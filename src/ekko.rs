@@ -517,6 +517,30 @@ impl Ekko {
 
     // ---- public: mutating commands ---------------------------------------
 
+    /// Writes `data` back, stamping `updated_at` on whatever actually
+    /// changed.
+    ///
+    /// Works by diffing against what is currently on disk rather than
+    /// asking each command to remember which ids it touched. That is
+    /// deliberate: there are eleven mutating commands, a twelfth is always
+    /// possible, and a hand-stamped field is one someone eventually forgets
+    /// to stamp. Comparing catches every field, including ones added later.
+    ///
+    /// Re-reading here is safe because every caller already holds the lock.
+    fn save_touching(&self, data: &mut ItemMap) -> Result<(), EkkoError> {
+        let before = self.storage.get()?;
+        let now = chrono::Local::now().timestamp_millis();
+
+        for (id, item) in data.iter_mut() {
+            if before.get(id) != Some(&*item) {
+                item.updated_at = Some(now);
+            }
+        }
+
+        self.storage.set(data)?;
+        Ok(())
+    }
+
     pub fn create_task(&self, input: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let (boards, description, priority, due_date) = self.parse_create_options(input)?;
@@ -525,7 +549,7 @@ impl Ekko {
         let mut item = Item::new_task(id, description, boards, priority);
         item.due_date = due_date;
         data.insert(id, item.clone());
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Task(item))
     }
 
@@ -539,7 +563,7 @@ impl Ekko {
         let id = self.generate_id(&data);
         let item = Item::new_note(id, description, boards);
         data.insert(id, item.clone());
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Note(item))
     }
 
@@ -558,7 +582,7 @@ impl Ekko {
                 }
             }
         }
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Check { checked, unchecked })
     }
 
@@ -577,7 +601,7 @@ impl Ekko {
                 }
             }
         }
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Begin { started, paused })
     }
 
@@ -592,7 +616,7 @@ impl Ekko {
                 if item.is_starred { starred.push(id) } else { unstarred.push(id) }
             }
         }
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Star { starred, unstarred })
     }
 
@@ -618,7 +642,7 @@ impl Ekko {
             }
         }
 
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         self.storage.set_archive(&archive)?;
         Ok(Outcome::Delete(results))
     }
@@ -638,7 +662,7 @@ impl Ekko {
         }
 
         self.storage.set_archive(&archive)?;
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Restore(results))
     }
 
@@ -654,7 +678,7 @@ impl Ekko {
         }
 
         data.get_mut(&id).expect("id just validated against data").description = new_description;
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Edit(data[&id].clone()))
     }
 
@@ -674,7 +698,7 @@ impl Ekko {
         boards = remove_duplicates(boards);
 
         data.get_mut(&id).expect("id just validated against data").boards = boards;
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Move(data[&id].clone()))
     }
 
@@ -692,7 +716,7 @@ impl Ekko {
         let id = self.validate_ids(&[id_str], &data)?[0];
 
         data.get_mut(&id).expect("id just validated against data").priority = Some(level);
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Priority(data[&id].clone()))
     }
 
@@ -809,8 +833,26 @@ impl Ekko {
             }
         }
 
-        self.storage.set(&data)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Set { ids, states })
+    }
+
+    /// The board, restricted to items changed at or after `since` (epoch
+    /// millis). Grouped by board like the default view, so the shape a
+    /// caller parses does not change with the filter.
+    ///
+    /// Only reports items that exist. A deletion leaves nothing behind to
+    /// carry a timestamp, so a caller that must notice removals has to
+    /// compare id sets, not just read this.
+    pub fn display_since(&self, since: i64) -> Result<Outcome, EkkoError> {
+        let mut data = self.storage.get()?;
+        // Items written before `updatedAt` existed fall back to their
+        // creation time. Otherwise they would be invisible to every
+        // `--since`, including `--since 0` on a first sync, which is worse
+        // than reporting the one instant we do know about them.
+        data.retain(|_, item| item.updated_at.unwrap_or(item.timestamp) >= since);
+        let boards = self.get_boards(&data);
+        Ok(Outcome::Board(self.group_by_board(&data, &boards)))
     }
     pub fn list_by_attributes(&self, terms: &[String]) -> Result<Outcome, EkkoError> {
         let data = self.storage.get()?;
@@ -1170,6 +1212,60 @@ mod tests {
 
         assert!(ids.contains(&1));
         assert!(ids.contains(&2), "an in-progress task should still show up under the pending filter, matching JS");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn since_reports_modified_items_not_only_newly_created_ones() {
+        // The reason `updatedAt` had to exist at all: `_timestamp` is
+        // creation time and never moves, so filtering on it would miss
+        // every edit.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["untouched"])).unwrap();
+        ekko.create_task(&words(&["will be edited"])).unwrap();
+
+        let mark = chrono::Local::now().timestamp_millis() + 1;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        ekko.set_state(&words(&["@2", "done"])).unwrap();
+
+        let Outcome::Board(groups) = ekko.display_since(mark).unwrap() else { panic!() };
+        let ids: Vec<u32> = groups.iter().flat_map(|(_, i)| i.iter().map(|x| x.id)).collect();
+
+        assert_eq!(ids, vec![2], "only the item that actually changed");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn since_zero_returns_everything_including_items_with_no_updated_at() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["current"])).unwrap();
+        // A legacy item: no `updatedAt`, as taskbook would have written it.
+        let raw = r#"{"1":{"_id":1,"_date":"Mon Aug 24 2026","_timestamp":1787600000000,"description":"legacy","isStarred":false,"boards":["@old"],"_isTask":true,"isComplete":false,"inProgress":false,"priority":1}}"#;
+        fs::write(dir.join("storage").join("storage.json"), raw).unwrap();
+
+        let Outcome::Board(groups) = ekko.display_since(0).unwrap() else { panic!() };
+        let ids: Vec<u32> = groups.iter().flat_map(|(_, i)| i.iter().map(|x| x.id)).collect();
+
+        assert_eq!(ids, vec![1], "falls back to creation time rather than vanishing");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_write_that_changes_nothing_does_not_bump_updated_at() {
+        // `save_touching` diffs rather than stamping blindly, so a command
+        // that turns out to be a no-op must not make an item look modified.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["a task"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        let after_first = ekko.storage.get().unwrap()[&1].updated_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        ekko.set_state(&words(&["@1", "done"])).unwrap(); // idempotent: no change
+
+        assert_eq!(ekko.storage.get().unwrap()[&1].updated_at, after_first);
 
         cleanup(&dir);
     }

@@ -55,6 +55,15 @@ pub struct Item {
     /// not "unknown".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<String>,
+    /// When this item last changed, in epoch milliseconds. Distinct from
+    /// `_timestamp`, which is when it was *created* and never moves --
+    /// that difference is the whole reason `--since` needs its own field.
+    ///
+    /// `Option` for the same reason `uid` is: items written before this
+    /// existed do not have one, and inventing values for them would be
+    /// lying about when they changed.
+    #[serde(rename = "updatedAt", default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -77,6 +86,7 @@ impl Item {
             in_progress: Some(false),
             due_date: None,
             uid: Some(new_uid()),
+            updated_at: Some(timestamp),
             priority: Some(priority),
         }
     }
@@ -96,6 +106,7 @@ impl Item {
             priority: None,
             due_date: None,
             uid: Some(new_uid()),
+            updated_at: Some(timestamp),
         }
     }
 }

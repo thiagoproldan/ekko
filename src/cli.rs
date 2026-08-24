@@ -40,6 +40,11 @@ pub struct Cli {
     pub set: bool,
     #[arg(long, short = 'r')]
     pub restore: bool,
+    /// Epoch milliseconds. Restricts the board view to items changed at or
+    /// after that instant, for callers syncing incrementally instead of
+    /// pulling the whole board every time.
+    #[arg(long, value_name = "MILLIS")]
+    pub since: Option<i64>,
     #[arg(long, short = 's')]
     pub star: bool,
     #[arg(long = "ekko-dir")]

@@ -39,6 +39,7 @@ const HELP: &str = r#"
       --priority, -p     Update priority of task
       --restore, -r      Restore items from archive
       --set              Set item state idempotently (retry-safe)
+      --since <MILLIS>   Only items changed at or after a timestamp
       --star, -s         Star/unstar item
       --ekko-dir         Define a custom ekko directory
       --task, -t         Create task
@@ -172,6 +173,9 @@ fn dispatch(cli: &cli::Cli, ekko: &Ekko) -> Result<Vec<Outcome>, EkkoError> {
     }
     if cli.copy {
         return Ok(vec![ekko.copy_to_clipboard(&cli.input, write_clipboard)?]);
+    }
+    if let Some(since) = cli.since {
+        return Ok(vec![ekko.display_since(since)?]);
     }
     if cli.timeline {
         return Ok(vec![ekko.display_by_date()?, ekko.display_stats()?]);

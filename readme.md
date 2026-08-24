@@ -22,6 +22,7 @@ Effectively a task manager built to be driven by a human and an LLM/coding agent
 - Board & timeline views
 - Priority & favorite mechanisms
 - Due dates via `d:YYYY-MM-DD`, coloured by urgency and filterable -- an Ekko addition
+- Retry-safe state changes (`--set`), stable per-item `uid`s, and incremental reads (`--since`) -- built for scripts and agents
 - Search & filter items
 - Archive & restore deleted items
 - Machine-readable `--json` output for every command, scripts and agents included
@@ -88,6 +89,7 @@ $ ekko --help
       --priority, -p     Update priority of task
       --restore, -r      Restore items from archive
       --set              Set item state idempotently (retry-safe)
+      --since <MILLIS>   Only items changed at or after a timestamp
       --star, -s         Star/unstar item
       --ekko-dir         Define a custom ekko directory
       --task, -t         Create task
@@ -284,6 +286,21 @@ Filter with `--list due` for everything carrying a deadline, or `--list overdue`
 
 This is an Ekko addition; taskbook has no equivalent. Items without a due date are unaffected, on screen and in `storage.json` alike -- the field is omitted entirely when unset, so files stay readable by taskbook.
 
+
+
+### Incremental Reads
+
+Reading the whole board to find out what changed gets expensive fast, and for a script or an agent syncing on every step it is nearly all waste. `--since` takes an epoch-millisecond timestamp and returns only items changed at or after it, grouped by board exactly like the default view.
+
+```
+$ ekko --json --since 1787600000000
+```
+
+Every item carries `updatedAt`, stamped whenever it actually changes -- distinct from `_timestamp`, which is creation time and never moves. The sync loop is therefore: read with `--since <last>`, do the work, and remember the highest `updatedAt` you saw as the next `<last>`.
+
+On a forty-item board, syncing one changed item this way costs around 330 bytes against roughly 11.5 KB for the full board.
+
+Two limits worth knowing. A write that changes nothing does not bump `updatedAt`, so an idempotent `--set` that was already satisfied will not resurface. And deletions leave nothing behind to carry a timestamp: a caller that must notice removals has to compare id sets, not just read `--since`. Items predating the field fall back to their creation time rather than disappearing, so `--since 0` still returns everything.
 
 ### Setting State Idempotently
 
