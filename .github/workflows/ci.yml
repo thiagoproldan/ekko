@@ -49,10 +49,10 @@ jobs:
       # crate.
       - name: Check the declared MSRV still builds
         run: |
-          MSRV=100 1 57 67 100 131 174 302 985grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
-          echo "Cargo.toml declares rust-version = "
-          rustup toolchain install "" --profile minimal
-          cargo +"" build --locked
+          MSRV=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          echo "Cargo.toml declares rust-version = $MSRV"
+          rustup toolchain install "$MSRV" --profile minimal
+          cargo "+$MSRV" build --locked
 
       # Cheap end-to-end check that the shipped binary actually runs: the
       # unit tests all drive the library side, and would not catch a broken
