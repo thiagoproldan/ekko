@@ -1,5 +1,5 @@
 <h1 align="center">
-  Taskbook
+  Ekko
 </h1>
 
 <h4 align="center">
@@ -10,49 +10,27 @@
   <img alt="Boards" width="70%" src="media/header-boards.png"/>
 </div>
 
-<div align="center">
-  <br>
-  <sup><b>Sponsored by:</b></sup>
-  <br>
-  <a href="https://betterstack.com">
-    <div>
-      <img src="https://github.com/Seldaek/monolog/assets/183678/7de58ce0-2fa2-45c0-b3e8-e60cebb3c4cf" width="200" alt="Better Stack">
-    </div>
-    <sup>
-      Spot, Resolve, and Prevent Downtime.
-    </sup>
-  </a>
-</div>
-
 ## Description
 
-By utilizing a simple and minimal usage syntax, that requires a flat learning curve, taskbook enables you to effectively manage your tasks and notes across multiple boards from within your terminal. All data are written atomically to the storage in order to prevent corruptions, and are never shared with anyone or anything. Deleted items are automatically archived and can be inspected or restored at any moment.
+Ekko is a pure-Rust rewrite of [taskbook](https://github.com/klaudiosinani/taskbook), keeping its terminal look and simple, minimal usage syntax byte-for-byte and rebuilding everything underneath: machine-readable `--json` output, a real cross-process lock so two invocations writing at once can't silently clobber each other, and a `node:test`\-era test suite carried over as `cargo test`. Local and private by design -- data never leaves your machine, and now nothing about running it depends on Node being installed either.
 
-Read this document in:
-[Albanian - Shqip](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.AL.md), [Polski](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.PL.md), [简体中文](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.ZH.md), [Русский](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.RU.md), [Français](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.FR.md), [Deutsch](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.GER.md), [Portuguese](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.PT-BR.md), [日本語](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.JP.md), [한국어](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.KR.md), [Spanish](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.ES.md), [Bulgarian](https://github.com/klaudiosinani/taskbook/blob/master/docs/readme.BG.md).
-
-You can now support the development process through [GitHub Sponsors](https://github.com/sponsors/klaudiosinani).
-
-Visit the [contributing guidelines](https://github.com/klaudiosinani/taskbook/blob/master/contributing.md#translating-documentation) to learn more on how to translate this document into more languages.
+Effectively a task manager built to be driven by a human and an LLM/coding agent working the same boards at the same time, which is exactly the property the rewrite exists to make solid.
 
 ## Highlights
 
-- Organize tasks & notes to boards
+- Organize tasks & notes into boards
 - Board & timeline views
 - Priority & favorite mechanisms
 - Search & filter items
 - Archive & restore deleted items
-- Lightweight & fast
-- Data written atomically to storage
-- Custom storage location
+- Machine-readable `--json` output for every command, scripts and agents included
+- Cross-process file lock: concurrent writers queue instead of losing each other's updates
+- Data written atomically to storage (temp file + rename)
+- Custom storage location, per-project or per-context
 - Progress overview
-- Simple & minimal usage syntax
-- Update notifications
-- Configurable through `~/.taskbook.json`
-- Data stored in JSON file at `~/.taskbook/storage`
-- Data location can be overwritten at runtime
-
-View highlights in a [taskbook board](https://raw.githubusercontent.com/klaudiosinani/taskbook/master/media/highlights.png).
+- Configurable through `~/.ekko.json`
+- Data stored in plain JSON at `~/.ekko/storage`
+- A reproducible `nix develop` shell for the whole toolchain
 
 ## Contents
 
@@ -64,41 +42,28 @@ View highlights in a [taskbook board](https://raw.githubusercontent.com/klaudios
 - [Configuration](#configuration)
 - [Flight Manual](#flight-manual)
 - [Development](#development)
-- [Related](#related)
-- [Team](#team)
-- [Sponsors](#sponsors)
+- [Credits](#credits)
 - [License](#license)
 
 ## Install
 
-### Yarn
+Not published anywhere -- build it from this repository.
 
 ```bash
-yarn global add taskbook
+$ git clone <this repo> && cd ekko
+$ nix develop           # Rust toolchain: cargo, rustc, clippy, rustfmt
+$ cargo install --path . --locked
 ```
 
-### NPM
-
-```bash
-npm install --global taskbook
-```
-
-### Snapcraft
-
-```bash
-snap install taskbook
-snap alias taskbook tb # set alias
-```
-
-**Note:** Due to the snap's strictly confined nature, both the storage & configuration files will be saved under the [`$SNAP_USER_DATA`](https://docs.snapcraft.io/reference/env) environment variable instead of the generic `$HOME` one.
+That installs the `ekko` binary to `~/.cargo/bin` (make sure it's on your `PATH`). To just build it without installing: `cargo build --release`, binary lands at `target/release/ekko`.
 
 ## Usage
 
 ```
-$ tb --help
+$ ekko --help
 
   Usage
-    $ tb [<options> ...]
+    $ ekko [<options> ...]
 
     Options
         none             Display board view
@@ -111,45 +76,46 @@ $ tb --help
       --edit, -e         Edit item description
       --find, -f         Search for items
       --help, -h         Display help message
+      --json, -j         Output machine-readable JSON instead of formatted text
       --list, -l         List items by attributes
       --move, -m         Move item between boards
       --note, -n         Create note
       --priority, -p     Update priority of task
       --restore, -r      Restore items from archive
       --star, -s         Star/unstar item
-      --taskbook-dir     Define a custom taskbook directory
+      --ekko-dir         Define a custom ekko directory
       --task, -t         Create task
       --timeline, -i     Display timeline view
       --version, -v      Display installed version
 
     Examples
-      $ tb
-      $ tb --archive
-      $ tb --begin 2 3
-      $ tb --check 1 2
-      $ tb --clear
-      $ tb --copy 1 2 3
-      $ tb --delete 4
-      $ tb --edit @3 Merge PR #42
-      $ tb --find documentation
-      $ tb --list pending coding
-      $ tb --move @1 cooking
-      $ tb --note @coding Mergesort worse-case O(nlogn)
-      $ tb --priority @3 2
-      $ tb --restore 4
-      $ tb --star 2
-      $ tb --taskbook-dir .custom-taskbook-dir
-      $ tb --task @coding @reviews Review PR #42
-      $ tb --task @coding Improve documentation
-      $ tb --task Make some buttercream
-      $ tb --timeline
+      $ ekko
+      $ ekko --archive
+      $ ekko --begin 2 3
+      $ ekko --check 1 2
+      $ ekko --clear
+      $ ekko --copy 1 2 3
+      $ ekko --delete 4
+      $ ekko --edit @3 Merge PR #42
+      $ ekko --find documentation
+      $ ekko --json --task @coding Review PR #42
+      $ ekko --list pending coding
+      $ ekko --move @1 cooking
+      $ ekko --note @coding Mergesort worse-case O(nlogn)
+      $ ekko --priority @3 2
+      $ ekko --restore 4
+      $ ekko --star 2
+      $ ekko --task @coding @reviews Review PR #42
+      $ ekko --task @coding Improve documentation
+      $ ekko --task Make some buttercream
+      $ ekko --timeline
 ```
 
 ## Views
 
 ### Board View
 
-Invoking taskbook without any options will display all saved items grouped into their respective boards.
+Invoking Ekko without any options will display all saved items grouped into their respective boards.
 
 <div align="center">
   <img alt="Boards" width="60%" src="media/header-boards.png"/>
@@ -165,13 +131,13 @@ In order to display all items in a timeline view, based on their creation date, 
 
 ## Configuration
 
-To configure taskbook navigate to the `~/.taskbook.json` file and modify any of the options to match your own preference. To reset back to the default values, simply delete the config file from your home directory.
+To configure Ekko navigate to the `~/.ekko.json` file and modify any of the options to match your own preference. To reset back to the default values, simply delete the config file from your home directory.
 
 The following illustrates all the available options with their respective default values.
 
 ```json
 {
-  "taskbookDirectory": "~",
+  "ekkoDirectory": "~",
   "displayCompleteTasks": true,
   "displayProgressOverview": true
 }
@@ -179,14 +145,14 @@ The following illustrates all the available options with their respective defaul
 
 ### In Detail
 
-##### `taskbookDirectory`
+##### `ekkoDirectory`
 
 - Type: `String`
 - Default: `~`
 
 Filesystem path where the storage will be initialized, i.e: `/home/username/the-cloud` or `~/the-cloud`
 
-If left undefined the home directory `~` will be used and taskbook will be set-up under `~/.taskbook/`.
+If left undefined the home directory `~` will be used and Ekko will be set up under `~/.ekko/`.
 
 ##### `displayCompleteTasks`
 
@@ -204,15 +170,14 @@ Display progress overview below the timeline and board views.
 
 ## Flight Manual
 
-The following is a minor walkthrough containing a set of examples on how to use taskbook.
-In case you spotted an error or think that an example is not to clear enough and should be further improved, please feel free to open an [issue](https://github.com/klaudiosinani/taskbook/issues/new/choose) or [pull request](https://github.com/klaudiosinani/taskbook/compare).
+The following is a minor walkthrough containing a set of examples on how to use Ekko.
 
 ### Create Task
 
 To create a new task use the `--task`/`-t` option with your task's description following right after.
 
 ```
-$ tb -t Improve documentation
+$ ekko -t Improve documentation
 ```
 
 ### Create Note
@@ -220,7 +185,7 @@ $ tb -t Improve documentation
 To create a new note use the `--note`/`-n` option with your note's body following right after.
 
 ```
-$ tb -n Mergesort worse-case O(nlogn)
+$ ekko -n Mergesort worse-case O(nlogn)
 ```
 
 ### Create Board
@@ -228,7 +193,7 @@ $ tb -n Mergesort worse-case O(nlogn)
 Boards are automatically initialized when creating a new task or note. To create one or more boards, include their names, prefixed by the `@` symbol, in the description of the about-to-be created item. As a result the newly created item will belong to all of the given boards. By default, items that do not contain any board names in their description are automatically added to the general purpose; `My Board`.
 
 ```
-$ tb -t @coding @docs Update contributing guidelines
+$ ekko -t @coding @docs Update contributing guidelines
 ```
 
 ### Check Task
@@ -236,7 +201,7 @@ $ tb -t @coding @docs Update contributing guidelines
 To mark a task as complete/incomplete, use the `--check`/`-c` option followed by the ids of the target tasks. Note that the option will update to its opposite the `complete` status of the given tasks, thus checking a complete task will render it as pending and a pending task as complete. Duplicate ids are automatically filtered out.
 
 ```
-$ tb -c 1 3
+$ ekko -c 1 3
 ```
 
 ### Begin Task
@@ -244,7 +209,7 @@ $ tb -c 1 3
 To mark a task as started/paused, use the `--begin`/`-b` option followed by the ids of the target tasks. The functionality of this option is the same as the one of the above described `--check` option.
 
 ```
-$ tb -b 2 3
+$ ekko -b 2 3
 ```
 
 ### Star Item
@@ -252,7 +217,7 @@ $ tb -b 2 3
 To mark one or more items as favorite, use the `--star`/`-s` option followed by the ids of the target items. The functionality of this option is the same as the one of the above described `--check` option.
 
 ```
-$ tb -s 1 2 3
+$ ekko -s 1 2 3
 ```
 
 ### Copy Item Description
@@ -260,15 +225,17 @@ $ tb -s 1 2 3
 To copy to your system's clipboard the description of one or more items, use the `--copy`/`-y` option followed by the ids of the target items. Note that the option will also include the newline character as a separator to each pair of adjacent copied descriptions, thus resulting in a clear and readable stack of sentences on paste.
 
 ```
-$ tb -y 1 2 3
+$ ekko -y 1 2 3
 ```
+
+On Linux, copying spawns a short-lived detached process to keep serving the clipboard after `ekko` itself exits (X11/Wayland make the copying application responsible for answering paste requests; a process that exits immediately can't). It goes away once something else claims the clipboard.
 
 ### Display Boards
 
-Invoking taskbook without any options will display all of saved items grouped into their respective boards.
+Invoking Ekko without any options will display all of saved items grouped into their respective boards.
 
 ```
-$ tb
+$ ekko
 ```
 
 ### Display Timeline
@@ -276,7 +243,7 @@ $ tb
 In order to display all items in a timeline view, based on their creation date, the `--timeline`/`-i` option can be used.
 
 ```
-$ tb -i
+$ ekko -i
 ```
 
 ### Set Priority
@@ -288,21 +255,21 @@ To set a priority level for a task while initializing it, include the `p:x` synt
 - `3` - High priority
 
 ```
-$ tb -t @coding Fix issue `#42` p:3
+$ ekko -t @coding Fix issue `#42` p:3
 ```
 
 To update the priority level of a specific task after its creation, use the `--priority`/`-p` option along with the id the target task, prefixed by the `@` symbol, and an integer of value `1`, `2` or `3`. Note that the order in which the target id and priority level are placed is not significant.
 
 ```
-$ tb -p @1 2
+$ ekko -p @1 2
 ```
 
 ### Move Item
 
-To move an item to one or more boards, use the `--move`/`-m` option, followed by the target item id, prefixed by the `@` symbol, and the name of the destination boards. The default `My board` can be accessed through the `myboard` keyword. The order in which the target id and board names are placed is not significant.
+To move an item to one or more boards, use the `--move`/`-m` option, followed by the target item id, prefixed by the `@` symbol, and the name of the destination boards. The default `My board` can be accessed through the `myboard` keyword. The order in which the target id and board names are placed is not significant. Note that this **replaces** the item's board list; it does not add to it -- list every board you want the item to keep, not just the new one.
 
 ```
-$ tb -m @1 myboard reviews
+$ ekko -m @1 myboard reviews
 ```
 
 ### Delete Item
@@ -310,7 +277,7 @@ $ tb -m @1 myboard reviews
 To delete one or more items, use the `--delete`/`-d` options followed by the ids of the target items. Note that deleted items are automatically archived, and can be inspected or restored at any moment. Duplicate ids are automatically filtered out.
 
 ```
-$ tb -d 1 2
+$ ekko -d 1 2
 ```
 
 ### Delete Checked Tasks
@@ -318,7 +285,7 @@ $ tb -d 1 2
 To delete/clear all complete tasks at once across all boards, use the `--clear` option. Note that all deleted tasks are automatically archived, and can be inspected or restored at any moment. In order to discourage any possible accidental usage, the `--clear` option has no available shorter alias.
 
 ```
-$ tb --clear
+$ ekko --clear
 ```
 
 ### Display Archive
@@ -326,15 +293,15 @@ $ tb --clear
 To display all archived items, use the `--archive`/`-a` option. Note that all archived items are displayed in timeline view, based on their creation date.
 
 ```
-$ tb -a
+$ ekko -a
 ```
 
 ### Restore Items
 
-To restore one or more items, use the `--restore`/`-r` option followed by the ids of the target items. Note that the ids of all archived items can be seen when invoking the `--archive`/`-a` option. Duplicate ids are automatically filtered out.
+To restore one or more items, use the `--restore`/`-r` option followed by the ids of the target items. Note that the ids of all archived items can be seen when invoking the `--archive`/`-a` option, **and are a separate id space from storage** -- a restored item gets a new id in `storage.json`, it does not get its old one back. `--delete`'s `--json` response reports both, precisely so a script/agent driving `--restore` afterward never has to guess.
 
 ```
-$ tb -r 1 2
+$ ekko -r 1 2
 ```
 
 ### List Items
@@ -342,7 +309,7 @@ $ tb -r 1 2
 To list a group of items where each item complies with a specific set of attributes, use the `--list`/`-l` option followed by the desired attributes. Board names along with item traits can be considered valid listing attributes. For example to list all items that belong to the default `myboard` and are pending tasks, the following could be used;
 
 ```
-$ tb -l myboard pending
+$ ekko -l myboard pending
 ```
 
 The by default supported listing attributes, together with their respective aliases, are the following;
@@ -350,7 +317,7 @@ The by default supported listing attributes, together with their respective alia
 - `myboard` - Items that belong to `My board`
 - `task`, `tasks`, `todo` - Items that are tasks.
 - `note`, `notes` - Items that are notes.
-- `pending`, `unchecked`, `incomplete` - Items that are pending tasks.
+- `pending`, `unchecked`, `incomplete` - Items that are pending tasks (note: an in-progress task is not yet complete either, so it matches this too).
 - `progress`, `started`, `begun` - Items that are in-progress tasks.
 - `done`, `checked`, `complete` - Items that complete tasks.
 - `star`, `starred` - Items that are starred.
@@ -360,81 +327,72 @@ The by default supported listing attributes, together with their respective alia
 To search for one of more items, use the `--find`/`-f` option, followed by your search terms.
 
 ```
-$ tb -f documentation
+$ ekko -f documentation
 ```
 
-### Runtime taskbook directory override
+### Runtime ekko directory override
 
-To override the configured storage location, use the `--taskbook-dir` flag or TASKBOOK_DIR environment variable. While Taskbook is designed to provide a multiple board approach for all of your projects, these options enable alternative use cases. Setup per project storage or run multiple global boards like home and work.
+To override the configured storage location, use the `--ekko-dir` flag or `EKKO_DIR` environment variable. While Ekko is designed to provide a multiple board approach for all of your projects, these options enable alternative use cases. Setup per-project storage or run multiple global boards like home and work.
 
-Note, if both the flag and environment variable are present Taskbook will use the flag value.
-
-```
-$ tb --taskbook-dir .custom-taskbook-dir
-```
+Note, if both the flag and environment variable are present Ekko will use the flag value.
 
 ```
-$ TASKBOOK_DIR=~/hometasks tb
+$ ekko --ekko-dir .custom-ekko-dir
+```
+
+```
+$ EKKO_DIR=~/hometasks ekko
 ```
 
 ### Locating the data files
 
-All task/note data lives in one JSON file, written atomically (temp file + rename) so it is always safe to read directly, without going through the CLI: `<taskbook-dir>/storage/storage.json`. Deleted/archived items live alongside it at `<taskbook-dir>/archive/archive.json`. `<taskbook-dir>` defaults to `~/.taskbook` and follows the same resolution order as the `--taskbook-dir` flag described above.
+All task/note data lives in one JSON file, written atomically (temp file + rename) so it is always safe to read directly, without going through the CLI: `<ekko-dir>/storage/storage.json`. Deleted/archived items live alongside it at `<ekko-dir>/archive/archive.json`. `<ekko-dir>` defaults to `~/.ekko` and follows the same resolution order as the `--ekko-dir` flag described above.
 
 ```
-$ cat ~/.taskbook/storage/storage.json
+$ cat ~/.ekko/storage/storage.json
 ```
 
-Every command that writes (`--task`, `--check`, `--delete`, ...) takes a lock at `<taskbook-dir>/.lock` for its duration, so two `tb` processes -- two terminals, two scripts, two agents -- touching the same directory at once queue up instead of silently clobbering each other's write. A second process waits up to 5 seconds for the lock to free up; if the process holding it has actually died, the stale lock is detected and cleared automatically, no waiting required. You should never need to touch this file by hand, but if `tb` ever reports a timeout with no other taskbook process actually running, it's safe to delete it.
+Every command that writes (`--task`, `--check`, `--delete`, ...) takes a lock at `<ekko-dir>/.lock` for its duration, so two `ekko` processes -- two terminals, two scripts, two agents -- touching the same directory at once queue up instead of silently clobbering each other's write. A second process waits up to 5 seconds for the lock to free up; if the process holding it has actually died, the stale lock is detected and cleared automatically, no waiting required. You should never need to touch this file by hand, but if `ekko` ever reports a timeout with no other ekko process actually running, it's safe to delete it.
 
 ### Machine-readable output
 
-Add the `--json`/`-j` flag to any command to get a single-line JSON object on stdout instead of formatted text — meant for scripts and agents that need to parse the result, rather than scrape colored terminal output. It composes with every other flag.
+Add the `--json`/`-j` flag to any command to get a single-line JSON object on stdout instead of formatted text -- meant for scripts and agents that need to parse the result, rather than scrape colored terminal output. It composes with every other flag.
 
 ```
-$ tb --json --task @coding Review PR #42
+$ ekko --json --task @coding Review PR #42
 {"ok":true,"command":"task","item":{"_id":7,"_date":"Mon Aug 24 2026","_timestamp":1787532527693,"description":"Review PR #42","isStarred":false,"boards":["@coding"],"_isTask":true,"isComplete":false,"inProgress":false,"priority":1}}
 ```
 
-On success, the object always has `ok: true` and a `command` field naming what ran, plus whatever data that command produces (a `create`d/`edit`ed/`move`d/`priority`-updated item's full record, id lists for `check`/`begin`/`star`, board- or date-grouped items for the view commands, etc). On failure it's `ok: false` with an `error` message and a stable `code` (`MISSING_ID`, `INVALID_ID`, `MISSING_DESC`, `INVALID_IDS_NUMBER`, `INVALID_PRIORITY`, `MISSING_BOARDS`, `INVALID_CUSTOM_APP_DIR`, `MISSING_TASKBOOK_DIR_FLAG_VALUE`) to branch on instead of matching on the message text — the process also exits `1`, same as today without `--json`.
+On success, the object always has `ok: true` and a `command` field naming what ran, plus whatever data that command produces (a `create`d/`edit`ed/`move`d/`priority`-updated item's full record, id lists for `check`/`begin`/`star`, board- or date-grouped items for the view commands, etc). On failure it's `ok: false` with an `error` message and a stable `code` (`MISSING_ID`, `INVALID_ID`, `MISSING_DESC`, `INVALID_IDS_NUMBER`, `INVALID_PRIORITY`, `MISSING_BOARDS`, `INVALID_CUSTOM_APP_DIR`, `MISSING_EKKO_DIR_FLAG_VALUE`, `LOCK_TIMEOUT`) to branch on instead of matching on the message text -- the process also exits `1`, same as without `--json`.
 
 A couple of things worth knowing:
 
-- **`--json` always returns complete data.** The `displayCompleteTasks`/`displayProgressOverview` preferences in `~/.taskbook.json` only affect the human-readable views; JSON output never hides anything.
+- **`--json` always returns complete data.** The `displayCompleteTasks`/`displayProgressOverview` preferences in `~/.ekko.json` only affect the human-readable views; JSON output never hides anything.
 - **Output is [newline-delimited JSON](https://github.com/ndjson/ndjson-spec), not always a single object.** A few commands (the default board view, `--timeline`, `--list`) print a data line followed by a separate `{"command":"stats",...}` line. Parse stdout line by line, not as one JSON document.
-- **`--delete`/`--restore` report both id spaces.** Archived items get a new id in `archive.json`, unrelated to their id in `storage.json` — `--delete`'s response includes both (`{"storageId":.., "archiveId":..}`) so you never have to guess which one `--restore` wants.
-- If you drive `tb` through `nix develop --command`, the devShell's own banner goes to stderr, not stdout, specifically so it never lands in a `--json` response — safe to invoke that way from a script.
+- If you drive `ekko` through `nix develop --command`, the devShell's own banner goes to stderr, not stdout, specifically so it never lands in a `--json` response -- safe to invoke that way from a script.
+
+### A literal hyphen at the start of a value
+
+If a description or other value genuinely needs to start with `-`, separate it from the flags with `--`, the same convention most CLI tools use for this:
+
+```
+$ ekko --task -- --json in the description, not the flag
+```
+
+Without the `--`, a word that happens to match a real flag name (`--json`, `--task`, ...) gets parsed as that flag instead of kept as literal text; a word that doesn't match anything real errors clearly rather than being silently dropped.
 
 ## Development
 
-For more info on how to contribute to the project, please read the [contributing guidelines](https://github.com/klaudiosinani/taskbook/blob/master/contributing.md).
-
 - Fork the repository and clone it to your machine
-- Navigate to your local fork: `cd taskbook`
-- On Nix/NixOS: run `nix develop` for a shell with Node.js and `xsel` (the clipboard backend `--copy` needs on Linux) already set up, then skip straight to installing dependencies
-- Install the project dependencies: `npm install` or `yarn install`
-- Run the full check -- lint plus the test suite: `npm test` or `yarn test`
-- Run only the tests, skipping lint: `npm run unit`
+- Navigate to your local fork: `cd ekko`
+- Run `nix develop` for a shell with the full Rust toolchain (cargo, rustc, clippy, rustfmt, rust-analyzer) already set up
+- Run the full check -- lint plus the test suite: `cargo clippy --all-targets && cargo test`
+- `cargo test` includes integration tests in `tests/` that spawn the real compiled binary (including real concurrent processes, to actually exercise the storage lock) -- not just unit tests
 
-Tests use Node's built-in test runner (`node:test`) -- no extra devDependency for that. `xo` is pinned to `0.59.3` with an explicit `rules` block in `package.json`: the codebase is CommonJS and stays that way for now, so a handful of `xo`'s newer, ESM-oriented rules are turned off rather than fought file by file. A full ESM migration would let those come back on, but that's a bigger, deliberate call, not a lint-config tweak.
+## Credits
 
-## Related
-
-- [signale](https://github.com/klaudiosinani/signale) - Highly configurable logging utility
-- [qoa](https://github.com/klaudiosinani/qoa) - Minimal interactive command-line prompts
-- [hyperocean](https://github.com/klaudiosinani/hyperocean) - Deep oceanic blue Hyper terminal theme
-
-## Team
-
-- Klaudio Sinani [(@klaudiosinani)](https://github.com/klaudiosinani)
-- Mario Sinani [(@mariosinani)](https://github.com/mariosinani)
-
-## Sponsors
-
-A big thank you to all the people and companies supporting our Open Source work:
-
-- [Better Stack: Spot, Resolve, and Prevent Downtime.](https://betterstack.com/)
+Ekko is a Rust rewrite of [taskbook](https://github.com/klaudiosinani/taskbook) by Klaudio Sinani and Mario Sinani. The terminal output -- icons, colors, layout -- is deliberately unchanged; that's what made the original worth rebuilding rather than replacing. See [license.md](license.md) for the original MIT copyright, preserved as required for a derivative work.
 
 ## License
 
-[MIT](https://github.com/klaudiosinani/taskbook/blob/master/license.md)
+[MIT](license.md)

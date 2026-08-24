@@ -11,6 +11,11 @@ insert_final_newline = true
 [*.md]
 trim_trailing_whitespace = false
 
-[*.{json,yml}]
+[*.{json,yml,toml}]
 indent_style = space
 indent_size = 2
+
+# rustfmt owns actual formatting on save; this just keeps live-typing
+# indent guides from fighting it (rustfmt defaults to 4 spaces).
+[*.rs]
+indent_size = 4
