@@ -32,6 +32,9 @@ fn success_value(outcome: &Outcome) -> Value {
         Outcome::Star { starred, unstarred } => {
             json!({"ok": true, "command": command, "starred": starred, "unstarred": unstarred})
         }
+        Outcome::Set { ids, states } => {
+            json!({"ok": true, "command": command, "ids": ids, "states": states})
+        }
         Outcome::Delete(items) => json!({"ok": true, "command": command, "items": items}),
         Outcome::Restore(items) => json!({"ok": true, "command": command, "items": items}),
         Outcome::Edit(item) | Outcome::Move(item) | Outcome::Priority(item) => {

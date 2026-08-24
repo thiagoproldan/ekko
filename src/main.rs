@@ -38,6 +38,7 @@ const HELP: &str = r#"
       --note, -n         Create note
       --priority, -p     Update priority of task
       --restore, -r      Restore items from archive
+      --set              Set item state idempotently (retry-safe)
       --star, -s         Star/unstar item
       --ekko-dir         Define a custom ekko directory
       --task, -t         Create task
@@ -162,6 +163,9 @@ fn dispatch(cli: &cli::Cli, ekko: &Ekko) -> Result<Vec<Outcome>, EkkoError> {
     }
     if cli.star {
         return Ok(vec![ekko.star_items(&cli.input)?]);
+    }
+    if cli.set {
+        return Ok(vec![ekko.set_state(&cli.input)?]);
     }
     if cli.priority {
         return Ok(vec![ekko.update_priority(&cli.input)?]);

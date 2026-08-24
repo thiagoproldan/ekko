@@ -31,6 +31,8 @@ pub enum EkkoError {
     MissingBoards,
     UnknownListTerm(String),
     InvalidDueDate(String),
+    MissingState,
+    UnknownState(String),
     InvalidCustomAppDir(String),
     MissingEkkoDirFlagValue,
     LockTimeout(String),
@@ -54,6 +56,8 @@ impl EkkoError {
             EkkoError::MissingBoards => "MISSING_BOARDS",
             EkkoError::UnknownListTerm(_) => "UNKNOWN_LIST_TERM",
             EkkoError::InvalidDueDate(_) => "INVALID_DUE_DATE",
+            EkkoError::MissingState => "MISSING_STATE",
+            EkkoError::UnknownState(_) => "UNKNOWN_STATE",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
             EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
             EkkoError::LockTimeout(_) => "LOCK_TIMEOUT",
@@ -80,6 +84,8 @@ impl EkkoError {
             EkkoError::MissingBoards => out.missing_boards(),
             EkkoError::UnknownListTerm(_) => out.generic_error(&self.to_string()),
             EkkoError::InvalidDueDate(_) => out.generic_error(&self.to_string()),
+            EkkoError::MissingState => out.generic_error(&self.to_string()),
+            EkkoError::UnknownState(_) => out.generic_error(&self.to_string()),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
             EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
             EkkoError::LockTimeout(path) => out.lock_timeout(path),
@@ -105,6 +111,10 @@ impl std::fmt::Display for EkkoError {
             }
             EkkoError::InvalidDueDate(token) => {
                 write!(f, "Due date must look like d:YYYY-MM-DD, got: {token}")
+            }
+            EkkoError::MissingState => write!(f, "No state was given as input"),
+            EkkoError::UnknownState(term) => {
+                write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, starred, unstarred")
             }
             EkkoError::InvalidCustomAppDir(path) => {
                 write!(f, "Custom app directory was not found on your system: {path}")
@@ -175,6 +185,9 @@ pub enum Outcome {
     Check { checked: Vec<u32>, unchecked: Vec<u32> },
     Begin { started: Vec<u32>, paused: Vec<u32> },
     Star { starred: Vec<u32>, unstarred: Vec<u32> },
+    /// Idempotent form of Check/Begin/Star: the states asked for, not
+    /// the flips performed.
+    Set { ids: Vec<u32>, states: Vec<String> },
     Delete(Vec<DeleteResult>),
     Restore(Vec<RestoreResult>),
     Edit(Item),
@@ -197,6 +210,7 @@ impl Outcome {
         match self {
             Outcome::Task(_) => "task",
             Outcome::Note(_) => "note",
+            Outcome::Set { .. } => "set",
             Outcome::Check { .. } => "check",
             Outcome::Begin { .. } => "begin",
             Outcome::Star { .. } => "star",
@@ -221,6 +235,22 @@ impl Outcome {
             Outcome::Check { checked, unchecked } => {
                 out.mark_complete(checked);
                 out.mark_incomplete(unchecked);
+            }
+            Outcome::Set { ids, states } => {
+                // Reuses the toggles' own messages rather than inventing a
+                // parallel vocabulary: the same transition should read the
+                // same way however it was requested.
+                for state in states {
+                    match state.as_str() {
+                        "done" => out.mark_complete(ids),
+                        "undone" => out.mark_incomplete(ids),
+                        "progress" => out.mark_started(ids),
+                        "paused" => out.mark_paused(ids),
+                        "starred" => out.mark_starred(ids),
+                        "unstarred" => out.mark_unstarred(ids),
+                        _ => {}
+                    }
+                }
             }
             Outcome::Begin { started, paused } => {
                 out.mark_started(started);
@@ -733,6 +763,55 @@ impl Ekko {
         Ok(Outcome::Find(self.group_by_board(&result, &boards)))
     }
 
+
+    /// Idempotent counterpart to `check_tasks`/`begin_tasks`/`star_items`.
+    ///
+    /// Those three toggle, which is right for a person at a terminal and
+    /// wrong for anything that might retry: run `--check 3` twice after a
+    /// timeout and the task ends up unchecked. This takes the states the
+    /// item should be *in*, so running it twice is the same as running it
+    /// once.
+    ///
+    /// Ids are marked with `@`, matching `--priority`/`--move`, which
+    /// leaves the bare words free to be state names.
+    pub fn set_state(&self, input: &[String]) -> Result<Outcome, EkkoError> {
+        let _lock = self.storage.acquire_lock()?;
+        let mut data = self.storage.get()?;
+
+        let (id_tokens, state_tokens): (Vec<&String>, Vec<&String>) =
+            input.iter().partition(|token| token.starts_with('@'));
+
+        if id_tokens.is_empty() {
+            return Err(EkkoError::MissingId);
+        }
+        if state_tokens.is_empty() {
+            return Err(EkkoError::MissingState);
+        }
+
+        let raw_ids: Vec<String> =
+            id_tokens.iter().map(|token| token.trim_start_matches('@').to_string()).collect();
+        let ids = self.validate_ids(&raw_ids, &data)?;
+
+        let mut states = Vec::new();
+        for token in &state_tokens {
+            match canonical_state(token) {
+                Some(state) => states.push(state.to_string()),
+                None => return Err(EkkoError::UnknownState((*token).clone())),
+            }
+        }
+        let states = remove_duplicates(states);
+
+        for id in &ids {
+            if let Some(item) = data.get_mut(id) {
+                for state in &states {
+                    apply_state(item, state);
+                }
+            }
+        }
+
+        self.storage.set(&data)?;
+        Ok(Outcome::Set { ids, states })
+    }
     pub fn list_by_attributes(&self, terms: &[String]) -> Result<Outcome, EkkoError> {
         let data = self.storage.get()?;
         let stored_boards = self.get_boards(&data);
@@ -817,8 +896,41 @@ fn remove_duplicates(items: Vec<String>) -> Vec<String> {
     }
     seen
 }
+/// The state vocabulary `--set` accepts, mapped to its canonical spelling.
+/// Deliberately the same words `--list` filters on, so there is one set of
+/// names to learn rather than two.
+fn canonical_state(term: &str) -> Option<&'static str> {
+    match term {
+        "done" | "checked" | "complete" => Some("done"),
+        "undone" | "unchecked" | "incomplete" | "pending" => Some("undone"),
+        "progress" | "started" | "begun" => Some("progress"),
+        "paused" | "unstarted" => Some("paused"),
+        "star" | "starred" => Some("starred"),
+        "unstar" | "unstarred" => Some("unstarred"),
+        _ => None,
+    }
+}
 
-
+/// Applies one canonical state. Task-only states are skipped on notes,
+/// matching how `--check` and `--begin` already ignore them; starring is
+/// the one that applies to both.
+fn apply_state(item: &mut Item, state: &str) {
+    match state {
+        "done" if item.is_task => {
+            item.is_complete = Some(true);
+            item.in_progress = Some(false);
+        }
+        "undone" if item.is_task => item.is_complete = Some(false),
+        "progress" if item.is_task => {
+            item.in_progress = Some(true);
+            item.is_complete = Some(false);
+        }
+        "paused" if item.is_task => item.in_progress = Some(false),
+        "starred" => item.is_starred = true,
+        "unstarred" => item.is_starred = false,
+        _ => {}
+    }
+}
 /// The attribute terms `--list` filters on. Kept beside
 /// `Ekko::filter_by_attributes`, which is the code that acts on them --
 /// the two must agree, or `list_by_attributes` would reject a term the
@@ -1058,6 +1170,70 @@ mod tests {
 
         assert!(ids.contains(&1));
         assert!(ids.contains(&2), "an in-progress task should still show up under the pending filter, matching JS");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn set_is_idempotent_where_the_toggles_are_not() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["a task"])).unwrap();
+
+        // The whole point: a retried command must not undo itself.
+        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        assert_eq!(ekko.storage.get().unwrap()[&1].is_complete, Some(true));
+
+        // Contrast, on the same data: the toggle flips back.
+        ekko.check_tasks(&words(&["1"])).unwrap();
+        assert_eq!(ekko.storage.get().unwrap()[&1].is_complete, Some(false));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn set_applies_several_states_to_several_items_at_once() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["one"])).unwrap();
+        ekko.create_task(&words(&["two"])).unwrap();
+
+        ekko.set_state(&words(&["@1", "@2", "progress", "starred"])).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        for id in [1, 2] {
+            assert_eq!(data[&id].in_progress, Some(true), "item {id}");
+            assert!(data[&id].is_starred, "item {id}");
+            assert_eq!(data[&id].is_complete, Some(false), "starting work un-completes it");
+        }
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn set_skips_task_only_states_on_notes_but_still_stars_them() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_note(&words(&["a note"])).unwrap();
+
+        ekko.set_state(&words(&["@1", "done", "starred"])).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        assert_eq!(data[&1].is_complete, None, "a note never gains task fields");
+        assert!(data[&1].is_starred, "starring works on notes, matching --star");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn set_rejects_missing_or_unknown_states_rather_than_doing_nothing() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["a task"])).unwrap();
+
+        assert!(matches!(ekko.set_state(&words(&["@1"])), Err(EkkoError::MissingState)));
+        assert!(matches!(
+            ekko.set_state(&words(&["@1", "finished"])),
+            Err(EkkoError::UnknownState(ref t)) if t == "finished"
+        ));
+        assert_eq!(ekko.storage.get().unwrap()[&1].is_complete, Some(false), "nothing applied");
 
         cleanup(&dir);
     }

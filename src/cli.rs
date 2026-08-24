@@ -33,6 +33,11 @@ pub struct Cli {
     pub note: bool,
     #[arg(long, short = 'p')]
     pub priority: bool,
+    /// Idempotent counterpart to the `--check`/`--begin`/`--star` toggles:
+    /// states the item should end up in, rather than flipping whatever it
+    /// is now. Retry-safe, which the toggles are not.
+    #[arg(long)]
+    pub set: bool,
     #[arg(long, short = 'r')]
     pub restore: bool,
     #[arg(long, short = 's')]
