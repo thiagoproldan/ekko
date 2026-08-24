@@ -8,6 +8,8 @@ const render = require('./render');
 
 class Taskbook {
   constructor(options = {}) {
+    this._json = Boolean(options.json);
+    render.setJsonMode(this._json);
     this._storage = new Storage(options);
   }
 
@@ -113,6 +115,11 @@ class Taskbook {
     });
 
     const description = desc.join(' ');
+
+    if (description.length === 0) {
+      render.missingDesc();
+      process.exit(1);
+    }
 
     if (boards.length === 0) {
       boards.push('My Board');
@@ -313,11 +320,17 @@ class Taskbook {
   }
 
   createNote(desc) {
+    this._storage.acquireLock();
     const {id, description, boards} = this._getOptions(desc);
     const note = new Note({id, description, boards});
     const {_data} = this;
     _data[id] = note;
     this._save(_data);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'note', item: note});
+    }
+
     render.successCreate(note);
   }
 
@@ -329,10 +342,16 @@ class Taskbook {
     ids.forEach(id => descriptions.push(_data[id].description));
 
     clipboardy.writeSync(descriptions.join('\n'));
+
+    if (this._json) {
+      return render.json({ok: true, command: 'copy', ids: ids.map(Number), descriptions});
+    }
+
     render.successCopyToClipboard(ids);
   }
 
   checkTasks(ids) {
+    this._storage.acquireLock();
     ids = this._validateIDs(ids);
     const {_data} = this;
     const [checked, unchecked] = [[], []];
@@ -346,11 +365,17 @@ class Taskbook {
     });
 
     this._save(_data);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'check', checked: checked.map(Number), unchecked: unchecked.map(Number)});
+    }
+
     render.markComplete(checked);
     render.markIncomplete(unchecked);
   }
 
   beginTasks(ids) {
+    this._storage.acquireLock();
     ids = this._validateIDs(ids);
     const {_data} = this;
     const [started, paused] = [[], []];
@@ -364,49 +389,94 @@ class Taskbook {
     });
 
     this._save(_data);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'begin', started: started.map(Number), paused: paused.map(Number)});
+    }
+
     render.markStarted(started);
     render.markPaused(paused);
   }
 
   createTask(desc) {
+    this._storage.acquireLock();
     const {boards, description, id, priority} = this._getOptions(desc);
     const task = new Task({id, description, boards, priority});
     const {_data} = this;
     _data[id] = task;
     this._save(_data);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'task', item: task});
+    }
+
     render.successCreate(task);
   }
 
   deleteItems(ids) {
+    this._storage.acquireLock();
     ids = this._validateIDs(ids);
     const {_data} = this;
+    const archived = [];
 
     ids.forEach(id => {
-      this._saveItemToArchive(_data[id]);
+      const item = _data[id];
+      this._saveItemToArchive(item);
+      archived.push({storageId: Number(id), archiveId: item._id});
       delete _data[id];
     });
 
     this._save(_data);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'delete', items: archived});
+    }
+
     render.successDelete(ids);
   }
 
   displayArchive() {
-    render.displayByDate(this._groupByDate(this._archive, this._getDates(this._archive)));
+    const grouped = this._groupByDate(this._archive, this._getDates(this._archive));
+
+    if (this._json) {
+      return render.json({ok: true, command: 'archive', dates: grouped});
+    }
+
+    render.displayByDate(grouped);
   }
 
   displayByBoard() {
-    render.displayByBoard(this._groupByBoard());
+    const grouped = this._groupByBoard();
+
+    if (this._json) {
+      return render.json({ok: true, command: 'board', boards: grouped});
+    }
+
+    render.displayByBoard(grouped);
   }
 
   displayByDate() {
-    render.displayByDate(this._groupByDate());
+    const grouped = this._groupByDate();
+
+    if (this._json) {
+      return render.json({ok: true, command: 'timeline', dates: grouped});
+    }
+
+    render.displayByDate(grouped);
   }
 
   displayStats() {
-    render.displayStats(this._getStats());
+    const stats = this._getStats();
+
+    if (this._json) {
+      return render.json({ok: true, command: 'stats', stats});
+    }
+
+    render.displayStats(stats);
   }
 
   editDescription(input) {
+    this._storage.acquireLock();
     const targets = input.filter(x => x.startsWith('@'));
 
     if (targets.length === 0) {
@@ -431,6 +501,11 @@ class Taskbook {
     const {_data} = this;
     _data[id].description = newDesc;
     this._save(_data);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'edit', item: _data[id]});
+    }
+
     render.successEdit(id);
   }
 
@@ -446,7 +521,13 @@ class Taskbook {
       result[id] = _data[id];
     });
 
-    render.displayByBoard(this._groupByBoard(result));
+    const grouped = this._groupByBoard(result);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'find', boards: grouped});
+    }
+
+    render.displayByBoard(grouped);
   }
 
   listByAttributes(terms) {
@@ -464,10 +545,17 @@ class Taskbook {
     [boards, attributes] = [boards, attributes].map(x => this._removeDuplicates(x));
 
     const data = this._filterByAttributes(attributes);
-    render.displayByBoard(this._groupByBoard(data, boards));
+    const grouped = this._groupByBoard(data, boards);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'list', boards: grouped});
+    }
+
+    render.displayByBoard(grouped);
   }
 
   moveBoards(input) {
+    this._storage.acquireLock();
     let boards = [];
     const targets = input.filter(x => x.startsWith('@'));
 
@@ -498,23 +586,38 @@ class Taskbook {
     const {_data} = this;
     _data[id].boards = boards;
     this._save(_data);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'move', item: _data[id]});
+    }
+
     render.successMove(id, boards);
   }
 
   restoreItems(ids) {
+    this._storage.acquireLock();
     ids = this._validateIDs(ids, this._getIDs(this._archive));
     const {_archive} = this;
+    const restored = [];
 
     ids.forEach(id => {
-      this._saveItemToStorage(_archive[id]);
+      const item = _archive[id];
+      this._saveItemToStorage(item);
+      restored.push({archiveId: Number(id), storageId: item._id});
       delete _archive[id];
     });
 
     this._saveArchive(_archive);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'restore', items: restored});
+    }
+
     render.successRestore(ids);
   }
 
   starItems(ids) {
+    this._storage.acquireLock();
     ids = this._validateIDs(ids);
     const {_data} = this;
     const [starred, unstarred] = [[], []];
@@ -525,11 +628,17 @@ class Taskbook {
     });
 
     this._save(_data);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'star', starred: starred.map(Number), unstarred: unstarred.map(Number)});
+    }
+
     render.markStarred(starred);
     render.markUnstarred(unstarred);
   }
 
   updatePriority(input) {
+    this._storage.acquireLock();
     const level = input.find(x => ['1', '2', '3'].indexOf(x) > -1);
 
     if (!level) {
@@ -555,6 +664,11 @@ class Taskbook {
     const {_data} = this;
     _data[id].priority = level;
     this._save(_data);
+
+    if (this._json) {
+      return render.json({ok: true, command: 'priority', item: _data[id]});
+    }
+
     render.successPriority(id, level);
   }
 
@@ -569,6 +683,10 @@ class Taskbook {
     });
 
     if (ids.length === 0) {
+      if (this._json) {
+        return render.json({ok: true, command: 'delete', items: []});
+      }
+
       return;
     }
 

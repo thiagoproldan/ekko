@@ -377,14 +377,46 @@ $ tb --taskbook-dir .custom-taskbook-dir
 $ TASKBOOK_DIR=~/hometasks tb
 ```
 
+### Locating the data files
+
+All task/note data lives in one JSON file, written atomically (temp file + rename) so it is always safe to read directly, without going through the CLI: `<taskbook-dir>/storage/storage.json`. Deleted/archived items live alongside it at `<taskbook-dir>/archive/archive.json`. `<taskbook-dir>` defaults to `~/.taskbook` and follows the same resolution order as the `--taskbook-dir` flag described above.
+
+```
+$ cat ~/.taskbook/storage/storage.json
+```
+
+Every command that writes (`--task`, `--check`, `--delete`, ...) takes a lock at `<taskbook-dir>/.lock` for its duration, so two `tb` processes -- two terminals, two scripts, two agents -- touching the same directory at once queue up instead of silently clobbering each other's write. A second process waits up to 5 seconds for the lock to free up; if the process holding it has actually died, the stale lock is detected and cleared automatically, no waiting required. You should never need to touch this file by hand, but if `tb` ever reports a timeout with no other taskbook process actually running, it's safe to delete it.
+
+### Machine-readable output
+
+Add the `--json`/`-j` flag to any command to get a single-line JSON object on stdout instead of formatted text — meant for scripts and agents that need to parse the result, rather than scrape colored terminal output. It composes with every other flag.
+
+```
+$ tb --json --task @coding Review PR #42
+{"ok":true,"command":"task","item":{"_id":7,"_date":"Mon Aug 24 2026","_timestamp":1787532527693,"description":"Review PR #42","isStarred":false,"boards":["@coding"],"_isTask":true,"isComplete":false,"inProgress":false,"priority":1}}
+```
+
+On success, the object always has `ok: true` and a `command` field naming what ran, plus whatever data that command produces (a `create`d/`edit`ed/`move`d/`priority`-updated item's full record, id lists for `check`/`begin`/`star`, board- or date-grouped items for the view commands, etc). On failure it's `ok: false` with an `error` message and a stable `code` (`MISSING_ID`, `INVALID_ID`, `MISSING_DESC`, `INVALID_IDS_NUMBER`, `INVALID_PRIORITY`, `MISSING_BOARDS`, `INVALID_CUSTOM_APP_DIR`, `MISSING_TASKBOOK_DIR_FLAG_VALUE`) to branch on instead of matching on the message text — the process also exits `1`, same as today without `--json`.
+
+A couple of things worth knowing:
+
+- **`--json` always returns complete data.** The `displayCompleteTasks`/`displayProgressOverview` preferences in `~/.taskbook.json` only affect the human-readable views; JSON output never hides anything.
+- **Output is [newline-delimited JSON](https://github.com/ndjson/ndjson-spec), not always a single object.** A few commands (the default board view, `--timeline`, `--list`) print a data line followed by a separate `{"command":"stats",...}` line. Parse stdout line by line, not as one JSON document.
+- **`--delete`/`--restore` report both id spaces.** Archived items get a new id in `archive.json`, unrelated to their id in `storage.json` — `--delete`'s response includes both (`{"storageId":.., "archiveId":..}`) so you never have to guess which one `--restore` wants.
+- If you drive `tb` through `nix develop --command`, the devShell's own banner goes to stderr, not stdout, specifically so it never lands in a `--json` response — safe to invoke that way from a script.
+
 ## Development
 
 For more info on how to contribute to the project, please read the [contributing guidelines](https://github.com/klaudiosinani/taskbook/blob/master/contributing.md).
 
 - Fork the repository and clone it to your machine
 - Navigate to your local fork: `cd taskbook`
+- On Nix/NixOS: run `nix develop` for a shell with Node.js and `xsel` (the clipboard backend `--copy` needs on Linux) already set up, then skip straight to installing dependencies
 - Install the project dependencies: `npm install` or `yarn install`
-- Lint the code for errors: `npm test` or `yarn test`
+- Run the full check -- lint plus the test suite: `npm test` or `yarn test`
+- Run only the tests, skipping lint: `npm run unit`
+
+Tests use Node's built-in test runner (`node:test`) -- no extra devDependency for that. `xo` is pinned to `0.59.3` with an explicit `rules` block in `package.json`: the codebase is CommonJS and stays that way for now, so a handful of `xo`'s newer, ESM-oriented rules are turned off rather than fought file by file. A full ESM migration would let those come back on, but that's a bigger, deliberate call, not a lint-config tweak.
 
 ## Related
 

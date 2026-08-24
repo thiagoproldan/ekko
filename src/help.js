@@ -15,6 +15,7 @@ module.exports = `
       --edit, -e         Edit item description
       --find, -f         Search for items
       --help, -h         Display help message
+      --json, -j         Output machine-readable JSON instead of formatted text
       --list, -l         List items by attributes
       --move, -m         Move item between boards
       --note, -n         Create note
@@ -36,6 +37,7 @@ module.exports = `
       $ tb --delete 4
       $ tb --edit @3 Merge PR #42
       $ tb --find documentation
+      $ tb --json --task @coding Review PR #42
       $ tb --list pending coding
       $ tb --move @1 cooking
       $ tb --note @coding Mergesort worse-case O(nlogn)

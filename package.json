@@ -1,7 +1,7 @@
 {
   "name": "taskbook",
   "productName": "Taskbook",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Tasks, boards & notes for the command-line habitat",
   "repository": "klaudiosinani/taskbook",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "tb": "cli.js"
   },
   "engines": {
-    "node": ">=6"
+    "node": ">=18"
   },
   "files": [
     "src",
@@ -41,7 +41,8 @@
     }
   },
   "scripts": {
-    "test": "xo"
+    "test": "xo && npm run unit",
+    "unit": "node --test \"test/*.test.js\""
   },
   "dependencies": {
     "chalk": "^2.4.1",
@@ -51,9 +52,38 @@
     "update-notifier": "^2.5.0"
   },
   "devDependencies": {
-    "xo": "*"
+    "xo": "0.59.3"
   },
   "xo": {
-    "space": 2
+    "space": 2,
+    "rules": {
+      "unicorn/prefer-module": "off",
+      "unicorn/no-array-for-each": "off",
+      "comma-dangle": "off",
+      "n/prefer-global/process": "off",
+      "object-curly-newline": "off",
+      "import/extensions": "off",
+      "unicorn/prevent-abbreviations": "off",
+      "unicorn/switch-case-braces": "off",
+      "unicorn/prefer-includes": "off",
+      "unicorn/prefer-node-protocol": "off",
+      "object-curly-spacing": "off",
+      "unicorn/no-nested-ternary": "off",
+      "unicorn/prefer-number-properties": "off",
+      "unicorn/no-process-exit": "off",
+      "unicorn/prefer-string-replace-all": "off",
+      "unicorn/prefer-at": "off",
+      "unicorn/no-array-push-push": "off",
+      "unicorn/explicit-length-check": "off",
+      "prefer-object-spread": "off"
+    },
+    "overrides": [
+      {
+        "files": "test/*.js",
+        "rules": {
+          "n/no-unsupported-features/node-builtins": "off"
+        }
+      }
+    ]
   }
 }

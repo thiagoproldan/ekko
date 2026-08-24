@@ -11,8 +11,29 @@ const {blue, green, grey, magenta, red, underline, yellow} = chalk;
 const priorities = {2: 'yellow', 3: 'red'};
 
 class Render {
+  constructor() {
+    this._jsonMode = false;
+  }
+
   get _configuration() {
     return config.get();
+  }
+
+  setJsonMode(enabled) {
+    this._jsonMode = Boolean(enabled);
+  }
+
+  json(payload) {
+    process.stdout.write(`${JSON.stringify(payload)}\n`);
+  }
+
+  _errorJson(code, message, extra = {}) {
+    if (!this._jsonMode) {
+      return false;
+    }
+
+    this.json({ok: false, error: message, code, ...extra});
+    return true;
   }
 
   _colorBoards(boards) {
@@ -191,32 +212,65 @@ class Render {
   }
 
   invalidCustomAppDir(path) {
+    if (this._errorJson('INVALID_CUSTOM_APP_DIR', 'Custom app directory was not found on your system', {path})) {
+      return;
+    }
+
     const [prefix, suffix] = ['\n', red(path)];
     const message = 'Custom app directory was not found on your system:';
     error({prefix, message, suffix});
   }
 
+  lockTimeout(path) {
+    const message = 'Timed out waiting for the taskbook storage lock. If no other taskbook process is running, delete this file and try again';
+
+    if (this._errorJson('LOCK_TIMEOUT', message, {path})) {
+      return;
+    }
+
+    const [prefix, suffix] = ['\n', red(path)];
+    error({prefix, message: `${message}:`, suffix});
+  }
+
   missingTaskbookDirFlagValue() {
-    const message =
-      'Please provide a value for --taskbook-dir or remove the flag.';
+    const message = 'Please provide a value for --taskbook-dir or remove the flag.';
+
+    if (this._errorJson('MISSING_TASKBOOK_DIR_FLAG_VALUE', message)) {
+      return;
+    }
+
     error({prefix: '\n ', message});
   }
 
   invalidID(id) {
+    if (this._errorJson('INVALID_ID', 'Unable to find item with id', {id})) {
+      return;
+    }
+
     const [prefix, suffix] = ['\n', grey(id)];
     const message = 'Unable to find item with id:';
     error({prefix, message, suffix});
   }
 
   invalidIDsNumber() {
-    const prefix = '\n';
     const message = 'More than one ids were given as input';
+
+    if (this._errorJson('INVALID_IDS_NUMBER', message)) {
+      return;
+    }
+
+    const prefix = '\n';
     error({prefix, message});
   }
 
   invalidPriority() {
-    const prefix = '\n';
     const message = 'Priority can only be 1, 2 or 3';
+
+    if (this._errorJson('INVALID_PRIORITY', message)) {
+      return;
+    }
+
+    const prefix = '\n';
     error({prefix, message});
   }
 
@@ -281,20 +335,35 @@ class Render {
   }
 
   missingBoards() {
-    const prefix = '\n';
     const message = 'No boards were given as input';
+
+    if (this._errorJson('MISSING_BOARDS', message)) {
+      return;
+    }
+
+    const prefix = '\n';
     error({prefix, message});
   }
 
   missingDesc() {
-    const prefix = '\n';
     const message = 'No description was given as input';
+
+    if (this._errorJson('MISSING_DESC', message)) {
+      return;
+    }
+
+    const prefix = '\n';
     error({prefix, message});
   }
 
   missingID() {
-    const prefix = '\n';
     const message = 'No id was given as input';
+
+    if (this._errorJson('MISSING_ID', message)) {
+      return;
+    }
+
+    const prefix = '\n';
     error({prefix, message});
   }
 

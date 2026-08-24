@@ -81,6 +81,10 @@ const cli = meow(help, {
     },
     taskbookDir: {
       type: 'string'
+    },
+    json: {
+      type: 'boolean',
+      alias: 'j'
     }
   }
 });
