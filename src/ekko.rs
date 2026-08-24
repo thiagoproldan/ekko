@@ -29,6 +29,7 @@ pub enum EkkoError {
     InvalidIdsNumber,
     InvalidPriority,
     MissingBoards,
+    UnknownListTerm(String),
     InvalidCustomAppDir(String),
     MissingEkkoDirFlagValue,
     LockTimeout(String),
@@ -50,6 +51,7 @@ impl EkkoError {
             EkkoError::InvalidIdsNumber => "INVALID_IDS_NUMBER",
             EkkoError::InvalidPriority => "INVALID_PRIORITY",
             EkkoError::MissingBoards => "MISSING_BOARDS",
+            EkkoError::UnknownListTerm(_) => "UNKNOWN_LIST_TERM",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
             EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
             EkkoError::LockTimeout(_) => "LOCK_TIMEOUT",
@@ -74,6 +76,7 @@ impl EkkoError {
             EkkoError::InvalidIdsNumber => out.invalid_ids_number(),
             EkkoError::InvalidPriority => out.invalid_priority(),
             EkkoError::MissingBoards => out.missing_boards(),
+            EkkoError::UnknownListTerm(_) => out.generic_error(&self.to_string()),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
             EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
             EkkoError::LockTimeout(path) => out.lock_timeout(path),
@@ -94,6 +97,9 @@ impl std::fmt::Display for EkkoError {
             EkkoError::InvalidIdsNumber => write!(f, "More than one ids were given as input"),
             EkkoError::InvalidPriority => write!(f, "Priority can only be 1, 2 or 3"),
             EkkoError::MissingBoards => write!(f, "No boards were given as input"),
+            EkkoError::UnknownListTerm(term) => {
+                write!(f, "Unknown board or attribute: {term}")
+            }
             EkkoError::InvalidCustomAppDir(path) => {
                 write!(f, "Custom app directory was not found on your system: {path}")
             }
@@ -701,13 +707,29 @@ impl Ekko {
 
         let (mut boards, mut attributes) = (Vec::new(), Vec::new());
         for term in terms {
-            let at_board = format!("@{term}");
+            // Two deliberate departures from the JS version here, both aimed
+            // at the same failure: it accepted anything and quietly listed
+            // *everything* when a term matched nothing, which reads as a
+            // successful filter returning the whole board.
+            //
+            // First, `@board` is accepted alongside the bare `board` the JS
+            // version wanted. The board view prints names in their `@name`
+            // form, so feeding one straight back is the obvious move -- and
+            // it was the one that silently did nothing.
+            let at_board =
+                if term.starts_with('@') { term.clone() } else { format!("@{term}") };
+
             if stored_boards.contains(&at_board) {
                 boards.push(at_board);
             } else if term == "myboard" {
                 boards.push("My Board".to_string());
-            } else {
+            } else if is_known_attribute(term) {
                 attributes.push(term.clone());
+            } else {
+                // Second: a term that names neither a board nor a known
+                // attribute is a typo or a board that does not exist, and
+                // saying so beats handing back a plausible-looking answer.
+                return Err(EkkoError::UnknownListTerm(term.clone()));
             }
         }
         let boards = remove_duplicates(boards);
@@ -745,6 +767,33 @@ fn remove_duplicates(items: Vec<String>) -> Vec<String> {
         }
     }
     seen
+}
+
+
+/// The attribute terms `--list` filters on. Kept beside
+/// `Ekko::filter_by_attributes`, which is the code that acts on them --
+/// the two must agree, or `list_by_attributes` would reject a term the
+/// filter would happily have handled.
+fn is_known_attribute(term: &str) -> bool {
+    matches!(
+        term,
+        "star"
+            | "starred"
+            | "done"
+            | "checked"
+            | "complete"
+            | "progress"
+            | "started"
+            | "begun"
+            | "pending"
+            | "unchecked"
+            | "incomplete"
+            | "todo"
+            | "task"
+            | "tasks"
+            | "note"
+            | "notes"
+    )
 }
 
 #[cfg(test)]
@@ -958,6 +1007,40 @@ mod tests {
 
         assert!(ids.contains(&1));
         assert!(ids.contains(&2), "an in-progress task should still show up under the pending filter, matching JS");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn list_accepts_a_board_name_in_the_at_form_the_board_view_prints() {
+        // The JS version only accepted the bare name, and quietly listed
+        // every board when given the `@name` form it had just printed --
+        // a filter that looks like it worked and did not.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["@alpha", "in alpha"])).unwrap();
+        ekko.create_task(&words(&["@beta", "in beta"])).unwrap();
+
+        for term in ["alpha", "@alpha"] {
+            let Outcome::List(groups) = ekko.list_by_attributes(&words(&[term])).unwrap() else {
+                panic!()
+            };
+            let boards: Vec<&str> = groups.iter().map(|(board, _)| board.as_str()).collect();
+            assert_eq!(boards, vec!["@alpha"], "--list {term} should list only @alpha");
+        }
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn list_rejects_a_term_that_is_neither_a_board_nor_an_attribute() {
+        // Silently returning everything is the worst possible answer here:
+        // it is indistinguishable from a filter that matched all items.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["@alpha", "in alpha"])).unwrap();
+
+        let result = ekko.list_by_attributes(&words(&["nonexistent"]));
+
+        assert!(matches!(result, Err(EkkoError::UnknownListTerm(ref t)) if t == "nonexistent"));
 
         cleanup(&dir);
     }
