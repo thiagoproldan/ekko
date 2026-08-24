@@ -240,6 +240,30 @@ impl<'a> Renderer<'a> {
         if age == 0 { String::new() } else { self.painter.grey(&format!("{age}d")) }
     }
 
+/// The due date, coloured by how it stands against today: overdue red,
+/// due today yellow, still ahead grey. Empty when the item has no due
+/// date, which is what keeps output for every pre-existing item -- and
+/// every golden reference -- byte-identical.
+///
+/// Compared as plain strings: `parse_due_date` canonicalises to
+/// `YYYY-MM-DD`, which sorts lexicographically the same way it sorts
+/// chronologically.
+    fn get_due(&self, item: &Item) -> String {
+        let Some(due) = item.due_date.as_deref() else { return String::new() };
+
+        // A finished task's deadline is history, not a warning.
+        if item.is_complete.unwrap_or(false) {
+            return self.painter.grey(due);
+        }
+
+        let today = self.now.format("%Y-%m-%d").to_string();
+        match due.cmp(today.as_str()) {
+            std::cmp::Ordering::Less => self.painter.red(due),
+            std::cmp::Ordering::Equal => self.painter.yellow(due),
+            std::cmp::Ordering::Greater => self.painter.grey(due),
+        }
+    }
+
     fn color_boards(&self, boards: &[String]) -> String {
         boards.iter().map(|b| self.painter.grey(b)).collect::<Vec<_>>().join(" ")
     }
@@ -314,7 +338,15 @@ impl<'a> Renderer<'a> {
         let level = self.item_level(item);
         let age = self.get_age_days(item.timestamp, now_millis);
         let star = self.get_star(item);
-        let suffix = if age.is_empty() { star } else { format!("{age} {star}") };
+        let due = self.get_due(item);
+        // Spelled out rather than filtered-and-joined so the two pre-existing
+        // cases keep their exact spacing, trailing space included.
+        let suffix = match (age.is_empty(), due.is_empty()) {
+            (true, true) => star,
+            (false, true) => format!("{age} {star}"),
+            (true, false) => format!("{due} {star}"),
+            (false, false) => format!("{age} {due} {star}"),
+        };
         let prefix = self.build_prefix(item);
         let message = self.build_message(item);
         self.emit(&prefix, Some(&level), &message, &suffix);
@@ -324,7 +356,12 @@ impl<'a> Renderer<'a> {
         let level = self.item_level(item);
         let boards: Vec<String> =
             item.boards.iter().filter(|b| b.as_str() != "My Board").cloned().collect();
-        let suffix = format!("{} {}", self.color_boards(&boards), self.get_star(item));
+        let due = self.get_due(item);
+        let suffix = if due.is_empty() {
+            format!("{} {}", self.color_boards(&boards), self.get_star(item))
+        } else {
+            format!("{} {} {}", self.color_boards(&boards), due, self.get_star(item))
+        };
         let prefix = self.build_prefix(item);
         let message = self.build_message(item);
         self.emit(&prefix, Some(&level), &message, &suffix);

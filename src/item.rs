@@ -35,6 +35,11 @@ pub struct Item {
     pub is_complete: Option<bool>,
     #[serde(rename = "inProgress", default, skip_serializing_if = "Option::is_none")]
     pub in_progress: Option<bool>,
+    // Task-only, and absent from the JSON when unset -- so a file
+    // written by taskbook, or by an Ekko that never saw a `d:` token,
+    // round-trips byte-identically through this field.
+    #[serde(rename = "dueDate", default, skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<String>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -55,6 +60,7 @@ impl Item {
             is_task: true,
             is_complete: Some(false),
             in_progress: Some(false),
+            due_date: None,
             priority: Some(priority),
         }
     }
@@ -72,6 +78,7 @@ impl Item {
             is_complete: None,
             in_progress: None,
             priority: None,
+            due_date: None,
         }
     }
 }

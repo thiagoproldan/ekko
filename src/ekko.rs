@@ -30,6 +30,7 @@ pub enum EkkoError {
     InvalidPriority,
     MissingBoards,
     UnknownListTerm(String),
+    InvalidDueDate(String),
     InvalidCustomAppDir(String),
     MissingEkkoDirFlagValue,
     LockTimeout(String),
@@ -52,6 +53,7 @@ impl EkkoError {
             EkkoError::InvalidPriority => "INVALID_PRIORITY",
             EkkoError::MissingBoards => "MISSING_BOARDS",
             EkkoError::UnknownListTerm(_) => "UNKNOWN_LIST_TERM",
+            EkkoError::InvalidDueDate(_) => "INVALID_DUE_DATE",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
             EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
             EkkoError::LockTimeout(_) => "LOCK_TIMEOUT",
@@ -77,6 +79,7 @@ impl EkkoError {
             EkkoError::InvalidPriority => out.invalid_priority(),
             EkkoError::MissingBoards => out.missing_boards(),
             EkkoError::UnknownListTerm(_) => out.generic_error(&self.to_string()),
+            EkkoError::InvalidDueDate(_) => out.generic_error(&self.to_string()),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
             EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
             EkkoError::LockTimeout(path) => out.lock_timeout(path),
@@ -99,6 +102,9 @@ impl std::fmt::Display for EkkoError {
             EkkoError::MissingBoards => write!(f, "No boards were given as input"),
             EkkoError::UnknownListTerm(term) => {
                 write!(f, "Unknown board or attribute: {term}")
+            }
+            EkkoError::InvalidDueDate(token) => {
+                write!(f, "Due date must look like d:YYYY-MM-DD, got: {token}")
             }
             EkkoError::InvalidCustomAppDir(path) => {
                 write!(f, "Custom app directory was not found on your system: {path}")
@@ -307,16 +313,27 @@ impl Ekko {
         Ok((id, rest))
     }
 
-    fn parse_create_options(&self, input: &[String]) -> Result<(Vec<String>, String, u8), EkkoError> {
+    fn parse_create_options(
+        &self,
+        input: &[String],
+    ) -> Result<(Vec<String>, String, u8, Option<String>), EkkoError> {
         if input.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
 
         let priority = get_priority(input);
+
+        let mut due_date = None;
+        for token in input.iter().filter(|t| is_due_opt(t)) {
+            match parse_due_date(token) {
+                Some(date) => due_date = Some(date),
+                None => return Err(EkkoError::InvalidDueDate(token.clone())),
+            }
+        }
         let mut boards = Vec::new();
         let mut words = Vec::new();
         for token in input {
-            if is_priority_opt(token) {
+            if is_priority_opt(token) || is_due_opt(token) {
                 continue;
             }
             if token.starts_with('@') && token.len() > 1 {
@@ -334,7 +351,7 @@ impl Ekko {
             boards.push("My Board".to_string());
         }
 
-        Ok((boards, description, priority))
+        Ok((boards, description, priority, due_date))
     }
 
     // ---- grouping / stats / search -------------------------------------
@@ -435,6 +452,17 @@ impl Ekko {
                 }
                 "todo" | "task" | "tasks" => data.retain(|_, item| item.is_task),
                 "note" | "notes" => data.retain(|_, item| !item.is_task),
+                "due" => data.retain(|_, item| item.due_date.is_some()),
+                // Only tasks that are still open: a finished task is not
+                // late, however long its deadline has been past.
+                "overdue" => {
+                    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    data.retain(|_, item| {
+                        item.is_task
+                            && !item.is_complete.unwrap_or(false)
+                            && item.due_date.as_deref().is_some_and(|d| d < today.as_str())
+                    });
+                }
                 _ => {}
             }
         }
@@ -461,10 +489,11 @@ impl Ekko {
 
     pub fn create_task(&self, input: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
-        let (boards, description, priority) = self.parse_create_options(input)?;
+        let (boards, description, priority, due_date) = self.parse_create_options(input)?;
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
-        let item = Item::new_task(id, description, boards, priority);
+        let mut item = Item::new_task(id, description, boards, priority);
+        item.due_date = due_date;
         data.insert(id, item.clone());
         self.storage.set(&data)?;
         Ok(Outcome::Task(item))
@@ -472,7 +501,10 @@ impl Ekko {
 
     pub fn create_note(&self, input: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
-        let (boards, description, _priority) = self.parse_create_options(input)?;
+        // Notes carry no deadline, same as they carry no priority: a `d:`
+        // token on a note is parsed (so a malformed one still errors) and
+        // then dropped.
+        let (boards, description, _priority, _due) = self.parse_create_options(input)?;
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
         let item = Item::new_note(id, description, boards);
@@ -754,6 +786,23 @@ fn get_priority(input: &[String]) -> u8 {
         .unwrap_or(1)
 }
 
+/// `d:YYYY-MM-DD`, mirroring how `p:N` marks priority. Validated here
+/// rather than at render time so a typo is rejected at the point the user
+/// can still see what they typed, instead of silently becoming a task with
+/// no deadline.
+fn is_due_opt(token: &str) -> bool {
+    token.starts_with("d:")
+}
+
+fn parse_due_date(token: &str) -> Option<String> {
+    let value = token.strip_prefix("d:")?;
+    let parsed = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    // Round-tripped through chrono so the stored form is always canonical:
+    // `d:2026-9-1` and `d:2026-09-01` land as the same string, which keeps
+    // the plain string comparisons in `due_state` honest.
+    Some(parsed.format("%Y-%m-%d").to_string())
+}
+
 fn has_terms(text: &str, terms: &[String]) -> bool {
     let lower = text.to_lowercase();
     terms.iter().any(|term| lower.contains(&term.to_lowercase()))
@@ -793,6 +842,8 @@ fn is_known_attribute(term: &str) -> bool {
             | "tasks"
             | "note"
             | "notes"
+            | "due"
+            | "overdue"
     )
 }
 
@@ -1007,6 +1058,51 @@ mod tests {
 
         assert!(ids.contains(&1));
         assert!(ids.contains(&2), "an in-progress task should still show up under the pending filter, matching JS");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn due_dates_are_parsed_canonicalised_and_kept_off_notes() {
+        let (ekko, dir) = fresh_ekko();
+        // Deliberately non-canonical: single-digit month and day.
+        ekko.create_task(&words(&["with a deadline", "d:2026-9-1"])).unwrap();
+        ekko.create_note(&words(&["a note", "d:2026-09-01"])).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        assert_eq!(data[&1].due_date.as_deref(), Some("2026-09-01"), "stored form should be canonical");
+        assert_eq!(data[&2].due_date, None, "notes carry no deadline, same as they carry no priority");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_malformed_due_date_is_rejected_rather_than_silently_dropped() {
+        let (ekko, dir) = fresh_ekko();
+
+        let result = ekko.create_task(&words(&["tomorrow please", "d:tomorrow"]));
+
+        assert!(matches!(result, Err(EkkoError::InvalidDueDate(ref t)) if t == "d:tomorrow"));
+        assert!(ekko.storage.get().unwrap().is_empty(), "nothing should have been created");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn overdue_excludes_completed_tasks_and_future_deadlines() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["late", "d:2000-01-01"])).unwrap();
+        ekko.create_task(&words(&["also late but done", "d:2000-01-01"])).unwrap();
+        ekko.create_task(&words(&["ages away", "d:3000-01-01"])).unwrap();
+        ekko.create_task(&words(&["no deadline at all"])).unwrap();
+        ekko.check_tasks(&words(&["2"])).unwrap();
+
+        let Outcome::List(groups) = ekko.list_by_attributes(&words(&["overdue"])).unwrap() else {
+            panic!()
+        };
+        let ids: Vec<u32> = groups.iter().flat_map(|(_, i)| i.iter().map(|x| x.id)).collect();
+
+        assert_eq!(ids, vec![1], "only the open, past-due task counts as overdue");
 
         cleanup(&dir);
     }

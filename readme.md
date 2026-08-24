@@ -21,6 +21,7 @@ Effectively a task manager built to be driven by a human and an LLM/coding agent
 - Organize tasks & notes into boards
 - Board & timeline views
 - Priority & favorite mechanisms
+- Due dates via `d:YYYY-MM-DD`, coloured by urgency and filterable -- an Ekko addition
 - Search & filter items
 - Archive & restore deleted items
 - Machine-readable `--json` output for every command, scripts and agents included
@@ -268,6 +269,20 @@ To update the priority level of a specific task after its creation, use the `--p
 $ ekko -p @1 2
 ```
 
+### Due Dates
+
+To give a task a deadline while creating it, include a `d:YYYY-MM-DD` token in the description, alongside `p:x` if you want both. The token is stripped from the description, and a date that does not parse is an error (`INVALID_DUE_DATE`) rather than a task quietly created without one.
+
+```
+ -t @coding Ship the release notes d:2026-09-01 p:2
+```
+
+Due dates show up next to the item, coloured by where they stand: red once past, yellow on the day itself, grey while still ahead, and grey again once the task is checked off -- a finished task is not late. Notes take no deadline, the same way they take no priority.
+
+Filter with `--list due` for everything carrying a deadline, or `--list overdue` for open tasks whose date has passed. Both compose with board names, so `ekko -l overdue coding` narrows to one board.
+
+This is an Ekko addition; taskbook has no equivalent. Items without a due date are unaffected, on screen and in `storage.json` alike -- the field is omitted entirely when unset, so files stay readable by taskbook.
+
 ### Move Item
 
 To move an item to one or more boards, use the `--move`/`-m` option, followed by the target item id, prefixed by the `@` symbol, and the name of the destination boards. The default `My board` can be accessed through the `myboard` keyword. The order in which the target id and board names are placed is not significant. Note that this **replaces** the item's board list; it does not add to it -- list every board you want the item to keep, not just the new one.
@@ -325,6 +340,8 @@ The by default supported listing attributes, together with their respective alia
 - `progress`, `started`, `begun` - Items that are in-progress tasks.
 - `done`, `checked`, `complete` - Items that complete tasks.
 - `star`, `starred` - Items that are starred.
+- `due` - Tasks that have a due date.
+- `overdue` - Tasks whose due date has passed and that are not yet complete.
 
 A board can be named either bare or in the `@name` form the board view prints, so `--list release` and `--list @release` are equivalent. A term matching neither a board nor an attribute above is an error (`UNKNOWN_LIST_TERM`), not a silent no-op.
 
@@ -371,7 +388,7 @@ $ ekko --json --task @coding Review PR #42
 {"ok":true,"command":"task","item":{"_id":7,"_date":"Mon Aug 24 2026","_timestamp":1787532527693,"description":"Review PR #42","isStarred":false,"boards":["@coding"],"_isTask":true,"isComplete":false,"inProgress":false,"priority":1}}
 ```
 
-On success, the object always has `ok: true` and a `command` field naming what ran, plus whatever data that command produces (a `create`d/`edit`ed/`move`d/`priority`-updated item's full record, id lists for `check`/`begin`/`star`, board- or date-grouped items for the view commands, etc). On failure it's `ok: false` with an `error` message and a stable `code` (`MISSING_ID`, `INVALID_ID`, `MISSING_DESC`, `INVALID_IDS_NUMBER`, `INVALID_PRIORITY`, `MISSING_BOARDS`, `UNKNOWN_LIST_TERM`, `INVALID_CUSTOM_APP_DIR`, `MISSING_EKKO_DIR_FLAG_VALUE`, `LOCK_TIMEOUT`) to branch on instead of matching on the message text -- the process also exits `1`, same as without `--json`.
+On success, the object always has `ok: true` and a `command` field naming what ran, plus whatever data that command produces (a `create`d/`edit`ed/`move`d/`priority`-updated item's full record, id lists for `check`/`begin`/`star`, board- or date-grouped items for the view commands, etc). On failure it's `ok: false` with an `error` message and a stable `code` (`MISSING_ID`, `INVALID_ID`, `MISSING_DESC`, `INVALID_IDS_NUMBER`, `INVALID_PRIORITY`, `MISSING_BOARDS`, `UNKNOWN_LIST_TERM`, `INVALID_DUE_DATE`, `INVALID_CUSTOM_APP_DIR`, `MISSING_EKKO_DIR_FLAG_VALUE`, `LOCK_TIMEOUT`) to branch on instead of matching on the message text -- the process also exits `1`, same as without `--json`.
 
 A couple of things worth knowing:
 
