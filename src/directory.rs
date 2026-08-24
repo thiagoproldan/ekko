@@ -1,6 +1,6 @@
 //! Resolves which directory `storage.rs` should actually use, in priority
-//! order: `--taskbook-dir` flag > `TASKBOOK_DIR` env var > the config
-//! file's `taskbookDirectory` > `home_dir/.taskbook`.
+//! order: `--ekko-dir` flag > `EKKO_DIR` env var > the config file's
+//! `ekkoDirectory` > `home_dir/.ekko`.
 //!
 //! `home_dir`/`cwd`/`flag`/`env_var` are all explicit parameters rather
 //! than read from `std::env`/`home::home_dir()` internally -- partly to
@@ -17,11 +17,11 @@ use std::path::{Path, PathBuf};
 use crate::config;
 use crate::paths::resolve_path;
 
-const TASKBOOK_DIR_NAME: &str = ".taskbook";
+const EKKO_DIR_NAME: &str = ".ekko";
 
 #[derive(Debug)]
 pub enum DirectoryError {
-    MissingTaskbookDirFlagValue,
+    MissingEkkoDirFlagValue,
     InvalidCustomAppDir(String),
     Config(config::ConfigError),
 }
@@ -29,8 +29,8 @@ pub enum DirectoryError {
 impl std::fmt::Display for DirectoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DirectoryError::MissingTaskbookDirFlagValue => {
-                write!(f, "Please provide a value for --taskbook-dir or remove the flag.")
+            DirectoryError::MissingEkkoDirFlagValue => {
+                write!(f, "Please provide a value for --ekko-dir or remove the flag.")
             }
             DirectoryError::InvalidCustomAppDir(candidate) => write!(
                 f,
@@ -49,20 +49,20 @@ impl From<config::ConfigError> for DirectoryError {
     }
 }
 
-pub fn retrieve_taskbook_directory(
+pub fn retrieve_ekko_directory(
     home_dir: &Path,
     cwd: &Path,
     flag: Option<&str>,
     env_var: Option<&str>,
 ) -> Result<PathBuf, DirectoryError> {
-    if let Some(custom) = resolve_custom_taskbook_directory(home_dir, cwd, flag, env_var)? {
+    if let Some(custom) = resolve_custom_ekko_directory(home_dir, cwd, flag, env_var)? {
         return Ok(custom);
     }
 
-    Ok(home_dir.join(TASKBOOK_DIR_NAME))
+    Ok(home_dir.join(EKKO_DIR_NAME))
 }
 
-fn resolve_custom_taskbook_directory(
+fn resolve_custom_ekko_directory(
     home_dir: &Path,
     cwd: &Path,
     flag: Option<&str>,
@@ -74,19 +74,19 @@ fn resolve_custom_taskbook_directory(
 
     let resolved = resolve_path(home_dir, cwd, &candidate);
 
-    if resolved.file_name().and_then(|n| n.to_str()) == Some(TASKBOOK_DIR_NAME) {
-        // The candidate already names the taskbook dir itself (e.g.
-        // `--taskbook-dir ~/work/.taskbook`) -- use it directly, only its
-        // parent needs to exist.
+    if resolved.file_name().and_then(|n| n.to_str()) == Some(EKKO_DIR_NAME) {
+        // The candidate already names the ekko dir itself (e.g.
+        // `--ekko-dir ~/work/.ekko`) -- use it directly, only its parent
+        // needs to exist.
         let parent = resolved.parent().unwrap_or(&resolved);
         assert_directory_exists(parent, &candidate)?;
         return Ok(Some(resolved));
     }
 
-    // Otherwise the candidate names the *parent* the taskbook dir should
-    // live under, and that parent must already exist.
+    // Otherwise the candidate names the *parent* the ekko dir should live
+    // under, and that parent must already exist.
     assert_directory_exists(&resolved, &candidate)?;
-    Ok(Some(resolved.join(TASKBOOK_DIR_NAME)))
+    Ok(Some(resolved.join(EKKO_DIR_NAME)))
 }
 
 fn select_custom_directory_candidate(
@@ -98,7 +98,7 @@ fn select_custom_directory_candidate(
         return if is_present(value) {
             Ok(Some(value.to_string()))
         } else {
-            Err(DirectoryError::MissingTaskbookDirFlagValue)
+            Err(DirectoryError::MissingEkkoDirFlagValue)
         };
     }
 
@@ -109,8 +109,8 @@ fn select_custom_directory_candidate(
     }
 
     let config = config::get(home_dir)?;
-    if is_present(&config.taskbook_directory) {
-        return Ok(Some(config.taskbook_directory));
+    if is_present(&config.ekko_directory) {
+        return Ok(Some(config.ekko_directory));
     }
 
     Ok(None)
@@ -147,29 +147,28 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_home_dot_taskbook_with_nothing_configured() {
+    fn defaults_to_home_dot_ekko_with_nothing_configured() {
         let home = temp_dir();
         let cwd = temp_dir();
 
-        let resolved = retrieve_taskbook_directory(&home, &cwd, None, None).unwrap();
+        let resolved = retrieve_ekko_directory(&home, &cwd, None, None).unwrap();
 
-        assert_eq!(resolved, home.join(".taskbook"));
+        assert_eq!(resolved, home.join(".ekko"));
 
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&cwd).ok();
     }
 
     #[test]
-    fn flag_wins_over_everything_and_composes_dot_taskbook_under_it() {
+    fn flag_wins_over_everything_and_composes_dot_ekko_under_it() {
         let home = temp_dir();
         let cwd = temp_dir();
         let custom = temp_dir();
 
         let resolved =
-            retrieve_taskbook_directory(&home, &cwd, Some(custom.to_str().unwrap()), None)
-                .unwrap();
+            retrieve_ekko_directory(&home, &cwd, Some(custom.to_str().unwrap()), None).unwrap();
 
-        assert_eq!(resolved, custom.join(".taskbook"));
+        assert_eq!(resolved, custom.join(".ekko"));
 
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&cwd).ok();
@@ -177,15 +176,14 @@ mod tests {
     }
 
     #[test]
-    fn flag_naming_the_taskbook_dir_itself_is_used_as_is() {
+    fn flag_naming_the_ekko_dir_itself_is_used_as_is() {
         let home = temp_dir();
         let cwd = temp_dir();
         let parent = temp_dir();
-        let explicit = parent.join(".taskbook");
+        let explicit = parent.join(".ekko");
 
         let resolved =
-            retrieve_taskbook_directory(&home, &cwd, Some(explicit.to_str().unwrap()), None)
-                .unwrap();
+            retrieve_ekko_directory(&home, &cwd, Some(explicit.to_str().unwrap()), None).unwrap();
 
         assert_eq!(resolved, explicit);
 
@@ -199,9 +197,9 @@ mod tests {
         let home = temp_dir();
         let cwd = temp_dir();
 
-        let result = retrieve_taskbook_directory(&home, &cwd, Some("   "), None);
+        let result = retrieve_ekko_directory(&home, &cwd, Some("   "), None);
 
-        assert!(matches!(result, Err(DirectoryError::MissingTaskbookDirFlagValue)));
+        assert!(matches!(result, Err(DirectoryError::MissingEkkoDirFlagValue)));
 
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&cwd).ok();
@@ -213,8 +211,7 @@ mod tests {
         let cwd = temp_dir();
         let nonexistent = home.join("nope-does-not-exist");
 
-        let result =
-            retrieve_taskbook_directory(&home, &cwd, Some(nonexistent.to_str().unwrap()), None);
+        let result = retrieve_ekko_directory(&home, &cwd, Some(nonexistent.to_str().unwrap()), None);
 
         assert!(matches!(result, Err(DirectoryError::InvalidCustomAppDir(_))));
 
@@ -229,10 +226,9 @@ mod tests {
         let custom = temp_dir();
 
         let resolved =
-            retrieve_taskbook_directory(&home, &cwd, None, Some(custom.to_str().unwrap()))
-                .unwrap();
+            retrieve_ekko_directory(&home, &cwd, None, Some(custom.to_str().unwrap())).unwrap();
 
-        assert_eq!(resolved, custom.join(".taskbook"));
+        assert_eq!(resolved, custom.join(".ekko"));
 
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&cwd).ok();
@@ -246,7 +242,7 @@ mod tests {
         let from_flag = temp_dir();
         let from_env = temp_dir();
 
-        let resolved = retrieve_taskbook_directory(
+        let resolved = retrieve_ekko_directory(
             &home,
             &cwd,
             Some(from_flag.to_str().unwrap()),
@@ -254,7 +250,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolved, from_flag.join(".taskbook"));
+        assert_eq!(resolved, from_flag.join(".ekko"));
 
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&cwd).ok();
@@ -269,13 +265,13 @@ mod tests {
         let custom = temp_dir();
         fs::write(
             config::config_file_path(&home),
-            format!(r#"{{"taskbookDirectory":"{}"}}"#, custom.to_str().unwrap().replace('\\', "\\\\")),
+            format!(r#"{{"ekkoDirectory":"{}"}}"#, custom.to_str().unwrap().replace('\\', "\\\\")),
         )
         .unwrap();
 
-        let resolved = retrieve_taskbook_directory(&home, &cwd, None, None).unwrap();
+        let resolved = retrieve_ekko_directory(&home, &cwd, None, None).unwrap();
 
-        assert_eq!(resolved, custom.join(".taskbook"));
+        assert_eq!(resolved, custom.join(".ekko"));
 
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&cwd).ok();
@@ -288,9 +284,9 @@ mod tests {
         let cwd = temp_dir();
         fs::create_dir_all(cwd.join("sub")).unwrap();
 
-        let resolved = retrieve_taskbook_directory(&home, &cwd, Some("sub"), None).unwrap();
+        let resolved = retrieve_ekko_directory(&home, &cwd, Some("sub"), None).unwrap();
 
-        assert_eq!(resolved, cwd.join("sub").join(".taskbook"));
+        assert_eq!(resolved, cwd.join("sub").join(".ekko"));
 
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&cwd).ok();

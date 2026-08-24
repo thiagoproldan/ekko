@@ -96,7 +96,7 @@ pub struct Stats {
 }
 
 /// Board or date groupings, in the order they should display -- callers
-/// (taskbook.rs) own how that order is produced; this module just walks it.
+/// (ekko.rs) own how that order is produced; this module just walks it.
 pub type Groups = [(String, Vec<Item>)];
 
 enum Level {
@@ -369,8 +369,8 @@ impl<'a> Renderer<'a> {
         self.error("\n", "Custom app directory was not found on your system:", &suffix);
     }
 
-    pub fn missing_taskbook_dir_flag_value(&mut self) {
-        self.error("\n ", "Please provide a value for --taskbook-dir or remove the flag.", "");
+    pub fn missing_ekko_dir_flag_value(&mut self) {
+        self.error("\n ", "Please provide a value for --ekko-dir or remove the flag.", "");
     }
 
     pub fn invalid_id(&mut self, id: &str) {
@@ -390,7 +390,7 @@ impl<'a> Renderer<'a> {
         let suffix = self.painter.red(path);
         self.error(
             "\n",
-            "Timed out waiting for the taskbook storage lock. If no other taskbook process is running, delete this file and try again:",
+            "Timed out waiting for the ekko storage lock. If no other ekko process is running, delete this file and try again:",
             &suffix,
         );
     }

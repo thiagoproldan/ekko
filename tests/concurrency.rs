@@ -33,7 +33,7 @@ fn temp_taskbook_dir() -> PathBuf {
 
 fn run_task_create(exe: &str, dir: &std::path::Path, description: &str) -> process::Child {
     Command::new(exe)
-        .args(["--taskbook-dir", dir.to_str().unwrap(), "--task", description])
+        .args(["--ekko-dir", dir.to_str().unwrap(), "--task", description])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -54,7 +54,7 @@ fn concurrent_writers_neither_collide_on_an_id_nor_lose_an_update() {
         assert!(status.success(), "an `ekko --task` invocation exited non-zero: {status:?}");
     }
 
-    let storage_path = dir.join(".taskbook").join("storage").join("storage.json");
+    let storage_path = dir.join(".ekko").join("storage").join("storage.json");
     let content = fs::read_to_string(&storage_path).expect("storage.json should exist");
     let data: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&content).expect("storage.json should be valid JSON");
@@ -84,7 +84,7 @@ fn fifty_concurrent_writers_still_neither_collide_nor_lose_updates() {
         assert!(child.wait().expect("failed to wait on child").success());
     }
 
-    let storage_path = dir.join(".taskbook").join("storage").join("storage.json");
+    let storage_path = dir.join(".ekko").join("storage").join("storage.json");
     let content = fs::read_to_string(&storage_path).unwrap();
     let data: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&content).unwrap();
 

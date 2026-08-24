@@ -30,7 +30,7 @@ pub enum EkkoError {
     InvalidPriority,
     MissingBoards,
     InvalidCustomAppDir(String),
-    MissingTaskbookDirFlagValue,
+    MissingEkkoDirFlagValue,
     LockTimeout(String),
     Storage(StorageError),
     Directory(DirectoryError),
@@ -51,7 +51,7 @@ impl EkkoError {
             EkkoError::InvalidPriority => "INVALID_PRIORITY",
             EkkoError::MissingBoards => "MISSING_BOARDS",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
-            EkkoError::MissingTaskbookDirFlagValue => "MISSING_TASKBOOK_DIR_FLAG_VALUE",
+            EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
             EkkoError::LockTimeout(_) => "LOCK_TIMEOUT",
             EkkoError::Storage(_) => "STORAGE_ERROR",
             EkkoError::Directory(_) => "DIRECTORY_ERROR",
@@ -75,7 +75,7 @@ impl EkkoError {
             EkkoError::InvalidPriority => out.invalid_priority(),
             EkkoError::MissingBoards => out.missing_boards(),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
-            EkkoError::MissingTaskbookDirFlagValue => out.missing_taskbook_dir_flag_value(),
+            EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
             EkkoError::LockTimeout(path) => out.lock_timeout(path),
             EkkoError::Storage(e) => out.generic_error(&e.to_string()),
             EkkoError::Directory(e) => out.generic_error(&e.to_string()),
@@ -97,10 +97,10 @@ impl std::fmt::Display for EkkoError {
             EkkoError::InvalidCustomAppDir(path) => {
                 write!(f, "Custom app directory was not found on your system: {path}")
             }
-            EkkoError::MissingTaskbookDirFlagValue => {
-                write!(f, "Please provide a value for --taskbook-dir or remove the flag.")
+            EkkoError::MissingEkkoDirFlagValue => {
+                write!(f, "Please provide a value for --ekko-dir or remove the flag.")
             }
-            EkkoError::LockTimeout(path) => write!(f, "Timed out waiting for the taskbook storage lock: {path}"),
+            EkkoError::LockTimeout(path) => write!(f, "Timed out waiting for the ekko storage lock: {path}"),
             EkkoError::Storage(e) => write!(f, "{e}"),
             EkkoError::Directory(e) => write!(f, "{e}"),
             EkkoError::Config(e) => write!(f, "{e}"),
@@ -123,7 +123,7 @@ impl From<StorageError> for EkkoError {
 impl From<DirectoryError> for EkkoError {
     fn from(error: DirectoryError) -> Self {
         match error {
-            DirectoryError::MissingTaskbookDirFlagValue => EkkoError::MissingTaskbookDirFlagValue,
+            DirectoryError::MissingEkkoDirFlagValue => EkkoError::MissingEkkoDirFlagValue,
             DirectoryError::InvalidCustomAppDir(path) => EkkoError::InvalidCustomAppDir(path),
             other => EkkoError::Directory(other),
         }
@@ -246,20 +246,19 @@ impl Ekko {
         Ekko { storage }
     }
 
-    /// Resolves the taskbook directory (flag > env > config > default,
-    /// see `directory::retrieve_taskbook_directory`) and opens storage in
-    /// it. `home_dir`/`cwd`/`taskbook_dir_flag`/`taskbook_dir_env` are the
-    /// real values the CLI layer read; kept as parameters here for the
-    /// same reason `directory`/`config` take them explicitly -- fully
-    /// deterministic, no hidden reach into `std::env` inside business
-    /// logic.
+    /// Resolves the ekko directory (flag > env > config > default, see
+    /// `directory::retrieve_ekko_directory`) and opens storage in it.
+    /// `home_dir`/`cwd`/`ekko_dir_flag`/`ekko_dir_env` are the real values
+    /// the CLI layer read; kept as parameters here for the same reason
+    /// `directory`/`config` take them explicitly -- fully deterministic,
+    /// no hidden reach into `std::env` inside business logic.
     pub fn open(
         home_dir: &std::path::Path,
         cwd: &std::path::Path,
-        taskbook_dir_flag: Option<&str>,
-        taskbook_dir_env: Option<&str>,
+        ekko_dir_flag: Option<&str>,
+        ekko_dir_env: Option<&str>,
     ) -> Result<Self, EkkoError> {
-        let dir = directory::retrieve_taskbook_directory(home_dir, cwd, taskbook_dir_flag, taskbook_dir_env)?;
+        let dir = directory::retrieve_ekko_directory(home_dir, cwd, ekko_dir_flag, ekko_dir_env)?;
         Ok(Self::new(Storage::new(&dir)?))
     }
 

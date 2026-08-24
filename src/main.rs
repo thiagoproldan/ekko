@@ -39,7 +39,7 @@ const HELP: &str = r#"
       --priority, -p     Update priority of task
       --restore, -r      Restore items from archive
       --star, -s         Star/unstar item
-      --taskbook-dir     Define a custom taskbook directory
+      --ekko-dir         Define a custom ekko directory
       --task, -t         Create task
       --timeline, -i     Display timeline view
       --version, -v      Display installed version
@@ -103,9 +103,9 @@ fn main() -> ExitCode {
     let json_mode = cli.json;
     let home_dir = home::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let taskbook_dir_env = std::env::var("TASKBOOK_DIR").ok();
+    let ekko_dir_env = std::env::var("EKKO_DIR").ok();
 
-    let ekko = match Ekko::open(&home_dir, &cwd, cli.taskbook_dir.as_deref(), taskbook_dir_env.as_deref()) {
+    let ekko = match Ekko::open(&home_dir, &cwd, cli.ekko_dir.as_deref(), ekko_dir_env.as_deref()) {
         Ok(ekko) => ekko,
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };

@@ -37,8 +37,8 @@ pub struct Cli {
     pub restore: bool,
     #[arg(long, short = 's')]
     pub star: bool,
-    #[arg(long = "taskbook-dir")]
-    pub taskbook_dir: Option<String>,
+    #[arg(long = "ekko-dir")]
+    pub ekko_dir: Option<String>,
     #[arg(long, short = 't')]
     pub task: bool,
     #[arg(long, short = 'i')]
@@ -47,6 +47,5 @@ pub struct Cli {
     /// Everything left over: item ids, `@board` tags, descriptions,
     /// `p:N` priority markers -- whatever the chosen command needs, parsed
     /// downstream in ekko.rs exactly like the JS version's `input` array.
-    #[arg(allow_hyphen_values = true)]
     pub input: Vec<String>,
 }

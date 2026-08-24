@@ -57,7 +57,7 @@ impl std::fmt::Display for StorageError {
             StorageError::Json(e) => write!(f, "{e}"),
             StorageError::LockTimeout(path) => write!(
                 f,
-                "Timed out waiting for the taskbook storage lock. If no other taskbook process is running, delete this file and try again: {}",
+                "Timed out waiting for the ekko storage lock. If no other ekko process is running, delete this file and try again: {}",
                 path.display()
             ),
         }
@@ -100,10 +100,10 @@ impl Drop for LockGuard<'_> {
 }
 
 impl Storage {
-    pub fn new(taskbook_dir: &Path) -> Result<Self, StorageError> {
-        let storage_dir = taskbook_dir.join("storage");
-        let archive_dir = taskbook_dir.join("archive");
-        let temp_dir = taskbook_dir.join(".temp");
+    pub fn new(ekko_dir: &Path) -> Result<Self, StorageError> {
+        let storage_dir = ekko_dir.join("storage");
+        let archive_dir = ekko_dir.join("archive");
+        let temp_dir = ekko_dir.join(".temp");
 
         fs::create_dir_all(&storage_dir)?;
         fs::create_dir_all(&archive_dir)?;
@@ -113,7 +113,7 @@ impl Storage {
             storage_file: storage_dir.join("storage.json"),
             archive_file: archive_dir.join("archive.json"),
             temp_dir,
-            lock_file: taskbook_dir.join(".lock"),
+            lock_file: ekko_dir.join(".lock"),
         };
 
         storage.clean_temp_dir()?;
@@ -320,7 +320,7 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    fn temp_taskbook_dir() -> PathBuf {
+    fn temp_ekko_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "ekko-test-{}-{}",
             process::id(),
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn get_on_a_fresh_dir_is_an_empty_map() {
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
 
         assert_eq!(storage.get().unwrap(), BTreeMap::new());
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn set_then_get_round_trips() {
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
 
         let mut data = BTreeMap::new();
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn acquire_then_drop_creates_and_removes_the_lock_file() {
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
         let lock_file = dir.join(".lock");
 
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn a_lock_left_by_a_dead_process_is_cleared_near_instantly() {
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
         // A pid essentially guaranteed not to exist, standing in for a
         // process that crashed while holding the lock.
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn release_never_deletes_a_lock_file_this_process_does_not_own() {
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
         let lock_file = dir.join(".lock");
 
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn waits_out_a_real_external_process_then_succeeds() {
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
 
         // A real, separate OS process -- not a simulation -- standing in
@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn a_lock_left_by_an_unreaped_zombie_is_also_cleared_near_instantly() {
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
 
         // Deliberately do *not* reap this one -- it becomes a zombie the
@@ -465,7 +465,7 @@ mod tests {
         // since read-only commands must stay lock-free) must not delete
         // something another live process is still in the middle of
         // writing.
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         Storage::new(&dir).unwrap();
         let fresh = dir.join(".temp").join("storage.TEMP-fake.json");
         fs::write(&fresh, "in-progress-write").unwrap();
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn old_abandoned_temp_files_are_swept_up() {
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         Storage::new(&dir).unwrap();
         let old = dir.join(".temp").join("storage.TEMP-fake.json");
         fs::write(&old, "abandoned").unwrap();
@@ -502,7 +502,7 @@ mod tests {
         // process that had just created it, so both processes believed
         // they held the lock. An empty-but-fresh lock file must be waited
         // out, not stolen.
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
         let lock_file = dir.join(".lock");
 
@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn an_empty_lock_file_old_enough_to_be_abandoned_is_still_cleared() {
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
         let lock_file = dir.join(".lock");
 
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn times_out_against_a_holder_that_outlives_the_timeout() {
-        let dir = temp_taskbook_dir();
+        let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
 
         let mut holder = Command::new("sleep").arg("8").spawn().unwrap();
