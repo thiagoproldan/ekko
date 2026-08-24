@@ -3,6 +3,7 @@ mod directory;
 mod item;
 mod json;
 mod paths;
+mod render;
 mod storage;
 
 fn main() {
