@@ -3,6 +3,11 @@
 //! into the library, an actual subprocess per invocation) racing to write
 //! the same ekko directory at once.
 //!
+//! This is the test that caught the lock losing an update under real
+//! contention -- a waiter deleting a live holder's lock file, letting a
+//! second writer into the critical section -- which every unit test around
+//! the lock had missed. See `storage::acquire_lock`.
+//!
 //! This is the test that should have existed from the start and didn't:
 //! every lower-level piece (the lock's acquire/release logic, temp-file
 //! cleanup) had its own unit tests and they all passed, but none of them

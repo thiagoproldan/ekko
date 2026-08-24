@@ -18,6 +18,7 @@
             rustc
             clippy
             rustfmt
+            util-linux # flock(1): the storage tests spawn a real external lock holder
             rust-analyzer
             pkg-config # several crates (e.g. clipboard backends) probe system libs at build time
           ];

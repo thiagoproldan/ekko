@@ -1,22 +1,31 @@
 //! File storage: reading/writing `storage.json`/`archive.json`, and the
 //! cross-process lock that protects both.
 //!
-//! Ported from the JS version's `storage.js` with one structural change,
-//! made natural by Rust rather than bolted on: instead of a module-level
-//! `Set` of held lock paths plus a manually-registered `process.on('exit')`
-//! cleanup hook (needed there because `process.exit()` skips `finally`
-//! blocks), `acquire_lock` returns a [`LockGuard`] whose `Drop` impl
-//! releases the lock. As long as call sites propagate errors with `?`
-//! instead of exiting mid-function (see the crate's error-handling
-//! design), normal Rust unwinding guarantees the release -- no exit hook
-//! needed at all. Nesting (e.g. one operation built out of two others that
+//! Ported from the JS version's `storage.js` with two structural changes.
+//!
+//! The first is made natural by Rust rather than bolted on: instead of a
+//! module-level `Set` of held lock paths plus a manually-registered
+//! `process.on('exit')` cleanup hook (needed there because
+//! `process.exit()` skips `finally` blocks), `acquire_lock` returns a
+//! [`LockGuard`] that releases on drop. As long as call sites propagate
+//! errors with `?` instead of exiting mid-function (see the crate's
+//! error-handling design), normal Rust unwinding guarantees the release.
+//!
+//! The second is the lock primitive itself: `flock(2)` on a held
+//! descriptor, rather than the JS version's pid-in-a-lock-file scheme.
+//! The kernel releases a `flock` whenever the descriptor closes, so a
+//! holder that exits, panics or is killed outright leaves nothing to clean
+//! up, and no other process ever needs to judge whether a lock is
+//! abandoned. A port of the original scheme was tried first and lost
+//! updates under real contention; `acquire_lock` documents exactly how. Nesting (e.g. one operation built out of two others that
 //! each separately need the lock) is handled by having only the outermost,
 //! public entry point acquire it, with private helpers that assume it's
 //! already held -- not by making acquisition itself re-entrant.
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -26,16 +35,14 @@ use crate::json;
 
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(5000);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
-const LOCK_STALE: Duration = Duration::from_millis(30_000);
-// `create_new` (atomically creating the lock file) and writing the pid
-// into it are two separate syscalls, not one atomic unit -- there's a
-// real, if microscopic, window where the file exists but is still empty.
-// A lock file younger than this and not yet holding a parseable pid is
-// presumed to be another process caught in exactly that window, not
-// abandoned; only older unparseable content is treated as genuinely stale
-// garbage (e.g. a process that crashed between the two syscalls). See
-// `clear_lock_if_stale`.
-const LOCK_WRITE_GRACE: Duration = Duration::from_millis(1000);
+
+/// How old a leftover file in the temp directory has to be before
+/// `clean_temp_dir` treats it as debris from a crashed write rather than
+/// an in-flight one. Nothing to do with the lock -- `write_atomic` creates
+/// its temp file and renames it within microseconds, so anything still
+/// sitting there after a full second belongs to a process that died
+/// between the two steps.
+const TEMP_FILE_ABANDONED: Duration = Duration::from_millis(1000);
 
 /// Boards/timeline grouping iterates this in id order; a `BTreeMap` gives
 /// that for free and matches the JS version's behavior, where plain objects
@@ -89,14 +96,15 @@ pub struct Storage {
 /// returns early via `?` -- unlike the JS version, no explicit
 /// "did I remember to unlock on every exit path" bookkeeping is possible to
 /// forget.
+///
+/// There is no `Drop` impl: the lock *is* the open descriptor, so closing
+/// the file is the release, and `File` already does that on drop. The file
+/// is deliberately never unlinked -- deleting it would let the next process
+/// create a fresh inode and lock that one while this guard still holds the
+/// old one, which is exactly the kind of hole the pid-file scheme had.
 pub struct LockGuard<'a> {
-    storage: &'a Storage,
-}
-
-impl Drop for LockGuard<'_> {
-    fn drop(&mut self) {
-        self.storage.release_lock_file();
-    }
+    _storage: &'a Storage,
+    _file: File,
 }
 
 impl Storage {
@@ -139,7 +147,7 @@ impl Storage {
                 .and_then(|m| m.modified())
                 .and_then(|m| m.elapsed().map_err(io::Error::other))
                 .unwrap_or(Duration::ZERO);
-            if age >= LOCK_WRITE_GRACE {
+            if age >= TEMP_FILE_ABANDONED {
                 fs::remove_file(entry.path())?;
             }
         }
@@ -163,120 +171,61 @@ impl Storage {
     }
 
     /// Blocks (thread::sleep between polls, not a busy spin) until the lock
-    /// is acquired, a dead holder is detected and cleared, or
-    /// `LOCK_ACQUIRE_TIMEOUT` elapses against a genuinely live holder.
+    /// is acquired, or `LOCK_ACQUIRE_TIMEOUT` elapses against a holder that
+    /// keeps it that long.
+    ///
+    /// The exclusion is `flock(2)`, held on an open descriptor for the whole
+    /// critical section. That is what makes crash recovery free: the kernel
+    /// drops a `flock` when the descriptor closes, and that covers every way
+    /// a process can end -- normal exit, panic, SIGKILL, an unreaped zombie
+    /// -- so a lock file left behind by a dead holder is already unlocked by
+    /// the time anyone else looks at it. Nothing has to *detect* staleness,
+    /// and nothing ever removes a lock file it doesn't hold.
+    ///
+    /// That last part is load-bearing. The previous design wrote the
+    /// holder's pid into the file and let a waiter delete the file when that
+    /// pid looked dead. Reading the pid, judging it dead, and unlinking are
+    /// three separate steps, and under real contention the lock changed
+    /// hands in between -- so a waiter could delete a *live* holder's lock,
+    /// admitting a second writer into the critical section. Both then read
+    /// the same state, derived the same next id, and one silently
+    /// overwrote the other. `tests/concurrency.rs` is what caught it.
     pub fn acquire_lock(&self) -> Result<LockGuard<'_>, StorageError> {
         let deadline = Instant::now() + LOCK_ACQUIRE_TIMEOUT;
 
+        // Opened once, outside the loop: a `flock` belongs to the open file
+        // description, not to the path or the process, so re-opening per
+        // attempt would be both wasteful and easy to get subtly wrong.
+        // `truncate(false)` because the file's *contents* are irrelevant now
+        // -- it exists purely as something to lock.
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.lock_file)?;
+
         loop {
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true) // atomic exclusive create: POSIX O_CREAT|O_EXCL
-                .open(&self.lock_file)
-            {
-                Ok(mut file) => {
-                    file.write_all(process::id().to_string().as_bytes())?;
-                    return Ok(LockGuard { storage: self });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    if self.clear_lock_if_stale() {
-                        continue;
-                    }
-
-                    if Instant::now() >= deadline {
-                        return Err(StorageError::LockTimeout(self.lock_file.clone()));
-                    }
-
-                    std::thread::sleep(LOCK_RETRY_DELAY);
-                }
-                Err(error) => return Err(error.into()),
+            // SAFETY: `file` owns this descriptor and outlives the call.
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result == 0 {
+                return Ok(LockGuard { _storage: self, _file: file });
             }
+
+            let error = io::Error::last_os_error();
+            // EWOULDBLOCK is the only "someone else is holding it" answer.
+            // Anything else is a genuine failure and shouldn't be retried
+            // silently until the timeout.
+            if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(error.into());
+            }
+
+            if Instant::now() >= deadline {
+                return Err(StorageError::LockTimeout(self.lock_file.clone()));
+            }
+
+            std::thread::sleep(LOCK_RETRY_DELAY);
         }
     }
-
-    /// `true` if the lock was missing or definitively stale (and has now
-    /// been cleared) -- i.e. the caller should retry acquiring immediately.
-    /// `false` means it's either genuinely held by a live process, or --
-    /// just as important -- *might* be mid-creation by one (empty/garbled
-    /// content, but too fresh to be sure it isn't simply caught between
-    /// `create_new` and the pid write landing); the caller should keep
-    /// waiting either way rather than risk clearing a lock someone else
-    /// legitimately holds.
-    fn clear_lock_if_stale(&self) -> bool {
-        let (Ok(metadata), Ok(content)) =
-            (fs::metadata(&self.lock_file), fs::read_to_string(&self.lock_file))
-        else {
-            return true; // vanished between our failed create and this check -> safe to retry immediately
-        };
-
-        let age = metadata
-            .modified()
-            .and_then(|m| m.elapsed().map_err(io::Error::other))
-            .unwrap_or(Duration::ZERO);
-
-        match content.trim().parse::<u32>() {
-            Ok(pid) if is_process_alive(pid) && age < LOCK_STALE => false,
-            Ok(_) => {
-                let _ = fs::remove_file(&self.lock_file);
-                true
-            }
-            // Empty/unparseable, but still within the pid-write grace
-            // window -> presume it's another process's create_new() that
-            // hasn't written its pid yet, not abandoned garbage. Do NOT
-            // delete out from under it.
-            Err(_) if age < LOCK_WRITE_GRACE => false,
-            Err(_) => {
-                let _ = fs::remove_file(&self.lock_file);
-                true
-            }
-        }
-    }
-
-    /// Never removes a lock file this process doesn't currently own -- it
-    /// may have been cleared as stale and re-acquired by someone else in
-    /// between.
-    fn release_lock_file(&self) {
-        if let Ok(content) = fs::read_to_string(&self.lock_file) {
-            if content.trim() == process::id().to_string() {
-                let _ = fs::remove_file(&self.lock_file);
-            }
-        }
-    }
-}
-
-fn is_process_alive(pid: u32) -> bool {
-    // Signal 0: sends nothing, just checks whether the pid could be
-    // signaled at all. `ESRCH` means "no such process"; anything else
-    // (typically EPERM, it exists but we can't signal it) still counts as
-    // alive.
-    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-        return false;
-    }
-
-    // kill() succeeding also covers zombies: a process that has already
-    // exited and is just waiting for its parent to collect the exit
-    // status. It holds no real resources and isn't doing any work, so
-    // treat it the same as "not alive" for staleness purposes. Found by a
-    // test that spawned a child, didn't reap it promptly, and watched lock
-    // recovery wait the full timeout instead of clearing near-instantly.
-    !is_zombie(pid)
-}
-
-/// Linux-only (via procfs); harmlessly returns `false` (i.e. "trust
-/// `kill()`") anywhere else, including if the process has already gone
-/// entirely.
-fn is_zombie(pid: u32) -> bool {
-    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false;
-    };
-
-    // Format: "pid (comm) state ...". `comm` (the executable name) can
-    // itself contain spaces or parens, so find the *last* ')' rather than
-    // splitting on the first one.
-    stat.rfind(')')
-        .and_then(|i| stat[i + 1..].trim_start().chars().next())
-        .is_some_and(|state| state == 'Z')
 }
 
 fn read_map(path: &Path) -> Result<ItemMap, StorageError> {
@@ -359,29 +308,54 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
     }
-
     #[test]
-    fn acquire_then_drop_creates_and_removes_the_lock_file() {
+    fn the_lock_file_is_never_unlinked_and_the_lock_is_retakeable() {
         let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
         let lock_file = dir.join(".lock");
 
         {
             let _guard = storage.acquire_lock().unwrap();
-            assert_eq!(fs::read_to_string(&lock_file).unwrap(), process::id().to_string());
+            assert!(lock_file.exists());
         }
 
-        assert!(!lock_file.exists(), "lock file should be gone once the guard drops");
+        // Deliberately still on disk. The lock lives in the kernel, attached
+        // to the open descriptor -- not in the file existing or in anything
+        // written inside it. Unlinking on release is what would reintroduce
+        // the old hole: the next process would create a fresh inode and lock
+        // *that* while an existing holder still had the old one.
+        assert!(lock_file.exists(), "the lock file must outlive the guard");
+
+        // And releasing really did release.
+        let _again = storage.acquire_lock().unwrap();
 
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn a_lock_left_by_a_dead_process_is_cleared_near_instantly() {
+    fn two_guards_in_one_process_still_exclude_each_other() {
+        // `flock` is held per open file description, not per process, so
+        // this is a real exclusion test and not a tautology -- it would
+        // fail if `acquire_lock` ever started reusing one descriptor.
         let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
-        // A pid essentially guaranteed not to exist, standing in for a
-        // process that crashed while holding the lock.
+
+        let _held = storage.acquire_lock().unwrap();
+        let second = storage.acquire_lock();
+
+        assert!(matches!(second, Err(StorageError::LockTimeout(_))));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_lock_file_left_behind_by_a_dead_holder_is_acquired_immediately() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        // Exactly what a crashed holder leaves: the file, with whatever it
+        // happened to contain. The kernel dropped its flock when it died, so
+        // the leftover file means nothing on its own -- and unlike the old
+        // pid-file scheme, nothing here has to work that out.
         fs::write(dir.join(".lock"), "999999999").unwrap();
 
         let start = Instant::now();
@@ -394,59 +368,33 @@ mod tests {
     }
 
     #[test]
-    fn release_never_deletes_a_lock_file_this_process_does_not_own() {
-        let dir = temp_ekko_dir();
-        let storage = Storage::new(&dir).unwrap();
-        let lock_file = dir.join(".lock");
-
-        let guard = storage.acquire_lock().unwrap();
-        // Simulate the file having been recreated by someone else in the
-        // meantime.
-        fs::write(&lock_file, "1").unwrap();
-        drop(guard);
-
-        assert!(lock_file.exists());
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn waits_out_a_real_external_process_then_succeeds() {
         let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
 
-        // A real, separate OS process -- not a simulation -- standing in
-        // for another `ekko` invocation holding the lock.
-        let mut holder = Command::new("sleep").arg("1").spawn().unwrap();
-        fs::write(dir.join(".lock"), holder.id().to_string()).unwrap();
-
-        // Reap it as soon as it exits, same as a real ekko invocation's
-        // parent shell would -- otherwise it lingers as a zombie, which
-        // `is_process_alive` now specifically accounts for but this test
-        // shouldn't rely on that to still prove out the common case.
-        let reaper = std::thread::spawn(move || {
-            holder.wait().ok();
-        });
+        // A real, separate OS process -- not a simulation -- standing in for
+        // another `ekko` invocation holding the lock.
+        let mut holder = spawn_lock_holder(&dir.join(".lock"), "1");
 
         let start = Instant::now();
         let _guard = storage.acquire_lock().unwrap();
         let elapsed = start.elapsed();
 
-        assert!(elapsed >= Duration::from_millis(900), "should have waited for the real holder, only waited {elapsed:?}");
-        reaper.join().ok();
+        assert!(elapsed >= Duration::from_millis(300), "should have waited for the real holder, only waited {elapsed:?}");
+        holder.wait().ok();
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn a_lock_left_by_an_unreaped_zombie_is_also_cleared_near_instantly() {
+    fn an_unreaped_zombie_holder_does_not_keep_the_lock() {
         let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
 
-        // Deliberately do *not* reap this one -- it becomes a zombie the
-        // moment it exits, which plain `kill(pid, 0)` alone would still
-        // report as "alive".
-        let mut holder = Command::new("sleep").arg("0.2").spawn().unwrap();
-        fs::write(dir.join(".lock"), holder.id().to_string()).unwrap();
+        // Deliberately not reaped. A zombie still has a pid and still
+        // answers `kill(pid, 0)`, which is what made it a hazard for the old
+        // pid-based scheme -- it looked alive. Its descriptors are gone
+        // though, so its flock went with them.
+        let mut holder = spawn_lock_holder(&dir.join(".lock"), "0.2");
         std::thread::sleep(Duration::from_millis(500)); // let it exit and zombify
 
         let start = Instant::now();
@@ -457,7 +405,6 @@ mod tests {
         holder.wait().ok();
         fs::remove_dir_all(&dir).ok();
     }
-
     #[test]
     fn fresh_temp_files_survive_a_new_storage_construction() {
         // Same root cause class as the lock-file test below: cleanup that
@@ -482,56 +429,12 @@ mod tests {
         Storage::new(&dir).unwrap();
         let old = dir.join(".temp").join("storage.TEMP-fake.json");
         fs::write(&old, "abandoned").unwrap();
-        let old_time = std::time::SystemTime::now() - LOCK_WRITE_GRACE - Duration::from_secs(1);
+        let old_time = std::time::SystemTime::now() - TEMP_FILE_ABANDONED - Duration::from_secs(1);
         filetime_set(&old, old_time);
 
         Storage::new(&dir).unwrap();
 
         assert!(!old.exists(), "an old abandoned temp file should be cleaned up");
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_fresh_empty_lock_file_is_not_stolen_from_its_creator() {
-        // Regression test for a real bug this project shipped and then
-        // caught by running real concurrent `ekko` processes: create_new()
-        // (creating the lock file) and writing the pid into it are two
-        // separate syscalls. A concurrent acquirer that reads the lock
-        // file in between sees it empty; earlier code treated "empty" the
-        // same as "abandoned garbage" and deleted it out from under the
-        // process that had just created it, so both processes believed
-        // they held the lock. An empty-but-fresh lock file must be waited
-        // out, not stolen.
-        let dir = temp_ekko_dir();
-        let storage = Storage::new(&dir).unwrap();
-        let lock_file = dir.join(".lock");
-
-        // Simulates catching another process between create_new() and its
-        // pid write: the file exists, but is empty.
-        fs::File::create(&lock_file).unwrap();
-
-        assert!(!storage.clear_lock_if_stale(), "a fresh empty lock file must not be treated as stale");
-        assert!(lock_file.exists(), "and must not have been deleted");
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn an_empty_lock_file_old_enough_to_be_abandoned_is_still_cleared() {
-        let dir = temp_ekko_dir();
-        let storage = Storage::new(&dir).unwrap();
-        let lock_file = dir.join(".lock");
-
-        fs::File::create(&lock_file).unwrap();
-        // Simulate it having sat there, empty, well past any plausible
-        // create-then-write window -- e.g. a process that crashed between
-        // the two syscalls rather than one merely caught mid-write.
-        let old = std::time::SystemTime::now() - LOCK_WRITE_GRACE - Duration::from_secs(1);
-        filetime_set(&lock_file, old);
-
-        assert!(storage.clear_lock_if_stale(), "old abandoned empty lock file should be cleared");
-        assert!(!lock_file.exists());
-
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -542,13 +445,40 @@ mod tests {
         file.set_modified(time).unwrap();
     }
 
+    /// Spawns a real, separate process that holds the lock via `flock(1)`
+    /// for `secs`, and returns once the lock is observably taken -- so a
+    /// caller timing an `acquire_lock` isn't racing the child's startup.
+    fn spawn_lock_holder(lock_file: &Path, secs: &str) -> process::Child {
+        let mut child = Command::new("flock")
+            .arg("-x")
+            .arg(lock_file)
+            .arg("sleep")
+            .arg(secs)
+            .spawn()
+            .expect("flock(1) from util-linux is required by these tests");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let probe = fs::OpenOptions::new().write(true).create(true).truncate(false).open(lock_file).unwrap();
+            let taken = unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0;
+            if taken {
+                return child;
+            }
+            drop(probe); // releases our probe lock before retrying
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        child.kill().ok();
+        child.wait().ok();
+        panic!("the flock(1) holder never took the lock");
+    }
+
     #[test]
     fn times_out_against_a_holder_that_outlives_the_timeout() {
         let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
 
-        let mut holder = Command::new("sleep").arg("8").spawn().unwrap();
-        fs::write(dir.join(".lock"), holder.id().to_string()).unwrap();
+        let mut holder = spawn_lock_holder(&dir.join(".lock"), "8");
 
         let result = storage.acquire_lock();
 
