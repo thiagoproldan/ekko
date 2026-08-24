@@ -76,6 +76,16 @@ const HELP: &str = r#"
 const CLIPBOARD_DAEMON_ARG: &str = "__ekko_clipboard_daemon";
 
 fn main() -> ExitCode {
+    // Rust disables SIGPIPE at startup, which turns `ekko --json | head`
+    // into a panic on a broken pipe rather than the quiet exit every other
+    // Unix tool gives you. Restoring the default handler makes the process
+    // die on the signal instead, which is what a pipeline expects -- and it
+    // covers every output path at once, including ones added later.
+    //
+    // SAFETY: sets a signal disposition before any thread is spawned or any
+    // output is written.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.first().map(String::as_str) == Some(CLIPBOARD_DAEMON_ARG) {
