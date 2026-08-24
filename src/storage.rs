@@ -21,9 +21,8 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize as _;
-
 use crate::item::Item;
+use crate::json;
 
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(5000);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
@@ -250,20 +249,11 @@ fn read_map(path: &Path) -> Result<ItemMap, StorageError> {
 }
 
 fn write_atomic(path: &Path, temp_dir: &Path, data: &ItemMap) -> Result<(), StorageError> {
-    let json = to_pretty_json(data)?;
+    let content = json::to_pretty_string(data)?;
     let temp_file = temp_file_path(path, temp_dir);
-    fs::write(&temp_file, json)?;
+    fs::write(&temp_file, content)?;
     fs::rename(&temp_file, path)?;
     Ok(())
-}
-
-/// 4-space indent, matching the JS version's `JSON.stringify(data, null, 4)`.
-fn to_pretty_json(data: &ItemMap) -> Result<String, serde_json::Error> {
-    let mut buffer = Vec::new();
-    let formatter = serde_json::ser::PrettyFormatter::with_indent(b"    ");
-    let mut serializer = serde_json::Serializer::with_formatter(&mut buffer, formatter);
-    data.serialize(&mut serializer)?;
-    Ok(String::from_utf8(buffer).expect("serde_json only ever writes valid UTF-8"))
 }
 
 /// pid + nanosecond timestamp instead of the JS version's random hex --

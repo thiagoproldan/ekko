@@ -1,4 +1,8 @@
+mod config;
+mod directory;
 mod item;
+mod json;
+mod paths;
 mod storage;
 
 fn main() {
