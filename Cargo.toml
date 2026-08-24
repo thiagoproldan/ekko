@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.87"
 description = "Tasks, boards & notes for the command-line habitat"
 license = "MIT"
+repository = "https://github.com/thiagoproldan/ekko"
 readme = "readme.md"
 keywords = ["task", "todo", "notes", "board", "cli"]
 categories = ["command-line-utilities"]
