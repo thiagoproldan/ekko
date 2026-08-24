@@ -136,13 +136,15 @@ impl From<config::ConfigError> for EkkoError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeleteResult {
     pub storage_id: u32,
     pub archive_id: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RestoreResult {
     pub archive_id: u32,
     pub storage_id: u32,
@@ -176,6 +178,31 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// Also doubles as the `--json` response's `"command"` field -- these
+    /// variants exist one-to-one with CLI commands specifically so this
+    /// never needs a separate name passed in alongside the data.
+    pub fn command_name(&self) -> &'static str {
+        match self {
+            Outcome::Task(_) => "task",
+            Outcome::Note(_) => "note",
+            Outcome::Check { .. } => "check",
+            Outcome::Begin { .. } => "begin",
+            Outcome::Star { .. } => "star",
+            Outcome::Delete(_) => "delete",
+            Outcome::Restore(_) => "restore",
+            Outcome::Edit(_) => "edit",
+            Outcome::Move(_) => "move",
+            Outcome::Priority(_) => "priority",
+            Outcome::Copy { .. } => "copy",
+            Outcome::Board(_) => "board",
+            Outcome::Timeline(_) => "timeline",
+            Outcome::Archive(_) => "archive",
+            Outcome::Find(_) => "find",
+            Outcome::List(_) => "list",
+            Outcome::Stats(_) => "stats",
+        }
+    }
+
     pub fn render(&self, out: &mut Renderer) {
         match self {
             Outcome::Task(item) | Outcome::Note(item) => out.success_create(item),
@@ -234,10 +261,6 @@ impl Ekko {
     ) -> Result<Self, EkkoError> {
         let dir = directory::retrieve_taskbook_directory(home_dir, cwd, taskbook_dir_flag, taskbook_dir_env)?;
         Ok(Self::new(Storage::new(&dir)?))
-    }
-
-    pub fn config(&self, home_dir: &std::path::Path) -> Result<config::Config, EkkoError> {
-        Ok(config::get(home_dir)?)
     }
 
     // ---- id / option parsing -------------------------------------------

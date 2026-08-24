@@ -27,6 +27,15 @@ use crate::json;
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(5000);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
 const LOCK_STALE: Duration = Duration::from_millis(30_000);
+// `create_new` (atomically creating the lock file) and writing the pid
+// into it are two separate syscalls, not one atomic unit -- there's a
+// real, if microscopic, window where the file exists but is still empty.
+// A lock file younger than this and not yet holding a parseable pid is
+// presumed to be another process caught in exactly that window, not
+// abandoned; only older unparseable content is treated as genuinely stale
+// garbage (e.g. a process that crashed between the two syscalls). See
+// `clear_lock_if_stale`.
+const LOCK_WRITE_GRACE: Duration = Duration::from_millis(1000);
 
 /// Boards/timeline grouping iterates this in id order; a `BTreeMap` gives
 /// that for free and matches the JS version's behavior, where plain objects
@@ -111,9 +120,28 @@ impl Storage {
         Ok(storage)
     }
 
+    /// Sweeps up temp files abandoned by a crashed write (create-then-
+    /// rename is atomic, but only once the write in between has actually
+    /// finished). This runs unconditionally at startup, for every
+    /// process, *not* under the lock -- constructing `Storage` at all
+    /// needs to stay lock-free for read-only commands. That means it can
+    /// run concurrently with another live process's in-flight
+    /// `write_atomic`, so it only removes temp files old enough that they
+    /// cannot plausibly still be someone's in-progress write (that write
+    /// is one `fs::write` call to a fresh, uniquely-named file -- there
+    /// and gone in well under this margin under any real load); a fresh
+    /// temp file is left alone rather than risk deleting live work.
     fn clean_temp_dir(&self) -> Result<(), StorageError> {
         for entry in fs::read_dir(&self.temp_dir)? {
-            fs::remove_file(entry?.path())?;
+            let entry = entry?;
+            let age = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .and_then(|m| m.elapsed().map_err(io::Error::other))
+                .unwrap_or(Duration::ZERO);
+            if age >= LOCK_WRITE_GRACE {
+                fs::remove_file(entry.path())?;
+            }
         }
         Ok(())
     }
@@ -166,30 +194,42 @@ impl Storage {
         }
     }
 
-    /// `true` if the lock was missing, unreadable, or stale (and has now
+    /// `true` if the lock was missing or definitively stale (and has now
     /// been cleared) -- i.e. the caller should retry acquiring immediately.
-    /// `false` means it's genuinely held by a live process within the
-    /// staleness window; the caller should keep waiting.
+    /// `false` means it's either genuinely held by a live process, or --
+    /// just as important -- *might* be mid-creation by one (empty/garbled
+    /// content, but too fresh to be sure it isn't simply caught between
+    /// `create_new` and the pid write landing); the caller should keep
+    /// waiting either way rather than risk clearing a lock someone else
+    /// legitimately holds.
     fn clear_lock_if_stale(&self) -> bool {
         let (Ok(metadata), Ok(content)) =
             (fs::metadata(&self.lock_file), fs::read_to_string(&self.lock_file))
         else {
-            return true;
+            return true; // vanished between our failed create and this check -> safe to retry immediately
         };
 
-        let pid: Option<u32> = content.trim().parse().ok();
-        let held_by_live_process = pid.is_some_and(is_process_alive);
         let age = metadata
             .modified()
             .and_then(|m| m.elapsed().map_err(io::Error::other))
-            .unwrap_or(Duration::MAX);
+            .unwrap_or(Duration::ZERO);
 
-        if held_by_live_process && age < LOCK_STALE {
-            return false;
+        match content.trim().parse::<u32>() {
+            Ok(pid) if is_process_alive(pid) && age < LOCK_STALE => false,
+            Ok(_) => {
+                let _ = fs::remove_file(&self.lock_file);
+                true
+            }
+            // Empty/unparseable, but still within the pid-write grace
+            // window -> presume it's another process's create_new() that
+            // hasn't written its pid yet, not abandoned garbage. Do NOT
+            // delete out from under it.
+            Err(_) if age < LOCK_WRITE_GRACE => false,
+            Err(_) => {
+                let _ = fs::remove_file(&self.lock_file);
+                true
+            }
         }
-
-        let _ = fs::remove_file(&self.lock_file);
-        true
     }
 
     /// Never removes a lock file this process doesn't currently own -- it
@@ -416,6 +456,90 @@ mod tests {
         assert!(elapsed < Duration::from_millis(500), "expected near-instant recovery from a zombie holder, took {elapsed:?}");
         holder.wait().ok();
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fresh_temp_files_survive_a_new_storage_construction() {
+        // Same root cause class as the lock-file test below: cleanup that
+        // runs unconditionally (here, on every `Storage::new`, unlocked,
+        // since read-only commands must stay lock-free) must not delete
+        // something another live process is still in the middle of
+        // writing.
+        let dir = temp_taskbook_dir();
+        Storage::new(&dir).unwrap();
+        let fresh = dir.join(".temp").join("storage.TEMP-fake.json");
+        fs::write(&fresh, "in-progress-write").unwrap();
+
+        Storage::new(&dir).unwrap(); // re-runs clean_temp_dir()
+
+        assert!(fresh.exists(), "a fresh temp file must not be swept up as abandoned");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn old_abandoned_temp_files_are_swept_up() {
+        let dir = temp_taskbook_dir();
+        Storage::new(&dir).unwrap();
+        let old = dir.join(".temp").join("storage.TEMP-fake.json");
+        fs::write(&old, "abandoned").unwrap();
+        let old_time = std::time::SystemTime::now() - LOCK_WRITE_GRACE - Duration::from_secs(1);
+        filetime_set(&old, old_time);
+
+        Storage::new(&dir).unwrap();
+
+        assert!(!old.exists(), "an old abandoned temp file should be cleaned up");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_fresh_empty_lock_file_is_not_stolen_from_its_creator() {
+        // Regression test for a real bug this project shipped and then
+        // caught by running real concurrent `ekko` processes: create_new()
+        // (creating the lock file) and writing the pid into it are two
+        // separate syscalls. A concurrent acquirer that reads the lock
+        // file in between sees it empty; earlier code treated "empty" the
+        // same as "abandoned garbage" and deleted it out from under the
+        // process that had just created it, so both processes believed
+        // they held the lock. An empty-but-fresh lock file must be waited
+        // out, not stolen.
+        let dir = temp_taskbook_dir();
+        let storage = Storage::new(&dir).unwrap();
+        let lock_file = dir.join(".lock");
+
+        // Simulates catching another process between create_new() and its
+        // pid write: the file exists, but is empty.
+        fs::File::create(&lock_file).unwrap();
+
+        assert!(!storage.clear_lock_if_stale(), "a fresh empty lock file must not be treated as stale");
+        assert!(lock_file.exists(), "and must not have been deleted");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_empty_lock_file_old_enough_to_be_abandoned_is_still_cleared() {
+        let dir = temp_taskbook_dir();
+        let storage = Storage::new(&dir).unwrap();
+        let lock_file = dir.join(".lock");
+
+        fs::File::create(&lock_file).unwrap();
+        // Simulate it having sat there, empty, well past any plausible
+        // create-then-write window -- e.g. a process that crashed between
+        // the two syscalls rather than one merely caught mid-write.
+        let old = std::time::SystemTime::now() - LOCK_WRITE_GRACE - Duration::from_secs(1);
+        filetime_set(&lock_file, old);
+
+        assert!(storage.clear_lock_if_stale(), "old abandoned empty lock file should be cleared");
+        assert!(!lock_file.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Backdates a file's mtime. No `filetime` dependency needed just for
+    /// this one test -- `std::fs::File::set_modified` already does it.
+    fn filetime_set(path: &Path, time: std::time::SystemTime) {
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(time).unwrap();
     }
 
     #[test]

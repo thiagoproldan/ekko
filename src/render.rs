@@ -85,7 +85,8 @@ impl Painter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Stats {
     pub percent: u32,
     pub complete: u32,
