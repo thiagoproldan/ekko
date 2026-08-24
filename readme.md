@@ -32,6 +32,10 @@ Effectively a task manager built to be driven by a human and an LLM/coding agent
 - Data stored in plain JSON at `~/.ekko/storage`
 - A reproducible `nix develop` shell for the whole toolchain
 
+<div align="center">
+  <img alt="Highlights" width="66%" src="media/highlights.png"/>
+</div>
+
 ## Contents
 
 - [Description](#description)
