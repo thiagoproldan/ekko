@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Tasks, boards & notes for the command-line habitat"
 license = "MIT"
+readme = "readme.md"
+keywords = ["task", "todo", "notes", "board", "cli"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "ekko"

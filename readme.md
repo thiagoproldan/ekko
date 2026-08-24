@@ -397,6 +397,8 @@ Without the `--`, a word that happens to match a real flag name (`--json`, `--ta
 
 Ekko is a Rust rewrite of [taskbook](https://github.com/klaudiosinani/taskbook) by Klaudio Sinani and Mario Sinani. The terminal output -- icons, colors, layout -- is deliberately unchanged; that's what made the original worth rebuilding rather than replacing. See [license.md](license.md) for the original MIT copyright, preserved as required for a derivative work.
 
+The `v0.1.0`-`v0.4.0` tags in this repository are taskbook's, inherited along with its history. They are kept deliberately -- `tests/golden/` documents regenerating Ekko's reference output from the `v0.4.0` tree -- so Ekko's own releases are tagged `ekko-v*` to keep the two lineages from colliding.
+
 ## License
 
 [MIT](license.md)
