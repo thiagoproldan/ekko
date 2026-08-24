@@ -1,5 +1,6 @@
 mod config;
 mod directory;
+mod ekko;
 mod item;
 mod json;
 mod paths;

@@ -406,6 +406,13 @@ impl<'a> Renderer<'a> {
         self.error("\n", "No id was given as input", "");
     }
 
+    /// Fallback for the wrapped-IO/JSON error variants in `EkkoError`,
+    /// which are unexpected enough (disk full, permission denied, a
+    /// corrupt JSON file) that a bespoke message per case isn't worth it.
+    pub fn generic_error(&mut self, message: &str) {
+        self.error("\n", message, "");
+    }
+
     pub fn mark_complete(&mut self, ids: &[u32]) {
         self.mark("Checked", "tasks", "task", ids);
     }
