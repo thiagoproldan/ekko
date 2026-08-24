@@ -18,8 +18,8 @@ If applicable, add screenshots to help explain your problem.
 
 **Technical Info (please complete the following information)**
  - OS:
- - Node.js Version:
- - Taskbook Version:
+ - Rust version (`rustc --version`, if building from source):
+ - Ekko version (`ekko --version`):
 
 **Additional context**
 Add any other context about the problem here.

@@ -22,6 +22,8 @@
 
 use std::io::{IsTerminal, Write};
 
+use chrono::{DateTime, Local};
+
 use crate::config::Config;
 use crate::item::Item;
 
@@ -44,6 +46,10 @@ impl Painter {
         Painter { enabled: !no_color && (force_color || std::io::stdout().is_terminal()) }
     }
 
+    /// Colour on/off regardless of TTY or environment. Only the tests
+    /// need this -- production always goes through `auto`, which is what
+    /// decides colour from `NO_COLOR`/`FORCE_COLOR`/isatty.
+    #[cfg(test)]
     pub fn forced(enabled: bool) -> Self {
         Painter { enabled }
     }
@@ -133,11 +139,34 @@ pub struct Renderer<'a> {
     painter: Painter,
     config: Config,
     out: &'a mut dyn Write,
+    /// Captured once, at construction, rather than read per group: one
+    /// render pass has to be internally consistent -- a run that straddles
+    /// midnight must not tag one group `[Today]` and the next one not --
+    /// and pinning it is what lets the golden tests reproduce output that
+    /// was captured on a specific date.
+    now: DateTime<Local>,
 }
 
 impl<'a> Renderer<'a> {
     pub fn new(painter: Painter, config: Config, out: &'a mut dyn Write) -> Self {
-        Renderer { painter, config, out }
+        Self::at(painter, config, out, Local::now())
+    }
+
+    /// `new` with the clock pinned. The golden `.ans` references embed the
+    /// date they were captured on (the timeline and archive headers print
+    /// it, and add `[Today]` when it matches), so the tests that diff
+    /// against them have to render as of that same instant -- otherwise
+    /// they would pass only on the day of capture.
+    fn at(painter: Painter, config: Config, out: &'a mut dyn Write, now: DateTime<Local>) -> Self {
+        Renderer { painter, config, out, now }
+    }
+
+    fn today(&self) -> String {
+        self.now.format("%a %b %d %Y").to_string()
+    }
+
+    fn now_millis(&self) -> i64 {
+        self.now.timestamp_millis()
     }
 
     // ---- layout building blocks -----------------------------------
@@ -293,13 +322,13 @@ impl<'a> Renderer<'a> {
     // ---- public: views ------------------------------------------------
 
     pub fn display_by_board(&mut self, groups: &Groups) {
-        let today = today_string();
+        let today = self.today();
+        let now_millis = self.now_millis();
         for (board, items) in groups {
             if self.is_group_complete(items) && !self.config.display_complete_tasks {
                 continue;
             }
             self.display_title(board, items, &today);
-            let now_millis = now_millis();
             for item in items {
                 if item.is_task && item.is_complete.unwrap_or(false) && !self.config.display_complete_tasks {
                     continue;
@@ -310,7 +339,7 @@ impl<'a> Renderer<'a> {
     }
 
     pub fn display_by_date(&mut self, groups: &Groups) {
-        let today = today_string();
+        let today = self.today();
         for (date, items) in groups {
             if self.is_group_complete(items) && !self.config.display_complete_tasks {
                 continue;
@@ -512,33 +541,42 @@ fn join_ids(ids: &[u32]) -> String {
     ids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
 }
 
-fn now_millis() -> i64 {
-    chrono::Local::now().timestamp_millis()
-}
-
-fn today_string() -> String {
-    chrono::Local::now().format("%a %b %d %Y").to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use std::fs;
     use std::path::Path;
+
+    /// The date the golden `.ans` files were captured on. Their
+    /// timeline and archive headers print it literally and tag it
+    /// `[Today]`, so every render under test is pinned to this instant --
+    /// without that these tests would only have passed on the capture day.
+    const GOLDEN_DAY: &str = "Mon Aug 24 2026";
+
+    fn golden_now() -> DateTime<Local> {
+        Local
+            .with_ymd_and_hms(2026, 8, 24, 12, 0, 0)
+            .single()
+            .expect("2026-08-24 12:00 local is a real, unambiguous instant")
+    }
 
     fn render_with<F: FnOnce(&mut Renderer)>(config: Config, f: F) -> String {
         let mut buffer: Vec<u8> = Vec::new();
         {
-            let mut renderer = Renderer::new(Painter::forced(true), config, &mut buffer);
+            let mut renderer =
+                Renderer::at(Painter::forced(true), config, &mut buffer, golden_now());
             f(&mut renderer);
         }
         String::from_utf8(buffer).unwrap()
     }
 
     fn golden(name: &str) -> String {
-        let path = Path::new("/tmp/claude-1000/-projects/2ccdf374-b6c0-4418-af0f-3e9d2fa9ede3/scratchpad/golden")
-            .join(name);
-        fs::read_to_string(path).unwrap_or_else(|e| panic!("reading golden/{name}: {e}"))
+        // Repo-relative, resolved at compile time -- these reference files
+        // are committed under tests/golden/, not pulled from anywhere
+        // ephemeral, so `cargo test` works on a fresh clone and in CI.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden").join(name);
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
     }
 
     /// Reconstructs the exact same items, in the exact same order, as the
@@ -562,8 +600,10 @@ mod tests {
             } else {
                 Item::new_note(id, description.to_string(), boards.iter().map(|s| s.to_string()).collect())
             };
-            item.date = "Sun Aug 23 2026".to_string();
-            item.timestamp = chrono::Local::now().timestamp_millis(); // "now" -> age always 0d, same as the golden capture
+            item.date = GOLDEN_DAY.to_string();
+            // Same instant the renderer is pinned to, so the age suffix is
+            // always 0d -- exactly as it was in the golden capture.
+            item.timestamp = golden_now().timestamp_millis();
             if is_task {
                 item.is_complete = Some(is_complete);
                 item.in_progress = Some(in_progress);
@@ -609,7 +649,7 @@ mod tests {
 
     #[test]
     fn timeline_view_matches_the_real_js_output_byte_for_byte() {
-        let date_groups = vec![("Sun Aug 23 2026".to_string(), golden_items())];
+        let date_groups = vec![(GOLDEN_DAY.to_string(), golden_items())];
 
         let output = render_with(Config::default(), |r| {
             r.display_by_date(&date_groups);
@@ -643,9 +683,9 @@ mod tests {
         // `--archive` calls displayByDate() only, no displayStats() --
         // unlike the default board view and --timeline.
         let mut note = Item::new_note(1, "A reference note".to_string(), vec!["@coding".to_string()]);
-        note.date = "Sun Aug 23 2026".to_string();
-        note.timestamp = chrono::Local::now().timestamp_millis();
-        let date_groups = vec![("Sun Aug 23 2026".to_string(), vec![note])];
+        note.date = GOLDEN_DAY.to_string();
+        note.timestamp = golden_now().timestamp_millis();
+        let date_groups = vec![(GOLDEN_DAY.to_string(), vec![note])];
 
         let output = render_with(Config::default(), |r| {
             r.display_by_date(&date_groups);

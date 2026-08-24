@@ -6,16 +6,48 @@ on:
   pull_request:
     branches: [master]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  # Linux only, deliberately: `storage.rs` reads /proc/<pid>/stat to tell a
+  # dead lock holder from a live one, with no cfg fallback, so the lock
+  # tests only mean anything on Linux. Adding macOS/Windows runners here
+  # would buy red builds, not coverage.
   test:
+    name: build, test & clippy
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [18.x, 20.x, 22.x]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: ${{ matrix.node-version }}
-      - run: npm install
-      - run: npm test
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # --locked everywhere: Cargo.lock is committed, and CI should fail
+      # loudly if a build would need to change it rather than silently
+      # resolving to different dependency versions than a local build.
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      # Includes the golden tests, which diff the renderer byte-for-byte
+      # against output captured from the original taskbook JS build. They
+      # pin the renderer's clock to the capture date, so they stay valid on
+      # any day and in any timezone the runner happens to use.
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      # Cheap end-to-end check that the shipped binary actually runs: the
+      # unit tests all drive the library side, and would not catch a broken
+      # argument parser or a panic on startup.
+      - name: Smoke-test the binary
+        run: |
+          # --ekko-dir requires an existing directory; it refuses to create one.
+          mkdir -p "$RUNNER_TEMP/ekko-smoke"
+          cargo run --locked --quiet -- --ekko-dir "$RUNNER_TEMP/ekko-smoke" --task @ci 'smoke test'
+          cargo run --locked --quiet -- --ekko-dir "$RUNNER_TEMP/ekko-smoke" --json
