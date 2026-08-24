@@ -3,7 +3,7 @@
 //! `ekkoDirectory` > `home_dir/.ekko`.
 //!
 //! `home_dir`/`cwd`/`flag`/`env_var` are all explicit parameters rather
-//! than read from `std::env`/`home::home_dir()` internally -- partly to
+//! than read from `std::env`/`std::env::home_dir()` internally -- partly to
 //! match the rest of this crate's style (inject what a function needs
 //! rather than reach for ambient state inside it), but mainly because it
 //! makes every branch here deterministically testable without mutating

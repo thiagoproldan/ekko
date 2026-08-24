@@ -101,7 +101,10 @@ fn main() -> ExitCode {
     };
 
     let json_mode = cli.json;
-    let home_dir = home::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    // `std::env::home_dir` rather than the `home` crate: it was
+    // un-deprecated once its Windows behaviour was fixed, and the crate
+    // was the single thing holding this crate's MSRV at 1.88.
+    let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let ekko_dir_env = std::env::var("EKKO_DIR").ok();
 
