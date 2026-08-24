@@ -55,11 +55,22 @@ impl Painter {
     }
 
     fn wrap(&self, open: &str, close: &str, text: &str) -> String {
-        if self.enabled {
-            format!("\x1b[{open}m{text}\x1b[{close}m")
-        } else {
-            text.to_string()
+        if !self.enabled {
+            return text.to_string();
         }
+
+        let open_seq = format!("\x1b[{open}m");
+        let close_seq = format!("\x1b[{close}m");
+
+        // Reproduces how chalk closes a *nested* style: rather than emitting
+        // a plain reset, which would drop back to the terminal default and
+        // silently lose the enclosing style, it rewrites any inner close of
+        // this same style into a re-open of it. `grey(green(x) + rest)` has
+        // to come out as `90 32 x 90 rest 39`, not `90 32 x 39 rest 39` --
+        // otherwise `rest` renders in the default colour instead of grey.
+        let inner = text.replace(&close_seq, &open_seq);
+
+        format!("{open_seq}{inner}{close_seq}")
     }
 
     fn grey(&self, text: &str) -> String {
@@ -715,5 +726,68 @@ mod tests {
 
         assert!(!output.contains("Normal priority task"));
         assert!(output.contains("Medium priority task"));
+    }
+
+    /// The two-task `@ekko` board that `stats-complete.ans` and
+    /// `stats-half.ans` were captured from.
+    fn stats_board(second_complete: bool) -> Vec<(String, Vec<Item>)> {
+        let items = [("One", true), ("Two", second_complete)]
+            .iter()
+            .enumerate()
+            .map(|(index, (description, is_complete))| {
+                let mut item = Item::new_task(
+                    index as u32 + 1,
+                    (*description).to_string(),
+                    vec!["@ekko".to_string()],
+                    1,
+                );
+                item.date = GOLDEN_DAY.to_string();
+                item.timestamp = golden_now().timestamp_millis();
+                item.is_complete = Some(*is_complete);
+                item.in_progress = Some(false);
+                item
+            })
+            .collect();
+
+        vec![("@ekko".to_string(), items)]
+    }
+
+    // A coloured percentage is the one place the renderer nests one style
+    // inside another, and chalk closes a nested style by re-opening the
+    // enclosing one instead of resetting to the terminal default. Neither
+    // board.ans nor timeline.ans exercises it -- both sit at 25%, where the
+    // percentage is left uncoloured -- which is exactly how the port came to
+    // emit a plain reset here and render the rest of the line in the default
+    // colour rather than grey. These pin both coloured branches.
+    #[test]
+    fn fully_complete_stats_line_matches_the_real_js_output_byte_for_byte() {
+        let output = render_with(Config::default(), |r| {
+            r.display_by_board(&stats_board(true));
+            r.display_stats(&Stats {
+                percent: 100,
+                complete: 2,
+                in_progress: 0,
+                pending: 0,
+                notes: 0,
+            });
+        });
+
+        assert_eq!(output, golden("stats-complete.ans"));
+    }
+
+    #[test]
+    fn half_complete_stats_line_matches_the_real_js_output_byte_for_byte() {
+        let output = render_with(Config::default(), |r| {
+            r.display_by_board(&stats_board(false));
+            r.display_stats(&Stats {
+                percent: 50,
+                complete: 1,
+                in_progress: 0,
+                pending: 1,
+                notes: 0,
+            });
+        });
+
+        assert_eq!(output, golden("stats-half.ans"));
     }
 }

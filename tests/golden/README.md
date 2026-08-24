@@ -22,6 +22,15 @@ against a fresh, pre-created data directory, with `FORCE_COLOR=1`:
 then capture: no-flags (board.ans), --timeline, --archive,
 --check 999999 (error.ans), --task @coding 'created ok' (success-msg.ans).
 
+`stats-complete.ans` and `stats-half.ans` come from a separate, smaller
+capture: a fresh directory, two tasks on `@ekko` ("One", "Two"), with both
+checked off for the first file and only the first checked off for the
+second, captured with no flags. They exist because a coloured percentage
+is the only place the renderer nests one style inside another -- chalk
+closes the inner style by re-opening the enclosing one rather than
+resetting to the terminal default -- and the capture above sits at 25%,
+where the percentage is left uncoloured, so it never exercised that path.
+
 These are frozen artifacts: their provenance is the JS build, so the tests
 prove Ekko matches taskbook's real output, not merely that it matches
 itself.
