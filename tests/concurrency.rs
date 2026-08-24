@@ -1,7 +1,7 @@
 //! End-to-end concurrency regression test: spawns real, separate `ekko`
 //! processes (the compiled binary, via `CARGO_BIN_EXE_ekko` -- not calls
 //! into the library, an actual subprocess per invocation) racing to write
-//! the same taskbook directory at once.
+//! the same ekko directory at once.
 //!
 //! This is the test that should have existed from the start and didn't:
 //! every lower-level piece (the lock's acquire/release logic, temp-file
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::process::{self, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn temp_taskbook_dir() -> PathBuf {
+fn temp_ekko_dir() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "ekko-e2e-concurrency-{}-{}",
         process::id(),
@@ -42,7 +42,7 @@ fn run_task_create(exe: &str, dir: &std::path::Path, description: &str) -> proce
 
 #[test]
 fn concurrent_writers_neither_collide_on_an_id_nor_lose_an_update() {
-    let dir = temp_taskbook_dir();
+    let dir = temp_ekko_dir();
     let exe = env!("CARGO_BIN_EXE_ekko");
     let total = 25;
 
@@ -73,7 +73,7 @@ fn concurrent_writers_neither_collide_on_an_id_nor_lose_an_update() {
 
 #[test]
 fn fifty_concurrent_writers_still_neither_collide_nor_lose_updates() {
-    let dir = temp_taskbook_dir();
+    let dir = temp_ekko_dir();
     let exe = env!("CARGO_BIN_EXE_ekko");
     let total = 50;
 
