@@ -9,6 +9,9 @@
 //! read `storage.json`/`archive.json` files an existing JS install already
 //! produced, unchanged.
 
+use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use chrono::Local;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -40,6 +43,18 @@ pub struct Item {
     // round-trips byte-identically through this field.
     #[serde(rename = "dueDate", default, skip_serializing_if = "Option::is_none")]
     pub due_date: Option<String>,
+    /// Stable across everything the display id is not: it survives
+    /// `--restore` (which hands the item a fresh `_id`), and it is never
+    /// recycled, whereas ids are `max + 1` and so get reused as soon as the
+    /// highest-numbered item is deleted. Callers that hold a reference
+    /// across time should hold this.
+    ///
+    /// `Option` because items written before this existed -- and any
+    /// written by taskbook -- do not have one, and backfilling would
+    /// rewrite files that are otherwise untouched. Absent means "legacy",
+    /// not "unknown".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -61,6 +76,7 @@ impl Item {
             is_complete: Some(false),
             in_progress: Some(false),
             due_date: None,
+            uid: Some(new_uid()),
             priority: Some(priority),
         }
     }
@@ -79,6 +95,7 @@ impl Item {
             in_progress: None,
             priority: None,
             due_date: None,
+            uid: Some(new_uid()),
         }
     }
 }
@@ -114,6 +131,17 @@ where
         Some(StringOrNumber::Number(n)) => Some(n),
         Some(StringOrNumber::String(s)) => s.parse().ok(),
     })
+}
+
+
+/// Unique per item, and cheap: nanosecond clock plus pid, hex-encoded.
+/// Same trick `storage::temp_file_path` already uses, and for the same
+/// reason -- unique enough without pulling in a `rand` dependency. Two
+/// items created back to back in one process get different nanos; two
+/// processes racing get different pids.
+fn new_uid() -> String {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("{:x}-{:x}", nanos, process::id())
 }
 
 #[cfg(test)]

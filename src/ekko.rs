@@ -1175,6 +1175,61 @@ mod tests {
     }
 
     #[test]
+    fn uid_distinguishes_items_that_share_a_recycled_id() {
+        // Ids are `max + 1`, so deleting the highest-numbered item and
+        // creating another hands the new one the same id. This is exactly
+        // the case a caller holding an id across time gets wrong.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["first"])).unwrap();
+        ekko.create_task(&words(&["second"])).unwrap();
+        let old_uid = ekko.storage.get().unwrap()[&2].uid.clone();
+
+        ekko.delete_items(&words(&["2"])).unwrap();
+        ekko.create_task(&words(&["reuses id 2"])).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        assert_eq!(data[&2].description, "reuses id 2", "the id really was recycled");
+        assert!(old_uid.is_some());
+        assert_ne!(data[&2].uid, old_uid, "same id, different item, different uid");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn uid_survives_the_fresh_id_a_restore_hands_out() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["archived then restored"])).unwrap();
+        let before = ekko.storage.get().unwrap()[&1].uid.clone();
+
+        ekko.check_tasks(&words(&["1"])).unwrap();
+        ekko.clear().unwrap();
+        ekko.restore_items(&words(&["1"])).unwrap();
+
+        let after = ekko.storage.get().unwrap().values().next().unwrap().uid.clone();
+        assert_eq!(after, before, "the uid is what stays put when the id does not");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn items_without_a_uid_load_and_are_not_backfilled() {
+        // What taskbook wrote, and what Ekko wrote before uids existed.
+        // Backfilling would rewrite files that are otherwise untouched.
+        let (ekko, dir) = fresh_ekko();
+        let raw = r#"{"1":{"_id":1,"_date":"Mon Aug 24 2026","_timestamp":1787600000000,"description":"legacy","isStarred":false,"boards":["@old"],"_isTask":true,"isComplete":false,"inProgress":false,"priority":1}}"#;
+        fs::write(dir.join("storage").join("storage.json"), raw).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        assert_eq!(data[&1].uid, None, "absent means legacy, not unknown");
+
+        ekko.star_items(&words(&["1"])).unwrap();
+        let written = fs::read_to_string(dir.join("storage").join("storage.json")).unwrap();
+        assert!(!written.contains("uid"), "a write must not invent one either");
+
+        cleanup(&dir);
+    }
+
+    #[test]
     fn set_is_idempotent_where_the_toggles_are_not() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["a task"])).unwrap();
