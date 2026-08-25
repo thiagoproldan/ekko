@@ -64,6 +64,15 @@ pub struct Item {
     /// lying about when they changed.
     #[serde(rename = "updatedAt", default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<i64>,
+    /// Set aside after having been started, as opposed to never started at
+    /// all -- two situations taskbook collapsed into the same empty box,
+    /// because it modelled "paused" as the absence of in-progress rather
+    /// than a state of its own.
+    ///
+    /// `Option`, and omitted when unset, so a board nobody ever pauses --
+    /// and anything taskbook wrote -- is byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -87,6 +96,7 @@ impl Item {
             due_date: None,
             uid: Some(new_uid()),
             updated_at: Some(timestamp),
+            paused: None,
             priority: Some(priority),
         }
     }
@@ -107,6 +117,7 @@ impl Item {
             due_date: None,
             uid: Some(new_uid()),
             updated_at: Some(timestamp),
+            paused: None,
         }
     }
 }

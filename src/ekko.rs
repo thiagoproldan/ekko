@@ -114,7 +114,7 @@ impl std::fmt::Display for EkkoError {
             }
             EkkoError::MissingState => write!(f, "No state was given as input"),
             EkkoError::UnknownState(term) => {
-                write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, starred, unstarred")
+                write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, unstarted, starred, unstarred")
             }
             EkkoError::InvalidCustomAppDir(path) => {
                 write!(f, "Custom app directory was not found on your system: {path}")
@@ -441,13 +441,20 @@ impl Ekko {
     }
 
     fn compute_stats(&self, data: &ItemMap) -> Stats {
-        let (mut complete, mut in_progress, mut pending, mut notes) = (0u32, 0u32, 0u32, 0u32);
+        let (mut complete, mut in_progress, mut paused, mut pending, mut notes) =
+            (0u32, 0u32, 0u32, 0u32, 0u32);
         for item in data.values() {
             if item.is_task {
                 if item.is_complete.unwrap_or(false) {
                     complete += 1;
                 } else if item.in_progress.unwrap_or(false) {
                     in_progress += 1;
+                } else if item.paused.unwrap_or(false) {
+                    // Counted apart from pending on purpose: lumping them back
+                    // together is exactly the conflation this state exists to
+                    // undo, and "0 pending" while two tasks sit half-done was
+                    // the original lie.
+                    paused += 1;
                 } else {
                     pending += 1;
                 }
@@ -455,9 +462,9 @@ impl Ekko {
                 notes += 1;
             }
         }
-        let total = complete + pending + in_progress;
+        let total = complete + pending + in_progress + paused;
         let percent = (complete * 100).checked_div(total).unwrap_or(0);
-        Stats { percent, complete, in_progress, pending, notes }
+        Stats { percent, complete, in_progress, paused, pending, notes }
     }
 
     fn filter_by_attributes(&self, attributes: &[String], mut data: ItemMap) -> ItemMap {
@@ -946,7 +953,10 @@ fn canonical_state(term: &str) -> Option<&'static str> {
         "done" | "checked" | "complete" => Some("done"),
         "undone" | "unchecked" | "incomplete" | "pending" => Some("undone"),
         "progress" | "started" | "begun" => Some("progress"),
-        "paused" | "unstarted" => Some("paused"),
+        "paused" => Some("paused"),
+        // Repointed: with a real paused state these became opposites.
+        // Also the way back from a mistyped `--set progress`.
+        "unstarted" | "unstart" => Some("unstarted"),
         "star" | "starred" => Some("starred"),
         "unstar" | "unstarred" => Some("unstarred"),
         _ => None,
@@ -961,13 +971,25 @@ fn apply_state(item: &mut Item, state: &str) {
         "done" if item.is_task => {
             item.is_complete = Some(true);
             item.in_progress = Some(false);
+            // Finishing something settles it: there is nothing left paused.
+            item.paused = None;
         }
         "undone" if item.is_task => item.is_complete = Some(false),
         "progress" if item.is_task => {
             item.in_progress = Some(true);
             item.is_complete = Some(false);
+            item.paused = None;
         }
-        "paused" if item.is_task => item.in_progress = Some(false),
+        "paused" if item.is_task => {
+            item.in_progress = Some(false);
+            item.paused = Some(true);
+        }
+        // Back to never-started: clears both flags, which is what undoes a
+        // `--set progress` aimed at the wrong id.
+        "unstarted" if item.is_task => {
+            item.in_progress = Some(false);
+            item.paused = None;
+        }
         "starred" => item.is_starred = true,
         "unstarred" => item.is_starred = false,
         _ => {}
@@ -1212,6 +1234,78 @@ mod tests {
 
         assert!(ids.contains(&1));
         assert!(ids.contains(&2), "an in-progress task should still show up under the pending filter, matching JS");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn paused_is_distinct_from_never_started() {
+        // The whole point: taskbook collapsed these into one empty box.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["set aside"])).unwrap();
+        ekko.create_task(&words(&["never touched"])).unwrap();
+
+        ekko.set_state(&words(&["@1", "progress"])).unwrap();
+        ekko.set_state(&words(&["@1", "paused"])).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        assert_eq!(data[&1].paused, Some(true));
+        assert_eq!(data[&1].in_progress, Some(false));
+        assert_eq!(data[&2].paused, None, "an untouched task is not paused, it is unstarted");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn unstarted_undoes_a_progress_aimed_at_the_wrong_id() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["typo victim"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"])).unwrap();
+
+        ekko.set_state(&words(&["@1", "unstarted"])).unwrap();
+
+        let item = &ekko.storage.get().unwrap()[&1];
+        assert_eq!(item.in_progress, Some(false));
+        assert_eq!(item.paused, None, "back to never-started, not paused");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resuming_or_finishing_clears_the_paused_flag() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["one"])).unwrap();
+        ekko.create_task(&words(&["two"])).unwrap();
+        for id in ["@1", "@2"] {
+            ekko.set_state(&words(&[id, "progress"])).unwrap();
+            ekko.set_state(&words(&[id, "paused"])).unwrap();
+        }
+
+        ekko.set_state(&words(&["@1", "progress"])).unwrap();
+        ekko.set_state(&words(&["@2", "done"])).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        assert_eq!(data[&1].paused, None, "resuming un-pauses");
+        assert_eq!(data[&2].paused, None, "finishing settles it");
+        assert_eq!(data[&2].is_complete, Some(true));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn stats_count_paused_apart_from_pending() {
+        // "0 pending" while two tasks sat half-done was the original lie.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["paused one"])).unwrap();
+        ekko.create_task(&words(&["never started"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"])).unwrap();
+        ekko.set_state(&words(&["@1", "paused"])).unwrap();
+
+        let Outcome::Stats(stats) = ekko.display_stats().unwrap() else { panic!() };
+
+        assert_eq!(stats.paused, 1);
+        assert_eq!(stats.pending, 1);
+        assert_eq!(stats.in_progress, 0);
 
         cleanup(&dir);
     }

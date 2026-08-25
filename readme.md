@@ -22,6 +22,7 @@ Effectively a task manager built to be driven by a human and an LLM/coding agent
 - Board & timeline views
 - Priority & favorite mechanisms
 - Due dates via `d:YYYY-MM-DD`, coloured by urgency and filterable -- an Ekko addition
+- A real paused state, so "set aside" stops looking like "never started"
 - Retry-safe state changes (`--set`), stable per-item `uid`s, and incremental reads (`--since`) -- built for scripts and agents
 - Search & filter items
 - Archive & restore deleted items
@@ -288,6 +289,32 @@ This is an Ekko addition; taskbook has no equivalent. Items without a due date a
 
 
 
+
+### Pausing
+
+`--check`, `--begin` and `--star` toggle; setting a task back out of progress with any of them leaves it looking exactly like a task that was never started. Those are different situations, and conflating them is how a board comes to report `0 pending` while two tasks sit half-done.
+
+A paused task keeps its own state and its own icon:
+
+```
+    1. ☐  never started
+    2. …  in progress
+    3. ⏸  paused
+    4. ✔  done
+```
+
+`ekko --set @3 paused` sets a task aside; `--set @3 progress` resumes it; `--set @3 unstarted` clears both flags and returns it to never-started, which is also how to undo a `--set progress` aimed at the wrong id. Finishing a task settles it either way.
+
+Nothing is paused automatically. Ekko instead points out when more than one task is in progress, since that is the state where the marker stops telling you where you are:
+
+```
+2 tasks in progress -- pause the ones you are not on: ekko --set @id paused
+```
+
+Both additions are conditional: the `paused` count joins the stats line only when it is above zero, and the warning only appears when it applies. A board that keeps to one task at a time prints exactly what it printed before.
+
+This is an Ekko addition, though the concept is not: taskbook's own help calls `--begin` "Start/pause task". It named pausing without giving it anywhere to live.
+
 ### Incremental Reads
 
 Reading the whole board to find out what changed gets expensive fast, and for a script or an agent syncing on every step it is nearly all waste. `--since` takes an epoch-millisecond timestamp and returns only items changed at or after it, grouped by board exactly like the default view.
@@ -313,7 +340,7 @@ $ ekko --set @3 done
 $ ekko --set @1 @2 progress starred
 ```
 
-Accepted states, with their aliases: `done`/`checked`/`complete`, `undone`/`unchecked`/`incomplete`/`pending`, `progress`/`started`/`begun`, `paused`/`unstarted`, `starred`/`star`, `unstarred`/`unstar`. They are the same words `--list` filters on, so there is one vocabulary rather than two. An unrecognised state is an error (`UNKNOWN_STATE`), not a silent no-op.
+Accepted states, with their aliases: `done`/`checked`/`complete`, `undone`/`unchecked`/`incomplete`/`pending`, `progress`/`started`/`begun`, `paused`, `unstarted`/`unstart`, `starred`/`star`, `unstarred`/`unstar`. They are the same words `--list` filters on, so there is one vocabulary rather than two. An unrecognised state is an error (`UNKNOWN_STATE`), not a silent no-op.
 
 Task-only states are ignored on notes, matching how `--check` already ignores them; starring applies to both.
 

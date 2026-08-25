@@ -108,6 +108,10 @@ pub struct Stats {
     pub percent: u32,
     pub complete: u32,
     pub in_progress: u32,
+    /// Started, then set aside. Only surfaces in the stats line when it is
+    /// above zero, so a board nobody pauses prints exactly what it always
+    /// did -- goldens included.
+    pub paused: u32,
     pub pending: u32,
     pub notes: u32,
 }
@@ -120,6 +124,7 @@ enum Level {
     Success, // complete task
     Pending, // pending task
     Wait,    // in-progress task
+    Paused,  // started, then set aside
     Note,
     Error,
 }
@@ -130,6 +135,7 @@ impl Level {
             Level::Success => "\u{2714}", // ✔
             Level::Pending => "\u{2610}", // ☐
             Level::Wait => "\u{2026}",    // …
+            Level::Paused => "\u{23f8}",  // ⏸ -- no variation selector, so it stays one column wide like the rest
             Level::Note => "\u{25cf}",    // ●
             Level::Error => "\u{2716}",   // ✖
         }
@@ -140,6 +146,7 @@ impl Level {
             Level::Success => painter.green(text),
             Level::Pending => painter.magenta(text),
             Level::Wait => painter.blue(text),
+            Level::Paused => painter.yellow(text),
             Level::Note => painter.blue(text),
             Level::Error => painter.red(text),
         }
@@ -190,6 +197,11 @@ impl<'a> Renderer<'a> {
             Level::Success
         } else if item.in_progress.unwrap_or(false) {
             Level::Wait
+        } else if item.paused.unwrap_or(false) {
+            // Below in-progress deliberately: an item cannot be both, and if
+            // stale data ever says otherwise, "being worked on" is the more
+            // useful lie to believe.
+            Level::Paused
         } else {
             Level::Pending
         }
@@ -416,18 +428,27 @@ impl<'a> Renderer<'a> {
             percent_text
         };
 
-        let status = [
+        let mut status = vec![
             format!("{} {}", self.painter.green(&stats.complete.to_string()), self.painter.grey("done")),
             format!("{} {}", self.painter.blue(&stats.in_progress.to_string()), self.painter.grey("in-progress")),
+        ];
+        if stats.paused > 0 {
+            status.push(format!(
+                "{} {}",
+                self.painter.yellow(&stats.paused.to_string()),
+                self.painter.grey("paused")
+            ));
+        }
+        status.extend([
             format!("{} {}", self.painter.magenta(&stats.pending.to_string()), self.painter.grey("pending")),
             format!(
                 "{} {}",
                 self.painter.blue(&stats.notes.to_string()),
                 self.painter.grey(if stats.notes == 1 { "note" } else { "notes" })
             ),
-        ];
+        ]);
 
-        let total = stats.pending + stats.in_progress + stats.complete + stats.notes;
+        let total = stats.pending + stats.in_progress + stats.paused + stats.complete + stats.notes;
         if total == 0 {
             self.emit("\n ", None, "Type `ekko --help` to get started", "");
         }
@@ -436,6 +457,22 @@ impl<'a> Renderer<'a> {
         self.emit("\n ", None, &complete_line, "");
         let joined = status.join(&self.painter.grey(" \u{b7} "));
         self.emit(" ", None, &joined, "\n");
+
+        // A nudge, not an error. More than one thing in progress is how the
+        // mark stops meaning "where I am" and starts meaning "things I once
+        // started" -- and it accumulates from decisions that each looked
+        // reasonable at the time, so it is worth surfacing on the day it
+        // happens rather than on the day someone comes back.
+        //
+        // Only ever printed when the situation exists, so a board that keeps
+        // to one cursor prints exactly what it always did.
+        if stats.in_progress > 1 {
+            let warning = self.painter.yellow(&format!(
+                "{} tasks in progress -- pause the ones you are not on: ekko --set @id paused",
+                stats.in_progress
+            ));
+            self.emit(" ", None, &warning, "\n");
+        }
     }
 
     // ---- public: messages ----------------------------------------------
@@ -679,7 +716,7 @@ mod tests {
     // Matches the golden `.ans` files' own stats line: 1 done, 1
     // in-progress, 2 pending, 0 notes -> 25% (1 of 4 tasks complete).
     fn golden_stats() -> Stats {
-        Stats { percent: 25, complete: 1, in_progress: 1, pending: 2, notes: 0 }
+        Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, pending: 2, notes: 0 }
     }
 
     #[test]
@@ -743,11 +780,59 @@ mod tests {
     }
 
     #[test]
+    fn the_stats_line_is_unchanged_when_nothing_is_paused() {
+        // The compatibility promise: boards that never pause anything print
+        // exactly what they always did, goldens included.
+        let output = render_with(Config::default(), |r| {
+            r.display_stats(&Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, pending: 2, notes: 0 });
+        });
+
+        assert!(!output.contains("paused"), "a zero count must not appear:\n{output}");
+    }
+
+    #[test]
+    fn the_stats_line_reports_paused_once_there_is_any() {
+        let output = render_with(Config::default(), |r| {
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 2, pending: 1, notes: 0 });
+        });
+
+        assert!(output.contains("2") && output.contains("paused"), "{output}");
+    }
+
+    #[test]
+    fn more_than_one_in_progress_earns_a_warning_and_one_does_not() {
+        let one = render_with(Config::default(), |r| {
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 0, pending: 0, notes: 0 });
+        });
+        let several = render_with(Config::default(), |r| {
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 3, paused: 0, pending: 0, notes: 0 });
+        });
+
+        assert!(!one.contains("in progress --"), "a single cursor is the healthy case:\n{one}");
+        assert!(several.contains("3 tasks in progress"), "{several}");
+    }
+
+    #[test]
+    fn a_paused_task_renders_with_its_own_icon() {
+        let mut item = Item::new_task(1, "set aside".to_string(), vec!["@b".to_string()], 1);
+        item.date = GOLDEN_DAY.to_string();
+        item.timestamp = golden_now().timestamp_millis();
+        item.paused = Some(true);
+
+        let output = render_with(Config::default(), |r| {
+            r.display_by_board(&[("@b".to_string(), vec![item])]);
+        });
+
+        assert!(output.contains('\u{23f8}'), "expected the pause icon:\n{output}");
+        assert!(!output.contains('\u{2610}'), "must not fall back to the empty box:\n{output}");
+    }
+
+    #[test]
     fn stats_are_hidden_when_config_disables_the_progress_overview() {
         let config = Config { display_progress_overview: false, ..Config::default() };
 
         let output = render_with(config, |r| {
-            r.display_stats(&Stats { percent: 50, complete: 1, in_progress: 1, pending: 1, notes: 0 });
+            r.display_stats(&Stats { percent: 50, complete: 1, in_progress: 1, paused: 0, pending: 1, notes: 0 });
         });
 
         assert_eq!(output, "");
@@ -804,6 +889,7 @@ mod tests {
                 percent: 100,
                 complete: 2,
                 in_progress: 0,
+                paused: 0,
                 pending: 0,
                 notes: 0,
             });
@@ -820,6 +906,7 @@ mod tests {
                 percent: 50,
                 complete: 1,
                 in_progress: 0,
+                paused: 0,
                 pending: 1,
                 notes: 0,
             });
