@@ -113,6 +113,18 @@ impl Painter {
     }
 }
 
+/// One node of the path: a declared phase, how far it has got, and whether
+/// work currently sits in it. Lives here beside `Stats` for the same reason
+/// -- a shape the renderer is given, computed elsewhere.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PathStep {
+    pub name: String,
+    pub complete: u32,
+    pub total: u32,
+    pub notes: u32,
+    pub current: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
@@ -471,6 +483,76 @@ impl<'a> Renderer<'a> {
     }
 
     /// The projects that exist, or a nudge when there are none yet.
+    /// The journey through a project's phases: what is behind, where work
+    /// sits now, and what is still ahead.
+    ///
+    /// Filled for phases that are done, marked for the one holding work,
+    /// hollow for the ones nobody has started -- so the same picture reads
+    /// backwards as history and forwards as a plan.
+    pub fn display_path(&mut self, steps: &[PathStep], rootless: u32) {
+        if steps.is_empty() {
+            self.emit(
+                "\n ",
+                None,
+                "No phases yet -- declare them with `ekko --phases <first> <second> ...`",
+                "",
+            );
+            return;
+        }
+
+        let mut nodes = Vec::new();
+        let mut counts = Vec::new();
+        for step in steps {
+            let done = step.total > 0 && step.complete == step.total;
+            let (icon, painted) = if step.current {
+                ("\u{25c9}", self.painter.blue(&step.name)) // ◉ here
+            } else if done {
+                ("\u{25cf}", self.painter.green(&step.name)) // ● behind
+            } else {
+                ("\u{25cb}", self.painter.grey(&step.name)) // ○ ahead
+            };
+
+            let head = format!("{painted} {icon}");
+            // Padded before colouring: an escape sequence has no width on
+            // screen but plenty of bytes, so padding a coloured string lines
+            // nothing up.
+            let plain = if step.current {
+                format!("{}/{} HERE", step.complete, step.total)
+            } else {
+                format!("{}/{}", step.complete, step.total)
+            };
+            let width = step.name.chars().count().max(plain.chars().count()) + 2;
+            let padded = format!("{plain:width$}");
+            let tally = if step.current {
+                self.painter.blue(&padded)
+            } else {
+                self.painter.grey(&padded)
+            };
+
+            nodes.push(format!("{head:width$}"));
+            counts.push(tally);
+        }
+
+        let joined = nodes.join(&self.painter.grey("\u{2500}\u{2500}\u{2500}"));
+        self.emit("\n ", None, &joined, "");
+        self.emit(" ", None, &counts.join("   "), "");
+
+        let mut tail = Vec::new();
+        let notes: u32 = steps.iter().map(|s| s.notes).sum();
+        if notes > 0 {
+            tail.push(format!("{notes} {}", if notes == 1 { "note" } else { "notes" }));
+        }
+        if rootless > 0 {
+            // Named, not hidden: the project root is a deliberate exception
+            // to "areas live inside phases", so it has to be visible.
+            tail.push(format!("{rootless} outside any phase"));
+        }
+        if !tail.is_empty() {
+            let line = self.painter.grey(&tail.join(" \u{b7} "));
+            self.emit("\n ", None, &line, "\n");
+        }
+    }
+
     pub fn display_projects(&mut self, names: &[String]) {
         if names.is_empty() {
             self.emit("\n ", None, "No projects yet -- create one with `ekko --project <name> --create`", "");

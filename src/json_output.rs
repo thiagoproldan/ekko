@@ -50,6 +50,10 @@ fn success_value(outcome: &Outcome) -> Value {
             json!({"ok": true, "command": command, "dates": groups_to_value(groups)})
         }
         Outcome::Projects(names) => json!({"ok": true, "command": command, "projects": names}),
+        Outcome::Phases(names) => json!({"ok": true, "command": command, "phases": names}),
+        Outcome::Path { steps, rootless } => {
+            json!({"ok": true, "command": command, "steps": steps, "rootless": rootless})
+        }
         Outcome::Stats(stats) => json!({"ok": true, "command": command, "stats": stats}),
     }
 }

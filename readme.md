@@ -36,6 +36,7 @@ Added by Ekko, each of them invisible until you use it:
 - **A real paused state**, so "set aside" stops looking like "never started"
 - **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
 - **Projects**: one board per project via `--project`, with the filesystem as the registry
+- **Phases and `--path`**: a project's journey, read backwards as history and forwards as a plan
 - **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
 - **Stable `uid`s**, because display ids get recycled and `--restore` hands out new ones
 - **`--since`**, reading only what changed rather than the whole board every time
@@ -107,6 +108,9 @@ $ ekko --help
       --list, -l         List items by attributes
       --move, -m         Move item between boards
       --note, -n         Create note
+      --path             Show the project's journey through its phases
+      --phase <NAME>     Scope work to one phase of a project
+      --phases <NAME>... Declare the project's ordered phase sequence
       --priority, -p     Update priority of task
       --project <NAME>   Work against a named project instead of the default board
       --projects         List the projects that exist
@@ -334,6 +338,40 @@ Three deliberate limits:
 To read a folded note in full, pipe the output (`ekko | less`) or use `--json`, which never folds.
 
 
+
+
+### Phases and the path
+
+Inside a project the shape is `project > phase > area`. The default board has no phases at all -- it stays what it always was, areas and tasks, for when you just want to write something down.
+
+Declare the sequence, then work inside it:
+
+```
+$ ekko --project winwayland --phases setup compositor packaging
+$ ekko --project winwayland --phase compositor --task @render Damage tracking
+$ ekko --project winwayland --path
+```
+
+```
+  project: winwayland
+
+  setup ●───compositor ◉───packaging ○
+  2/2       0/2 HERE       0/1
+
+  1 note · 1 outside any phase
+```
+
+Filled is behind you, `◉ HERE` is where work sits, hollow is still ahead -- so the same picture reads backwards as history and forwards as a plan. A phase nobody has started yet is a legitimate thing to have: that is where speculation lives.
+
+Five decisions worth knowing:
+
+- **Each phase is its own world.** `@render` under `setup` and `@render` under `compositor` are two areas, not one appearing twice. Scoping is what tells them apart.
+- **`--phases` replaces the sequence.** Inserting a phase in the middle is the common case and appending cannot express it, so the whole list is given at once -- the same contract `--move` already has for an item's boards.
+- **Order cannot be derived.** "Setup comes before build" is knowledge, not a timestamp. It is the only thing in Ekko you have to state outright.
+- **No phase means the project root.** An item created without `--phase` is never filed into a guessed current phase; it sits outside the path, and the path says how many are out there.
+- **`--path` is invoked, never automatic.** The board view is unchanged whether phases exist or not.
+
+Cancelled tasks leave a phase's total, the same way they leave the percentage, so a phase that drops work can still read as finished.
 
 ### Projects
 

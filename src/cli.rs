@@ -31,6 +31,22 @@ pub struct Cli {
     pub r#move: bool,
     #[arg(long, short = 'n')]
     pub note: bool,
+    /// Scope work to one phase of a project. Areas are phase-scoped, so this
+    /// is what distinguishes `@render` under `setup` from `@render` under
+    /// `compositor`.
+    #[arg(long, value_name = "NAME")]
+    pub phase: Option<String>,
+
+    /// Declare the project's ordered phase sequence, replacing whatever was
+    /// there. Replacing rather than appending because inserting a phase in
+    /// the middle is the common case, and appending cannot express it.
+    #[arg(long, num_args = 0.., value_name = "NAME")]
+    pub phases: Option<Vec<String>>,
+
+    /// Render the project's journey: phases in order, with progress and
+    /// where work currently sits.
+    #[arg(long)]
+    pub path: bool,
     /// Work against a named project instead of the default board. Sugar over
     /// `--ekko-dir`: the project lives at `~/.ekko/projects/<name>`, so the
     /// filesystem is the registry and there is no list to keep in sync.

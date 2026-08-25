@@ -80,6 +80,14 @@ pub struct Item {
     /// byte-identical to before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelled: Option<bool>,
+    /// Which phase of a project this belongs to, when it belongs to one.
+    ///
+    /// `None` means the project root -- outside the path, and the only shape
+    /// the default board ever has. Areas are scoped by phase, so `@render`
+    /// under `setup` and `@render` under `compositor` are two distinct
+    /// areas; this field is what tells them apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -105,6 +113,7 @@ impl Item {
             updated_at: Some(timestamp),
             paused: None,
             cancelled: None,
+            phase: None,
             priority: Some(priority),
         }
     }
@@ -127,6 +136,7 @@ impl Item {
             updated_at: Some(timestamp),
             paused: None,
             cancelled: None,
+            phase: None,
         }
     }
 }

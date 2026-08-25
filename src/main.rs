@@ -37,6 +37,9 @@ const HELP: &str = r#"
       --list, -l         List items by attributes
       --move, -m         Move item between boards
       --note, -n         Create note
+      --path             Show the project's journey through its phases
+      --phase <NAME>     Scope work to one phase of a project
+      --phases <NAME>... Declare the project's ordered phase sequence
       --priority, -p     Update priority of task
       --project <NAME>   Work against a named project instead of the default board
       --projects         List the projects that exist
@@ -179,6 +182,12 @@ fn dispatch(
     ekko: &Ekko,
     home_dir: &Path,
 ) -> Result<Vec<Outcome>, EkkoError> {
+    if let Some(names) = cli.phases.as_deref() {
+        return Ok(vec![ekko.set_phases(names)?]);
+    }
+    if cli.path {
+        return Ok(vec![ekko.display_path()?]);
+    }
     if cli.projects {
         return Ok(vec![Outcome::Projects(directory::list_projects(home_dir))]);
     }
@@ -186,13 +195,13 @@ fn dispatch(
         return Ok(vec![ekko.display_archive()?]);
     }
     if cli.task {
-        return Ok(vec![ekko.create_task(&cli.input)?]);
+        return Ok(vec![ekko.create_task_in(&cli.input, cli.phase.as_deref())?]);
     }
     if cli.restore {
         return Ok(vec![ekko.restore_items(&cli.input)?]);
     }
     if cli.note {
-        return Ok(vec![ekko.create_note(&cli.input)?]);
+        return Ok(vec![ekko.create_note_in(&cli.input, cli.phase.as_deref())?]);
     }
     if cli.delete {
         return Ok(vec![ekko.delete_items(&cli.input)?]);

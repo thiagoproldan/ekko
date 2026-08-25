@@ -228,6 +228,44 @@ impl Storage {
     }
 }
 
+
+/// The ordered phase sequence of a project.
+///
+/// Kept in its own file rather than inside `storage.json`, which is a flat
+/// map of numeric item ids that taskbook parses by iterating keys -- a
+/// non-numeric key there would be a foreign object in someone else's
+/// format. This one is Ekko's alone.
+///
+/// Order is the whole point and cannot be derived: "setup comes before
+/// build" is knowledge, not a timestamp.
+impl Storage {
+    fn phases_file(&self) -> PathBuf {
+        self.storage_file.with_file_name("phases.json")
+    }
+
+    /// The declared sequence, or empty when a project has none.
+    pub fn get_phases(&self) -> Result<Vec<String>, StorageError> {
+        let path = self.phases_file();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&content)?)
+    }
+
+    /// Replaces the sequence wholesale. Written through the same temp-file
+    /// and rename dance as everything else, so a reader never sees half a
+    /// list.
+    pub fn set_phases(&self, phases: &[String]) -> Result<(), StorageError> {
+        let content = serde_json::to_string_pretty(phases)?;
+        let path = self.phases_file();
+        let temp_file = temp_file_path(&path, &self.temp_dir);
+        fs::write(&temp_file, content)?;
+        fs::rename(&temp_file, &path)?;
+        Ok(())
+    }
+}
+
 fn read_map(path: &Path) -> Result<ItemMap, StorageError> {
     if !path.exists() {
         return Ok(BTreeMap::new());

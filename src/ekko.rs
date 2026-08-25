@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use crate::config;
 use crate::directory::{self, DirectoryError};
 use crate::item::Item;
-use crate::render::{Renderer, Stats};
+use crate::render::{PathStep, Renderer, Stats};
 use crate::storage::{ItemMap, Storage, StorageError};
 
 #[derive(Debug)]
@@ -200,8 +200,11 @@ pub enum Outcome {
     Find(Vec<(String, Vec<Item>)>),
     List(Vec<(String, Vec<Item>)>),
     Projects(Vec<String>),
+    Phases(Vec<String>),
+    Path { steps: Vec<PathStep>, rootless: u32 },
     Stats(Stats),
 }
+
 
 impl Outcome {
     /// Also doubles as the `--json` response's `"command"` field -- these
@@ -227,6 +230,8 @@ impl Outcome {
             Outcome::Find(_) => "find",
             Outcome::List(_) => "list",
             Outcome::Projects(_) => "projects",
+            Outcome::Phases(_) => "phases",
+            Outcome::Path { .. } => "path",
             Outcome::Stats(_) => "stats",
         }
     }
@@ -277,6 +282,8 @@ impl Outcome {
             Outcome::Board(groups) | Outcome::Find(groups) | Outcome::List(groups) => out.display_by_board(groups),
             Outcome::Timeline(groups) | Outcome::Archive(groups) => out.display_by_date(groups),
             Outcome::Projects(names) => out.display_projects(names),
+            Outcome::Phases(names) => out.display_projects(names),
+            Outcome::Path { steps, rootless } => out.display_path(steps, *rootless),
             Outcome::Stats(stats) => out.display_stats(stats),
         }
     }
@@ -580,6 +587,49 @@ impl Ekko {
 
         self.storage.set(data)?;
         Ok(())
+    }
+
+    /// `phase` is the scope the CLI was invoked with. Items created without
+    /// one land at the project root, outside the path -- never in a guessed
+    /// current phase, because putting work somewhere nobody chose is exactly
+    /// the plausible-wrong-answer this codebase keeps refusing.
+    pub fn create_task_in(
+        &self,
+        input: &[String],
+        phase: Option<&str>,
+    ) -> Result<Outcome, EkkoError> {
+        let outcome = self.create_task(input)?;
+        self.assign_phase(&outcome, phase)
+    }
+
+    pub fn create_note_in(
+        &self,
+        input: &[String],
+        phase: Option<&str>,
+    ) -> Result<Outcome, EkkoError> {
+        let outcome = self.create_note(input)?;
+        self.assign_phase(&outcome, phase)
+    }
+
+    fn assign_phase(&self, outcome: &Outcome, phase: Option<&str>) -> Result<Outcome, EkkoError> {
+        let (Some(name), Outcome::Task(item) | Outcome::Note(item)) = (phase, outcome) else {
+            return Ok(match outcome {
+                Outcome::Task(i) => Outcome::Task(i.clone()),
+                other => Outcome::Note(match other {
+                    Outcome::Note(i) => i.clone(),
+                    _ => unreachable!("assign_phase only ever sees a created item"),
+                }),
+            });
+        };
+
+        let _lock = self.storage.acquire_lock()?;
+        let mut data = self.storage.get()?;
+        let mut updated = item.clone();
+        updated.phase = Some(name.to_string());
+        data.insert(updated.id, updated.clone());
+        self.save_touching(&mut data)?;
+
+        Ok(if updated.is_task { Outcome::Task(updated) } else { Outcome::Note(updated) })
     }
 
     pub fn create_task(&self, input: &[String]) -> Result<Outcome, EkkoError> {
@@ -895,6 +945,56 @@ impl Ekko {
         let boards = self.get_boards(&data);
         Ok(Outcome::Board(self.group_by_board(&data, &boards)))
     }
+
+    /// Replaces the project's phase sequence.
+    pub fn set_phases(&self, names: &[String]) -> Result<Outcome, EkkoError> {
+        let _lock = self.storage.acquire_lock()?;
+        let cleaned = remove_duplicates(
+            names.iter().map(|n| n.trim_start_matches('@').to_string()).collect(),
+        );
+        self.storage.set_phases(&cleaned)?;
+        Ok(Outcome::Phases(cleaned))
+    }
+
+    /// The journey: declared phases in order, each with how far it has got,
+    /// and which one holds work in progress.
+    ///
+    /// Nothing here is stored beyond the sequence itself -- the counts and
+    /// the cursor are read off the items every time, so the view cannot
+    /// drift from the board it describes.
+    pub fn display_path(&self) -> Result<Outcome, EkkoError> {
+        let data = self.storage.get()?;
+        let phases = self.storage.get_phases()?;
+
+        let mut steps = Vec::new();
+        for name in &phases {
+            let items: Vec<&Item> =
+                data.values().filter(|i| i.phase.as_deref() == Some(name.as_str())).collect();
+
+            let tasks: Vec<&&Item> = items.iter().filter(|i| i.is_task).collect();
+            let complete =
+                tasks.iter().filter(|i| i.is_complete.unwrap_or(false)).count() as u32;
+            let cancelled = tasks.iter().filter(|i| i.cancelled.unwrap_or(false)).count() as u32;
+            let current = tasks.iter().any(|i| i.in_progress.unwrap_or(false));
+
+            steps.push(PathStep {
+                name: name.clone(),
+                complete,
+                // Cancelled work is not work, the same way it is left out of
+                // the percentage.
+                total: tasks.len() as u32 - cancelled,
+                notes: items.iter().filter(|i| !i.is_task).count() as u32,
+                current,
+            });
+        }
+
+        // Anything inside the project but outside every phase. Counted rather
+        // than hidden: the root is a deliberate exception, not a hole.
+        let rootless = data.values().filter(|i| i.phase.is_none()).count() as u32;
+
+        Ok(Outcome::Path { steps, rootless })
+    }
+
     pub fn list_by_attributes(&self, terms: &[String]) -> Result<Outcome, EkkoError> {
         let data = self.storage.get()?;
         let stored_boards = self.get_boards(&data);
@@ -1283,6 +1383,88 @@ mod tests {
 
         assert!(ids.contains(&1));
         assert!(ids.contains(&2), "an in-progress task should still show up under the pending filter, matching JS");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn phases_are_replaced_wholesale_so_reordering_and_inserting_are_one_operation() {
+        // Appending could not express "put testing between the last two"
+        // without three more commands to fix the ordering afterwards.
+        let (ekko, dir) = fresh_ekko();
+        ekko.set_phases(&words(&["setup", "ship"])).unwrap();
+
+        ekko.set_phases(&words(&["setup", "testing", "ship"])).unwrap();
+
+        assert_eq!(ekko.storage.get_phases().unwrap(), words(&["setup", "testing", "ship"]));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn an_item_created_without_a_phase_lands_outside_the_path_and_is_counted() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.set_phases(&words(&["setup"])).unwrap();
+        ekko.create_task_in(&words(&["@a", "in a phase"]), Some("setup")).unwrap();
+        ekko.create_task_in(&words(&["@b", "at the root"]), None).unwrap();
+
+        let Outcome::Path { steps, rootless } = ekko.display_path().unwrap() else { panic!() };
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].total, 1, "only the phased task belongs to the step");
+        assert_eq!(rootless, 1, "the root item is counted, not hidden");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn the_same_area_name_in_two_phases_is_two_areas() {
+        // Each phase is its own world; scoping is what keeps `@render` under
+        // setup distinct from `@render` under build.
+        let (ekko, dir) = fresh_ekko();
+        ekko.set_phases(&words(&["setup", "build"])).unwrap();
+        ekko.create_task_in(&words(&["@render", "early"]), Some("setup")).unwrap();
+        ekko.create_task_in(&words(&["@render", "later"]), Some("build")).unwrap();
+
+        let Outcome::Path { steps, .. } = ekko.display_path().unwrap() else { panic!() };
+
+        assert_eq!(steps[0].total, 1);
+        assert_eq!(steps[1].total, 1, "the second @render did not join the first");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn the_cursor_marks_the_phase_holding_work_and_nothing_when_there_is_none() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.set_phases(&words(&["setup", "build"])).unwrap();
+        ekko.create_task_in(&words(&["@a", "one"]), Some("setup")).unwrap();
+        ekko.create_task_in(&words(&["@b", "two"]), Some("build")).unwrap();
+
+        let Outcome::Path { steps, .. } = ekko.display_path().unwrap() else { panic!() };
+        assert!(steps.iter().all(|s| !s.current), "nothing in progress means no cursor");
+
+        ekko.set_state(&words(&["@2", "progress"])).unwrap();
+        let Outcome::Path { steps, .. } = ekko.display_path().unwrap() else { panic!() };
+        assert!(!steps[0].current && steps[1].current);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn cancelled_work_leaves_a_phase_total_rather_than_holding_it_short() {
+        // Same reasoning as the percentage: cancelled work is not work, so a
+        // phase that drops something can still read as finished.
+        let (ekko, dir) = fresh_ekko();
+        ekko.set_phases(&words(&["setup"])).unwrap();
+        ekko.create_task_in(&words(&["@a", "done"]), Some("setup")).unwrap();
+        ekko.create_task_in(&words(&["@a", "dropped"]), Some("setup")).unwrap();
+        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_state(&words(&["@2", "cancelled"])).unwrap();
+
+        let Outcome::Path { steps, .. } = ekko.display_path().unwrap() else { panic!() };
+
+        assert_eq!((steps[0].complete, steps[0].total), (1, 1), "reads as finished");
 
         cleanup(&dir);
     }
