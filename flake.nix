@@ -44,6 +44,16 @@
           };
         };
 
+        # The `/ekko` Claude Code skill, exposed so a consumer can install it
+        # without needing to know the layout of this repo. It ships from here
+        # rather than living loose in a skills directory so it moves with the
+        # code it documents -- it has already gone stale once, still
+        # recommending the toggles after `--set` existed.
+        packages.skill = pkgs.runCommandLocal "ekko-skill" { } ''
+          mkdir -p "$out/ekko"
+          cp ${./skill/SKILL.md} "$out/ekko/SKILL.md"
+        '';
+
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             cargo
