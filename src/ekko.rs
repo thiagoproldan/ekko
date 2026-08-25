@@ -253,15 +253,24 @@ impl Outcome {
                 out.mark_incomplete(unchecked);
             }
             Outcome::Set { ids, states } => {
-                // Reuses the toggles' own messages rather than inventing a
-                // parallel vocabulary: the same transition should read the
-                // same way however it was requested.
+                // Reuses the toggles' own messages where one exists, rather
+                // than inventing a parallel vocabulary: the same transition
+                // should read the same way however it was requested. The two
+                // states with no toggle behind them get their own verbs.
+                //
+                // Every canonical state `canonical_state` can return must
+                // appear here. The catch-all below cannot be removed (the
+                // match is on `&str`), so it will not fail a build -- it
+                // will silently print nothing, which is how `cancelled` and
+                // `unstarted` shipped mute. Add the arm when adding a state.
                 for state in states {
                     match state.as_str() {
                         "done" => out.mark_complete(ids),
                         "undone" => out.mark_incomplete(ids),
                         "progress" => out.mark_started(ids),
                         "paused" => out.mark_paused(ids),
+                        "cancelled" => out.mark_cancelled(ids),
+                        "unstarted" => out.mark_reset(ids),
                         "starred" => out.mark_starred(ids),
                         "unstarred" => out.mark_unstarred(ids),
                         _ => {}
@@ -1286,6 +1295,8 @@ fn is_known_attribute(term: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::render::Painter;
     use std::fs;
     use std::path::PathBuf;
     use std::process;
@@ -2102,6 +2113,50 @@ mod tests {
         assert_eq!(ekko.create_task(&[]).unwrap_err().code(), "MISSING_DESC");
         assert_eq!(ekko.edit_description(&words(&["@1", "@2", "x"])).unwrap_err().code(), "INVALID_IDS_NUMBER");
         assert_eq!(ekko.move_boards(&words(&["@1"])).unwrap_err().code(), "INVALID_ID"); // no item 1 exists yet -> caught before boards are even checked
+
+        cleanup(&dir);
+    }
+
+    /// Every state `--set` accepts has to say so. `cancelled` and
+    /// `unstarted` shipped mute: they reached `apply_state` but not the
+    /// match that renders the confirmation, so the write landed and the
+    /// terminal stayed silent -- indistinguishable from a failure, and
+    /// worst on `unstarted`, whose whole job is undoing a `--set` aimed at
+    /// the wrong id. Drives the real `set_state` rather than building an
+    /// `Outcome` by hand, so an arm can never be reachable only in a test.
+    #[test]
+    fn every_settable_state_reports_what_it_did() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["a task to move through every state"])).unwrap();
+
+        // Every canonical state `canonical_state` can return.
+        let states = [
+            "done",
+            "undone",
+            "progress",
+            "paused",
+            "cancelled",
+            "unstarted",
+            "starred",
+            "unstarred",
+        ];
+
+        for state in states {
+            let outcome = ekko.set_state(&words(&["@1", state])).unwrap();
+
+            let mut buffer: Vec<u8> = Vec::new();
+            {
+                let mut renderer =
+                    Renderer::new(Painter::forced(false), Config::default(), &mut buffer);
+                outcome.render(&mut renderer);
+            }
+            let rendered = String::from_utf8(buffer).unwrap();
+
+            assert!(
+                rendered.contains('1'),
+                "--set @1 {state} rendered no confirmation naming the id: {rendered:?}"
+            );
+        }
 
         cleanup(&dir);
     }

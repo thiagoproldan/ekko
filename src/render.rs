@@ -779,6 +779,17 @@ impl<'a> Renderer<'a> {
         self.mark("Paused", "tasks", "task", ids);
     }
 
+    pub fn mark_cancelled(&mut self, ids: &[u32]) {
+        self.mark("Cancelled", "tasks", "task", ids);
+    }
+
+    /// `unstarted` clears progress, pause and cancellation at once, so no
+    /// single past participle names it. "Reset" describes what the caller
+    /// asked for, which is most often undoing a `--set` aimed at a wrong id.
+    pub fn mark_reset(&mut self, ids: &[u32]) {
+        self.mark("Reset", "tasks", "task", ids);
+    }
+
     pub fn mark_starred(&mut self, ids: &[u32]) {
         self.mark("Starred", "items", "item", ids);
     }
