@@ -23,6 +23,7 @@ Effectively a task manager built to be driven by a human and an LLM/coding agent
 - Priority & favorite mechanisms
 - Due dates via `d:YYYY-MM-DD`, coloured by urgency and filterable -- an Ekko addition
 - A real paused state, so "set aside" stops looking like "never started"
+- Long notes fold to one line on screen, and stay whole in pipes and `--json`
 - Retry-safe state changes (`--set`), stable per-item `uid`s, and incremental reads (`--since`) -- built for scripts and agents
 - Search & filter items
 - Archive & restore deleted items
@@ -289,6 +290,27 @@ This is an Ekko addition; taskbook has no equivalent. Items without a due date a
 
 
 
+
+
+### Folded Notes
+
+Notes hold the reasoning worth keeping, which is why they run long. On a real board they took 56 of 94 rendered lines while every task, open and closed, took 28 -- so a board becomes unscannable through its notes, not its tick marks.
+
+When stdout is a terminal, a note too long for one line is shortened and told on itself:
+
+```
+   28. ●  Timeline idea, with the constraints that survived scrutiny. (1) A node is … (+12 lines)
+```
+
+The count is useful on its own: you can see which notes are dense before deciding to open one.
+
+Three deliberate limits:
+
+- **Only when stdout is a terminal.** `ekko | grep` and `ekko > file` get every note in full, so nothing that reads Ekko's output breaks. Folding asks the terminal for its width directly rather than reusing the colour decision, because `FORCE_COLOR=1 ekko > file` must still write everything.
+- **Only notes.** A truncated task hides something you are meant to act on; a truncated note hides something you can go and read.
+- **Only when it helps.** Below about two dozen usable columns the marker would eat most of the line, so the note is left whole for the terminal to wrap.
+
+To read a folded note in full, pipe the output (`ekko | less`) or use `--json`, which never folds.
 
 ### Pausing
 

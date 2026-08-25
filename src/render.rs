@@ -31,6 +31,11 @@ const PRIORITY_NORMAL: u8 = 1;
 const PRIORITY_MEDIUM: u8 = 2;
 const PRIORITY_HIGH: u8 = 3;
 
+/// Below this many columns of usable space, folding stops helping: the
+/// "(+N lines)" marker would eat most of what is left, so leave the note
+/// whole and let the terminal wrap it.
+const MIN_FOLD_WIDTH: usize = 24;
+
 /// Decides whether ANSI codes get emitted at all. Real usage auto-detects
 /// (colors for a real terminal, plain text once piped/redirected, same as
 /// chalk); `NO_COLOR`/`FORCE_COLOR` override that, and tests construct one
@@ -163,11 +168,20 @@ pub struct Renderer<'a> {
     /// and pinning it is what lets the golden tests reproduce output that
     /// was captured on a specific date.
     now: DateTime<Local>,
+    /// Width to fold long notes to, or `None` to leave them whole.
+    ///
+    /// Deliberately not derived from `Painter`: that folds colour in with
+    /// `NO_COLOR`/`FORCE_COLOR`, and `FORCE_COLOR=1 ekko > file` must still
+    /// write every note in full. Folding is about a screen, so it asks the
+    /// screen directly.
+    fold_width: Option<usize>,
 }
 
 impl<'a> Renderer<'a> {
     pub fn new(painter: Painter, config: Config, out: &'a mut dyn Write) -> Self {
-        Self::at(painter, config, out, Local::now())
+        let mut renderer = Self::at(painter, config, out, Local::now());
+        renderer.fold_width = terminal_width();
+        renderer
     }
 
     /// `new` with the clock pinned. The golden `.ans` references embed the
@@ -176,7 +190,9 @@ impl<'a> Renderer<'a> {
     /// against them have to render as of that same instant -- otherwise
     /// they would pass only on the day of capture.
     fn at(painter: Painter, config: Config, out: &'a mut dyn Write, now: DateTime<Local>) -> Self {
-        Renderer { painter, config, out, now }
+        // Folding off by default, so every test -- the byte-for-byte golden
+        // ones above all -- renders exactly what it always did.
+        Renderer { painter, config, out, now, fold_width: None }
     }
 
     fn today(&self) -> String {
@@ -213,22 +229,58 @@ impl<'a> Renderer<'a> {
         format!("{padding} {}", self.painter.grey(&format!("{id}.")))
     }
 
+    /// Shortens a note that would wrap, to one line plus a count of what was
+    /// hidden. Returns the description untouched when there is nothing to
+    /// gain, or when folding is off.
+    ///
+    /// Notes only. They are prose and hold the reasoning worth keeping, which
+    /// is exactly why they run long -- on a real board they took 56 of 94
+    /// rendered lines while every task, open and closed, took 28. Tasks stay
+    /// whole because a truncated task hides something you are meant to act
+    /// on, where a truncated note hides something you can go and read.
+    fn fold_note(&self, item: &Item) -> String {
+        let Some(width) = self.fold_width else {
+            return item.description.clone();
+        };
+        if item.is_task {
+            return item.description.clone();
+        }
+
+        // Everything the line spends before the description: the id column,
+        // the icon and their separators.
+        let overhead = 12;
+        let available = width.saturating_sub(overhead);
+        let chars = item.description.chars().count();
+        if available < MIN_FOLD_WIDTH || chars <= available {
+            return item.description.clone();
+        }
+
+        let hidden = chars.div_ceil(available) - 1;
+        let plural = if hidden == 1 { "line" } else { "lines" };
+        let suffix = format!("\u{2026} (+{hidden} {plural})");
+        let keep = available.saturating_sub(suffix.chars().count());
+
+        let head: String = item.description.chars().take(keep).collect();
+        format!("{head}{suffix}")
+    }
+
     fn build_message(&self, item: &Item) -> String {
         let is_complete = item.is_complete.unwrap_or(false);
         let priority = item.priority.unwrap_or(0);
+        let description = self.fold_note(item);
 
         let mut parts = Vec::new();
 
         if !is_complete && priority > PRIORITY_NORMAL {
             let colored = match priority {
-                PRIORITY_MEDIUM => self.painter.yellow(&item.description),
-                _ => self.painter.red(&item.description),
+                PRIORITY_MEDIUM => self.painter.yellow(&description),
+                _ => self.painter.red(&description),
             };
             parts.push(self.painter.underline(&colored));
         } else if is_complete {
-            parts.push(self.painter.grey(&item.description));
+            parts.push(self.painter.grey(&description));
         } else {
-            parts.push(item.description.clone());
+            parts.push(description);
         }
 
         if !is_complete && priority > PRIORITY_NORMAL {
@@ -626,6 +678,29 @@ fn join_ids(ids: &[u32]) -> String {
     ids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
 }
 
+
+/// Columns of the controlling terminal, or `None` when stdout is not one.
+///
+/// `ioctl(TIOCGWINSZ)` rather than a crate: `libc` is already a dependency
+/// for the storage lock, and this is the whole of what a terminal-size
+/// crate would do. A terminal that reports zero columns is treated as
+/// unknown rather than as a very narrow screen.
+fn terminal_width() -> Option<usize> {
+    use std::os::fd::AsRawFd;
+
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+
+    // SAFETY: `winsize` is plain data, and the fd is stdout's, alive for the
+    // duration of the call.
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    let result =
+        unsafe { libc::ioctl(std::io::stdout().as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+
+    (result == 0 && size.ws_col > 0).then_some(size.ws_col as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +852,87 @@ mod tests {
         });
 
         assert_eq!(output, golden("archive.ans"));
+    }
+
+    /// Renders with folding on at a fixed width, and without colour, so the
+    /// assertions are about the text rather than the escape codes.
+    fn render_folded_at<F: FnOnce(&mut Renderer)>(width: usize, f: F) -> String {
+        let mut buffer: Vec<u8> = Vec::new();
+        {
+            let mut renderer =
+                Renderer::at(Painter::forced(false), Config::default(), &mut buffer, golden_now());
+            renderer.fold_width = Some(width);
+            f(&mut renderer);
+        }
+        String::from_utf8(buffer).unwrap()
+    }
+
+    fn long_note(text: &str) -> Item {
+        let mut note = Item::new_note(1, text.to_string(), vec!["@b".to_string()]);
+        note.date = GOLDEN_DAY.to_string();
+        note.timestamp = golden_now().timestamp_millis();
+        note
+    }
+
+    #[test]
+    fn a_long_note_folds_to_one_line_and_says_how_much_it_hid() {
+        let text = "x".repeat(300);
+        let output = render_folded_at(100, |r| {
+            r.display_by_board(&[("@b".to_string(), vec![long_note(&text)])]);
+        });
+
+        let body = output.lines().find(|l| l.contains('x')).expect("the note should render");
+        assert!(body.chars().count() <= 100, "folded line still overflows: {}", body.chars().count());
+        assert!(body.contains("(+"), "no hidden-line count: {body}");
+        assert!(!body.contains(&text), "the full text leaked through");
+    }
+
+    #[test]
+    fn a_note_that_already_fits_is_left_exactly_alone() {
+        let output = render_folded_at(100, |r| {
+            r.display_by_board(&[("@b".to_string(), vec![long_note("short enough")])]);
+        });
+
+        assert!(output.contains("short enough"));
+        assert!(!output.contains("(+"), "nothing was hidden, so nothing should be claimed");
+    }
+
+    #[test]
+    fn tasks_are_never_folded_however_long_they_get() {
+        // A truncated task hides something you are meant to act on.
+        let text = "y".repeat(300);
+        let mut task = Item::new_task(1, text.clone(), vec!["@b".to_string()], 1);
+        task.date = GOLDEN_DAY.to_string();
+        task.timestamp = golden_now().timestamp_millis();
+
+        let output = render_folded_at(100, |r| {
+            r.display_by_board(&[("@b".to_string(), vec![task])]);
+        });
+
+        assert!(output.contains(&text), "a task must survive whole");
+    }
+
+    #[test]
+    fn folding_off_leaves_everything_whole() {
+        // This is what keeps every golden test passing: the renderer only
+        // folds when something told it a width, and nothing does in tests or
+        // when stdout is a pipe.
+        let text = "z".repeat(300);
+        let output = render_with(Config::default(), |r| {
+            r.display_by_board(&[("@b".to_string(), vec![long_note(&text)])]);
+        });
+
+        assert!(output.contains(&text));
+    }
+
+    #[test]
+    fn a_terminal_too_narrow_to_fold_usefully_does_not_try() {
+        let text = "w".repeat(300);
+        let output = render_folded_at(20, |r| {
+            r.display_by_board(&[("@b".to_string(), vec![long_note(&text)])]);
+        });
+
+        assert!(output.contains(&text), "below MIN_FOLD_WIDTH the marker would eat the line");
     }
 
     #[test]
