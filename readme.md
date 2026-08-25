@@ -83,7 +83,7 @@ $ cargo install --path . --locked
 
 That lands the binary in `~/.cargo/bin`, which your shell may not read. To build without installing: `cargo build --release`, and the binary appears at `target/release/ekko`.
 
-Ekko is Linux-only: the storage lock reads `/proc/<pid>/stat` to tell a dead lock holder from a live one, with no fallback for other platforms.
+Ekko is developed and tested on Linux. The parts that touch the OS are POSIX -- `flock(2)` for the storage lock, `ioctl(TIOCGWINSZ)` for the terminal width, `SIGPIPE` restored to its default -- but the clipboard backend behind `--copy` is built for Wayland, and nothing else is exercised by CI.
 
 ## Usage
 
@@ -165,6 +165,16 @@ In order to display all items in a timeline view, based on their creation date, 
 <div align="center">
   <img alt="Timeline View" width="62%" src="media/timeline.png"/>
 </div>
+
+### Path View
+
+Inside a project with declared phases, `--path` shows the journey through them: filled for what is behind, marked for the phase holding work now, hollow for what is still ahead. The same picture reads backwards as history and forwards as a plan.
+
+<div align="center">
+  <img alt="Path View" width="52%" src="media/path.png"/>
+</div>
+
+Anything created in the project without `--phase` sits at the project root, outside the path, and is counted at the foot rather than guessed into a phase. See [Phases and the path](#phases-and-the-path).
 
 ## Configuration
 
@@ -339,10 +349,6 @@ Three deliberate limits:
 
 To read a folded note in full, pipe the output (`ekko | less`) or use `--json`, which never folds.
 
-
-
-
-
 ### Dependencies
 
 Record what an item waits on, and the board stops pretending everything is equally startable:
@@ -498,7 +504,7 @@ $ ekko --set @3 done
 $ ekko --set @1 @2 progress starred
 ```
 
-Accepted states, with their aliases: `done`/`checked`/`complete`, `undone`/`unchecked`/`incomplete`/`pending`, `progress`/`started`/`begun`, `paused`, `unstarted`/`unstart`, `starred`/`star`, `unstarred`/`unstar`. They are the same words `--list` filters on, so there is one vocabulary rather than two. An unrecognised state is an error (`UNKNOWN_STATE`), not a silent no-op.
+Accepted states, with their aliases: `done`/`checked`/`complete`, `undone`/`unchecked`/`incomplete`/`pending`, `progress`/`started`/`begun`, `paused`, `cancelled`/`cancel`/`canceled`, `unstarted`/`unstart`, `starred`/`star`, `unstarred`/`unstar`. They are the same words `--list` filters on, so there is one vocabulary rather than two. An unrecognised state is an error (`UNKNOWN_STATE`), not a silent no-op.
 
 Task-only states are ignored on notes, matching how `--check` already ignores them; starring applies to both.
 
@@ -601,7 +607,9 @@ All task/note data lives in one JSON file, written atomically (temp file + renam
 $ cat ~/.ekko/storage/storage.json
 ```
 
-Every command that writes (`--task`, `--check`, `--delete`, ...) takes a lock at `<ekko-dir>/.lock` for its duration, so two `ekko` processes -- two terminals, two scripts, two agents -- touching the same directory at once queue up instead of silently clobbering each other's write. A second process waits up to 5 seconds for the lock to free up; if the process holding it has actually died, the stale lock is detected and cleared automatically, no waiting required. You should never need to touch this file by hand, but if `ekko` ever reports a timeout with no other ekko process actually running, it's safe to delete it.
+Every command that writes (`--task`, `--check`, `--delete`, ...) takes a lock at `<ekko-dir>/.lock` for its duration, so two `ekko` processes -- two terminals, two scripts, two agents -- touching the same directory at once queue up instead of silently clobbering each other's write. A second process waits up to 5 seconds before reporting `LOCK_TIMEOUT`.
+
+The lock is `flock(2)`, which means there is no such thing as a stale one: the kernel drops it when the holding process exits, however it exits. Nothing has to notice a dead holder, and nothing ever steals a lock from a live one. An earlier port of taskbook's pid-file scheme did try to tell the two apart, and the gap between checking and acting silently lost writes; `tests/concurrency.rs` spawns real processes and kills them mid-hold to keep that fixed. You never need to touch the file by hand.
 
 ### Machine-readable output
 
@@ -642,6 +650,7 @@ Without the `--`, a word that happens to match a real flag name (`--json`, `--ta
 - Run `nix develop` for a shell with the full Rust toolchain (cargo, rustc, clippy, rustfmt, rust-analyzer) already set up
 - Run the full check -- lint plus the test suite: `cargo clippy --all-targets && cargo test`
 - `cargo test` includes integration tests in `tests/` that spawn the real compiled binary (including real concurrent processes, to actually exercise the storage lock) -- not just unit tests
+- The screenshots above are generated from real command output by [`media/capture/shot.sh`](media/capture/readme.md), so a picture cannot drift from what Ekko actually prints
 
 ## Credits
 
