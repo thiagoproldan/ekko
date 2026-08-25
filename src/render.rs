@@ -105,6 +105,12 @@ impl Painter {
     fn underline(&self, text: &str) -> String {
         self.wrap("4", "24", text)
     }
+
+    /// SGR 9. Same nesting rules as every other style here, so a struck
+    /// description that already carries colour closes correctly.
+    fn strike(&self, text: &str) -> String {
+        self.wrap("9", "29", text)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -117,6 +123,10 @@ pub struct Stats {
     /// above zero, so a board nobody pauses prints exactly what it always
     /// did -- goldens included.
     pub paused: u32,
+    /// Abandoned on purpose. Counted, but deliberately kept out of the
+    /// percentage denominator: cancelled work is not work, so a board that
+    /// drops something can still reach 100%.
+    pub cancelled: u32,
     pub pending: u32,
     pub notes: u32,
 }
@@ -130,6 +140,7 @@ enum Level {
     Pending, // pending task
     Wait,    // in-progress task
     Paused,  // started, then set aside
+    Cancelled, // abandoned on purpose, kept for the record
     Note,
     Error,
 }
@@ -141,6 +152,7 @@ impl Level {
             Level::Pending => "\u{2610}", // ☐
             Level::Wait => "\u{2026}",    // …
             Level::Paused => "\u{23f8}",  // ⏸ -- no variation selector, so it stays one column wide like the rest
+            Level::Cancelled => "\u{2298}", // ⊘ -- covered by the mono fonts, unlike the pause glyph
             Level::Note => "\u{25cf}",    // ●
             Level::Error => "\u{2716}",   // ✖
         }
@@ -152,6 +164,7 @@ impl Level {
             Level::Pending => painter.magenta(text),
             Level::Wait => painter.blue(text),
             Level::Paused => painter.yellow(text),
+            Level::Cancelled => painter.grey(text),
             Level::Note => painter.blue(text),
             Level::Error => painter.red(text),
         }
@@ -209,7 +222,11 @@ impl<'a> Renderer<'a> {
         if !item.is_task {
             return Level::Note;
         }
-        if item.is_complete.unwrap_or(false) {
+        // Ahead of complete: cancelling is terminal too, and the two are
+        // mutually exclusive by construction in `apply_state`.
+        if item.cancelled.unwrap_or(false) {
+            Level::Cancelled
+        } else if item.is_complete.unwrap_or(false) {
             Level::Success
         } else if item.in_progress.unwrap_or(false) {
             Level::Wait
@@ -271,7 +288,12 @@ impl<'a> Renderer<'a> {
 
         let mut parts = Vec::new();
 
-        if !is_complete && priority > PRIORITY_NORMAL {
+        if item.cancelled.unwrap_or(false) {
+            // Struck through in the same grey the icon uses: the strike carries
+            // "dropped", the grey carries "no longer live". Priority markers
+            // are left off -- an abandoned task has no urgency left.
+            parts.push(self.painter.strike(&self.painter.grey(&description)));
+        } else if !is_complete && priority > PRIORITY_NORMAL {
             let colored = match priority {
                 PRIORITY_MEDIUM => self.painter.yellow(&description),
                 _ => self.painter.red(&description),
@@ -283,7 +305,10 @@ impl<'a> Renderer<'a> {
             parts.push(description);
         }
 
-        if !is_complete && priority > PRIORITY_NORMAL {
+        // Cancelled excluded alongside complete: an abandoned task has no
+        // urgency left, and a struck-through line still shouting "(!!)" reads
+        // as a contradiction.
+        if !is_complete && !item.cancelled.unwrap_or(false) && priority > PRIORITY_NORMAL {
             parts.push(if priority == PRIORITY_MEDIUM {
                 self.painter.yellow("(!)")
             } else {
@@ -491,6 +516,13 @@ impl<'a> Renderer<'a> {
                 self.painter.grey("paused")
             ));
         }
+        if stats.cancelled > 0 {
+            status.push(format!(
+                "{} {}",
+                self.painter.grey(&stats.cancelled.to_string()),
+                self.painter.grey("cancelled")
+            ));
+        }
         status.extend([
             format!("{} {}", self.painter.magenta(&stats.pending.to_string()), self.painter.grey("pending")),
             format!(
@@ -500,7 +532,8 @@ impl<'a> Renderer<'a> {
             ),
         ]);
 
-        let total = stats.pending + stats.in_progress + stats.paused + stats.complete + stats.notes;
+        let total =
+            stats.pending + stats.in_progress + stats.paused + stats.cancelled + stats.complete + stats.notes;
         if total == 0 {
             self.emit("\n ", None, "Type `ekko --help` to get started", "");
         }
@@ -791,7 +824,7 @@ mod tests {
     // Matches the golden `.ans` files' own stats line: 1 done, 1
     // in-progress, 2 pending, 0 notes -> 25% (1 of 4 tasks complete).
     fn golden_stats() -> Stats {
-        Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, pending: 2, notes: 0 }
+        Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 2, notes: 0 }
     }
 
     #[test]
@@ -940,7 +973,7 @@ mod tests {
         // The compatibility promise: boards that never pause anything print
         // exactly what they always did, goldens included.
         let output = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, pending: 2, notes: 0 });
+            r.display_stats(&Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 2, notes: 0 });
         });
 
         assert!(!output.contains("paused"), "a zero count must not appear:\n{output}");
@@ -949,7 +982,7 @@ mod tests {
     #[test]
     fn the_stats_line_reports_paused_once_there_is_any() {
         let output = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 2, pending: 1, notes: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 2, cancelled: 0, pending: 1, notes: 0 });
         });
 
         assert!(output.contains("2") && output.contains("paused"), "{output}");
@@ -958,10 +991,10 @@ mod tests {
     #[test]
     fn more_than_one_in_progress_earns_a_warning_and_one_does_not() {
         let one = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 0, pending: 0, notes: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 0, cancelled: 0, pending: 0, notes: 0 });
         });
         let several = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 3, paused: 0, pending: 0, notes: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 3, paused: 0, cancelled: 0, pending: 0, notes: 0 });
         });
 
         assert!(!one.contains("in progress --"), "a single cursor is the healthy case:\n{one}");
@@ -988,7 +1021,7 @@ mod tests {
         let config = Config { display_progress_overview: false, ..Config::default() };
 
         let output = render_with(config, |r| {
-            r.display_stats(&Stats { percent: 50, complete: 1, in_progress: 1, paused: 0, pending: 1, notes: 0 });
+            r.display_stats(&Stats { percent: 50, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 1, notes: 0 });
         });
 
         assert_eq!(output, "");
@@ -1046,6 +1079,7 @@ mod tests {
                 complete: 2,
                 in_progress: 0,
                 paused: 0,
+                cancelled: 0,
                 pending: 0,
                 notes: 0,
             });
@@ -1063,6 +1097,7 @@ mod tests {
                 complete: 1,
                 in_progress: 0,
                 paused: 0,
+                cancelled: 0,
                 pending: 1,
                 notes: 0,
             });

@@ -73,6 +73,13 @@ pub struct Item {
     /// and anything taskbook wrote -- is byte-identical to before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<bool>,
+    /// Abandoned on purpose, and kept. Distinct from deleting it, which
+    /// loses why it was dropped -- often the part worth having later.
+    ///
+    /// `Option`, omitted when unset, so a board that cancels nothing is
+    /// byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled: Option<bool>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -97,6 +104,7 @@ impl Item {
             uid: Some(new_uid()),
             updated_at: Some(timestamp),
             paused: None,
+            cancelled: None,
             priority: Some(priority),
         }
     }
@@ -118,6 +126,7 @@ impl Item {
             uid: Some(new_uid()),
             updated_at: Some(timestamp),
             paused: None,
+            cancelled: None,
         }
     }
 }

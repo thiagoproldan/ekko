@@ -114,7 +114,7 @@ impl std::fmt::Display for EkkoError {
             }
             EkkoError::MissingState => write!(f, "No state was given as input"),
             EkkoError::UnknownState(term) => {
-                write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, unstarted, starred, unstarred")
+                write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, cancelled, unstarted, starred, unstarred")
             }
             EkkoError::InvalidCustomAppDir(path) => {
                 write!(f, "Custom app directory was not found on your system: {path}")
@@ -441,11 +441,13 @@ impl Ekko {
     }
 
     fn compute_stats(&self, data: &ItemMap) -> Stats {
-        let (mut complete, mut in_progress, mut paused, mut pending, mut notes) =
-            (0u32, 0u32, 0u32, 0u32, 0u32);
+        let (mut complete, mut in_progress, mut paused, mut cancelled, mut pending, mut notes) =
+            (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
         for item in data.values() {
             if item.is_task {
-                if item.is_complete.unwrap_or(false) {
+                if item.cancelled.unwrap_or(false) {
+                    cancelled += 1;
+                } else if item.is_complete.unwrap_or(false) {
                     complete += 1;
                 } else if item.in_progress.unwrap_or(false) {
                     in_progress += 1;
@@ -462,9 +464,12 @@ impl Ekko {
                 notes += 1;
             }
         }
+        // `cancelled` is absent from the total on purpose: counting it would
+        // mean a board can never reach 100% once anything is dropped, which
+        // reads as unfinished work rather than as work that went away.
         let total = complete + pending + in_progress + paused;
         let percent = (complete * 100).checked_div(total).unwrap_or(0);
-        Stats { percent, complete, in_progress, paused, pending, notes }
+        Stats { percent, complete, in_progress, paused, cancelled, pending, notes }
     }
 
     fn filter_by_attributes(&self, attributes: &[String], mut data: ItemMap) -> ItemMap {
@@ -485,10 +490,21 @@ impl Ekko {
                 // too. Not something this port introduced or should
                 // silently change.
                 "pending" | "unchecked" | "incomplete" => {
-                    data.retain(|_, item| item.is_task && !item.is_complete.unwrap_or(false));
+                    // Cancelled excluded, unlike the JS version, which had no such
+                    // state to exclude. A dropped task is not waiting to be done,
+                    // and listing it as pending is the same conflation the
+                    // paused state was added to undo.
+                    data.retain(|_, item| {
+                        item.is_task
+                            && !item.is_complete.unwrap_or(false)
+                            && !item.cancelled.unwrap_or(false)
+                    });
                 }
                 "todo" | "task" | "tasks" => data.retain(|_, item| item.is_task),
                 "note" | "notes" => data.retain(|_, item| !item.is_task),
+                "cancelled" | "canceled" => {
+                    data.retain(|_, item| item.cancelled.unwrap_or(false));
+                }
                 "due" => data.retain(|_, item| item.due_date.is_some()),
                 // Only tasks that are still open: a finished task is not
                 // late, however long its deadline has been past.
@@ -957,6 +973,7 @@ fn canonical_state(term: &str) -> Option<&'static str> {
         // Repointed: with a real paused state these became opposites.
         // Also the way back from a mistyped `--set progress`.
         "unstarted" | "unstart" => Some("unstarted"),
+        "cancel" | "cancelled" | "canceled" => Some("cancelled"),
         "star" | "starred" => Some("starred"),
         "unstar" | "unstarred" => Some("unstarred"),
         _ => None,
@@ -973,22 +990,34 @@ fn apply_state(item: &mut Item, state: &str) {
             item.in_progress = Some(false);
             // Finishing something settles it: there is nothing left paused.
             item.paused = None;
+            item.cancelled = None;
         }
         "undone" if item.is_task => item.is_complete = Some(false),
         "progress" if item.is_task => {
             item.in_progress = Some(true);
             item.is_complete = Some(false);
             item.paused = None;
+            item.cancelled = None;
         }
         "paused" if item.is_task => {
             item.in_progress = Some(false);
             item.paused = Some(true);
+            item.cancelled = None;
+        }
+        // Terminal, like done, and mutually exclusive with it. Reviving a
+        // cancelled task goes through `unstarted`.
+        "cancelled" if item.is_task => {
+            item.cancelled = Some(true);
+            item.is_complete = Some(false);
+            item.in_progress = Some(false);
+            item.paused = None;
         }
         // Back to never-started: clears both flags, which is what undoes a
         // `--set progress` aimed at the wrong id.
         "unstarted" if item.is_task => {
             item.in_progress = Some(false);
             item.paused = None;
+            item.cancelled = None;
         }
         "starred" => item.is_starred = true,
         "unstarred" => item.is_starred = false,
@@ -1018,6 +1047,8 @@ fn is_known_attribute(term: &str) -> bool {
             | "tasks"
             | "note"
             | "notes"
+            | "cancelled"
+            | "canceled"
             | "due"
             | "overdue"
     )
@@ -1234,6 +1265,62 @@ mod tests {
 
         assert!(ids.contains(&1));
         assert!(ids.contains(&2), "an in-progress task should still show up under the pending filter, matching JS");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn cancelling_is_terminal_and_mutually_exclusive_with_the_other_states() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["dropped"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"])).unwrap();
+
+        ekko.set_state(&words(&["@1", "cancelled"])).unwrap();
+
+        let item = &ekko.storage.get().unwrap()[&1];
+        assert_eq!(item.cancelled, Some(true));
+        assert_eq!(item.in_progress, Some(false));
+        assert_eq!(item.is_complete, Some(false));
+        assert_eq!(item.paused, None);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn any_other_state_revives_a_cancelled_task() {
+        let (ekko, dir) = fresh_ekko();
+        for (id, revive) in [("@1", "progress"), ("@2", "done"), ("@3", "unstarted")] {
+            ekko.create_task(&words(&["dropped"])).unwrap();
+            ekko.set_state(&words(&[id, "cancelled"])).unwrap();
+            ekko.set_state(&words(&[id, revive])).unwrap();
+        }
+
+        let data = ekko.storage.get().unwrap();
+        for id in 1..=3 {
+            assert_eq!(data[&id].cancelled, None, "item {id} should no longer be cancelled");
+        }
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_cancelled_task_is_not_pending_and_is_not_counted_in_the_percentage() {
+        // Two conflations avoided at once: a dropped task is not waiting to be
+        // done, and it is not unfinished work dragging the board down forever.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["real work"])).unwrap();
+        ekko.create_task(&words(&["dropped"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_state(&words(&["@2", "cancelled"])).unwrap();
+
+        let Outcome::List(groups) = ekko.list_by_attributes(&words(&["pending"])).unwrap() else {
+            panic!()
+        };
+        assert!(groups.is_empty(), "the cancelled task must not show up as pending");
+
+        let Outcome::Stats(stats) = ekko.display_stats().unwrap() else { panic!() };
+        assert_eq!(stats.cancelled, 1);
+        assert_eq!(stats.percent, 100, "one of one real task is done");
 
         cleanup(&dir);
     }

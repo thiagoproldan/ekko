@@ -34,6 +34,7 @@ Added by Ekko, each of them invisible until you use it:
 
 - **Due dates** via `d:YYYY-MM-DD`, coloured by urgency and filterable with `--list due|overdue`
 - **A real paused state**, so "set aside" stops looking like "never started"
+- **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
 - **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
 - **Stable `uid`s**, because display ids get recycled and `--restore` hands out new ones
 - **`--since`**, reading only what changed rather than the whole board every time
@@ -328,6 +329,29 @@ Three deliberate limits:
 
 To read a folded note in full, pipe the output (`ekko | less`) or use `--json`, which never folds.
 
+
+### Cancelling
+
+Some work gets dropped without being finished, and deleting it loses the part worth keeping: why it was dropped. A cancelled task stays on the board, struck through and greyed out.
+
+```
+    1. ☐  never started
+    2. …  in progress
+    3. ⏸  paused
+    4. ✔  done
+    5. ⊘  Migrate to the new API
+```
+
+`ekko --set @5 cancelled` drops a task; `--set @5 unstarted` revives it, as does any other state -- cancelling is terminal but not permanent. Aliases: `cancel`, `canceled`.
+
+Three consequences worth knowing, each of them deliberate:
+
+- **It is not pending.** `--list pending` excludes cancelled tasks, because a dropped task is not waiting to be done. `--list cancelled` finds them.
+- **It is not counted in the percentage.** Cancelled work is not work, so a board that drops something can still reach 100%. It still appears in the stats line, so nothing is hidden.
+- **Priority markers are dropped with it.** A struck-through line still shouting `(!!)` reads as a contradiction.
+
+The task keeps its description, so the record of what was dropped survives. If *why* matters, put it in the description (`--edit`) or leave a note beside it -- Ekko does not ask for a reason, and a field nobody fills in would be worse than the habit.
+
 ### Pausing
 
 `--check`, `--begin` and `--star` toggle; setting a task back out of progress with any of them leaves it looking exactly like a task that was never started. Those are different situations, and conflating them is how a board comes to report `0 pending` while two tasks sit half-done.
@@ -443,6 +467,7 @@ The by default supported listing attributes, together with their respective alia
 - `star`, `starred` - Items that are starred.
 - `due` - Tasks that have a due date.
 - `overdue` - Tasks whose due date has passed and that are not yet complete.
+- `cancelled`, `canceled` - Tasks that were dropped rather than finished.
 
 A board can be named either bare or in the `@name` form the board view prints, so `--list release` and `--list @release` are equivalent. A term matching neither a board nor an attribute above is an error (`UNKNOWN_LIST_TERM`), not a silent no-op.
 
