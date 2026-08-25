@@ -458,6 +458,29 @@ impl<'a> Renderer<'a> {
 
     // ---- public: views ------------------------------------------------
 
+    /// Names the project a board belongs to, when one is active.
+    ///
+    /// Without this, `EKKO_PROJECT` set and forgotten would show a different
+    /// board with nothing on screen saying so -- invisible state changing
+    /// what you see, which is the failure mode this whole file keeps trying
+    /// to avoid. Printed only when a project is active, so the default board
+    /// is untouched.
+    pub fn display_project(&mut self, name: &str) {
+        let line = format!("{} {}", self.painter.grey("project:"), self.painter.underline(name));
+        self.emit("\n ", None, &line, "");
+    }
+
+    /// The projects that exist, or a nudge when there are none yet.
+    pub fn display_projects(&mut self, names: &[String]) {
+        if names.is_empty() {
+            self.emit("\n ", None, "No projects yet -- create one with `ekko --project <name> --create`", "");
+            return;
+        }
+        for name in names {
+            self.emit("\n ", None, &self.painter.underline(name), "");
+        }
+    }
+
     pub fn display_by_board(&mut self, groups: &Groups) {
         let today = self.today();
         let now_millis = self.now_millis();

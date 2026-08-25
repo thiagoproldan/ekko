@@ -49,6 +49,7 @@ fn success_value(outcome: &Outcome) -> Value {
         Outcome::Timeline(groups) | Outcome::Archive(groups) => {
             json!({"ok": true, "command": command, "dates": groups_to_value(groups)})
         }
+        Outcome::Projects(names) => json!({"ok": true, "command": command, "projects": names}),
         Outcome::Stats(stats) => json!({"ok": true, "command": command, "stats": stats}),
     }
 }

@@ -35,6 +35,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Due dates** via `d:YYYY-MM-DD`, coloured by urgency and filterable with `--list due|overdue`
 - **A real paused state**, so "set aside" stops looking like "never started"
 - **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
+- **Projects**: one board per project via `--project`, with the filesystem as the registry
 - **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
 - **Stable `uid`s**, because display ids get recycled and `--restore` hands out new ones
 - **`--since`**, reading only what changed rather than the whole board every time
@@ -97,6 +98,7 @@ $ ekko --help
       --check, -c        Check/uncheck task
       --clear            Delete all checked items
       --copy, -y         Copy item description
+      --create           Create the project named by --project
       --delete, -d       Delete item
       --edit, -e         Edit item description
       --find, -f         Search for items
@@ -106,6 +108,8 @@ $ ekko --help
       --move, -m         Move item between boards
       --note, -n         Create note
       --priority, -p     Update priority of task
+      --project <NAME>   Work against a named project instead of the default board
+      --projects         List the projects that exist
       --restore, -r      Restore items from archive
       --set              Set item state idempotently (retry-safe)
       --since <MILLIS>   Only items changed at or after a timestamp
@@ -329,6 +333,28 @@ Three deliberate limits:
 
 To read a folded note in full, pipe the output (`ekko | less`) or use `--json`, which never folds.
 
+
+
+### Projects
+
+One board per project, without typing paths. `--project <name>` works against `~/.ekko/projects/<name>` instead of the default board:
+
+```
+$ ekko --project winwayland --create      # first time only
+$ ekko --project winwayland --task @setup Build the compositor
+$ ekko --projects                          # what exists
+```
+
+`EKKO_PROJECT` does the same for a whole shell, the way `EKKO_DIR` already does for a directory.
+
+This is sugar over `--ekko-dir`, which could always point at a per-project board -- what it adds is not having to remember where each one lives. Four decisions worth knowing:
+
+- **The filesystem is the registry.** There is no list of projects kept alongside the directories, so nothing can drift out of step with what exists. `--projects` reads the directory.
+- **An unknown name is an error**, and the message carries the fix. Creating on first use would turn a typo into a new, empty project -- the same failure as a filter that silently matches nothing.
+- **The active project is printed above the board.** `EKKO_PROJECT` set and forgotten would otherwise show a different board with nothing on screen saying so.
+- **The default board is untouched.** Projects are additional; a setup that never uses one behaves exactly as before.
+
+`--project` and `--ekko-dir` together is an error rather than one silently winning: both say where data lives, and guessing which was meant is how you write to the wrong board.
 
 ### Cancelling
 

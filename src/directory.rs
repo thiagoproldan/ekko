@@ -22,6 +22,10 @@ const EKKO_DIR_NAME: &str = ".ekko";
 #[derive(Debug)]
 pub enum DirectoryError {
     MissingEkkoDirFlagValue,
+    MissingProjectName,
+    InvalidProjectName(String),
+    UnknownProject(String),
+    ProjectAndEkkoDirTogether,
     InvalidCustomAppDir(String),
     Config(config::ConfigError),
 }
@@ -32,6 +36,20 @@ impl std::fmt::Display for DirectoryError {
             DirectoryError::MissingEkkoDirFlagValue => {
                 write!(f, "Please provide a value for --ekko-dir or remove the flag.")
             }
+            DirectoryError::MissingProjectName => {
+                write!(f, "Please provide a name for --project or remove the flag.")
+            }
+            DirectoryError::InvalidProjectName(name) => {
+                write!(f, "A project name cannot contain a path separator: {name}")
+            }
+            DirectoryError::UnknownProject(name) => write!(
+                f,
+                "No such project: {name}. Create it with: ekko --project {name} --create"
+            ),
+            DirectoryError::ProjectAndEkkoDirTogether => write!(
+                f,
+                "--project and --ekko-dir both say where data lives; pass only one"
+            ),
             DirectoryError::InvalidCustomAppDir(candidate) => write!(
                 f,
                 "Custom app directory was not found on your system: {candidate}"
@@ -47,6 +65,60 @@ impl From<config::ConfigError> for DirectoryError {
     fn from(error: config::ConfigError) -> Self {
         DirectoryError::Config(error)
     }
+}
+
+
+/// Where named projects live, under the ekko directory.
+pub const PROJECTS_DIR_NAME: &str = "projects";
+
+/// Resolves a project name to its directory, creating it only when asked.
+///
+/// The filesystem is the registry: there is no list of projects to keep in
+/// step with what exists, because the directories *are* the list. A name
+/// that does not resolve is an error rather than a fresh empty project --
+/// the same reasoning as `--list` refusing terms it does not recognise,
+/// since a typo that silently succeeds is the worst kind of success.
+pub fn retrieve_project_directory(
+    home_dir: &Path,
+    name: &str,
+    create: bool,
+) -> Result<PathBuf, DirectoryError> {
+    if !is_present(name) {
+        return Err(DirectoryError::MissingProjectName);
+    }
+    if name.contains('/') || name.contains(std::path::MAIN_SEPARATOR) || name == ".." {
+        return Err(DirectoryError::InvalidProjectName(name.to_string()));
+    }
+
+    let root = home_dir.join(EKKO_DIR_NAME).join(PROJECTS_DIR_NAME);
+    let dir = root.join(name);
+
+    if dir.is_dir() {
+        return Ok(dir.join(EKKO_DIR_NAME));
+    }
+    if !create {
+        return Err(DirectoryError::UnknownProject(name.to_string()));
+    }
+
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| DirectoryError::InvalidCustomAppDir(format!("{}: {e}", dir.display())))?;
+    Ok(dir.join(EKKO_DIR_NAME))
+}
+
+/// Every project that exists, in name order.
+pub fn list_projects(home_dir: &Path) -> Vec<String> {
+    let root = home_dir.join(EKKO_DIR_NAME).join(PROJECTS_DIR_NAME);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
 }
 
 pub fn retrieve_ekko_directory(
@@ -144,6 +216,67 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn an_unknown_project_is_an_error_carrying_the_way_to_create_it() {
+        // Creating on first use would turn a typo into a new empty project,
+        // which is the `--list` failure in another costume.
+        let home = temp_dir();
+
+        let result = retrieve_project_directory(&home, "nope", false);
+
+        let Err(DirectoryError::UnknownProject(name)) = result else { panic!("{result:?}") };
+        assert_eq!(name, "nope");
+        assert!(
+            DirectoryError::UnknownProject("nope".into()).to_string().contains("--create"),
+            "the message should say how to fix it"
+        );
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn creating_a_project_puts_it_where_listing_will_find_it() {
+        // The filesystem is the registry, so these two have to agree by
+        // construction rather than by being kept in step.
+        let home = temp_dir();
+
+        retrieve_project_directory(&home, "winwayland", true).unwrap();
+
+        assert_eq!(list_projects(&home), vec!["winwayland".to_string()]);
+        assert!(retrieve_project_directory(&home, "winwayland", false).is_ok(), "now resolvable");
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_project_name_cannot_escape_the_projects_directory() {
+        let home = temp_dir();
+
+        for name in ["../elsewhere", "a/b"] {
+            let result = retrieve_project_directory(&home, name, true);
+            assert!(
+                matches!(result, Err(DirectoryError::InvalidProjectName(_))),
+                "{name} should be rejected, got {result:?}"
+            );
+        }
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn projects_are_isolated_from_each_other_and_from_the_default_board() {
+        let home = temp_dir();
+        let one = retrieve_project_directory(&home, "one", true).unwrap();
+        let two = retrieve_project_directory(&home, "two", true).unwrap();
+        let default = retrieve_ekko_directory(&home, &home, None, None).unwrap();
+
+        assert_ne!(one, two);
+        assert_ne!(one, default);
+        assert_ne!(two, default);
+
+        fs::remove_dir_all(&home).ok();
     }
 
     #[test]

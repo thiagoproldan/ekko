@@ -199,6 +199,7 @@ pub enum Outcome {
     Archive(Vec<(String, Vec<Item>)>),
     Find(Vec<(String, Vec<Item>)>),
     List(Vec<(String, Vec<Item>)>),
+    Projects(Vec<String>),
     Stats(Stats),
 }
 
@@ -225,6 +226,7 @@ impl Outcome {
             Outcome::Archive(_) => "archive",
             Outcome::Find(_) => "find",
             Outcome::List(_) => "list",
+            Outcome::Projects(_) => "projects",
             Outcome::Stats(_) => "stats",
         }
     }
@@ -274,6 +276,7 @@ impl Outcome {
             Outcome::Copy { ids, .. } => out.success_copy_to_clipboard(ids),
             Outcome::Board(groups) | Outcome::Find(groups) | Outcome::List(groups) => out.display_by_board(groups),
             Outcome::Timeline(groups) | Outcome::Archive(groups) => out.display_by_date(groups),
+            Outcome::Projects(names) => out.display_projects(names),
             Outcome::Stats(stats) => out.display_stats(stats),
         }
     }
@@ -288,19 +291,34 @@ impl Ekko {
         Ekko { storage }
     }
 
-    /// Resolves the ekko directory (flag > env > config > default, see
-    /// `directory::retrieve_ekko_directory`) and opens storage in it.
-    /// `home_dir`/`cwd`/`ekko_dir_flag`/`ekko_dir_env` are the real values
-    /// the CLI layer read; kept as parameters here for the same reason
-    /// `directory`/`config` take them explicitly -- fully deterministic,
-    /// no hidden reach into `std::env` inside business logic.
+    /// Resolves the ekko directory and opens storage in it.
+    ///
+    /// Precedence: `--ekko-dir` > `--project` > `EKKO_DIR` > config >
+    /// default. `--ekko-dir` and `--project` together is an error rather
+    /// than a silent winner: both say where data lives, and guessing which
+    /// one someone meant is how you end up writing to the wrong board.
+    ///
+    /// Everything is a parameter here for the same reason `directory` and
+    /// `config` take them explicitly -- fully deterministic, no hidden reach
+    /// into `std::env` inside business logic.
     pub fn open(
         home_dir: &std::path::Path,
         cwd: &std::path::Path,
         ekko_dir_flag: Option<&str>,
         ekko_dir_env: Option<&str>,
+        project: Option<&str>,
+        create_project: bool,
     ) -> Result<Self, EkkoError> {
-        let dir = directory::retrieve_ekko_directory(home_dir, cwd, ekko_dir_flag, ekko_dir_env)?;
+        let dir = match project {
+            Some(name) if ekko_dir_flag.is_some() => {
+                let _ = name;
+                return Err(directory::DirectoryError::ProjectAndEkkoDirTogether.into());
+            }
+            Some(name) => directory::retrieve_project_directory(home_dir, name, create_project)?,
+            None => {
+                directory::retrieve_ekko_directory(home_dir, cwd, ekko_dir_flag, ekko_dir_env)?
+            }
+        };
         Ok(Self::new(Storage::new(&dir)?))
     }
 

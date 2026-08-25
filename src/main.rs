@@ -28,6 +28,7 @@ const HELP: &str = r#"
       --check, -c        Check/uncheck task
       --clear            Delete all checked items
       --copy, -y         Copy item description
+      --create           Create the project named by --project
       --delete, -d       Delete item
       --edit, -e         Edit item description
       --find, -f         Search for items
@@ -37,6 +38,8 @@ const HELP: &str = r#"
       --move, -m         Move item between boards
       --note, -n         Create note
       --priority, -p     Update priority of task
+      --project <NAME>   Work against a named project instead of the default board
+      --projects         List the projects that exist
       --restore, -r      Restore items from archive
       --set              Set item state idempotently (retry-safe)
       --since <MILLIS>   Only items changed at or after a timestamp
@@ -119,13 +122,25 @@ fn main() -> ExitCode {
     let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let ekko_dir_env = std::env::var("EKKO_DIR").ok();
+    // Same role as EKKO_DIR, one level up: sticks a project to a shell
+    // without a persistent "current project" file, which would change what
+    // `ekko` shows from invisible state.
+    let project_env = std::env::var("EKKO_PROJECT").ok();
+    let project = cli.project.as_deref().or(project_env.as_deref());
 
-    let ekko = match Ekko::open(&home_dir, &cwd, cli.ekko_dir.as_deref(), ekko_dir_env.as_deref()) {
+    let ekko = match Ekko::open(
+        &home_dir,
+        &cwd,
+        cli.ekko_dir.as_deref(),
+        ekko_dir_env.as_deref(),
+        project,
+        cli.create,
+    ) {
         Ok(ekko) => ekko,
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
 
-    match dispatch(&cli, &ekko) {
+    match dispatch(&cli, &ekko, &home_dir) {
         Ok(outcomes) => {
             if json_mode {
                 for outcome in &outcomes {
@@ -133,6 +148,15 @@ fn main() -> ExitCode {
                 }
             } else {
                 with_renderer(&home_dir, |r| {
+                    // Named before the board, and only when one is active: an
+                    // EKKO_PROJECT set and forgotten would otherwise show a
+                    // different board with nothing on screen saying so.
+                    // Suppressed for --projects, which is already about them.
+                    if let Some(name) = project {
+                        if !cli.projects {
+                            r.display_project(name);
+                        }
+                    }
                     for outcome in &outcomes {
                         outcome.render(r);
                     }
@@ -150,7 +174,14 @@ fn main() -> ExitCode {
 /// there. `--timeline`/`--list`/the default (no flag) view each produce
 /// *two* outcomes -- the view, then the stats line -- matching the two
 /// separate render calls index.js made for those three cases.
-fn dispatch(cli: &cli::Cli, ekko: &Ekko) -> Result<Vec<Outcome>, EkkoError> {
+fn dispatch(
+    cli: &cli::Cli,
+    ekko: &Ekko,
+    home_dir: &Path,
+) -> Result<Vec<Outcome>, EkkoError> {
+    if cli.projects {
+        return Ok(vec![Outcome::Projects(directory::list_projects(home_dir))]);
+    }
     if cli.archive {
         return Ok(vec![ekko.display_archive()?]);
     }

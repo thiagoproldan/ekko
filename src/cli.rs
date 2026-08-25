@@ -31,6 +31,21 @@ pub struct Cli {
     pub r#move: bool,
     #[arg(long, short = 'n')]
     pub note: bool,
+    /// Work against a named project instead of the default board. Sugar over
+    /// `--ekko-dir`: the project lives at `~/.ekko/projects/<name>`, so the
+    /// filesystem is the registry and there is no list to keep in sync.
+    #[arg(long, value_name = "NAME")]
+    pub project: Option<String>,
+
+    /// Create the project named by `--project` rather than failing when it
+    /// does not exist. Separate on purpose: creating on first use would turn
+    /// a typo into a new, empty project.
+    #[arg(long)]
+    pub create: bool,
+
+    /// List the projects that exist, with their item counts.
+    #[arg(long)]
+    pub projects: bool,
     #[arg(long, short = 'p')]
     pub priority: bool,
     /// Idempotent counterpart to the `--check`/`--begin`/`--star` toggles:
