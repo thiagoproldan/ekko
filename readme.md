@@ -12,29 +12,35 @@
 
 ## Description
 
-Ekko is a pure-Rust rewrite of [taskbook](https://github.com/klaudiosinani/taskbook), keeping its terminal look and simple, minimal usage syntax byte-for-byte and rebuilding everything underneath: machine-readable `--json` output, a real cross-process lock so two invocations writing at once can't silently clobber each other, and a `node:test`\-era test suite carried over as `cargo test`. Local and private by design -- data never leaves your machine, and now nothing about running it depends on Node being installed either.
+Ekko is a pure-Rust rewrite of [taskbook](https://github.com/klaudiosinani/taskbook). It began as a faithful port -- the terminal output is still byte-for-byte identical for anything taskbook could produce, pinned by golden tests that diff against output captured from the real JavaScript build -- and everything underneath was rebuilt: machine-readable `--json` for every command, a `flock`-based cross-process lock so two invocations writing at once cannot silently clobber each other, and the JS test suite carried over and grown.
+
+It has since grown past the original where the original was in the way. Due dates, a real paused state, retry-safe state changes, stable per-item ids and incremental reads are all Ekko's, and none of them disturb a board that does not use them. Where taskbook silently returned a plausible wrong answer, Ekko errors instead.
 
 Effectively a task manager built to be driven by a human and an LLM/coding agent working the same boards at the same time, which is exactly the property the rewrite exists to make solid.
 
 ## Highlights
 
+Inherited from taskbook, and rendered identically:
+
 - Organize tasks & notes into boards
 - Board & timeline views
 - Priority & favorite mechanisms
-- Due dates via `d:YYYY-MM-DD`, coloured by urgency and filterable -- an Ekko addition
-- A real paused state, so "set aside" stops looking like "never started"
-- Long notes fold to one line on screen, and stay whole in pipes and `--json`
-- Retry-safe state changes (`--set`), stable per-item `uid`s, and incremental reads (`--since`) -- built for scripts and agents
 - Search & filter items
 - Archive & restore deleted items
-- Machine-readable `--json` output for every command, scripts and agents included
-- Cross-process file lock: concurrent writers queue instead of losing each other's updates
-- Data written atomically to storage (temp file + rename)
-- Custom storage location, per-project or per-context
 - Progress overview
-- Configurable through `~/.ekko.json`
-- Data stored in plain JSON at `~/.ekko/storage`
-- A reproducible `nix develop` shell for the whole toolchain
+- Configurable through `~/.ekko.json`, data in plain JSON at `~/.ekko/storage`
+
+Added by Ekko, each of them invisible until you use it:
+
+- **Due dates** via `d:YYYY-MM-DD`, coloured by urgency and filterable with `--list due|overdue`
+- **A real paused state**, so "set aside" stops looking like "never started"
+- **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
+- **Stable `uid`s**, because display ids get recycled and `--restore` hands out new ones
+- **`--since`**, reading only what changed rather than the whole board every time
+- **Folded notes** on screen, whole in pipes and `--json`
+- **Errors instead of silence** when a filter term matches nothing
+- **A `flock` lock and atomic writes**, so concurrent invocations queue rather than lose updates
+- **A reproducible `nix develop` shell**, and a flake package you can `nix run` without cloning
 
 <div align="center">
   <img alt="Highlights" width="66%" src="media/highlights.png"/>
@@ -55,15 +61,25 @@ Effectively a task manager built to be driven by a human and an LLM/coding agent
 
 ## Install
 
-Not published anywhere -- build it from this repository.
+With nix, nothing needs cloning:
 
 ```bash
-$ git clone <this repo> && cd ekko
+$ nix run github:thiagoproldan/ekko -- --help
+$ nix profile install github:thiagoproldan/ekko
+```
+
+The flake also exposes the `/ekko` Claude Code skill as `packages.skill`, so a home-manager config can install the tool and the skill it documents together, pinned to the same revision -- see [`skill/readme.md`](skill/readme.md).
+
+With cargo, from a clone:
+
+```bash
 $ nix develop           # Rust toolchain: cargo, rustc, clippy, rustfmt
 $ cargo install --path . --locked
 ```
 
-That installs the `ekko` binary to `~/.cargo/bin` (make sure it's on your `PATH`). To just build it without installing: `cargo build --release`, binary lands at `target/release/ekko`.
+That lands the binary in `~/.cargo/bin`, which your shell may not read. To build without installing: `cargo build --release`, and the binary appears at `target/release/ekko`.
+
+Ekko is Linux-only: the storage lock reads `/proc/<pid>/stat` to tell a dead lock holder from a live one, with no fallback for other platforms.
 
 ## Usage
 
