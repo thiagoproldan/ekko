@@ -498,6 +498,12 @@ impl<'a> Renderer<'a> {
         } else {
             format!("{} {} {}", self.color_boards(&boards), due, self.get_star(item))
         };
+        // Same shape as the board view: prepended, and empty when nothing is
+        // outstanding, which is what keeps the timeline goldens byte-identical.
+        // The board drew this from the day dependencies landed and this view
+        // did not -- one surface got the feature and its sibling did not.
+        let blocked = self.get_blocked(item);
+        let suffix = if blocked.is_empty() { suffix } else { format!("{blocked} {suffix}") };
         let prefix = self.build_prefix(item);
         let message = self.build_message(item);
         self.emit(&prefix, Some(&level), &message, &suffix);
@@ -539,32 +545,45 @@ impl<'a> Renderer<'a> {
         let mut counts = Vec::new();
         for step in steps {
             let done = step.total > 0 && step.complete == step.total;
-            let (icon, painted) = if step.current {
-                ("\u{25c9}", self.painter.blue(&step.name)) // ◉ here
+            // Name and node painted together. Painting only the name left
+            // every dot in the default colour, so behind/here/ahead read as
+            // one weight at a glance -- the shape carried the distinction
+            // alone and the colour that should reinforce it was absent.
+            let icon = if step.current {
+                "\u{25c9}" // ◉ here
             } else if done {
-                ("\u{25cf}", self.painter.green(&step.name)) // ● behind
+                "\u{25cf}" // ● behind
             } else {
-                ("\u{25cb}", self.painter.grey(&step.name)) // ○ ahead
+                "\u{25cb}" // ○ ahead
+            };
+            let label = format!("{} {icon}", step.name);
+            let head = if step.current {
+                self.painter.blue(&label)
+            } else if done {
+                self.painter.green(&label)
+            } else {
+                self.painter.grey(&label)
             };
 
-            let head = format!("{painted} {icon}");
-            // Padded before colouring: an escape sequence has no width on
-            // screen but plenty of bytes, so padding a coloured string lines
-            // nothing up.
+            // Widths come from the plain strings and the padding is appended
+            // outside the colour: an escape sequence has no width on screen
+            // but plenty of chars, so padding a painted string lines nothing
+            // up. `{head:width$}` did exactly that and silently added no
+            // spaces whenever a name was shorter than its own tally.
             let plain = if step.current {
                 format!("{}/{} HERE", step.complete, step.total)
             } else {
                 format!("{}/{}", step.complete, step.total)
             };
             let width = step.name.chars().count().max(plain.chars().count()) + 2;
-            let padded = format!("{plain:width$}");
             let tally = if step.current {
-                self.painter.blue(&padded)
+                self.painter.blue(&format!("{plain:width$}"))
             } else {
-                self.painter.grey(&padded)
+                self.painter.grey(&format!("{plain:width$}"))
             };
 
-            nodes.push(format!("{head:width$}"));
+            let pad = width.saturating_sub(label.chars().count());
+            nodes.push(format!("{head}{:pad$}", ""));
             counts.push(tally);
         }
 
@@ -1265,5 +1284,100 @@ mod tests {
         });
 
         assert_eq!(output, golden("stats-half.ans"));
+    }
+
+    /// The board view drew `⇠` from the day dependencies landed; the
+    /// timeline never did, because `display_item_by_date` was not updated
+    /// alongside `display_item_by_board`. One surface got the feature and
+    /// its sibling did not, which is invisible until you happen to run the
+    /// other view.
+    #[test]
+    fn the_timeline_draws_the_blocked_marker_too() {
+        let mut blocked = Item::new_task(2, "ship it".to_string(), vec!["@coding".to_string()], 1);
+        blocked.date = GOLDEN_DAY.to_string();
+        blocked.timestamp = golden_now().timestamp_millis();
+        let groups = vec![(GOLDEN_DAY.to_string(), vec![blocked])];
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(2, vec![1]);
+
+        let output = render_with(Config::default(), |r| {
+            r.with_blockers(map);
+            r.display_by_date(&groups);
+        });
+
+        assert!(output.contains('\u{21e0}'), "timeline dropped the marker: {output:?}");
+        assert!(output.contains("ship it"), "timeline lost the description: {output:?}");
+    }
+
+    /// The path's three node glyphs carry the state, and the colour has to
+    /// carry it with them. Painting only the name left every dot in the
+    /// terminal default, so behind, here and ahead read as one weight.
+    #[test]
+    fn path_nodes_are_painted_with_their_phase() {
+        let steps = vec![
+            PathStep { name: "setup".into(), complete: 2, total: 2, notes: 0, current: false },
+            PathStep { name: "build".into(), complete: 0, total: 3, notes: 0, current: true },
+            PathStep { name: "ship".into(), complete: 0, total: 1, notes: 0, current: false },
+        ];
+
+        let output = render_with(Config::default(), |r| r.display_path(&steps, 0));
+
+        // Each glyph inside its colour's span, not after the close.
+        assert!(output.contains("\u{1b}[32msetup \u{25cf}"), "done node unpainted: {output:?}");
+        assert!(output.contains("\u{1b}[34mbuild \u{25c9}"), "current node unpainted: {output:?}");
+        assert!(output.contains("\u{1b}[90mship \u{25cb}"), "ahead node unpainted: {output:?}");
+    }
+
+    /// Column widths are counted on the plain text and the padding is
+    /// appended outside the colour. Padding the *painted* string counted the
+    /// escape sequences as width, so whenever a phase name was shorter than
+    /// its own tally the node row silently got no padding at all and the two
+    /// rows drifted apart -- only with colour on, which is to say only in a
+    /// real terminal and never in a pipe.
+    #[test]
+    fn path_rows_line_up_when_the_tally_is_wider_than_the_name() {
+        let steps = vec![
+            PathStep { name: "ci".into(), complete: 0, total: 12, notes: 0, current: true },
+            PathStep { name: "build".into(), complete: 0, total: 0, notes: 0, current: false },
+        ];
+
+        let output = render_with(Config::default(), |r| r.display_path(&steps, 0));
+
+        let plain: String = strip_ansi(&output);
+        let rows: Vec<&str> = plain.lines().filter(|l| !l.trim().is_empty()).collect();
+        let nodes = rows[0];
+        let counts = rows[1];
+
+        // Columns, not byte offsets: `───` and `◉` are three bytes each, so
+        // `str::find` would report the two rows as misaligned when they line
+        // up perfectly on screen.
+        fn column(haystack: &str, needle: &str) -> Option<usize> {
+            haystack.find(needle).map(|b| haystack[..b].chars().count())
+        }
+
+        // "build" on the node row starts in the column "0/0" does below it.
+        assert_eq!(
+            column(nodes, "build"),
+            column(counts, "0/0"),
+            "node and tally rows drifted:\n{nodes}\n{counts}"
+        );
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 }
