@@ -18,7 +18,12 @@ jobs:
     name: build, test & clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # v5 is the first release on Node 24; v4 targets Node 20, which GitHub
+      # deprecated and now force-upgrades with a warning on every run. Newer
+      # majors exist, but their release notes do not say what changed, and
+      # this action is used with no inputs at all -- there is nothing to gain
+      # from adopting changes nobody can enumerate.
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
