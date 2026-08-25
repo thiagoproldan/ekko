@@ -1,6 +1,6 @@
 ---
 name: ekko
-description: Track work on a shared ekko board (tasks, notes, boards, due dates, archive) that both the user and Claude read and write. Use when work spans sessions, when the user wants to see or edit the task list themselves, or when they ask to put something "on the board". Not a replacement for TodoWrite, which stays the right tool for a plan that only lives inside one conversation.
+description: Track work on a shared ekko board (tasks, notes, boards, due dates, dependencies, projects and phases, archive) that both the user and Claude read and write. Use when work spans sessions, when the user wants to see or edit the task list themselves, or when they ask to put something "on the board". Not a replacement for TodoWrite, which stays the right tool for a plan that only lives inside one conversation.
 ---
 
 # Ekko as a shared board
@@ -99,8 +99,8 @@ Add `--json` to anything whose result you will branch on.
   `{"command":"stats",...}` line. Parse line by line, not as one document.
 - Errors are `{"ok":false,"error":...,"code":...}` with a stable `code`
   (`INVALID_ID`, `UNKNOWN_LIST_TERM`, `UNKNOWN_STATE`, `INVALID_DUE_DATE`,
-  `LOCK_TIMEOUT`, …). Branch on `code`; the message text is not an API. Exit
-  status is `1`.
+  `BLOCKING_CYCLE`, `LOCK_TIMEOUT`, …). Branch on `code`; the message text is
+  not an API. Exit status is `1`.
 - `--restore` especially: the pretty output reports the *archive* id, while the
   item comes back with a fresh storage id. Only `--json` gives you both
   (`archiveId`, `storageId`).
@@ -114,11 +114,79 @@ state the item should end up in and is therefore safe to repeat:
     ekko --set @3 done
     ekko --set @1 @2 progress starred
 
-States: `done`, `undone`, `progress`, `paused`, `starred`, `unstarred` (plus
-the `--list` aliases). Ids take `@`, states do not. Unknown states error rather
-than doing nothing.
+States: `done`, `undone`, `progress`, `paused`, `cancelled`, `unstarted`,
+`starred`, `unstarred` (plus the `--list` aliases). Ids take `@`, states do
+not. Unknown states error rather than doing nothing.
+
+Two of those are not toggles of anything and are worth knowing:
+
+- `cancelled` is terminal, like `done`, and mutually exclusive with it —
+  abandoned on purpose, struck through, kept as context rather than deleted.
+  It is left out of the percentage denominator, so a board that drops
+  something can still reach 100%. Prefer it to `--delete` when the user
+  decides against a task: the record of having decided is usually the point.
+- `unstarted` is the way back. It clears progress, pause and cancellation at
+  once, which is what undoes a `--set` aimed at the wrong id.
 
 Leave the toggles to the user — they are the shorter thing to type by hand.
+
+## Dependencies, and the one filter to reach for
+
+`ekko --blocked-by @3 1 2` records that item 3 waits on 1 and 2. The `@`
+marks the item being blocked; the blockers are bare ids. Blocked items render
+with `⇠ 1, 2` after the description.
+
+Blockers are stored as `uid` and **evaluated live**, never latched. Reopening
+a finished blocker re-blocks everything waiting on it, with no command to
+run. Cycles are refused at write time (`BLOCKING_CYCLE`), so the graph cannot
+be made inconsistent.
+
+`ekko --list ready` is the filter this exists for: pending items with no
+unmet blockers — what can actually be started right now. Reach for it instead
+of reading the whole board and reasoning about order yourself, which is both
+more expensive and easier to get wrong.
+
+One limit to know: there is no way to clear a dependency once set. Passing
+`--blocked-by @3` with no blockers errors rather than unblocking. Say so
+rather than guessing at a spelling.
+
+## Projects and phases
+
+The default board is flat: boards (areas) and items, quick capture, no
+hierarchy. That is unchanged and is still the right shape for most work.
+
+A **project** is a separate board with its own storage. `--project <name>`
+scopes every command to it, `--projects` lists them, and `--project <name>
+--create` makes one. It is sugar over `--ekko-dir` and the two are mutually
+exclusive — passing both errors rather than picking one.
+
+Inside a project the hierarchy is **project > phase > area**. Each phase is
+its own world, so the same area name in two phases means two distinct areas.
+
+Phases are declared, never inferred — "setup comes before build" is
+knowledge, not a timestamp:
+
+    ekko --project demo --phases setup build ship
+
+That **replaces** the whole ordered list rather than appending, which is what
+makes reordering and inserting the same operation. Same contract as `--move`.
+
+Two things that will bite otherwise:
+
+- `--phase <name>` scopes **creation only**. `--task` and `--note` honour it;
+  the views ignore it silently, so `--project demo --phase build` prints the
+  whole project, not that phase.
+- A task created in a project *without* `--phase` lands at the project root,
+  outside the path — never in a guessed current phase. `--path` counts those
+  at its foot so they stay visible.
+
+`ekko --project demo --path` is the phase-aware view:
+
+    setup ●───build ◉   ───ship ○
+    2/2       0/2 HERE     0/0
+
+    1 note · 1 outside any phase
+
 
 ## Command shapes worth memorising
 
@@ -132,9 +200,18 @@ Leave the toggles to the user — they are the shorter thing to type by hand.
 | changed only | `ekko --json --since 1787600000000` | epoch millis |
 | history | `ekko --archive` | completed items, grouped by date |
 | restore | `ekko --restore 2` | takes the **archive** id |
+| what can start | `ekko --list ready` | pending, no unmet blockers |
+| declare a blocker | `ekko --blocked-by @3 1 2` | `@` marks the **blocked** item |
+| scope to a project | `ekko --project demo --list ready` | mutually exclusive with `--ekko-dir` |
+| the phase view | `ekko --project demo --path` | `--phase` itself only affects creation |
 
 Filter attributes: `pending`, `progress`, `done`, `star`, `task`, `note`,
-`due`, `overdue`, `myboard`, plus any board name.
+`cancelled`, `ready`, `blocked`, `due`, `overdue`, `myboard`, plus any board
+name. Several have aliases (`checked`/`complete`, `started`/`begun`,
+`unchecked`/`incomplete`, `todo`). Boards work bare or as `@board`, but by
+their `@` name — `--list 'My Board'` errors, `--list myboard` is the spelling
+for the default one. Unknown terms error rather than quietly returning
+everything.
 
 ## Destructive commands need consent
 
@@ -142,6 +219,12 @@ Filter attributes: `pending`, `progress`, `done`, `star`, `task`, `note`,
 board the user also owns, including items you never saw them create. Ask first,
 every time, even if the user asked you to "clean up". Their idea of which items
 are finished with may not match the board's `isComplete` flags.
+
+Before proposing `--delete`, consider `--set @N cancelled` instead. It keeps
+the item, struck through, and does not count against the percentage — so
+"we decided not to do this" survives as a fact rather than as a hole where an
+item used to be. Deleting is for things that should never have been on the
+board; cancelling is for things that were, and then were not.
 
 Concurrency itself is safe: the storage lock is `flock(2)`, so parallel
 invocations queue rather than clobbering each other. It is your *judgement*
