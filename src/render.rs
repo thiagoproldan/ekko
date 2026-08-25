@@ -200,6 +200,11 @@ pub struct Renderer<'a> {
     /// write every note in full. Folding is about a screen, so it asks the
     /// screen directly.
     fold_width: Option<usize>,
+    /// Unmet blockers per item id, computed where the whole map is in scope
+    /// and handed in, since blockers can point at items outside the current
+    /// view and resolving them from the view alone would report the wrong
+    /// answer.
+    blockers: std::collections::HashMap<u32, Vec<u32>>,
 }
 
 impl<'a> Renderer<'a> {
@@ -217,7 +222,19 @@ impl<'a> Renderer<'a> {
     fn at(painter: Painter, config: Config, out: &'a mut dyn Write, now: DateTime<Local>) -> Self {
         // Folding off by default, so every test -- the byte-for-byte golden
         // ones above all -- renders exactly what it always did.
-        Renderer { painter, config, out, now, fold_width: None }
+        Renderer {
+            painter,
+            config,
+            out,
+            now,
+            fold_width: None,
+            blockers: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Hands the renderer the unmet blockers it cannot work out for itself.
+    pub fn with_blockers(&mut self, blockers: std::collections::HashMap<u32, Vec<u32>>) {
+        self.blockers = blockers;
     }
 
     fn today(&self) -> String {
@@ -344,6 +361,21 @@ impl<'a> Renderer<'a> {
 /// The due date, coloured by how it stands against today: overdue red,
 /// due today yellow, still ahead grey. Empty when the item has no due
 /// date, which is what keeps output for every pre-existing item -- and
+    /// The `⇠ ids` marker, listing only the blockers still outstanding.
+    ///
+    /// A satisfied blocker vanishes on its own, so the marker always names
+    /// what is holding the item up *now* -- nothing ever has to be unblocked
+    /// by hand. Empty when there is nothing outstanding, which is what keeps
+    /// every pre-existing board byte-identical.
+    fn get_blocked(&self, item: &Item) -> String {
+        let Some(ids) = self.blockers.get(&item.id) else { return String::new() };
+        if ids.is_empty() {
+            return String::new();
+        }
+        let list = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+        self.painter.grey(&format!("\u{21e0} {list}"))
+    }
+
 /// every golden reference -- byte-identical.
 ///
 /// Compared as plain strings: `parse_due_date` canonicalises to
@@ -436,10 +468,12 @@ impl<'a> Renderer<'a> {
     }
 
     fn display_item_by_board(&mut self, item: &Item, now_millis: i64) {
+
         let level = self.item_level(item);
         let age = self.get_age_days(item.timestamp, now_millis);
         let star = self.get_star(item);
         let due = self.get_due(item);
+        let blocked = self.get_blocked(item);
         // Spelled out rather than filtered-and-joined so the two pre-existing
         // cases keep their exact spacing, trailing space included.
         let suffix = match (age.is_empty(), due.is_empty()) {
@@ -448,6 +482,7 @@ impl<'a> Renderer<'a> {
             (true, false) => format!("{due} {star}"),
             (false, false) => format!("{age} {due} {star}"),
         };
+        let suffix = if blocked.is_empty() { suffix } else { format!("{blocked} {suffix}") };
         let prefix = self.build_prefix(item);
         let message = self.build_message(item);
         self.emit(&prefix, Some(&level), &message, &suffix);
@@ -553,6 +588,16 @@ impl<'a> Renderer<'a> {
         }
     }
 
+
+    /// Reports what an item now waits on, or that it waits on nothing.
+    pub fn success_blocked(&mut self, id: u32, blockers: &[u32]) {
+        if blockers.is_empty() {
+            self.success(" ", &format!("Item {id} waits on nothing"), "");
+            return;
+        }
+        let suffix = self.painter.grey(&join_ids(blockers));
+        self.success(" ", &format!("Item {id} now waits on:"), &suffix);
+    }
     pub fn display_projects(&mut self, names: &[String]) {
         if names.is_empty() {
             self.emit("\n ", None, "No projects yet -- create one with `ekko --project <name> --create`", "");

@@ -88,6 +88,18 @@ pub struct Item {
     /// areas; this field is what tells them apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Items this one waits on, by `uid`.
+    ///
+    /// By uid and not by display id: ids are recycled, so a dependency
+    /// stored as `3` would silently start pointing at a different item the
+    /// moment the original was deleted and the number reused. That is the
+    /// exact hazard `uid` was added for.
+    ///
+    /// A blocker that no longer exists does not block -- deleting it is a
+    /// way to unblock, and the alternative is an item stuck forever on
+    /// something nobody can finish.
+    #[serde(rename = "blockedBy", default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<Vec<String>>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -114,6 +126,7 @@ impl Item {
             paused: None,
             cancelled: None,
             phase: None,
+            blocked_by: None,
             priority: Some(priority),
         }
     }
@@ -137,6 +150,7 @@ impl Item {
             paused: None,
             cancelled: None,
             phase: None,
+            blocked_by: None,
         }
     }
 }

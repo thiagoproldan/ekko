@@ -37,6 +37,7 @@ Added by Ekko, each of them invisible until you use it:
 - **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
 - **Projects**: one board per project via `--project`, with the filesystem as the registry
 - **Phases and `--path`**: a project's journey, read backwards as history and forwards as a plan
+- **Dependencies**: `--blocked-by`, and `--list ready` for what can actually be started
 - **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
 - **Stable `uid`s**, because display ids get recycled and `--restore` hands out new ones
 - **`--since`**, reading only what changed rather than the whole board every time
@@ -96,6 +97,7 @@ $ ekko --help
         none             Display board view
       --archive, -a      Display archived items
       --begin, -b        Start/pause task
+      --blocked-by <IDS> Record what an item waits on
       --check, -c        Check/uncheck task
       --clear            Delete all checked items
       --copy, -y         Copy item description
@@ -340,6 +342,36 @@ To read a folded note in full, pipe the output (`ekko | less`) or use `--json`, 
 
 
 
+
+### Dependencies
+
+Record what an item waits on, and the board stops pretending everything is equally startable:
+
+```
+$ ekko --blocked-by @3 1 2
+ ✔  Item 3 now waits on: 1, 2
+```
+
+```
+  @packaging [0/3]
+    1. ☐  Vendor wlroots
+    2. ☐  Damage tracking
+    3. ☐  Ship the package ⇠ 1, 2
+```
+
+`--list ready` is the daily question -- what can be started right now -- and `--list blocked` is its complement.
+
+Four properties, each of them a consequence rather than a feature:
+
+- **Blockers are evaluated live, never latched.** Finishing a blocker unblocks whatever waited on it, with nothing to do by hand; the marker only ever names what is holding the item up *now*. Reopening a finished blocker blocks it again, which is what makes going back to an earlier link work at all.
+- **A blocker that is cancelled or deleted stops blocking.** Neither can ever be finished, so treating them as outstanding would strand the waiter forever.
+- **Stored by `uid`, not by display id.** Ids are recycled, and a dependency stored as a number would quietly follow the number to a different item.
+- **Cycles are refused.** Two items waiting on each other is a pair nothing can make ready, and the board would state it as calmly as any other fact.
+
+`--blocked-by` replaces the list rather than adding to it, the same contract `--move` and `--phases` already use.
+
+There is no picture yet, on purpose. The data is what a drawing would need anyway, and whether a drawing earns its keep is easier to answer after living with `--list ready` for a while than before.
+
 ### Phases and the path
 
 Inside a project the shape is `project > phase > area`. The default board has no phases at all -- it stays what it always was, areas and tasks, for when you just want to write something down.
@@ -532,6 +564,8 @@ The by default supported listing attributes, together with their respective alia
 - `due` - Tasks that have a due date.
 - `overdue` - Tasks whose due date has passed and that are not yet complete.
 - `cancelled`, `canceled` - Tasks that were dropped rather than finished.
+- `ready` - Open tasks with nothing outstanding blocking them.
+- `blocked` - Items still waiting on something.
 
 A board can be named either bare or in the `@name` form the board view prints, so `--list release` and `--list @release` are equivalent. A term matching neither a board nor an attribute above is an error (`UNKNOWN_LIST_TERM`), not a silent no-op.
 

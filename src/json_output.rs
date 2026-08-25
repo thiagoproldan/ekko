@@ -51,6 +51,9 @@ fn success_value(outcome: &Outcome) -> Value {
         }
         Outcome::Projects(names) => json!({"ok": true, "command": command, "projects": names}),
         Outcome::Phases(names) => json!({"ok": true, "command": command, "phases": names}),
+        Outcome::Blocked { item, blockers } => {
+            json!({"ok": true, "command": command, "item": item, "blockers": blockers})
+        }
         Outcome::Path { steps, rootless } => {
             json!({"ok": true, "command": command, "steps": steps, "rootless": rootless})
         }

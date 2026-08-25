@@ -33,6 +33,7 @@ pub enum EkkoError {
     InvalidDueDate(String),
     MissingState,
     UnknownState(String),
+    BlockingCycle(u32, u32),
     InvalidCustomAppDir(String),
     MissingEkkoDirFlagValue,
     LockTimeout(String),
@@ -58,6 +59,7 @@ impl EkkoError {
             EkkoError::InvalidDueDate(_) => "INVALID_DUE_DATE",
             EkkoError::MissingState => "MISSING_STATE",
             EkkoError::UnknownState(_) => "UNKNOWN_STATE",
+            EkkoError::BlockingCycle(_, _) => "BLOCKING_CYCLE",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
             EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
             EkkoError::LockTimeout(_) => "LOCK_TIMEOUT",
@@ -86,6 +88,7 @@ impl EkkoError {
             EkkoError::InvalidDueDate(_) => out.generic_error(&self.to_string()),
             EkkoError::MissingState => out.generic_error(&self.to_string()),
             EkkoError::UnknownState(_) => out.generic_error(&self.to_string()),
+            EkkoError::BlockingCycle(_, _) => out.generic_error(&self.to_string()),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
             EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
             EkkoError::LockTimeout(path) => out.lock_timeout(path),
@@ -113,6 +116,10 @@ impl std::fmt::Display for EkkoError {
                 write!(f, "Due date must look like d:YYYY-MM-DD, got: {token}")
             }
             EkkoError::MissingState => write!(f, "No state was given as input"),
+            EkkoError::BlockingCycle(waiter, blocker) => write!(
+                f,
+                "Item {waiter} cannot wait on {blocker}: {blocker} already waits on {waiter}"
+            ),
             EkkoError::UnknownState(term) => {
                 write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, cancelled, unstarted, starred, unstarred")
             }
@@ -201,6 +208,7 @@ pub enum Outcome {
     List(Vec<(String, Vec<Item>)>),
     Projects(Vec<String>),
     Phases(Vec<String>),
+    Blocked { item: Item, blockers: Vec<u32> },
     Path { steps: Vec<PathStep>, rootless: u32 },
     Stats(Stats),
 }
@@ -231,6 +239,7 @@ impl Outcome {
             Outcome::List(_) => "list",
             Outcome::Projects(_) => "projects",
             Outcome::Phases(_) => "phases",
+            Outcome::Blocked { .. } => "blocked",
             Outcome::Path { .. } => "path",
             Outcome::Stats(_) => "stats",
         }
@@ -283,6 +292,7 @@ impl Outcome {
             Outcome::Timeline(groups) | Outcome::Archive(groups) => out.display_by_date(groups),
             Outcome::Projects(names) => out.display_projects(names),
             Outcome::Phases(names) => out.display_projects(names),
+            Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
             Outcome::Path { steps, rootless } => out.display_path(steps, *rootless),
             Outcome::Stats(stats) => out.display_stats(stats),
         }
@@ -527,6 +537,21 @@ impl Ekko {
                 }
                 "todo" | "task" | "tasks" => data.retain(|_, item| item.is_task),
                 "note" | "notes" => data.retain(|_, item| !item.is_task),
+                // Needs the whole map, not just the retained subset: a
+                // blocker can sit outside whatever else is being filtered.
+                "ready" => {
+                    let all = data.clone();
+                    data.retain(|_, item| {
+                        item.is_task
+                            && !item.is_complete.unwrap_or(false)
+                            && !item.cancelled.unwrap_or(false)
+                            && Self::unmet_blockers(&all, item).is_empty()
+                    });
+                }
+                "blocked" => {
+                    let all = data.clone();
+                    data.retain(|_, item| !Self::unmet_blockers(&all, item).is_empty());
+                }
                 "cancelled" | "canceled" => {
                     data.retain(|_, item| item.cancelled.unwrap_or(false));
                 }
@@ -946,6 +971,90 @@ impl Ekko {
         Ok(Outcome::Board(self.group_by_board(&data, &boards)))
     }
 
+    /// Unmet blockers for every item that has any, keyed by display id.
+    pub fn blocker_map(&self) -> Result<std::collections::HashMap<u32, Vec<u32>>, EkkoError> {
+        let data = self.storage.get()?;
+        let mut map = std::collections::HashMap::new();
+        for (id, item) in &data {
+            let unmet = Self::unmet_blockers(&data, item);
+            if !unmet.is_empty() {
+                map.insert(*id, unmet);
+            }
+        }
+        Ok(map)
+    }
+
+    /// Records that one item waits on others, replacing whatever it waited
+    /// on before -- the same contract `--move` and `--phases` use.
+    ///
+    /// Refuses to create a cycle. Without one, A waiting on B while B waits
+    /// on A is a pair nothing can ever make ready, and the board would state
+    /// it as calmly as any other fact.
+    pub fn set_blocked_by(&self, input: &[String]) -> Result<Outcome, EkkoError> {
+        let _lock = self.storage.acquire_lock()?;
+        let mut data = self.storage.get()?;
+
+        let (id_str, rest) = self.extract_single_id_target(input)?;
+        let id = self.validate_ids(&[id_str], &data)?[0];
+
+        let blocker_ids = self.validate_ids(
+            &rest.into_iter().cloned().collect::<Vec<String>>(),
+            &data,
+        )?;
+
+        for blocker in &blocker_ids {
+            if *blocker == id {
+                return Err(EkkoError::BlockingCycle(id, *blocker));
+            }
+            if self.reaches(&data, *blocker, id) {
+                return Err(EkkoError::BlockingCycle(id, *blocker));
+            }
+        }
+
+        let uids: Vec<String> =
+            blocker_ids.iter().filter_map(|b| data.get(b)?.uid.clone()).collect();
+
+        let item = data.get_mut(&id).expect("id just validated against data");
+        item.blocked_by = if uids.is_empty() { None } else { Some(uids) };
+        let updated = item.clone();
+
+        self.save_touching(&mut data)?;
+        Ok(Outcome::Blocked { item: updated, blockers: blocker_ids })
+    }
+
+    /// Whether `from` already waits, directly or through others, on `target`.
+    fn reaches(&self, data: &ItemMap, from: u32, target: u32) -> bool {
+        let Some(item) = data.get(&from) else { return false };
+        let Some(blockers) = item.blocked_by.as_ref() else { return false };
+
+        for uid in blockers {
+            let Some((id, _)) = data.iter().find(|(_, i)| i.uid.as_deref() == Some(uid)) else {
+                continue;
+            };
+            if *id == target || self.reaches(data, *id, target) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The blockers of `item` that are still outstanding, as current display
+    /// ids. A finished, cancelled or deleted blocker is not one -- which is
+    /// why nothing ever has to be unblocked by hand.
+    pub fn unmet_blockers(data: &ItemMap, item: &Item) -> Vec<u32> {
+        let Some(uids) = item.blocked_by.as_ref() else { return Vec::new() };
+
+        let mut ids: Vec<u32> = uids
+            .iter()
+            .filter_map(|uid| data.iter().find(|(_, i)| i.uid.as_deref() == Some(uid)))
+            .filter(|(_, blocker)| {
+                !blocker.is_complete.unwrap_or(false) && !blocker.cancelled.unwrap_or(false)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
     /// Replaces the project's phase sequence.
     pub fn set_phases(&self, names: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
@@ -1167,6 +1276,8 @@ fn is_known_attribute(term: &str) -> bool {
             | "notes"
             | "cancelled"
             | "canceled"
+            | "ready"
+            | "blocked"
             | "due"
             | "overdue"
     )
@@ -1383,6 +1494,101 @@ mod tests {
 
         assert!(ids.contains(&1));
         assert!(ids.contains(&2), "an in-progress task should still show up under the pending filter, matching JS");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_blocker_that_finishes_stops_blocking_without_anyone_saying_so() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["first"])).unwrap();
+        ekko.create_task(&words(&["second"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        assert_eq!(Ekko::unmet_blockers(&data, &data[&2]), vec![1]);
+
+        ekko.set_state(&words(&["@1", "done"])).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        assert!(Ekko::unmet_blockers(&data, &data[&2]).is_empty(), "nothing to unblock by hand");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn blockers_are_stored_by_uid_so_a_recycled_id_cannot_repoint_them() {
+        // Ids are max + 1, so deleting the highest and creating another hands
+        // the number back. A dependency stored as a number would follow it.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["waiter"])).unwrap();
+        ekko.create_task(&words(&["doomed"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        let stored = ekko.storage.get().unwrap()[&2].blocked_by.clone().unwrap();
+        let blocker_uid = ekko.storage.get().unwrap()[&1].uid.clone().unwrap();
+        assert_eq!(stored, vec![blocker_uid], "stored by uid, not by 1");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_cycle_is_refused_rather_than_recorded() {
+        // Without it, two items wait on each other and neither can ever be
+        // ready -- a fact the board would state as calmly as any other.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["a"])).unwrap();
+        ekko.create_task(&words(&["b"])).unwrap();
+        ekko.create_task(&words(&["c"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        ekko.set_blocked_by(&words(&["@3", "2"])).unwrap();
+
+        // Direct, and through the chain a -> b -> c.
+        assert!(matches!(
+            ekko.set_blocked_by(&words(&["@1", "2"])),
+            Err(EkkoError::BlockingCycle(_, _))
+        ));
+        assert!(matches!(
+            ekko.set_blocked_by(&words(&["@1", "3"])),
+            Err(EkkoError::BlockingCycle(_, _))
+        ));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn ready_excludes_blocked_work_and_blocked_finds_it() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["free"])).unwrap();
+        ekko.create_task(&words(&["waiting"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        let ids = |o: Outcome| -> Vec<u32> {
+            let Outcome::List(groups) = o else { panic!() };
+            groups.iter().flat_map(|(_, i)| i.iter().map(|x| x.id)).collect()
+        };
+
+        assert_eq!(ids(ekko.list_by_attributes(&words(&["ready"])).unwrap()), vec![1]);
+        assert_eq!(ids(ekko.list_by_attributes(&words(&["blocked"])).unwrap()), vec![2]);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn deleting_a_blocker_unblocks_what_waited_on_it() {
+        // A blocker that no longer exists cannot be finished, so treating it
+        // as still blocking would strand the waiter forever.
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["waiter"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        ekko.delete_items(&words(&["1"])).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        let waiter = data.values().next().unwrap();
+        assert!(Ekko::unmet_blockers(&data, waiter).is_empty());
 
         cleanup(&dir);
     }

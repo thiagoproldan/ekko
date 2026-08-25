@@ -25,6 +25,7 @@ const HELP: &str = r#"
         none             Display board view
       --archive, -a      Display archived items
       --begin, -b        Start/pause task
+      --blocked-by <IDS> Record what an item waits on
       --check, -c        Check/uncheck task
       --clear            Delete all checked items
       --copy, -y         Copy item description
@@ -150,7 +151,9 @@ fn main() -> ExitCode {
                     json_output::print_success(outcome);
                 }
             } else {
+                let blockers = ekko.blocker_map().unwrap_or_default();
                 with_renderer(&home_dir, |r| {
+                    r.with_blockers(blockers);
                     // Named before the board, and only when one is active: an
                     // EKKO_PROJECT set and forgotten would otherwise show a
                     // different board with nothing on screen saying so.
@@ -182,6 +185,9 @@ fn dispatch(
     ekko: &Ekko,
     home_dir: &Path,
 ) -> Result<Vec<Outcome>, EkkoError> {
+    if let Some(args) = cli.blocked_by.as_deref() {
+        return Ok(vec![ekko.set_blocked_by(args)?]);
+    }
     if let Some(names) = cli.phases.as_deref() {
         return Ok(vec![ekko.set_phases(names)?]);
     }

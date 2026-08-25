@@ -11,6 +11,11 @@ pub struct Cli {
     pub archive: bool,
     #[arg(long, short = 'b')]
     pub begin: bool,
+    /// Record what an item waits on: the target id prefixed with `@`, then
+    /// the ids it should wait for. Replaces whatever it waited on before.
+    #[arg(long = "blocked-by", num_args = 0.., value_name = "IDS")]
+    pub blocked_by: Option<Vec<String>>,
+
     #[arg(long, short = 'c')]
     pub check: bool,
     #[arg(long)]
