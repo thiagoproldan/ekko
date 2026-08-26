@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 
 use crate::config;
 use crate::paths::resolve_path;
+use crate::render::ProjectSummary;
+use crate::storage::ItemMap;
 
 const EKKO_DIR_NAME: &str = ".ekko";
 
@@ -106,7 +108,7 @@ pub fn retrieve_project_directory(
 }
 
 /// Every project that exists, in name order.
-pub fn list_projects(home_dir: &Path) -> Vec<String> {
+pub fn list_projects(home_dir: &Path) -> Vec<ProjectSummary> {
     let root = home_dir.join(EKKO_DIR_NAME).join(PROJECTS_DIR_NAME);
     let Ok(entries) = std::fs::read_dir(&root) else {
         return Vec::new();
@@ -118,7 +120,49 @@ pub fn list_projects(home_dir: &Path) -> Vec<String> {
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
     names.sort();
+
     names
+        .into_iter()
+        .map(|name| {
+            let storage = root.join(&name).join(EKKO_DIR_NAME).join("storage").join("storage.json");
+            let (complete, tasks, notes) = count_items(&storage);
+            ProjectSummary { name, complete, tasks, notes }
+        })
+        .collect()
+}
+
+/// Reads one project's storage directly rather than through `Storage`,
+/// which creates the directories it expects -- a side effect no listing
+/// should have, least of all one that might run while a project is being
+/// removed.
+///
+/// An absent file is an empty project and counts as such: `--create` makes
+/// the directories and writes nothing until the first item. A file that
+/// cannot be parsed also reads as empty here, because failing the whole
+/// listing over one bad project would hide the good ones; opening that
+/// project reports the real error.
+fn count_items(storage_file: &Path) -> (u32, u32, u32) {
+    let Ok(contents) = std::fs::read_to_string(storage_file) else {
+        return (0, 0, 0);
+    };
+    let Ok(items) = serde_json::from_str::<ItemMap>(&contents) else {
+        return (0, 0, 0);
+    };
+
+    let mut complete = 0;
+    let mut tasks = 0;
+    let mut notes = 0;
+    for item in items.values() {
+        if item.is_task {
+            tasks += 1;
+            if item.is_complete.unwrap_or(false) {
+                complete += 1;
+            }
+        } else {
+            notes += 1;
+        }
+    }
+    (complete, tasks, notes)
 }
 
 pub fn retrieve_ekko_directory(
@@ -244,8 +288,69 @@ mod tests {
 
         retrieve_project_directory(&home, "winwayland", true).unwrap();
 
-        assert_eq!(list_projects(&home), vec!["winwayland".to_string()]);
+        let listed = list_projects(&home);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "winwayland");
         assert!(retrieve_project_directory(&home, "winwayland", false).is_ok(), "now resolvable");
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A project created and never written to has no storage.json at all,
+    /// which is an empty project and must count as one rather than as an
+    /// error or a gap in the listing.
+    #[test]
+    fn a_project_with_nothing_written_yet_counts_as_empty() {
+        let home = temp_dir();
+        retrieve_project_directory(&home, "fresh", true).unwrap();
+
+        let listed = list_projects(&home);
+
+        assert_eq!((listed[0].complete, listed[0].tasks, listed[0].notes), (0, 0, 0));
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// The counts are the whole point of the listing: a project is the one
+    /// thing here with no archive behind it, so what it holds has to be
+    /// visible before acting on it. Tasks and notes are counted separately,
+    /// matching what a board title means by `[1/2]`.
+    #[test]
+    fn listing_reports_what_each_project_holds() {
+        let home = temp_dir();
+        let ekko_dir = retrieve_project_directory(&home, "work", true).unwrap();
+        let storage = ekko_dir.join("storage");
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(
+            storage.join("storage.json"),
+            r#"{
+              "1":{"_id":1,"_date":"Tue Aug 25 2026","_timestamp":1787600000000,"description":"done one","isStarred":false,"boards":["@a"],"_isTask":true,"isComplete":true,"inProgress":false,"priority":1},
+              "2":{"_id":2,"_date":"Tue Aug 25 2026","_timestamp":1787600000000,"description":"open one","isStarred":false,"boards":["@a"],"_isTask":true,"isComplete":false,"inProgress":false,"priority":1},
+              "3":{"_id":3,"_date":"Tue Aug 25 2026","_timestamp":1787600000000,"description":"a note","isStarred":false,"boards":["@a"],"_isTask":false}
+            }"#,
+        )
+        .unwrap();
+
+        let listed = list_projects(&home);
+
+        assert_eq!((listed[0].complete, listed[0].tasks, listed[0].notes), (1, 2, 1));
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// Listing must not be a write. `Storage::new` creates the directories
+    /// it expects, so counting through it would have the listing recreate
+    /// storage for every project it walks -- including one being removed.
+    #[test]
+    fn listing_creates_nothing() {
+        let home = temp_dir();
+        let ekko_dir = retrieve_project_directory(&home, "solo", true).unwrap();
+        let storage = ekko_dir.join("storage");
+        fs::remove_dir_all(&storage).ok();
+
+        list_projects(&home);
+
+        assert!(!storage.exists(), "listing recreated {}", storage.display());
 
         fs::remove_dir_all(&home).ok();
     }

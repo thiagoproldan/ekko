@@ -418,7 +418,10 @@ One board per project, without typing paths. `--project <name>` works against `~
 ```
 $ ekko --project winwayland --create      # first time only
 $ ekko --project winwayland --task @setup Build the compositor
-$ ekko --projects                          # what exists
+
+$ ekko --projects
+  compositor [3/12] · 2 notes
+  winwayland [0/0]
 ```
 
 `EKKO_PROJECT` does the same for a whole shell, the way `EKKO_DIR` already does for a directory.
@@ -426,6 +429,7 @@ $ ekko --projects                          # what exists
 This is sugar over `--ekko-dir`, which could always point at a per-project board -- what it adds is not having to remember where each one lives. Four decisions worth knowing:
 
 - **The filesystem is the registry.** There is no list of projects kept alongside the directories, so nothing can drift out of step with what exists. `--projects` reads the directory.
+- **The listing says what each project holds**, in the same `[complete/tasks]` a board title uses, with notes counted separately and shown only when there are any. That matters more here than anywhere else: a project is the one thing in Ekko with nothing behind it -- items go to the archive and come back with `--restore`, a removed project does not -- so its size has to be visible before you act on it, not after. Removing one is still `rm -rf` on the directory; Ekko has no command for it yet.
 - **An unknown name is an error**, and the message carries the fix. Creating on first use would turn a typo into a new, empty project -- the same failure as a filter that silently matches nothing.
 - **The active project is printed above the board.** `EKKO_PROJECT` set and forgotten would otherwise show a different board with nothing on screen saying so.
 - **The default board is untouched.** Projects are additional; a setup that never uses one behaves exactly as before.

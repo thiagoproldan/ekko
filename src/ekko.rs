@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use crate::config;
 use crate::directory::{self, DirectoryError};
 use crate::item::Item;
-use crate::render::{PathStep, Renderer, Stats};
+use crate::render::{PathStep, ProjectSummary, Renderer, Stats};
 use crate::storage::{ItemMap, Storage, StorageError};
 
 #[derive(Debug)]
@@ -206,7 +206,7 @@ pub enum Outcome {
     Archive(Vec<(String, Vec<Item>)>),
     Find(Vec<(String, Vec<Item>)>),
     List(Vec<(String, Vec<Item>)>),
-    Projects(Vec<String>),
+    Projects(Vec<ProjectSummary>),
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
     Path { steps: Vec<PathStep>, rootless: u32 },
@@ -299,8 +299,8 @@ impl Outcome {
             Outcome::Copy { ids, .. } => out.success_copy_to_clipboard(ids),
             Outcome::Board(groups) | Outcome::Find(groups) | Outcome::List(groups) => out.display_by_board(groups),
             Outcome::Timeline(groups) | Outcome::Archive(groups) => out.display_by_date(groups),
-            Outcome::Projects(names) => out.display_projects(names),
-            Outcome::Phases(names) => out.display_projects(names),
+            Outcome::Projects(projects) => out.display_projects(projects),
+            Outcome::Phases(names) => out.display_phases(names),
             Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
             Outcome::Path { steps, rootless } => out.display_path(steps, *rootless),
             Outcome::Stats(stats) => out.display_stats(stats),

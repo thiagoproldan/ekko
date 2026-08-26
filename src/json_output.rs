@@ -49,7 +49,7 @@ fn success_value(outcome: &Outcome) -> Value {
         Outcome::Timeline(groups) | Outcome::Archive(groups) => {
             json!({"ok": true, "command": command, "dates": groups_to_value(groups)})
         }
-        Outcome::Projects(names) => json!({"ok": true, "command": command, "projects": names}),
+        Outcome::Projects(projects) => json!({"ok": true, "command": command, "projects": projects}),
         Outcome::Phases(names) => json!({"ok": true, "command": command, "phases": names}),
         Outcome::Blocked { item, blockers } => {
             json!({"ok": true, "command": command, "item": item, "blockers": blockers})

@@ -156,9 +156,15 @@ The default board is flat: boards (areas) and items, quick capture, no
 hierarchy. That is unchanged and is still the right shape for most work.
 
 A **project** is a separate board with its own storage. `--project <name>`
-scopes every command to it, `--projects` lists them, and `--project <name>
---create` makes one. It is sugar over `--ekko-dir` and the two are mutually
-exclusive — passing both errors rather than picking one.
+scopes every command to it, `--projects` lists them with what each holds
+(`plan [0/15] · 4 notes`), and `--project <name> --create` makes one. It is
+sugar over `--ekko-dir` and the two are mutually exclusive — passing both
+errors rather than picking one.
+
+There is **no command to remove a project**. Deleting one means `rm -rf` on
+its directory, it does not go to the archive, and `--restore` cannot bring it
+back. If the user asks you to get rid of a project, say that plainly and read
+`--projects` first so the count is on the record before anything is removed.
 
 Inside a project the hierarchy is **project > phase > area**. Each phase is
 its own world, so the same area name in two phases means two distinct areas.

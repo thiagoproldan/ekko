@@ -113,6 +113,17 @@ impl Painter {
     }
 }
 
+/// One project in `--projects`: its name and what it holds. Same counts a
+/// board title carries, so the listing and the board agree on what `[1/6]`
+/// means -- tasks only, notes reported separately.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectSummary {
+    pub name: String,
+    pub complete: u32,
+    pub tasks: u32,
+    pub notes: u32,
+}
+
 /// One node of the path: a declared phase, how far it has got, and whether
 /// work currently sits in it. Lives here beside `Stats` for the same reason
 /// -- a shape the renderer is given, computed elsewhere.
@@ -617,13 +628,38 @@ impl<'a> Renderer<'a> {
         let suffix = self.painter.grey(&join_ids(blockers));
         self.success(" ", &format!("Item {id} now waits on:"), &suffix);
     }
-    pub fn display_projects(&mut self, names: &[String]) {
-        if names.is_empty() {
+    /// A project's declared phase sequence, in order.
+    ///
+    /// Split from `display_projects` when that grew counts: the two were
+    /// sharing a renderer only because a list of names and a list of names
+    /// looked alike, and they stopped looking alike.
+    pub fn display_phases(&mut self, names: &[String]) {
+        for name in names {
+            self.emit("\n ", None, &self.painter.underline(name), "");
+        }
+    }
+
+    /// The projects that exist, each with what it holds.
+    ///
+    /// The counts are the point, not decoration: a project is the one thing
+    /// in Ekko with no archive behind it, so knowing it holds fifteen tasks
+    /// has to be possible *before* acting on it rather than after. Notes are
+    /// reported separately and only when there are any, the same way the
+    /// stats line treats paused and cancelled.
+    pub fn display_projects(&mut self, projects: &[ProjectSummary]) {
+        if projects.is_empty() {
             self.emit("\n ", None, "No projects yet -- create one with `ekko --project <name> --create`", "");
             return;
         }
-        for name in names {
-            self.emit("\n ", None, &self.painter.underline(name), "");
+        for project in projects {
+            let title = self.painter.underline(&project.name);
+            let mut suffix =
+                self.painter.grey(&format!("[{}/{}]", project.complete, project.tasks));
+            if project.notes > 0 {
+                let word = if project.notes == 1 { "note" } else { "notes" };
+                suffix.push_str(&self.painter.grey(&format!(" · {} {word}", project.notes)));
+            }
+            self.emit("\n ", None, &title, &suffix);
         }
     }
 
@@ -1379,5 +1415,45 @@ mod tests {
             }
         }
         out
+    }
+
+    /// `--projects` promised item counts in `cli.rs` and printed bare names,
+    /// so the one listing that could have said how big a project was said
+    /// nothing -- and a project is the only thing in Ekko with no archive
+    /// behind it. Notes appear only when there are any, the same rule the
+    /// stats line uses for paused and cancelled.
+    #[test]
+    fn the_project_listing_says_what_each_one_holds() {
+        let projects = vec![
+            ProjectSummary { name: "plan".into(), complete: 0, tasks: 15, notes: 4 },
+            ProjectSummary { name: "solo".into(), complete: 1, tasks: 2, notes: 0 },
+            ProjectSummary { name: "empty".into(), complete: 0, tasks: 0, notes: 0 },
+        ];
+
+        let output = render_with(Config::default(), |r| r.display_projects(&projects));
+        let plain = strip_ansi(&output);
+
+        assert!(plain.contains("plan [0/15] · 4 notes"), "{plain:?}");
+        assert!(plain.contains("solo [1/2]"), "{plain:?}");
+        assert!(!plain.contains("solo [1/2] ·"), "no note tail when there are none: {plain:?}");
+        assert!(plain.contains("empty [0/0]"), "{plain:?}");
+    }
+
+    /// Phases lost their renderer when projects grew counts. They were only
+    /// sharing one because two lists of names looked alike, and `--phases`
+    /// still has to print exactly what it always printed.
+    #[test]
+    fn phases_still_print_as_bare_names() {
+        let names = vec!["setup".to_string(), "build".to_string()];
+
+        let output = render_with(Config::default(), |r| r.display_phases(&names));
+        let plain = strip_ansi(&output);
+
+        assert!(!plain.contains('['), "a phase list carries no counts: {plain:?}");
+        assert_eq!(
+            plain.lines().filter(|l| !l.trim().is_empty()).count(),
+            2,
+            "one line per phase: {plain:?}"
+        );
     }
 }
