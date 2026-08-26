@@ -103,6 +103,7 @@ $ ekko --help
       --copy, -y         Copy item description
       --create           Create the project named by --project
       --delete, -d       Delete item
+      --destroy          Move the project named by --project to the trash
       --edit, -e         Edit item description
       --find, -f         Search for items
       --help, -h         Display help message
@@ -135,6 +136,7 @@ $ ekko --help
       $ ekko --delete 4
       $ ekko --edit @3 Merge PR #42
       $ ekko --find documentation
+      $ ekko --project old --destroy
       $ ekko --json --task @coding Review PR #42
       $ ekko --list pending coding
       $ ekko --move @1 cooking
@@ -429,10 +431,29 @@ $ ekko --projects
 This is sugar over `--ekko-dir`, which could always point at a per-project board -- what it adds is not having to remember where each one lives. Four decisions worth knowing:
 
 - **The filesystem is the registry.** There is no list of projects kept alongside the directories, so nothing can drift out of step with what exists. `--projects` reads the directory.
-- **The listing says what each project holds**, in the same `[complete/tasks]` a board title uses, with notes counted separately and shown only when there are any. That matters more here than anywhere else: a project is the one thing in Ekko with nothing behind it -- items go to the archive and come back with `--restore`, a removed project does not -- so its size has to be visible before you act on it, not after. Removing one is still `rm -rf` on the directory; Ekko has no command for it yet.
+- **The listing says what each project holds**, in the same `[complete/tasks]` a board title uses, with notes counted separately and shown only when there are any. Its size should be visible before you act on it, not after.
 - **An unknown name is an error**, and the message carries the fix. Creating on first use would turn a typo into a new, empty project -- the same failure as a filter that silently matches nothing.
 - **The active project is printed above the board.** `EKKO_PROJECT` set and forgotten would otherwise show a different board with nothing on screen saying so.
 - **The default board is untouched.** Projects are additional; a setup that never uses one behaves exactly as before.
+
+#### Destroying a project
+
+```
+$ ekko --project old --destroy
+ ✔  Destroyed project: old (15 tasks · 4 notes)
+  moved to /home/you/.ekko/.trash/old-1787708896450
+```
+
+The word is `--destroy` and not `--delete` because `--delete` already means "remove items": `--project old --delete 3` removes item 3 *inside* `old`. One word with both meanings would turn a command that lost its ids into one that destroyed the whole project, and the failure would look like success.
+
+Four things it does, each answering something the `rm -rf` it replaces got wrong:
+
+- **It takes the project's lock first**, so a concurrent write finishes instead of having its directory pulled out from under it. `flock` protects writers from each other; it never protected anything from the directory vanishing, because whoever ran `rm -rf` did not go through Ekko.
+- **It counts before it moves**, because afterwards nothing could say how big the thing was.
+- **It moves rather than deletes.** Every other removal in Ekko has somewhere to come back from; this one had nothing. Destroyed projects go to `~/.ekko/.trash/<name>-<epoch-millis>`, which sits *beside* `projects/` rather than inside it -- inside would make every destroyed project show up in `--projects` until a filter hid it, and that filter would reserve `.trash` as a name nobody could give a project. The timestamp is what lets destroy, recreate and destroy again keep both copies. Nothing empties the trash for you; `mv` a directory back into `~/.ekko/projects/` to restore it.
+- **It does not ask.** No command in Ekko prompts, and one that did would break every script and agent driving it. The count in the reply is the confirmation, and the trash is the safety net.
+
+One race is left on purpose: a second process already blocked on the lock will acquire it *after* the move and write into the trashed copy rather than a live project. Nothing is lost -- the writes land somewhere no longer listed. Closing it would need a tombstone protocol for the case of two processes racing on one project at the moment it is destroyed.
 
 `--project` and `--ekko-dir` together is an error rather than one silently winning: both say where data lives, and guessing which was meant is how you write to the wrong board.
 

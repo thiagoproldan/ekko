@@ -31,6 +31,7 @@ const HELP: &str = r#"
       --copy, -y         Copy item description
       --create           Create the project named by --project
       --delete, -d       Delete item
+      --destroy          Move the project named by --project to the trash
       --edit, -e         Edit item description
       --find, -f         Search for items
       --help, -h         Display help message
@@ -63,6 +64,7 @@ const HELP: &str = r#"
       $ ekko --delete 4
       $ ekko --edit @3 Merge PR #42
       $ ekko --find documentation
+      $ ekko --project old --destroy
       $ ekko --json --task @coding Review PR #42
       $ ekko --list pending coding
       $ ekko --move @1 cooking
@@ -144,7 +146,7 @@ fn main() -> ExitCode {
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
 
-    match dispatch(&cli, &ekko, &home_dir) {
+    match dispatch(&cli, &ekko, project, &home_dir) {
         Ok(outcomes) => {
             if json_mode {
                 for outcome in &outcomes {
@@ -157,9 +159,12 @@ fn main() -> ExitCode {
                     // Named before the board, and only when one is active: an
                     // EKKO_PROJECT set and forgotten would otherwise show a
                     // different board with nothing on screen saying so.
-                    // Suppressed for --projects, which is already about them.
+                    // Suppressed for --projects, which is already about them,
+                    // and for --destroy, whose reply names the project it
+                    // just removed -- a header above that would announce a
+                    // board nobody can open any more.
                     if let Some(name) = project {
-                        if !cli.projects {
+                        if !cli.projects && !cli.destroy {
                             r.display_project(name);
                         }
                     }
@@ -183,6 +188,7 @@ fn main() -> ExitCode {
 fn dispatch(
     cli: &cli::Cli,
     ekko: &Ekko,
+    project: Option<&str>,
     home_dir: &Path,
 ) -> Result<Vec<Outcome>, EkkoError> {
     if let Some(args) = cli.blocked_by.as_deref() {
@@ -193,6 +199,15 @@ fn dispatch(
     }
     if cli.path {
         return Ok(vec![ekko.display_path()?]);
+    }
+    if cli.destroy {
+        // Ahead of every view and every write: whatever else the line said,
+        // a --destroy line is about removing the project, and running some
+        // other command first would act on something about to disappear.
+        let Some(name) = project else {
+            return Err(directory::DirectoryError::DestroyNeedsProject.into());
+        };
+        return Ok(vec![ekko.destroy_project(home_dir, name, chrono::Local::now().timestamp_millis())?]);
     }
     if cli.projects {
         return Ok(vec![Outcome::Projects(directory::list_projects(home_dir))]);

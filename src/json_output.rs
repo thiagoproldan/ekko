@@ -50,6 +50,16 @@ fn success_value(outcome: &Outcome) -> Value {
             json!({"ok": true, "command": command, "dates": groups_to_value(groups)})
         }
         Outcome::Projects(projects) => json!({"ok": true, "command": command, "projects": projects}),
+        Outcome::Destroyed { name, tasks, notes, trash } => json!({
+            "ok": true,
+            "command": command,
+            "project": name,
+            "tasks": tasks,
+            "notes": notes,
+            // Absolute, because it is the only way back and a caller has no
+            // other way to work out where the project went.
+            "trash": trash.display().to_string(),
+        }),
         Outcome::Phases(names) => json!({"ok": true, "command": command, "phases": names}),
         Outcome::Blocked { item, blockers } => {
             json!({"ok": true, "command": command, "item": item, "blockers": blockers})

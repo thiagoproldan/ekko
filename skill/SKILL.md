@@ -161,10 +161,16 @@ scopes every command to it, `--projects` lists them with what each holds
 sugar over `--ekko-dir` and the two are mutually exclusive — passing both
 errors rather than picking one.
 
-There is **no command to remove a project**. Deleting one means `rm -rf` on
-its directory, it does not go to the archive, and `--restore` cannot bring it
-back. If the user asks you to get rid of a project, say that plainly and read
-`--projects` first so the count is on the record before anything is removed.
+`--project <name> --destroy` removes one. It is **not** `--delete`, which
+still means "remove items" — `--project old --delete 3` removes item 3 inside
+`old`. Destroy takes the project's lock, reports what went (`15 tasks · 4
+notes`) and moves the directory to `~/.ekko/.trash/<name>-<millis>` rather
+than deleting it. `--restore` does not reach it; recovery is `mv`-ing that
+directory back into `~/.ekko/projects/`.
+
+It never prompts, so the consent rule below applies with full force: read
+`--projects` first, put the count in front of the user, and let them say yes
+before you destroy a board you did not build.
 
 Inside a project the hierarchy is **project > phase > area**. Each phase is
 its own world, so the same area name in two phases means two distinct areas.
@@ -210,6 +216,7 @@ Two things that will bite otherwise:
 | declare a blocker | `ekko --blocked-by @3 1 2` | `@` marks the **blocked** item |
 | scope to a project | `ekko --project demo --list ready` | mutually exclusive with `--ekko-dir` |
 | the phase view | `ekko --project demo --path` | `--phase` itself only affects creation |
+| destroy a project | `ekko --project old --destroy` | whole board to the trash; ask first |
 
 Filter attributes: `pending`, `progress`, `done`, `star`, `task`, `note`,
 `cancelled`, `ready`, `blocked`, `due`, `overdue`, `myboard`, plus any board
@@ -221,10 +228,16 @@ everything.
 
 ## Destructive commands need consent
 
-`--clear` archives every completed item and `--delete` removes items — on a
-board the user also owns, including items you never saw them create. Ask first,
-every time, even if the user asked you to "clean up". Their idea of which items
-are finished with may not match the board's `isComplete` flags.
+`--clear` archives every completed item, `--delete` removes items, and
+`--destroy` takes a whole project — on a board the user also owns, including
+items you never saw them create. Ask first, every time, even if the user asked
+you to "clean up". Their idea of which items are finished with may not match
+the board's `isComplete` flags.
+
+`--destroy` is the one to be slowest about. It is the only command whose
+blast radius is a board rather than a row, and Ekko will not stop you: it
+takes the lock, reports the count and moves on. Read `--projects`, say the
+number out loud, and wait.
 
 Before proposing `--delete`, consider `--set @N cancelled` instead. It keeps
 the item, struck through, and does not count against the percentage — so

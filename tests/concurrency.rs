@@ -264,3 +264,72 @@ fn can_lock(lock_file: &std::path::Path) -> bool {
     // SAFETY: `file` owns this descriptor and outlives the call.
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
+
+/// Destroying a project takes the project's own lock first.
+///
+/// The gap this closes was found by deleting a project with `rm -rf` and
+/// noticing that `flock` protects concurrent writers from each other and
+/// protects nothing from the directory vanishing underneath them -- because
+/// whoever runs `rm -rf` never goes through Ekko. A destroy that Ekko owns
+/// can queue behind a writer; this proves it does, rather than trusting that
+/// the lock call is on the path.
+#[test]
+fn destroying_a_project_waits_for_a_writer_to_finish() {
+    let exe = env!("CARGO_BIN_EXE_ekko");
+    let home = temp_ekko_dir();
+
+    let create = process::Command::new(exe)
+        .args(["--project", "doomed", "--create"])
+        .env("HOME", &home)
+        .output()
+        .expect("failed to create the project");
+    assert!(create.status.success());
+
+    // A write, not just the create: the lock file is made on first
+    // acquire, and --create only lays out the directories.
+    let seeded = process::Command::new(exe)
+        .args(["--project", "doomed", "--task", "something to lose"])
+        .env("HOME", &home)
+        .output()
+        .expect("failed to seed the project");
+    assert!(seeded.status.success());
+
+    let project_lock =
+        home.join(".ekko").join("projects").join("doomed").join(".ekko").join(".lock");
+    assert!(project_lock.exists(), "expected a lock at {}", project_lock.display());
+
+    // `-o` closes the locked descriptor before running the command, so the
+    // sleep does not inherit it and the holder is the flock(1) process.
+    let mut holder = process::Command::new("flock")
+        .args(["-x", "-o", project_lock.to_str().unwrap(), "sleep", "30"])
+        .spawn()
+        .expect("failed to spawn the lock holder");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while can_lock(&project_lock) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!can_lock(&project_lock), "the flock(1) holder never took the lock");
+
+    let destroy = process::Command::new(exe)
+        .args(["--project", "doomed", "--json", "--destroy"])
+        .env("HOME", &home)
+        .output()
+        .expect("failed to run the destroy");
+
+    holder.kill().expect("failed to kill the holder");
+    holder.wait().ok();
+
+    assert!(!destroy.status.success(), "destroy ignored the lock");
+    let stdout = String::from_utf8_lossy(&destroy.stdout);
+    assert!(stdout.contains("LOCK_TIMEOUT"), "expected a lock timeout, got: {stdout}");
+
+    // The project is still there, which is the point: a destroy that could
+    // not take the lock must not have moved anything.
+    assert!(
+        home.join(".ekko").join("projects").join("doomed").is_dir(),
+        "a destroy that timed out still removed the project"
+    );
+
+    fs::remove_dir_all(&home).ok();
+}

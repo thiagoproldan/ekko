@@ -64,6 +64,15 @@ pub struct Cli {
     #[arg(long)]
     pub create: bool,
 
+    /// Move the project named by `--project` to the trash.
+    ///
+    /// Deliberately not `--delete`, which already means "remove items":
+    /// `--project foo --delete 3` removes item 3 inside foo, and giving the
+    /// same word both meanings would make a command that lost its ids
+    /// destroy the whole project instead of failing.
+    #[arg(long)]
+    pub destroy: bool,
+
     /// List the projects that exist, with their item counts.
     #[arg(long)]
     pub projects: bool,

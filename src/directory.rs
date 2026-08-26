@@ -28,6 +28,8 @@ pub enum DirectoryError {
     InvalidProjectName(String),
     UnknownProject(String),
     ProjectAndEkkoDirTogether,
+    DestroyNeedsProject,
+    Trash(String),
     InvalidCustomAppDir(String),
     Config(config::ConfigError),
 }
@@ -48,6 +50,13 @@ impl std::fmt::Display for DirectoryError {
                 f,
                 "No such project: {name}. Create it with: ekko --project {name} --create"
             ),
+            DirectoryError::DestroyNeedsProject => write!(
+                f,
+                "--destroy needs a project to destroy: ekko --project <name> --destroy"
+            ),
+            DirectoryError::Trash(detail) => {
+                write!(f, "Could not move the project to the trash: {detail}")
+            }
             DirectoryError::ProjectAndEkkoDirTogether => write!(
                 f,
                 "--project and --ekko-dir both say where data lives; pass only one"
@@ -72,6 +81,14 @@ impl From<config::ConfigError> for DirectoryError {
 
 /// Where named projects live, under the ekko directory.
 pub const PROJECTS_DIR_NAME: &str = "projects";
+
+/// Where destroyed projects go, beside `projects/` rather than inside it.
+///
+/// Inside would put it in `list_projects`' way and force a filter, which
+/// would make `.trash` a name nobody could give a project -- a reserved
+/// word invented to work around a layout choice. Beside costs nothing and
+/// mirrors how `archive/` already sits next to `storage/`.
+pub const TRASH_DIR_NAME: &str = ".trash";
 
 /// Resolves a project name to its directory, creating it only when asked.
 ///
@@ -129,6 +146,36 @@ pub fn list_projects(home_dir: &Path) -> Vec<ProjectSummary> {
             ProjectSummary { name, complete, tasks, notes }
         })
         .collect()
+}
+
+/// Moves a project out of `projects/` and into the trash, returning where
+/// it went.
+///
+/// A rename rather than a delete, and a rename rather than a copy: it is
+/// atomic on one filesystem, so the project is either listed or trashed and
+/// never half of both, and it cannot run out of disk partway through. The
+/// caller holds the project's lock while this runs.
+///
+/// The timestamp is epoch millis -- the same clock `_timestamp` and
+/// `updatedAt` already use -- so two projects of the same name can be
+/// trashed without one replacing the other, and the directory sorts by
+/// when it was removed.
+pub fn destroy_project(home_dir: &Path, name: &str, now_millis: i64) -> Result<PathBuf, DirectoryError> {
+    let root = home_dir.join(EKKO_DIR_NAME).join(PROJECTS_DIR_NAME);
+    let dir = root.join(name);
+    if !dir.is_dir() {
+        return Err(DirectoryError::UnknownProject(name.to_string()));
+    }
+
+    let trash = home_dir.join(EKKO_DIR_NAME).join(TRASH_DIR_NAME);
+    std::fs::create_dir_all(&trash)
+        .map_err(|e| DirectoryError::Trash(format!("{}: {e}", trash.display())))?;
+
+    let target = trash.join(format!("{name}-{now_millis}"));
+    std::fs::rename(&dir, &target)
+        .map_err(|e| DirectoryError::Trash(format!("{} -> {}: {e}", dir.display(), target.display())))?;
+
+    Ok(target)
 }
 
 /// Reads one project's storage directly rather than through `Storage`,
@@ -292,6 +339,61 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "winwayland");
         assert!(retrieve_project_directory(&home, "winwayland", false).is_ok(), "now resolvable");
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// The trash lives beside `projects/`, not inside it. Inside would make
+    /// every destroyed project show up as a project until a filter hid it,
+    /// and that filter would reserve `.trash` as a name nobody could use.
+    #[test]
+    fn a_destroyed_project_leaves_the_listing_and_lands_in_the_trash() {
+        let home = temp_dir();
+        retrieve_project_directory(&home, "doomed", true).unwrap();
+        retrieve_project_directory(&home, "keeper", true).unwrap();
+
+        let trashed = destroy_project(&home, "doomed", 1787600000000).unwrap();
+
+        let names: Vec<String> = list_projects(&home).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["keeper".to_string()], "destroyed project still listed");
+        assert!(trashed.is_dir(), "nothing arrived at {}", trashed.display());
+        assert!(trashed.ends_with("doomed-1787600000000"), "{}", trashed.display());
+        assert!(
+            !trashed.starts_with(home.join(EKKO_DIR_NAME).join(PROJECTS_DIR_NAME)),
+            "the trash must not sit inside projects/: {}",
+            trashed.display()
+        );
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// The timestamp is what keeps two projects of the same name from
+    /// replacing one another in the trash -- destroy, recreate, destroy
+    /// again is an ordinary sequence and neither copy may be lost.
+    #[test]
+    fn destroying_the_same_name_twice_keeps_both_copies() {
+        let home = temp_dir();
+
+        retrieve_project_directory(&home, "again", true).unwrap();
+        let first = destroy_project(&home, "again", 1787600000000).unwrap();
+        retrieve_project_directory(&home, "again", true).unwrap();
+        let second = destroy_project(&home, "again", 1787600009999).unwrap();
+
+        assert_ne!(first, second);
+        assert!(first.is_dir() && second.is_dir(), "one copy replaced the other");
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// Destroying something that is not there is an error, not a quiet
+    /// success -- the same reasoning as `--list` refusing unknown terms.
+    #[test]
+    fn destroying_an_unknown_project_is_an_error() {
+        let home = temp_dir();
+
+        let result = destroy_project(&home, "never-existed", 1787600000000);
+
+        assert!(matches!(result, Err(DirectoryError::UnknownProject(_))));
 
         fs::remove_dir_all(&home).ok();
     }

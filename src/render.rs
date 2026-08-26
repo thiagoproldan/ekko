@@ -860,6 +860,27 @@ impl<'a> Renderer<'a> {
         self.success("\n", &message, &suffix);
     }
 
+    /// Says what went, then where it went.
+    ///
+    /// The count is the confirmation Ekko never asks for out loud, and the
+    /// path is the way back -- both on screen because a destroyed project
+    /// is the one thing `--restore` cannot reach.
+    pub fn success_destroy(
+        &mut self,
+        name: &str,
+        tasks: u32,
+        notes: u32,
+        trash: &std::path::Path,
+    ) {
+        let mut held = format!("{tasks} {}", if tasks == 1 { "task" } else { "tasks" });
+        if notes > 0 {
+            held.push_str(&format!(" · {notes} {}", if notes == 1 { "note" } else { "notes" }));
+        }
+        let suffix = format!("{} {}", self.painter.grey(name), self.painter.grey(&format!("({held})")));
+        self.success("\n", "Destroyed project:", &suffix);
+        self.emit(" ", None, &self.painter.grey(&format!("moved to {}", trash.display())), "");
+    }
+
     pub fn success_edit(&mut self, id: u32) {
         let suffix = self.painter.grey(&id.to_string());
         self.success("\n", "Updated description of item:", &suffix);

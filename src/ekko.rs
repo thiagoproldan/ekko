@@ -207,6 +207,7 @@ pub enum Outcome {
     Find(Vec<(String, Vec<Item>)>),
     List(Vec<(String, Vec<Item>)>),
     Projects(Vec<ProjectSummary>),
+    Destroyed { name: String, tasks: u32, notes: u32, trash: std::path::PathBuf },
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
     Path { steps: Vec<PathStep>, rootless: u32 },
@@ -238,6 +239,7 @@ impl Outcome {
             Outcome::Find(_) => "find",
             Outcome::List(_) => "list",
             Outcome::Projects(_) => "projects",
+            Outcome::Destroyed { .. } => "destroy",
             Outcome::Phases(_) => "phases",
             Outcome::Blocked { .. } => "blocked",
             Outcome::Path { .. } => "path",
@@ -300,6 +302,9 @@ impl Outcome {
             Outcome::Board(groups) | Outcome::Find(groups) | Outcome::List(groups) => out.display_by_board(groups),
             Outcome::Timeline(groups) | Outcome::Archive(groups) => out.display_by_date(groups),
             Outcome::Projects(projects) => out.display_projects(projects),
+            Outcome::Destroyed { name, tasks, notes, trash } => {
+                out.success_destroy(name, *tasks, *notes, trash)
+            }
             Outcome::Phases(names) => out.display_phases(names),
             Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
             Outcome::Path { steps, rootless } => out.display_path(steps, *rootless),
@@ -923,6 +928,43 @@ impl Ekko {
     ///
     /// Ids are marked with `@`, matching `--priority`/`--move`, which
     /// leaves the bare words free to be state names.
+    /// Moves a whole project to the trash, reporting what went with it.
+    ///
+    /// The only irreversible-looking operation in Ekko, and the reason for
+    /// each of its choices: it takes the project's own lock first, so a
+    /// concurrent write finishes rather than being torn out from under
+    /// itself; it counts before moving, because nothing else would ever be
+    /// able to say how big the thing was; and it moves rather than deletes,
+    /// because every other removal here has somewhere to come back from and
+    /// this one had nothing.
+    ///
+    /// It does not ask. No other command in Ekko prompts, and a prompt here
+    /// would break every script and agent that drives it. The confirmation
+    /// is the count in the reply, and the safety net is the trash.
+    ///
+    /// One race is left, deliberately: a second process already blocked on
+    /// the lock acquires it after the move and writes into the trashed copy
+    /// rather than a live project. Nothing is lost, the writes simply land
+    /// somewhere that is no longer listed. Closing it would need a tombstone
+    /// protocol for a case that takes two processes racing on one project at
+    /// the moment it is destroyed.
+    pub fn destroy_project(
+        &self,
+        home_dir: &std::path::Path,
+        name: &str,
+        now_millis: i64,
+    ) -> Result<Outcome, EkkoError> {
+        let _lock = self.storage.acquire_lock()?;
+        let data = self.storage.get()?;
+
+        let tasks = data.values().filter(|item| item.is_task).count() as u32;
+        let notes = data.len() as u32 - tasks;
+
+        let trash = directory::destroy_project(home_dir, name, now_millis)?;
+
+        Ok(Outcome::Destroyed { name: name.to_string(), tasks, notes, trash })
+    }
+
     pub fn set_state(&self, input: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let mut data = self.storage.get()?;
