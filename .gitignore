@@ -20,3 +20,6 @@ parts
 stage
 snap
 *.snap
+
+# nix build output
+/result
