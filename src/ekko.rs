@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use crate::config;
 use crate::directory::{self, DirectoryError};
 use crate::item::Item;
-use crate::render::{PathStep, ProjectSummary, Renderer, Stats};
+use crate::render::{CalendarMonth, PathStep, ProjectSummary, Renderer, Stats};
 use crate::storage::{ItemMap, Storage, StorageError};
 
 #[derive(Debug)]
@@ -232,6 +232,7 @@ pub enum Outcome {
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
     Anchored { item: Item, target: Option<u32> },
+    Calendar(CalendarMonth),
     Path { steps: Vec<PathStep>, rootless: u32 },
     Stats(Stats),
 }
@@ -265,6 +266,7 @@ impl Outcome {
             Outcome::Phases(_) => "phases",
             Outcome::Blocked { .. } => "blocked",
             Outcome::Anchored { .. } => "anchor",
+            Outcome::Calendar(_) => "calendar",
             Outcome::Path { .. } => "path",
             Outcome::Stats(_) => "stats",
         }
@@ -331,6 +333,7 @@ impl Outcome {
             Outcome::Phases(names) => out.display_phases(names),
             Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
             Outcome::Anchored { item, target } => out.success_anchored(item.id, *target),
+            Outcome::Calendar(month) => out.display_calendar(month),
             Outcome::Path { steps, rootless } => out.display_path(steps, *rootless),
             Outcome::Stats(stats) => out.display_stats(stats),
         }
@@ -972,6 +975,22 @@ impl Ekko {
     ///
     /// Ids are marked with `@`, matching `--priority`/`--move`, which
     /// leaves the bare words free to be state names.
+    /// The current month, drawn.
+    ///
+    /// Reads nothing: no lock, no storage, no board. That is the whole of
+    /// this first cut on purpose -- drawing a month and deciding what a day
+    /// should show are separate questions, and the second one is not
+    /// answered yet. See the board for which way it goes.
+    pub fn display_calendar(&self) -> Result<Outcome, EkkoError> {
+        use chrono::Datelike;
+
+        let now = chrono::Local::now();
+        let month = CalendarMonth::of(now.year(), now.month(), Some(now.day()))
+            .expect("today is always a real date in a real month");
+
+        Ok(Outcome::Calendar(month))
+    }
+
     /// Points a note at the task it explains.
     ///
     /// Reasons and work were siblings on the board, which is how a long

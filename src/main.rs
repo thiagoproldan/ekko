@@ -28,6 +28,7 @@ const HELP: &str = r#"
       --archive, -a      Display archived items
       --begin, -b        Start/pause task
       --blocked-by <IDS> Record what an item waits on
+      --calendar         Show the current month
       --check, -c        Check/uncheck task
       --clear            Delete all checked items
       --copy, -y         Copy item description
@@ -62,6 +63,7 @@ const HELP: &str = r#"
       $ ekko --anchor @16 12
       $ ekko --archive
       $ ekko --begin 2 3
+      $ ekko --calendar
       $ ekko --check 1 2
       $ ekko --clear
       $ ekko --copy 1 2 3
@@ -217,6 +219,9 @@ fn dispatch(
     }
     if cli.path {
         return Ok(vec![ekko.display_path()?]);
+    }
+    if cli.calendar {
+        return Ok(vec![ekko.display_calendar()?]);
     }
     if cli.destroy {
         // Ahead of every view and every write: whatever else the line said,

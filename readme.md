@@ -100,6 +100,7 @@ $ ekko --help
       --archive, -a      Display archived items
       --begin, -b        Start/pause task
       --blocked-by <IDS> Record what an item waits on
+      --calendar         Show the current month
       --check, -c        Check/uncheck task
       --clear            Delete all checked items
       --copy, -y         Copy item description
@@ -134,6 +135,7 @@ $ ekko --help
       $ ekko --anchor @16 12
       $ ekko --archive
       $ ekko --begin 2 3
+      $ ekko --calendar
       $ ekko --check 1 2
       $ ekko --clear
       $ ekko --copy 1 2 3
@@ -201,6 +203,27 @@ Three things about how it behaves, each of them a consequence of the board being
 - **It never holds the lock while idle.** A write takes the lock and releases it immediately, the same as any other command. A UI parked on the `flock` would block your other terminal and every agent -- the exact failure the lock exists to prevent, caused by the thing meant to help.
 - **It reloads after every write**, so the screen reports what landed rather than what was asked for. That costs under 10ms on a real board.
 - **It changes nothing about the CLI.** Interactive mode is a separate frontend on the same core and never goes through the renderer the golden tests pin, so the byte-for-byte guarantee is untouched by construction rather than by care.
+
+### Calendar
+
+`ekko --calendar` draws the current month, with today picked out.
+
+```
+$ ekko --calendar
+
+      August 2026
+  Su Mo Tu We Th Fr Sa
+                     1
+   2  3  4  5  6  7  8
+   9 10 11 12 13 14 15
+  16 17 18 19 20 21 22
+  23 24 25 26 27 28 29
+  30 31
+```
+
+**Nothing from the board is on it yet, on purpose.** Drawing a month and deciding what a day should show are two separate questions, and the second one is genuinely open: a day could mean what is *due* then, or what was *created* then. Those are different views -- the first looks forward and would be the only forward-looking thing Ekko has, the second looks back and would overlap [`--timeline`](#timeline-view), which already groups by creation date and renders in a similar shape.
+
+Weeks start on Sunday, matching `cal(1)`. The month is derived from the dates themselves rather than a table of lengths, so February in a leap year comes out right without the calendar being able to disagree with the calendar.
 
 ### Path View
 

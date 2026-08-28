@@ -61,6 +61,7 @@ fn success_value(outcome: &Outcome) -> Value {
             "trash": trash.display().to_string(),
         }),
         Outcome::Phases(names) => json!({"ok": true, "command": command, "phases": names}),
+        Outcome::Calendar(month) => json!({"ok": true, "command": command, "month": month}),
         Outcome::Anchored { item, target } => {
             json!({"ok": true, "command": command, "item": item, "anchor": target})
         }

@@ -113,6 +113,65 @@ impl Painter {
     }
 }
 
+/// A month laid out as weeks, ready to draw.
+///
+/// Computed rather than derived at draw time so it can be tested against a
+/// fixed date -- a calendar built from `Local::now()` inside the renderer
+/// would only be checkable on the day it was written.
+///
+/// Weeks start on Sunday, which is what `cal(1)` does on this system and
+/// what a Brazilian wall calendar does. `None` is padding before the first
+/// and after the last day.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CalendarMonth {
+    pub year: i32,
+    pub month: u32,
+    pub label: String,
+    pub weeks: Vec<Vec<Option<u32>>>,
+    /// Day of the month, when today falls inside this month.
+    pub today: Option<u32>,
+}
+
+impl CalendarMonth {
+    pub fn of(year: i32, month: u32, today: Option<u32>) -> Option<CalendarMonth> {
+        use chrono::{Datelike, NaiveDate};
+
+        let first = NaiveDate::from_ymd_opt(year, month, 1)?;
+        let next = match month {
+            12 => NaiveDate::from_ymd_opt(year + 1, 1, 1)?,
+            _ => NaiveDate::from_ymd_opt(year, month + 1, 1)?,
+        };
+        let days = next.signed_duration_since(first).num_days() as u32;
+        let lead = first.weekday().num_days_from_sunday() as usize;
+
+        let mut weeks: Vec<Vec<Option<u32>>> = Vec::new();
+        let mut week: Vec<Option<u32>> = vec![None; lead];
+        for day in 1..=days {
+            week.push(Some(day));
+            if week.len() == 7 {
+                weeks.push(std::mem::take(&mut week));
+            }
+        }
+        if !week.is_empty() {
+            week.resize(7, None);
+            weeks.push(week);
+        }
+
+        Some(CalendarMonth {
+            year,
+            month,
+            label: format!("{} {year}", MONTHS[month as usize - 1]),
+            weeks,
+            today,
+        })
+    }
+}
+
+const MONTHS: [&str; 12] = [
+    "January", "February", "March", "April", "May", "June", "July", "August", "September",
+    "October", "November", "December",
+];
+
 /// One project in `--projects`: its name and what it holds. Same counts a
 /// board title carries, so the listing and the board agree on what `[1/6]`
 /// means -- tasks only, notes reported separately.
@@ -659,6 +718,38 @@ impl<'a> Renderer<'a> {
         let suffix = self.painter.grey(&join_ids(blockers));
         self.success(" ", &format!("Item {id} now waits on:"), &suffix);
     }
+    /// A month, with today picked out.
+    ///
+    /// Nothing from the board is on it yet. That is deliberate for a first
+    /// cut: the drawing and the question of what a day should show are two
+    /// decisions, and the second one -- whether a day means "due" or
+    /// "created" -- has not been made.
+    pub fn display_calendar(&mut self, month: &CalendarMonth) {
+        let width: usize = 20; // seven columns of two, six single spaces between
+        let pad = width.saturating_sub(month.label.chars().count()) / 2;
+        self.emit("\n ", None, &format!("{}{}", " ".repeat(pad), self.painter.underline(&month.label)), "");
+
+        let head = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].join(" ");
+        self.emit(" ", None, &self.painter.grey(&head), "");
+
+        for week in &month.weeks {
+            let cells: Vec<String> = week
+                .iter()
+                .map(|day| match day {
+                    None => "  ".to_string(),
+                    Some(day) if Some(*day) == month.today => {
+                        // Today is the one thing a calendar with no items on
+                        // it can still tell you, so it is the one thing
+                        // painted.
+                        self.painter.yellow(&format!("{day:>2}"))
+                    }
+                    Some(day) => format!("{day:>2}"),
+                })
+                .collect();
+            self.emit(" ", None, cells.join(" ").trim_end(), "");
+        }
+    }
+
     /// A project's declared phase sequence, in order.
     ///
     /// Split from `display_projects` when that grew counts: the two were
@@ -1540,5 +1631,62 @@ mod tests {
             depth(plain_line) + 2,
             "anchored note not indented:\n{anchored_line}\n{plain_line}"
         );
+    }
+
+    /// August 2026 starts on a Saturday and has 31 days, so it needs six
+    /// leading blanks and spills into a sixth week -- the two shapes most
+    /// likely to be got wrong.
+    #[test]
+    fn a_month_is_padded_at_both_ends_to_whole_weeks() {
+        let month = CalendarMonth::of(2026, 8, Some(28)).expect("August 2026 is real");
+
+        assert_eq!(month.label, "August 2026");
+        assert!(month.weeks.iter().all(|week| week.len() == 7), "every week is seven cells");
+        assert_eq!(month.weeks[0], vec![None, None, None, None, None, None, Some(1)]);
+        assert_eq!(month.weeks.last().unwrap()[2..], [None, None, None, None, None]);
+
+        let days: Vec<u32> = month.weeks.iter().flatten().flatten().copied().collect();
+        assert_eq!(days, (1..=31).collect::<Vec<u32>>(), "every day appears once, in order");
+    }
+
+    /// February in a leap year, the case a hand-rolled day count gets
+    /// wrong. Derived from the next month's first day rather than a table,
+    /// so the calendar cannot disagree with the calendar.
+    #[test]
+    fn february_lengths_come_from_the_dates_themselves() {
+        let leap = CalendarMonth::of(2028, 2, None).expect("February 2028 is real");
+        let plain = CalendarMonth::of(2026, 2, None).expect("February 2026 is real");
+
+        let count = |m: &CalendarMonth| m.weeks.iter().flatten().flatten().count();
+
+        assert_eq!(count(&leap), 29);
+        assert_eq!(count(&plain), 28);
+    }
+
+    /// December has to look at the next January, not month 13.
+    #[test]
+    fn december_rolls_into_the_next_year_rather_than_failing() {
+        let month = CalendarMonth::of(2026, 12, None).expect("December 2026 is real");
+
+        assert_eq!(month.weeks.iter().flatten().flatten().count(), 31);
+        assert_eq!(month.label, "December 2026");
+    }
+
+    #[test]
+    fn an_impossible_month_is_none_rather_than_a_panic() {
+        assert!(CalendarMonth::of(2026, 13, None).is_none());
+        assert!(CalendarMonth::of(2026, 0, None).is_none());
+    }
+
+    /// With nothing from the board on it, today is the only thing the
+    /// drawing can tell you -- so it is the one thing painted.
+    #[test]
+    fn today_is_the_only_painted_cell() {
+        let month = CalendarMonth::of(2026, 8, Some(28)).expect("August 2026 is real");
+
+        let output = render_with(Config::default(), |r| r.display_calendar(&month));
+
+        assert!(output.contains("\u{1b}[33m28\u{1b}[39m"), "today not painted: {output:?}");
+        assert!(!output.contains("\u{1b}[33m27"), "a plain day was painted: {output:?}");
     }
 }
