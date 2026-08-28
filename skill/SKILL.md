@@ -224,6 +224,9 @@ Two things that will bite otherwise:
 | what can start | `ekko --list ready` | pending, no unmet blockers |
 | declare a blocker | `ekko --blocked-by @3 1 2` | `@` marks the **blocked** item |
 | clear a blocker | `ekko --blocked-by @3` | no blockers means none |
+| put away | `ekko --stash @due` | ids or a board; no ids lists the stash |
+| bring it back | `ekko --unstash 9` | comes back as what it was |
+| remove | `ekko --delete 4` | to the trash, kept 30 days |
 | anchor a note | `ekko --anchor @16 12` | note first, then its task |
 | scope to a project | `ekko --project demo --list ready` | mutually exclusive with `--ekko-dir` |
 | the phase view | `ekko --project demo --path` | `--phase` itself only affects creation |
@@ -259,6 +262,21 @@ board; cancelling is for things that were, and then were not.
 Concurrency itself is safe: the storage lock is `flock(2)`, so parallel
 invocations queue rather than clobbering each other. It is your *judgement*
 about which items to remove that needs checking, not the write.
+
+## Putting things away
+
+`--stash <ids or @board>` hides something without changing it; `--unstash`
+brings it back as what it was. `--delete` sends items to the trash, which
+keeps them 30 days and expires on the way past a write.
+
+Both are counted separately in the stats line (`3 in-stash · 1 in-trash`) and
+counted *instead of* what the item was, so a stashed done task is not in the
+`done` number. That means **the percentage can drop when finished work is
+stashed** — say so rather than letting it read as a regression.
+
+Stashing is the answer when a board has grown unreadable and the user asks you
+to tidy. Prefer it to `--clear`, which archives and hands out new ids on the
+way back; a stashed item keeps its own.
 
 ## Leave reasoning behind, not just state
 

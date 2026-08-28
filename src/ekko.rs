@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use crate::config;
 use crate::directory::{self, DirectoryError};
 use crate::item::Item;
-use crate::render::{CalendarMonth, PathStep, ProjectSummary, Renderer, Stats};
+use crate::render::{CalendarMonth, PathStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
 use crate::storage::{ItemMap, Storage, StorageError};
 
 #[derive(Debug)]
@@ -233,6 +233,10 @@ pub enum Outcome {
     Blocked { item: Item, blockers: Vec<u32> },
     Anchored { item: Item, target: Option<u32> },
     Calendar(CalendarMonth),
+    Stashed { ids: Vec<u32>, away: bool },
+    Trashed { ids: Vec<u32>, away: bool },
+    Stash(Vec<(String, Vec<Item>)>),
+    Trash(Vec<Item>),
     Path { steps: Vec<PathStep>, rootless: u32 },
     Stats(Stats),
 }
@@ -267,6 +271,10 @@ impl Outcome {
             Outcome::Blocked { .. } => "blocked",
             Outcome::Anchored { .. } => "anchor",
             Outcome::Calendar(_) => "calendar",
+            Outcome::Stashed { away, .. } => if *away { "stash" } else { "unstash" },
+            Outcome::Trashed { away, .. } => if *away { "trash" } else { "untrash" },
+            Outcome::Stash(_) => "stash",
+            Outcome::Trash(_) => "trash",
             Outcome::Path { .. } => "path",
             Outcome::Stats(_) => "stats",
         }
@@ -334,6 +342,10 @@ impl Outcome {
             Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
             Outcome::Anchored { item, target } => out.success_anchored(item.id, *target),
             Outcome::Calendar(month) => out.display_calendar(month),
+            Outcome::Stashed { ids, away } => out.success_stashed(ids, *away),
+            Outcome::Trashed { ids, away } => out.success_trashed(ids, *away),
+            Outcome::Stash(groups) => out.display_stash(groups),
+            Outcome::Trash(items) => out.display_trash(items),
             Outcome::Path { steps, rootless } => out.display_path(steps, *rootless),
             Outcome::Stats(stats) => out.display_stats(stats),
         }
@@ -536,10 +548,29 @@ impl Ekko {
         grouped
     }
 
+    /// The stats line, counting every item exactly once.
+    ///
+    /// Stashed and trashed are counted *instead of* whatever they were,
+    /// not as well as: a stashed done task shows up under `in-stash` and
+    /// not under `done`. Disjoint counts are what let the line still sum
+    /// to the board, and they answer the question the line is for -- what
+    /// is in front of me right now -- rather than what exists.
+    ///
+    /// The item keeps its real state underneath, so unstashing puts it
+    /// back where it belongs. Only the counting hides it.
     fn compute_stats(&self, data: &ItemMap) -> Stats {
         let (mut complete, mut in_progress, mut paused, mut cancelled, mut pending, mut notes) =
             (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+        let (mut stashed, mut trashed) = (0u32, 0u32);
         for item in data.values() {
+            if item.trashed.is_some() {
+                trashed += 1;
+                continue;
+            }
+            if item.stashed.is_some() {
+                stashed += 1;
+                continue;
+            }
             if item.is_task {
                 if item.cancelled.unwrap_or(false) {
                     cancelled += 1;
@@ -565,7 +596,7 @@ impl Ekko {
         // reads as unfinished work rather than as work that went away.
         let total = complete + pending + in_progress + paused;
         let percent = (complete * 100).checked_div(total).unwrap_or(0);
-        Stats { percent, complete, in_progress, paused, cancelled, pending, notes }
+        Stats { percent, complete, in_progress, paused, cancelled, pending, notes, stashed, trashed }
     }
 
     fn filter_by_attributes(&self, attributes: &[String], mut data: ItemMap) -> ItemMap {
@@ -664,6 +695,19 @@ impl Ekko {
     fn save_touching(&self, data: &mut ItemMap) -> Result<(), EkkoError> {
         let before = self.storage.get()?;
         let now = chrono::Local::now().timestamp_millis();
+
+        // The trash empties here, on the way past, and only here.
+        //
+        // Ekko has no daemon, so expiry has to happen on some invocation --
+        // and it must not be a read. `list_projects` already had to avoid
+        // creating directories for the same reason: a command that only
+        // looks at the board cannot be allowed to change it, or `--json`
+        // stops being safe to call. Every write already holds the lock, so
+        // this rides along on one that was happening anyway.
+        data.retain(|_, item| match item.trashed {
+            Some(at) => now - at < TRASH_DAYS * 86_400_000,
+            None => true,
+        });
 
         for (id, item) in data.iter_mut() {
             if before.get(id) != Some(&*item) {
@@ -797,9 +841,18 @@ impl Ekko {
         Ok(Outcome::Star { starred, unstarred })
     }
 
+    /// Removes items -- to the trash, not to the archive.
+    ///
+    /// It used to archive them, which put a task you finished on purpose
+    /// and a task you deleted by mistake in the same place. The archive is
+    /// the record of what got done; a mistake in it is noise in the one
+    /// history you might trust. The trash is where removals go, and it
+    /// expires, which the archive must never do.
+    ///
+    /// `--clear` still archives, because completed work reaching the end
+    /// is exactly what the archive is for.
     pub fn delete_items(&self, ids: &[String]) -> Result<Outcome, EkkoError> {
-        let _lock = self.storage.acquire_lock()?;
-        self.delete_items_locked(ids)
+        self.set_trashed(ids, true)
     }
 
     /// Assumes the caller already holds the storage lock -- only called
@@ -900,8 +953,20 @@ impl Ekko {
     pub fn clear(&self) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let data = self.storage.get()?;
-        let ids: Vec<String> =
-            data.iter().filter(|(_, item)| item.is_complete.unwrap_or(false)).map(|(id, _)| id.to_string()).collect();
+        // Only what is actually on the board. Something already stashed has
+        // been put away on purpose, and sweeping it into the archive would
+        // both undo that and change its id on the way back -- a bulk
+        // command reaching past the board into the things hidden from it is
+        // the opposite of what hiding them was for.
+        let ids: Vec<String> = data
+            .iter()
+            .filter(|(_, item)| {
+                item.is_complete.unwrap_or(false)
+                    && item.stashed.is_none()
+                    && item.trashed.is_none()
+            })
+            .map(|(id, _)| id.to_string())
+            .collect();
         if ids.is_empty() {
             return Ok(Outcome::Delete(vec![]));
         }
@@ -925,14 +990,26 @@ impl Ekko {
 
     // ---- public: read-only commands --------------------------------------
 
+    /// Storage with what has been put away or thrown away taken out.
+    ///
+    /// Every *view* reads through this; every *mutation* reads raw, so a
+    /// stashed item can still be addressed by id -- otherwise unstashing
+    /// something would require it to be visible, which is the one thing it
+    /// is not.
+    fn visible(&self) -> Result<ItemMap, EkkoError> {
+        let mut data = self.storage.get()?;
+        data.retain(|_, item| item.stashed.is_none() && item.trashed.is_none());
+        Ok(data)
+    }
+
     pub fn display_by_board(&self) -> Result<Outcome, EkkoError> {
-        let data = self.storage.get()?;
+        let data = self.visible()?;
         let boards = self.get_boards(&data);
         Ok(Outcome::Board(self.group_by_board(&data, &boards)))
     }
 
     pub fn display_by_date(&self) -> Result<Outcome, EkkoError> {
-        let data = self.storage.get()?;
+        let data = self.visible()?;
         let dates = self.get_dates(&data);
         Ok(Outcome::Timeline(self.group_by_date(&data, &dates)))
     }
@@ -949,7 +1026,7 @@ impl Ekko {
     }
 
     pub fn find_items(&self, terms: &[String]) -> Result<Outcome, EkkoError> {
-        let data = self.storage.get()?;
+        let data = self.visible()?;
         let mut result: ItemMap = BTreeMap::new();
         for (id, item) in &data {
             if has_terms(&item.description, terms) {
@@ -975,6 +1052,115 @@ impl Ekko {
     ///
     /// Ids are marked with `@`, matching `--priority`/`--move`, which
     /// leaves the bare words free to be state names.
+    /// Puts items away, or brings them back.
+    ///
+    /// Hiding, not changing. A stashed done task is still done and comes
+    /// back done -- which is why this is its own field and not another
+    /// state: a state would overwrite whatever it found, and unstashing
+    /// would then have to guess what to restore.
+    ///
+    /// A `@board` argument stashes what is on that board *now*. It does
+    /// not close the board: an item created there tomorrow shows up
+    /// normally. Closing a board so later items are born hidden is a
+    /// different feature, and it is what item 31 wants for phases.
+    pub fn set_stashed(&self, input: &[String], away: bool) -> Result<Outcome, EkkoError> {
+        let _lock = self.storage.acquire_lock()?;
+        let mut data = self.storage.get()?;
+
+        let ids = self.resolve_targets(input, &data)?;
+        let now = chrono::Local::now().timestamp_millis();
+
+        for id in &ids {
+            if let Some(item) = data.get_mut(id) {
+                item.stashed = if away { Some(now) } else { None };
+            }
+        }
+
+        self.save_touching(&mut data)?;
+        Ok(Outcome::Stashed { ids, away })
+    }
+
+    /// Same shape for the trash, and the same reasoning about not
+    /// overwriting state. The difference is that this one expires.
+    pub fn set_trashed(&self, input: &[String], away: bool) -> Result<Outcome, EkkoError> {
+        let _lock = self.storage.acquire_lock()?;
+        let mut data = self.storage.get()?;
+
+        let ids = self.resolve_targets(input, &data)?;
+        let now = chrono::Local::now().timestamp_millis();
+
+        for id in &ids {
+            if let Some(item) = data.get_mut(id) {
+                item.trashed = if away { Some(now) } else { None };
+            }
+        }
+
+        self.save_touching(&mut data)?;
+        Ok(Outcome::Trashed { ids, away })
+    }
+
+    /// Ids, or every item on a `@board`.
+    ///
+    /// Both spellings exist because stashing one note and stashing a
+    /// finished area are the same intention at different sizes, and
+    /// making the second one mean typing five ids would guarantee nobody
+    /// does it.
+    fn resolve_targets(&self, input: &[String], data: &ItemMap) -> Result<Vec<u32>, EkkoError> {
+        if input.is_empty() {
+            return Err(EkkoError::MissingId);
+        }
+
+        let mut ids = Vec::new();
+        let mut raw = Vec::new();
+        let boards = self.get_boards(data);
+
+        for token in input {
+            let as_board =
+                if token.starts_with('@') { token.clone() } else { format!("@{token}") };
+            if boards.contains(&as_board) {
+                for (id, item) in data.iter() {
+                    if item.boards.contains(&as_board) && !ids.contains(id) {
+                        ids.push(*id);
+                    }
+                }
+            } else {
+                raw.push(token.trim_start_matches('@').to_string());
+            }
+        }
+
+        if !raw.is_empty() {
+            for id in self.validate_ids(&raw, data)? {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// What is in the stash, grouped by the board each item came from.
+    ///
+    /// Grouped rather than flat because the grouping is the context: a
+    /// note explaining four tasks is only useful next to them, and taking
+    /// a finished area out of the way should not shred it on the way.
+    pub fn display_stash(&self) -> Result<Outcome, EkkoError> {
+        let mut data = self.storage.get()?;
+        data.retain(|_, item| item.stashed.is_some());
+        let boards = self.get_boards(&data);
+        Ok(Outcome::Stash(self.group_by_board(&data, &boards)))
+    }
+
+    /// What is in the trash, and how long it has left.
+    pub fn display_trash(&self) -> Result<Outcome, EkkoError> {
+        let mut data = self.storage.get()?;
+        data.retain(|_, item| item.trashed.is_some());
+        let mut items: Vec<Item> = data.into_values().collect();
+        items.sort_by_key(|item| item.trashed);
+        Ok(Outcome::Trash(items))
+    }
+
     /// The current month, drawn.
     ///
     /// Reads nothing: no lock, no storage, no board. That is the whole of
@@ -1125,7 +1311,7 @@ impl Ekko {
     /// carry a timestamp, so a caller that must notice removals has to
     /// compare id sets, not just read this.
     pub fn display_since(&self, since: i64) -> Result<Outcome, EkkoError> {
-        let mut data = self.storage.get()?;
+        let mut data = self.visible()?;
         // Items written before `updatedAt` existed fall back to their
         // creation time. Otherwise they would be invisible to every
         // `--since`, including `--since 0` on a first sync, which is worse
@@ -1242,7 +1428,7 @@ impl Ekko {
     /// the cursor are read off the items every time, so the view cannot
     /// drift from the board it describes.
     pub fn display_path(&self) -> Result<Outcome, EkkoError> {
-        let data = self.storage.get()?;
+        let data = self.visible()?;
         let phases = self.storage.get_phases()?;
 
         let mut steps = Vec::new();
@@ -1275,7 +1461,7 @@ impl Ekko {
     }
 
     pub fn list_by_attributes(&self, terms: &[String]) -> Result<Outcome, EkkoError> {
-        let data = self.storage.get()?;
+        let data = self.visible()?;
         let stored_boards = self.get_boards(&data);
 
         let (mut boards, mut attributes) = (Vec::new(), Vec::new());
@@ -1606,12 +1792,16 @@ mod tests {
         cleanup(&dir);
     }
 
+    /// Was about --delete archiving, which it no longer does. Kept,
+    /// pointed at --clear, because the archive id being unrelated to the
+    /// storage id is still true and still the trap it always was.
     #[test]
-    fn delete_reports_both_the_storage_id_and_the_new_unrelated_archive_id() {
+    fn clearing_reports_both_the_storage_id_and_the_new_unrelated_archive_id() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["first"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"])).unwrap();
 
-        let Outcome::Delete(results) = ekko.delete_items(&words(&["1"])).unwrap() else { panic!() };
+        let Outcome::Delete(results) = ekko.clear().unwrap() else { panic!() };
 
         assert_eq!(results, vec![DeleteResult { storage_id: 1, archive_id: 1 }]);
 
@@ -1623,11 +1813,12 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["a"])).unwrap();
         ekko.create_task(&words(&["b"])).unwrap();
-        ekko.delete_items(&words(&["1"])).unwrap(); // archive id 1
+        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.clear().unwrap(); // archive id 1
 
         let Outcome::Restore(results) = ekko.restore_items(&words(&["1"])).unwrap() else { panic!() };
 
-        // Next storage id is 3 (1 and 2 already used, 1 was deleted but
+        // Next storage id is 3 (1 and 2 already used, 1 left storage but
         // ids aren't reused across a *different* map the way they are
         // within the same one).
         assert_eq!(results, vec![RestoreResult { archive_id: 1, storage_id: 3 }]);
@@ -1635,16 +1826,42 @@ mod tests {
         cleanup(&dir);
     }
 
+    /// Ids are still `max + 1`, so one freed by leaving storage comes
+    /// back. What changed is which commands free one: `--clear` archives
+    /// and so does, `--delete` now trashes and so does NOT -- a trashed
+    /// item is still there, and it has to keep its id or `--untrash 5`
+    /// could not mean anything.
     #[test]
-    fn deleted_ids_are_reused_within_storage_max_plus_one_not_a_counter() {
+    fn an_id_is_reused_once_the_item_actually_leaves_storage() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["a"])).unwrap();
         ekko.create_task(&words(&["b"])).unwrap(); // id 2
-        ekko.delete_items(&words(&["2"])).unwrap();
+        ekko.set_state(&words(&["@2", "done"])).unwrap();
+        ekko.clear().unwrap();
 
         let Outcome::Task(item) = ekko.create_task(&words(&["c"])).unwrap() else { panic!() };
 
         assert_eq!(item.id, 2, "id 2 should be reused now that the max id is 1 again");
+
+        cleanup(&dir);
+    }
+
+    /// The other half of the same rule, and the reason it has to hold:
+    /// something in the trash keeps its number, so recovering it by that
+    /// number is unambiguous.
+    #[test]
+    fn a_trashed_item_keeps_its_id_so_nothing_can_take_it() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["a"])).unwrap();
+        ekko.create_task(&words(&["b"])).unwrap();
+        ekko.delete_items(&words(&["2"])).unwrap();
+
+        let Outcome::Task(item) = ekko.create_task(&words(&["c"])).unwrap() else { panic!() };
+
+        assert_eq!(item.id, 3, "a new item took the trashed item's number");
+        ekko.set_trashed(&words(&["2"]), false).unwrap();
+        let Outcome::Board(groups) = ekko.display_by_board().unwrap() else { panic!() };
+        assert_eq!(groups[0].1.len(), 3, "recovering it collided with something");
 
         cleanup(&dir);
     }
@@ -2073,15 +2290,18 @@ mod tests {
 
     #[test]
     fn uid_distinguishes_items_that_share_a_recycled_id() {
-        // Ids are `max + 1`, so deleting the highest-numbered item and
-        // creating another hands the new one the same id. This is exactly
-        // the case a caller holding an id across time gets wrong.
+        // Ids are `max + 1`, so an item leaving storage and another being
+        // created hands the new one the same id. This is exactly the case
+        // a caller holding an id across time gets wrong. `--clear` rather
+        // than `--delete` because deleting now trashes, and a trashed item
+        // keeps its number.
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["first"])).unwrap();
         ekko.create_task(&words(&["second"])).unwrap();
         let old_uid = ekko.storage.get().unwrap()[&2].uid.clone();
 
-        ekko.delete_items(&words(&["2"])).unwrap();
+        ekko.set_state(&words(&["@2", "done"])).unwrap();
+        ekko.clear().unwrap();
         ekko.create_task(&words(&["reuses id 2"])).unwrap();
 
         let data = ekko.storage.get().unwrap();
@@ -2524,6 +2744,140 @@ mod tests {
         let order: Vec<u32> = there.1.iter().map(|item| item.id).collect();
 
         assert_eq!(order, vec![3, 2], "the orphan is appended, in id order, never dropped");
+
+        cleanup(&dir);
+    }
+
+    /// Stashing hides, it does not change. A stashed done task is still
+    /// done underneath and comes back done -- which is why this is its own
+    /// field and not another state: a state would overwrite what it found,
+    /// and unstashing would then have to guess.
+    #[test]
+    fn stashing_hides_an_item_without_changing_what_it_is() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["done and put away"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"])).unwrap();
+
+        ekko.set_stashed(&words(&["1"]), true).unwrap();
+
+        let Outcome::Board(groups) = ekko.display_by_board().unwrap() else { panic!() };
+        assert!(groups.is_empty(), "a stashed item is still on the board");
+
+        let Outcome::Stash(stashed) = ekko.display_stash().unwrap() else { panic!() };
+        assert!(stashed[0].1[0].is_complete.unwrap_or(false), "it stopped being done");
+
+        ekko.set_stashed(&words(&["1"]), false).unwrap();
+        let Outcome::Board(groups) = ekko.display_by_board().unwrap() else { panic!() };
+        assert!(groups[0].1[0].is_complete.unwrap_or(false), "it came back as something else");
+
+        cleanup(&dir);
+    }
+
+    /// The counts have to be disjoint or the line stops summing to the
+    /// board. A stashed done task belongs under `in-stash` and nowhere
+    /// else -- it is not in front of you, and the line answers what is.
+    #[test]
+    fn the_stats_line_counts_every_item_exactly_once() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["done and stashed"])).unwrap();
+        ekko.create_task(&words(&["plain pending"])).unwrap();
+        ekko.create_note(&words(&["a note, trashed"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_stashed(&words(&["1"]), true).unwrap();
+        ekko.set_trashed(&words(&["3"]), true).unwrap();
+
+        let Outcome::Stats(stats) = ekko.display_stats().unwrap() else { panic!() };
+
+        assert_eq!(stats.complete, 0, "the stashed one is still counted as done");
+        assert_eq!(stats.notes, 0, "the trashed one is still counted as a note");
+        assert_eq!((stats.stashed, stats.trashed, stats.pending), (1, 1, 1));
+
+        cleanup(&dir);
+    }
+
+    /// A board argument stashes what is on it now. It does not close the
+    /// board: something created there tomorrow shows up normally, which is
+    /// a different feature and the one item 31 wants for phases.
+    #[test]
+    fn stashing_a_board_takes_what_is_on_it_and_does_not_close_it() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["@due", "first"])).unwrap();
+        ekko.create_note(&words(&["@due", "the reason"])).unwrap();
+        ekko.create_task(&words(&["@other", "untouched"])).unwrap();
+
+        ekko.set_stashed(&words(&["@due"]), true).unwrap();
+        ekko.create_task(&words(&["@due", "created after"])).unwrap();
+
+        let Outcome::Board(groups) = ekko.display_by_board().unwrap() else { panic!() };
+        let due = groups.iter().find(|(b, _)| b == "@due").expect("@due is back");
+
+        assert_eq!(due.1.len(), 1, "the new item was born hidden");
+        assert_eq!(due.1[0].description, "created after");
+
+        cleanup(&dir);
+    }
+
+    /// `--clear` sweeps the board, and something stashed is not on it.
+    /// Archiving it would undo the stash and change its id on the way
+    /// back, which is the opposite of what putting it away was for.
+    #[test]
+    fn clearing_does_not_reach_into_the_stash() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["stashed and done"])).unwrap();
+        ekko.create_task(&words(&["visible and done"])).unwrap();
+        ekko.set_state(&words(&["@1", "@2", "done"])).unwrap();
+        ekko.set_stashed(&words(&["1"]), true).unwrap();
+
+        ekko.clear().unwrap();
+
+        let Outcome::Stash(stashed) = ekko.display_stash().unwrap() else { panic!() };
+        assert_eq!(stashed[0].1.len(), 1, "clear swept the stash");
+        assert_eq!(stashed[0].1[0].description, "stashed and done");
+
+        cleanup(&dir);
+    }
+
+    /// Removing goes to the trash, not the archive. The archive is the
+    /// record of what got done; a task deleted by mistake sitting in it is
+    /// noise in the one history worth trusting.
+    #[test]
+    fn deleting_trashes_rather_than_archiving() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["a mistake"])).unwrap();
+
+        ekko.delete_items(&words(&["1"])).unwrap();
+
+        let Outcome::Archive(archived) = ekko.display_archive().unwrap() else { panic!() };
+        assert!(archived.is_empty(), "a deletion landed in the archive");
+
+        let Outcome::Trash(trashed) = ekko.display_trash().unwrap() else { panic!() };
+        assert_eq!(trashed.len(), 1);
+        assert!(trashed[0].trashed.is_some(), "no timestamp, so nothing can expire");
+
+        cleanup(&dir);
+    }
+
+    /// Ekko has no daemon, so expiry rides along on a write -- and only on
+    /// a write. A read that changed the board would make `--json` unsafe to
+    /// call, which is the rule `list_projects` already follows.
+    #[test]
+    fn the_trash_expires_on_a_write_and_never_on_a_read() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["long gone"])).unwrap();
+        ekko.delete_items(&words(&["1"])).unwrap();
+
+        // Backdate past the retention window.
+        let mut data = ekko.storage.get().unwrap();
+        let old = chrono::Local::now().timestamp_millis() - (TRASH_DAYS + 1) * 86_400_000;
+        data.get_mut(&1).unwrap().trashed = Some(old);
+        ekko.storage.set(&data).unwrap();
+
+        ekko.display_by_board().unwrap();
+        ekko.display_trash().unwrap();
+        assert!(ekko.storage.get().unwrap().contains_key(&1), "a read swept the trash");
+
+        ekko.create_task(&words(&["anything at all"])).unwrap();
+        assert!(!ekko.storage.get().unwrap().contains_key(&1), "a write did not sweep it");
 
         cleanup(&dir);
     }

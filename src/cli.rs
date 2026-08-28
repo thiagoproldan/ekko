@@ -12,6 +12,22 @@ pub struct Cli {
     #[arg(long, num_args = 0.., value_name = "IDS")]
     pub anchor: Option<Vec<String>>,
 
+    /// Put items or a whole board away, or with no ids, list what is away.
+    #[arg(long, num_args = 0.., value_name = "IDS")]
+    pub stash: Option<Vec<String>>,
+
+    /// Bring items back out of the stash.
+    #[arg(long, num_args = 1.., value_name = "IDS")]
+    pub unstash: Option<Vec<String>>,
+
+    /// Show what is in the trash, and how long it has left.
+    #[arg(long)]
+    pub trash: bool,
+
+    /// Bring items back out of the trash.
+    #[arg(long, num_args = 1.., value_name = "IDS")]
+    pub untrash: Option<Vec<String>>,
+
     /// The current month, drawn. Nothing from the board is on it yet.
     #[arg(long)]
     pub calendar: bool,

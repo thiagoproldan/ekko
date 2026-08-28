@@ -44,6 +44,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Folded notes** on screen, whole in pipes and `--json`
 - **Errors instead of silence** when a filter term matches nothing
 - **A `flock` lock and atomic writes**, so concurrent invocations queue rather than lose updates
+- **Stash and trash**: put finished work out of the way and keep it reachable, or remove it with 30 days to change your mind
 - **`--ui`**, an interactive picker in the terminal, where a long note is one line in the list and whole in the preview
 - **A reproducible `nix develop` shell**, and a flake package you can `nix run` without cloning
 
@@ -124,6 +125,10 @@ $ ekko --help
       --set              Set item state idempotently (retry-safe)
       --since <MILLIS>   Only items changed at or after a timestamp
       --star, -s         Star/unstar item
+      --stash [IDS]      Put items or a board away; no ids lists the stash
+      --trash            Show the trash, and how long each thing has left
+      --unstash <IDS>    Bring items back out of the stash
+      --untrash <IDS>    Bring items back out of the trash
       --ekko-dir         Define a custom ekko directory
       --task, -t         Create task
       --timeline, -i     Display timeline view
@@ -150,6 +155,8 @@ $ ekko --help
       $ ekko --priority @3 2
       $ ekko --restore 4
       $ ekko --star 2
+      $ ekko --stash @due
+      $ ekko --unstash 9
       $ ekko --task @coding @reviews Review PR #42
       $ ekko --task @coding Improve documentation
       $ ekko --task Make some buttercream
@@ -652,13 +659,67 @@ To move an item to one or more boards, use the `--move`/`-m` option, followed by
 $ ekko -m @1 myboard reviews
 ```
 
+### Stash and Trash
+
+Two ways for something to leave the board without leaving Ekko, and they differ in why it went.
+
+**Stash** is for putting something away. Work that is finished, or was cancelled, and that you still want within reach -- the reasoning beside a closed-out area, the decision you might need to reread. It stays in storage, keeps its id, and simply stops being shown.
+
+```
+$ ekko --stash @due
+ ✔  Stashed items: 1, 2, 3
+
+$ ekko
+  @work [0/1]
+    4. ☐  something still open
+
+  0% of all tasks complete.
+  0 done · 0 in-progress · 1 pending · 0 notes · 3 in-stash
+
+$ ekko --stash
+  @due (stashed today)
+    1. ✔  Store dueDate on Item
+    2. ✔  Render overdue items in red
+    3. ●  Chose Option<String> over a date type
+```
+
+A note stashed with the tasks it explains comes back beside them: the stash is grouped by the board things came from, so putting a finished area out of the way does not shred it on the way out. `--unstash <ids>` brings anything back, **as what it was** -- a stashed done task is still done underneath, which is why this is its own field rather than another state.
+
+`@board` stashes what is on that board *now*. It does not close the board: something created there tomorrow shows up normally.
+
+**Trash** is for removal, and it expires.
+
+```
+$ ekko --delete 4
+ ✔  Trashed item: 4
+
+$ ekko --trash
+  Trash
+    4. ☐  something still open  expires in 30d
+```
+
+The countdown is not decoration. Without it "expires" is a promise nobody can see coming, and the first time anyone learns the trash empties is when they go looking for something that is gone. It turns red in the last week, the same urgency vocabulary due dates already use.
+
+Ekko has no daemon, so the trash empties on the way past a **write** -- never on a read. A command that only looks at the board must not change it, which is the same rule `--projects` follows when it counts without creating anything.
+
+Three things worth knowing about how the counts behave:
+
+- **`in-stash` and `in-trash` are counted instead of what the item was, not as well.** A stashed done task appears under `in-stash` and not under `done`, so the line still sums to the board and answers what is in front of you rather than what exists.
+- **The percentage can go down when you stash finished work.** That is the same reasoning that keeps cancelled out of the denominator: it reports what is on the board now.
+- **`--clear` does not reach into the stash.** Something put away on purpose is not on the board, and sweeping it into the archive would undo the stash and change its id on the way back.
+
 ### Delete Item
 
-To delete one or more items, use the `--delete`/`-d` options followed by the ids of the target items. Note that deleted items are automatically archived, and can be inspected or restored at any moment. Duplicate ids are automatically filtered out.
+To delete one or more items, use the `--delete`/`-d` options followed by the ids of the target items. Duplicate ids are automatically filtered out.
 
 ```
 $ ekko -d 1 2
+ ✔  Trashed items: 1, 2
 ```
+
+Deleted items go to [the trash](#stash-and-trash), not the archive. The archive is the record of what got done; a task deleted by mistake sitting in it is noise in the one history worth trusting. The trash keeps them for 30 days and `--untrash` brings them back.
+
+A trashed item **keeps its id** for as long as it is in there, so `--untrash 5` can only mean one thing. That is a change from before: `--delete` used to free the number immediately. `--clear` still does, because archiving really does remove the item.
 
 ### Delete Checked Tasks
 

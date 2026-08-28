@@ -36,6 +36,12 @@ const PRIORITY_HIGH: u8 = 3;
 /// whole and let the terminal wrap it.
 const MIN_FOLD_WIDTH: usize = 24;
 
+/// How long the trash keeps something before dropping it.
+///
+/// Long enough that "I deleted the wrong thing" is recoverable days
+/// later, short enough that the trash does not become a second board.
+pub const TRASH_DAYS: i64 = 30;
+
 /// Decides whether ANSI codes get emitted at all. Real usage auto-detects
 /// (colors for a real terminal, plain text once piped/redirected, same as
 /// chalk); `NO_COLOR`/`FORCE_COLOR` override that, and tests construct one
@@ -211,6 +217,15 @@ pub struct Stats {
     pub cancelled: u32,
     pub pending: u32,
     pub notes: u32,
+    /// Put away, and thrown away. Counted *instead of* whatever the item
+    /// was rather than as well, so the line still sums to the board -- a
+    /// stashed done task appears here and not under `done`. The item keeps
+    /// its real state underneath; only the counting hides it.
+    ///
+    /// Shown only above zero, the same rule paused and cancelled follow,
+    /// which is what keeps a board that uses neither byte-identical.
+    pub stashed: u32,
+    pub trashed: u32,
 }
 
 /// Board or date groupings, in the order they should display -- callers
@@ -700,6 +715,92 @@ impl<'a> Renderer<'a> {
 
 
     /// Reports what an item now waits on, or that it waits on nothing.
+    pub fn success_stashed(&mut self, ids: &[u32], away: bool) {
+        let verb = if away { "Stashed" } else { "Unstashed" };
+        self.mark(verb, "items", "item", ids);
+    }
+
+    pub fn success_trashed(&mut self, ids: &[u32], away: bool) {
+        let verb = if away { "Trashed" } else { "Recovered" };
+        self.mark(verb, "items", "item", ids);
+    }
+
+    /// What is put away, grouped by the board it came from.
+    ///
+    /// Grouped rather than flat because the grouping *is* the context: a
+    /// note explaining four tasks is only worth anything beside them, and
+    /// putting a finished area out of the way should not shred it on the
+    /// way out.
+    pub fn display_stash(&mut self, groups: &Groups) {
+        if groups.is_empty() {
+            self.emit("\n ", None, "Nothing stashed", "");
+            return;
+        }
+        let now_millis = self.now_millis();
+        for (board, items) in groups {
+            let oldest = items.iter().filter_map(|item| item.stashed).min();
+            let since = oldest
+                .map(|at| self.painter.grey(&format!("(stashed {})", self.ago(at, now_millis))))
+                .unwrap_or_default();
+            self.emit("\n ", None, &self.painter.underline(board), &since);
+            for item in items {
+                self.display_item_by_board(item, now_millis);
+            }
+        }
+    }
+
+    /// What is in the trash, and how long each thing has left.
+    ///
+    /// The countdown is the point. Without it "expires" is a promise
+    /// nobody can see coming, and the first time anyone learns the trash
+    /// empties is when they go looking for something that is gone.
+    pub fn display_trash(&mut self, items: &[Item]) {
+        if items.is_empty() {
+            self.emit("\n ", None, "Nothing in the trash", "");
+            return;
+        }
+        let now_millis = self.now_millis();
+        self.emit("\n ", None, &self.painter.underline("Trash"), "");
+        for item in items {
+            let left = item
+                .trashed
+                .map(|at| self.expires_in(at, now_millis))
+                .unwrap_or_default();
+            let level = Level::of(item);
+            let prefix = self.build_prefix(item);
+            let message = self.build_message(item);
+            self.emit(&prefix, Some(&level), &message, &left);
+        }
+    }
+
+    /// Whole days since an instant, worded for a person.
+    fn ago(&self, at: i64, now_millis: i64) -> String {
+        let days = (now_millis - at) / 86_400_000;
+        match days {
+            d if d <= 0 => "today".to_string(),
+            1 => "yesterday".to_string(),
+            d => format!("{d}d ago"),
+        }
+    }
+
+    /// Days left before the trash drops it, coloured as it runs out.
+    fn expires_in(&self, trashed_at: i64, now_millis: i64) -> String {
+        let elapsed = (now_millis - trashed_at) / 86_400_000;
+        let left = TRASH_DAYS - elapsed;
+        let text = match left {
+            d if d <= 0 => "expires today".to_string(),
+            1 => "expires tomorrow".to_string(),
+            d => format!("expires in {d}d"),
+        };
+        // Red at the end, the same urgency vocabulary due dates already
+        // use, so the last week reads as a deadline rather than a fact.
+        if left <= 7 {
+            self.painter.red(&text)
+        } else {
+            self.painter.grey(&text)
+        }
+    }
+
     pub fn success_anchored(&mut self, id: u32, target: Option<u32>) {
         match target {
             Some(target) => {
@@ -858,6 +959,24 @@ impl<'a> Renderer<'a> {
                 self.painter.grey(if stats.notes == 1 { "note" } else { "notes" })
             ),
         ]);
+        // At the end, and only when they exist: these count what is NOT in
+        // front of you, so they read as a footnote to the line rather than
+        // as part of it. A board that stashes nothing prints exactly what it
+        // always did.
+        if stats.stashed > 0 {
+            status.push(format!(
+                "{} {}",
+                self.painter.grey(&stats.stashed.to_string()),
+                self.painter.grey("in-stash")
+            ));
+        }
+        if stats.trashed > 0 {
+            status.push(format!(
+                "{} {}",
+                self.painter.grey(&stats.trashed.to_string()),
+                self.painter.grey("in-trash")
+            ));
+        }
 
         let total =
             stats.pending + stats.in_progress + stats.paused + stats.cancelled + stats.complete + stats.notes;
@@ -1183,7 +1302,7 @@ mod tests {
     // Matches the golden `.ans` files' own stats line: 1 done, 1
     // in-progress, 2 pending, 0 notes -> 25% (1 of 4 tasks complete).
     fn golden_stats() -> Stats {
-        Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 2, notes: 0 }
+        Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 2, notes: 0, stashed: 0, trashed: 0 }
     }
 
     #[test]
@@ -1332,7 +1451,7 @@ mod tests {
         // The compatibility promise: boards that never pause anything print
         // exactly what they always did, goldens included.
         let output = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 2, notes: 0 });
+            r.display_stats(&Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 2, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert!(!output.contains("paused"), "a zero count must not appear:\n{output}");
@@ -1341,7 +1460,7 @@ mod tests {
     #[test]
     fn the_stats_line_reports_paused_once_there_is_any() {
         let output = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 2, cancelled: 0, pending: 1, notes: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 2, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert!(output.contains("2") && output.contains("paused"), "{output}");
@@ -1350,10 +1469,10 @@ mod tests {
     #[test]
     fn more_than_one_in_progress_earns_a_warning_and_one_does_not() {
         let one = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 0, cancelled: 0, pending: 0, notes: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 0, cancelled: 0, pending: 0, notes: 0, stashed: 0, trashed: 0 });
         });
         let several = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 3, paused: 0, cancelled: 0, pending: 0, notes: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 3, paused: 0, cancelled: 0, pending: 0, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert!(!one.contains("in progress --"), "a single cursor is the healthy case:\n{one}");
@@ -1380,7 +1499,7 @@ mod tests {
         let config = Config { display_progress_overview: false, ..Config::default() };
 
         let output = render_with(config, |r| {
-            r.display_stats(&Stats { percent: 50, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 1, notes: 0 });
+            r.display_stats(&Stats { percent: 50, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert_eq!(output, "");
@@ -1441,6 +1560,8 @@ mod tests {
                 cancelled: 0,
                 pending: 0,
                 notes: 0,
+                stashed: 0,
+                trashed: 0,
             });
         });
 
@@ -1459,6 +1580,8 @@ mod tests {
                 cancelled: 0,
                 pending: 1,
                 notes: 0,
+                stashed: 0,
+                trashed: 0,
             });
         });
 

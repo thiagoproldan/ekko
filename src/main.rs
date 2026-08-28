@@ -52,6 +52,10 @@ const HELP: &str = r#"
       --set              Set item state idempotently (retry-safe)
       --since <MILLIS>   Only items changed at or after a timestamp
       --star, -s         Star/unstar item
+      --stash [IDS]      Put items or a board away; no ids lists the stash
+      --trash            Show the trash, and how long each thing has left
+      --unstash <IDS>    Bring items back out of the stash
+      --untrash <IDS>    Bring items back out of the trash
       --ekko-dir         Define a custom ekko directory
       --task, -t         Create task
       --timeline, -i     Display timeline view
@@ -78,6 +82,8 @@ const HELP: &str = r#"
       $ ekko --priority @3 2
       $ ekko --restore 4
       $ ekko --star 2
+      $ ekko --stash @due
+      $ ekko --unstash 9
       $ ekko --task @coding @reviews Review PR #42
       $ ekko --task @coding Improve documentation
       $ ekko --task Make some buttercream
@@ -219,6 +225,22 @@ fn dispatch(
     }
     if cli.path {
         return Ok(vec![ekko.display_path()?]);
+    }
+    if let Some(args) = cli.stash.as_deref() {
+        return Ok(vec![if args.is_empty() {
+            ekko.display_stash()?
+        } else {
+            ekko.set_stashed(args, true)?
+        }]);
+    }
+    if let Some(args) = cli.unstash.as_deref() {
+        return Ok(vec![ekko.set_stashed(args, false)?]);
+    }
+    if cli.trash {
+        return Ok(vec![ekko.display_trash()?]);
+    }
+    if let Some(args) = cli.untrash.as_deref() {
+        return Ok(vec![ekko.set_trashed(args, false)?]);
     }
     if cli.calendar {
         return Ok(vec![ekko.display_calendar()?]);

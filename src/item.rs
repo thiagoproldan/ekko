@@ -100,6 +100,26 @@ pub struct Item {
     /// something nobody can finish.
     #[serde(rename = "blockedBy", default, skip_serializing_if = "Option::is_none")]
     pub blocked_by: Option<Vec<String>>,
+    /// When this was put away, in epoch millis.
+    ///
+    /// A timestamp rather than a flag so the stash view can say how long
+    /// something has been sitting there -- which is most of what tells you
+    /// whether you are ever going back for it.
+    ///
+    /// Stashing hides an item; it does not change what the item *is*. A
+    /// stashed done task is still done, and comes back done. That is why
+    /// this is a separate field rather than another `state`: a state would
+    /// have to overwrite the one it found, and unstashing would then have
+    /// to guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stashed: Option<i64>,
+    /// When this was thrown away, in epoch millis.
+    ///
+    /// Also a timestamp, and for a sharper reason: the trash expires, so
+    /// the moment it went in is the only thing that can say when it goes
+    /// out. A boolean could never answer "how long do I have".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trashed: Option<i64>,
     /// The task this note explains, by `uid`.
     ///
     /// Only a note carries one, and it only ever points at a task. Both
@@ -141,6 +161,8 @@ impl Item {
             phase: None,
             blocked_by: None,
             anchor: None,
+            stashed: None,
+            trashed: None,
             priority: Some(priority),
         }
     }
@@ -166,6 +188,8 @@ impl Item {
             phase: None,
             blocked_by: None,
             anchor: None,
+            stashed: None,
+            trashed: None,
         }
     }
 }

@@ -62,6 +62,13 @@ fn success_value(outcome: &Outcome) -> Value {
         }),
         Outcome::Phases(names) => json!({"ok": true, "command": command, "phases": names}),
         Outcome::Calendar(month) => json!({"ok": true, "command": command, "month": month}),
+        Outcome::Stashed { ids, away } | Outcome::Trashed { ids, away } => {
+            json!({"ok": true, "command": command, "ids": ids, "away": away})
+        }
+        Outcome::Stash(groups) => {
+            json!({"ok": true, "command": command, "boards": groups_to_value(groups)})
+        }
+        Outcome::Trash(items) => json!({"ok": true, "command": command, "items": items}),
         Outcome::Anchored { item, target } => {
             json!({"ok": true, "command": command, "item": item, "anchor": target})
         }
