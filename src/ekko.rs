@@ -359,6 +359,20 @@ impl Ekko {
         data.keys().max().copied().unwrap_or(0) + 1
     }
 
+    /// Resolves what a caller typed into display ids, accepting either.
+    ///
+    /// A display id is recycled -- `max + 1` means deleting the highest and
+    /// creating another hands the number back out -- so anything holding a
+    /// reference across time is told to hold the `uid` instead. That advice
+    /// was unfollowable until this accepted one: every mutation took display
+    /// ids only, so an agent could carry a uid and then had nothing to do
+    /// with it but re-read the board to translate.
+    ///
+    /// The two never collide. A uid is `{nanos:x}-{pid:x}`, so it always
+    /// carries a hyphen and never parses as a `u32`; anything numeric is a
+    /// display id and anything else is looked up as a uid. Both miss the
+    /// same way, as `INVALID_ID`, because a caller branching on the code
+    /// should not have to care which spelling it used.
     fn validate_ids(&self, raw_ids: &[String], existing: &ItemMap) -> Result<Vec<u32>, EkkoError> {
         if raw_ids.is_empty() {
             return Err(EkkoError::MissingId);
@@ -366,10 +380,13 @@ impl Ekko {
 
         let mut ids = Vec::new();
         for raw in raw_ids {
-            let id: u32 = raw.parse().map_err(|_| EkkoError::InvalidId(raw.clone()))?;
-            if !existing.contains_key(&id) {
-                return Err(EkkoError::InvalidId(raw.clone()));
-            }
+            let id = match raw.parse::<u32>() {
+                Ok(id) if existing.contains_key(&id) => id,
+                Ok(_) => return Err(EkkoError::InvalidId(raw.clone())),
+                Err(_) => {
+                    find_by_uid(existing, raw).ok_or_else(|| EkkoError::InvalidId(raw.clone()))?
+                }
+            };
             if !ids.contains(&id) {
                 ids.push(id);
             }
@@ -1048,10 +1065,16 @@ impl Ekko {
         let (id_str, rest) = self.extract_single_id_target(input)?;
         let id = self.validate_ids(&[id_str], &data)?[0];
 
-        let blocker_ids = self.validate_ids(
-            &rest.into_iter().cloned().collect::<Vec<String>>(),
-            &data,
-        )?;
+        // No blockers given means clear, not "you forgot the blockers".
+        // This shipped erroring instead, which left `blocked_by = None`
+        // below unreachable and a wrongly blocked task with no way back
+        // except delete and recreate. Real use found it first: an agent
+        // had to write "this dependency is wrong and ekko will not let me
+        // clear it" into a task description, which is a false statement
+        // the board then carries as if it were true.
+        let raw: Vec<String> = rest.into_iter().cloned().collect();
+        let blocker_ids =
+            if raw.is_empty() { Vec::new() } else { self.validate_ids(&raw, &data)? };
 
         for blocker in &blocker_ids {
             if *blocker == id {
@@ -1079,10 +1102,10 @@ impl Ekko {
         let Some(blockers) = item.blocked_by.as_ref() else { return false };
 
         for uid in blockers {
-            let Some((id, _)) = data.iter().find(|(_, i)| i.uid.as_deref() == Some(uid)) else {
+            let Some(id) = find_by_uid(data, uid) else {
                 continue;
             };
-            if *id == target || self.reaches(data, *id, target) {
+            if id == target || self.reaches(data, id, target) {
                 return true;
             }
         }
@@ -1192,6 +1215,15 @@ impl Ekko {
         let filtered = self.filter_by_attributes(&attributes, data);
         Ok(Outcome::List(self.group_by_board(&filtered, &boards)))
     }
+}
+
+/// The display id of the item carrying `uid`, if any.
+///
+/// Shared by `validate_ids` and `reaches` rather than written twice: they
+/// are asking the same question, and a dependency stored by uid has to
+/// resolve the same way whether a cycle check or a caller is asking.
+fn find_by_uid(items: &ItemMap, uid: &str) -> Option<u32> {
+    items.iter().find(|(_, item)| item.uid.as_deref() == Some(uid)).map(|(id, _)| *id)
 }
 
 fn is_priority_opt(token: &str) -> bool {
@@ -2199,6 +2231,83 @@ mod tests {
                 "--set @1 {state} rendered no confirmation naming the id: {rendered:?}"
             );
         }
+
+        cleanup(&dir);
+    }
+
+    /// Shipped with no way to unset: passing no blockers errored, which
+    /// left the `None` branch in `set_blocked_by` unreachable and a wrongly
+    /// blocked task with no way back but delete and recreate. Real use hit
+    /// it before we did -- an agent wrote "this dependency is wrong and
+    /// ekko will not let me clear it" into a task description, so the board
+    /// ended up carrying a false statement as if it were data.
+    #[test]
+    fn a_dependency_can_be_cleared() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["first"])).unwrap();
+        ekko.create_task(&words(&["second"])).unwrap();
+
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        assert_eq!(ekko.blocker_map().unwrap().get(&2), Some(&vec![1]));
+
+        let Outcome::Blocked { blockers, .. } = ekko.set_blocked_by(&words(&["@2"])).unwrap()
+        else {
+            panic!("expected a Blocked outcome")
+        };
+
+        assert!(blockers.is_empty(), "clearing reported blockers: {blockers:?}");
+        assert_eq!(ekko.blocker_map().unwrap().get(&2), None, "the marker survived");
+
+        cleanup(&dir);
+    }
+
+    /// Display ids are recycled, so anything holding a reference across
+    /// time is told to hold the uid instead -- advice that was impossible
+    /// to follow while every mutation took display ids only. An agent could
+    /// carry a uid and then had nothing to do with it but re-read the board
+    /// to translate it back.
+    #[test]
+    fn a_uid_works_wherever_a_display_id_does() {
+        let (ekko, dir) = fresh_ekko();
+        let Outcome::Task(item) = ekko.create_task(&words(&["carry me"])).unwrap() else {
+            panic!("expected a Task outcome")
+        };
+        let uid = item.uid.clone().expect("a created task carries a uid");
+        let marked = format!("@{uid}");
+
+        ekko.set_state(&[marked.clone(), "done".to_string()]).unwrap();
+        ekko.update_priority(&[marked.clone(), "2".to_string()]).unwrap();
+        ekko.edit_description(&[marked, "renamed by uid".to_string()]).unwrap();
+        // A toggle takes the id bare, with no `@`, so it exercises the
+        // other spelling on the same value.
+        ekko.star_items(std::slice::from_ref(&uid)).unwrap();
+
+        let stored = ekko.display_by_board().unwrap();
+        let Outcome::Board(groups) = stored else { panic!("expected a Board outcome") };
+        let item = &groups[0].1[0];
+
+        assert!(item.is_complete.unwrap_or(false), "--set by uid did not land");
+        assert_eq!(item.priority, Some(2), "--priority by uid did not land");
+        assert_eq!(item.description, "renamed by uid", "--edit by uid did not land");
+        assert!(item.is_starred, "--star by a bare uid did not land");
+
+        cleanup(&dir);
+    }
+
+    /// A uid can never be mistaken for a display id: it is
+    /// `{nanos:x}-{pid:x}`, so it always carries a hyphen and never parses
+    /// as a u32. Both spellings miss the same way, because a caller
+    /// branching on the error code should not have to care which it used.
+    #[test]
+    fn an_unknown_uid_misses_the_same_way_an_unknown_id_does() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["only one"])).unwrap();
+
+        let by_uid = ekko.set_state(&words(&["@18cfdfefd310bd35-10468b", "done"]));
+        let by_id = ekko.set_state(&words(&["@999", "done"]));
+
+        assert!(matches!(by_uid, Err(EkkoError::InvalidId(_))));
+        assert!(matches!(by_id, Err(EkkoError::InvalidId(_))));
 
         cleanup(&dir);
     }

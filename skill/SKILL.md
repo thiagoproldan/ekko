@@ -63,13 +63,21 @@ at something else entirely.
 - Safe to act on blind: an id you created *in this same turn*.
 - Not safe: any id from an earlier turn, or one the user mentioned in passing.
 
-Before `--check`, `--delete`, `--edit`, `--move` or `--priority` on an id you
-did not just create, re-read and confirm the description matches what you
-expect. This costs one command and prevents silently editing the user's work.
+**Carry the `uid`, and act on it.** `--json` gives every item one: never
+recycled, unchanged by `--restore`, and accepted **anywhere a display id is**
+— `--set`, `--edit`, `--move`, `--priority`, `--delete`, `--blocked-by`,
+`--restore` and the toggles all take either.
 
-`--json` also gives every item a `uid`: never recycled, and unchanged by
-`--restore`. When you need to carry a reference across turns, carry that
-rather than the display id.
+    ekko --set @18cfa4987d5ce3-1043bc done      # `@` marks the id, as always
+    ekko --star 18cfa4987d5ce3-1043bc           # toggles take it bare
+
+The two can never be confused: a uid always carries a hyphen and never parses
+as a number. An unknown one fails as `INVALID_ID`, the same as an unknown id.
+
+So the re-read before acting is only needed when a **display** id is all you
+have — one the user typed, or one you read a while ago. Carrying uids from the
+start removes that cost entirely, and it is the one reference that survives an
+item being archived and restored.
 
 ## Read sparingly, but read when it matters
 
@@ -146,9 +154,9 @@ unmet blockers — what can actually be started right now. Reach for it instead
 of reading the whole board and reasoning about order yourself, which is both
 more expensive and easier to get wrong.
 
-One limit to know: there is no way to clear a dependency once set. Passing
-`--blocked-by @3` with no blockers errors rather than unblocking. Say so
-rather than guessing at a spelling.
+`--blocked-by @3` with no blockers **clears** them. Reach for it the moment a
+dependency turns out to be wrong — a blocker you cannot undo becomes a false
+statement the board then carries as if it were data.
 
 ## Projects and phases
 
@@ -214,6 +222,7 @@ Two things that will bite otherwise:
 | restore | `ekko --restore 2` | takes the **archive** id |
 | what can start | `ekko --list ready` | pending, no unmet blockers |
 | declare a blocker | `ekko --blocked-by @3 1 2` | `@` marks the **blocked** item |
+| clear a blocker | `ekko --blocked-by @3` | no blockers means none |
 | scope to a project | `ekko --project demo --list ready` | mutually exclusive with `--ekko-dir` |
 | the phase view | `ekko --project demo --path` | `--phase` itself only affects creation |
 | destroy a project | `ekko --project old --destroy` | whole board to the trash; ask first |

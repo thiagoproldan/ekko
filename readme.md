@@ -39,7 +39,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Phases and `--path`**: a project's journey, read backwards as history and forwards as a plan
 - **Dependencies**: `--blocked-by`, and `--list ready` for what can actually be started
 - **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
-- **Stable `uid`s**, because display ids get recycled and `--restore` hands out new ones
+- **Stable `uid`s**, accepted anywhere a display id is, because display ids get recycled and `--restore` hands out new ones
 - **`--since`**, reading only what changed rather than the whole board every time
 - **Folded notes** on screen, whole in pipes and `--json`
 - **Errors instead of silence** when a filter term matches nothing
@@ -376,7 +376,14 @@ Four properties, each of them a consequence rather than a feature:
 - **Stored by `uid`, not by display id.** Ids are recycled, and a dependency stored as a number would quietly follow the number to a different item.
 - **Cycles are refused.** Two items waiting on each other is a pair nothing can make ready, and the board would state it as calmly as any other fact.
 
-`--blocked-by` replaces the list rather than adding to it, the same contract `--move` and `--phases` already use.
+`--blocked-by` replaces the list rather than adding to it, the same contract `--move` and `--phases` already use. Passing it with no blockers clears them:
+
+```
+$ ekko --blocked-by @3
+ ✔  Item 3 waits on nothing
+```
+
+That matters more than it looks. A dependency you cannot undo does not stay a mistake quietly — it becomes a false statement the board carries as if it were data, and only a person reading the description will ever notice.
 
 There is no picture yet, on purpose. The data is what a drawing would need anyway, and whether a drawing earns its keep is easier to answer after living with `--list ready` for a while than before.
 
@@ -503,6 +510,21 @@ Nothing is paused automatically. Ekko instead points out when more than one task
 Both additions are conditional: the `paused` count joins the stats line only when it is above zero, and the warning only appears when it applies. A board that keeps to one task at a time prints exactly what it printed before.
 
 This is an Ekko addition, though the concept is not: taskbook's own help calls `--begin` "Start/pause task". It named pausing without giving it anywhere to live.
+
+### Stable ids
+
+The next display id is `max + 1`, so deleting the highest-numbered item and creating another hands that number straight back out. For someone typing at a terminal that is fine -- the id you use is the one on screen in front of you. For anything holding a reference between one command and the next, it is a trap.
+
+Every item therefore carries a `uid` in `--json`: never recycled, and unchanged when an item is archived and restored. It is accepted **anywhere a display id is** -- `--set`, `--edit`, `--move`, `--priority`, `--delete`, `--blocked-by`, `--restore`, and the toggles.
+
+```
+$ ekko --set @18cfa4987d5ce3-1043bc done    # `@` marks the id, as always
+$ ekko --star 18cfa4987d5ce3-1043bc         # toggles take it bare
+```
+
+The two spellings cannot be confused: a uid is `{nanos:x}-{pid:x}`, so it always carries a hyphen and never parses as a number. Both miss the same way, as `INVALID_ID`, because a caller branching on the error code should not have to care which it used.
+
+This shipped incomplete and real use found it: the `uid` existed and no command accepted one, so the advice to carry it across turns could not actually be followed. A caller could hold the stable reference and then had nothing to do but re-read the board to translate it back into a number that might have moved.
 
 ### Incremental Reads
 
