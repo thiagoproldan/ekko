@@ -23,3 +23,6 @@ snap
 
 # nix build output
 /result
+
+# UI reference screenshots -- third-party, kept locally
+/imgs_base_ui

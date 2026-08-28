@@ -44,6 +44,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Folded notes** on screen, whole in pipes and `--json`
 - **Errors instead of silence** when a filter term matches nothing
 - **A `flock` lock and atomic writes**, so concurrent invocations queue rather than lose updates
+- **`--ui`**, an interactive picker in the terminal, where a long note is one line in the list and whole in the preview
 - **A reproducible `nix develop` shell**, and a flake package you can `nix run` without cloning
 
 <div align="center">
@@ -125,6 +126,7 @@ $ ekko --help
       --ekko-dir         Define a custom ekko directory
       --task, -t         Create task
       --timeline, -i     Display timeline view
+      --ui               Interactive mode: a picker in the terminal
       --version, -v      Display installed version
 
     Examples
@@ -150,6 +152,7 @@ $ ekko --help
       $ ekko --task @coding Improve documentation
       $ ekko --task Make some buttercream
       $ ekko --timeline
+      $ ekko --ui
 ```
 
 ## Views
@@ -169,6 +172,35 @@ In order to display all items in a timeline view, based on their creation date, 
 <div align="center">
   <img alt="Timeline View" width="62%" src="media/timeline.png"/>
 </div>
+
+### Interactive Mode
+
+`ekko --ui` opens a picker in the terminal: the items on the left, whatever is selected in full on the right, and a prompt that filters as you type.
+
+```
+┌─────────────────────── Results ───────────────────────┐  ┌─────────────────────── Preview ────────────────────────┐
+│    1. ✔ Vendor wlroots                                │  │                                                        │
+│    2. … Damage tracking                               │  │ ● note                                                 │
+│>     3. ● Damage is in surface coordinates, not output│  │                                                        │
+│    4. ✔ Ship the package                              │  │ Damage is in surface coordinates, not output           │
+│    5. ☐ Write the readme                              │  │ coordinates -- getting this backwards is why the first  │
+│                                                       │  │ attempt flickered, and it cost most of an afternoon to  │
+│                                                       │  │ find                                                   │
+└───────────────────────────────────────────────────────┘  │ boards   @wayland                                      │
+┌─────────────────────── Prompt ────────────────────────┐  │ explains a task                                        │
+│ >                                               5 / 5 │  │ created  Fri Aug 28 2026                               │
+└───────────────────────────────────────────────────────┘  └────────────────────────────────────────────────────────┘
+```
+
+Type to filter, arrows or `Ctrl-n`/`Ctrl-p` to move, `Enter` to complete a task, `Tab` to start or pause one, click to select, `Esc` to leave.
+
+The split is the point rather than decoration. Notes hold the reasoning worth keeping, which is exactly why they run long -- on a real board they took 43 of 85 item lines. [Folding](#folded-notes) copes with that by truncating to fit one line; a picker does not have to truncate anything, because the list holds one line per item and the whole text lives in the preview, on demand. The long note stays long and stops being a wall.
+
+Three things about how it behaves, each of them a consequence of the board being shared:
+
+- **It never holds the lock while idle.** A write takes the lock and releases it immediately, the same as any other command. A UI parked on the `flock` would block your other terminal and every agent -- the exact failure the lock exists to prevent, caused by the thing meant to help.
+- **It reloads after every write**, so the screen reports what landed rather than what was asked for. That costs under 10ms on a real board.
+- **It changes nothing about the CLI.** Interactive mode is a separate frontend on the same core and never goes through the renderer the golden tests pin, so the byte-for-byte guarantee is untouched by construction rather than by care.
 
 ### Path View
 

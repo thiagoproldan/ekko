@@ -8,6 +8,7 @@ mod json_output;
 mod paths;
 mod render;
 mod storage;
+mod ui;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -53,6 +54,7 @@ const HELP: &str = r#"
       --ekko-dir         Define a custom ekko directory
       --task, -t         Create task
       --timeline, -i     Display timeline view
+      --ui               Interactive mode: a picker in the terminal
       --version, -v      Display installed version
 
     Examples
@@ -78,6 +80,7 @@ const HELP: &str = r#"
       $ ekko --task @coding Improve documentation
       $ ekko --task Make some buttercream
       $ ekko --timeline
+      $ ekko --ui
 "#;
 
 /// Argument that re-invokes this same binary as a detached clipboard
@@ -147,6 +150,16 @@ fn main() -> ExitCode {
         Ok(ekko) => ekko,
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
+
+    // Handled here rather than in `dispatch`: the interactive mode is a
+    // frontend, not a command. It produces no `Outcome` because it is not
+    // one answer to one question -- it takes the terminal and stays.
+    if cli.ui {
+        return match ui::run(&ekko) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => finish_with_error(&err, json_mode, &home_dir),
+        };
+    }
 
     match dispatch(&cli, &ekko, project, &home_dir) {
         Ok(outcomes) => {

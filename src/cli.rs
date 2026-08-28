@@ -12,6 +12,10 @@ pub struct Cli {
     #[arg(long, num_args = 0.., value_name = "IDS")]
     pub anchor: Option<Vec<String>>,
 
+    /// Interactive mode: a picker in the terminal, for a person.
+    #[arg(long)]
+    pub ui: bool,
+
     #[arg(long, short = 'a')]
     pub archive: bool,
     #[arg(long, short = 'b')]

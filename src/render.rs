@@ -158,7 +158,12 @@ pub struct Stats {
 /// (ekko.rs) own how that order is produced; this module just walks it.
 pub type Groups = [(String, Vec<Item>)];
 
-enum Level {
+/// Which of the six item appearances applies. Public so a second
+/// frontend can ask the same question rather than re-deriving the
+/// precedence between cancelled, complete, in-progress and paused --
+/// getting that order wrong in one place and not the other is exactly
+/// how two surfaces drift apart.
+pub enum Level {
     Success, // complete task
     Pending, // pending task
     Wait,    // in-progress task
@@ -169,7 +174,31 @@ enum Level {
 }
 
 impl Level {
-    fn icon(&self) -> &'static str {
+    /// Which appearance an item has, decided in one place.
+    ///
+    /// The precedence matters and is easy to get subtly different on a
+    /// second reading: cancelled wins over complete because both are
+    /// terminal, and in-progress wins over paused because if stale data
+    /// ever claims both, "being worked on" is the more useful lie to
+    /// believe.
+    pub fn of(item: &Item) -> Level {
+        if !item.is_task {
+            return Level::Note;
+        }
+        if item.cancelled.unwrap_or(false) {
+            Level::Cancelled
+        } else if item.is_complete.unwrap_or(false) {
+            Level::Success
+        } else if item.in_progress.unwrap_or(false) {
+            Level::Wait
+        } else if item.paused.unwrap_or(false) {
+            Level::Paused
+        } else {
+            Level::Pending
+        }
+    }
+
+    pub fn icon(&self) -> &'static str {
         match self {
             Level::Success => "\u{2714}", // ✔
             Level::Pending => "\u{2610}", // ☐
@@ -259,25 +288,7 @@ impl<'a> Renderer<'a> {
     // ---- layout building blocks -----------------------------------
 
     fn item_level(&self, item: &Item) -> Level {
-        if !item.is_task {
-            return Level::Note;
-        }
-        // Ahead of complete: cancelling is terminal too, and the two are
-        // mutually exclusive by construction in `apply_state`.
-        if item.cancelled.unwrap_or(false) {
-            Level::Cancelled
-        } else if item.is_complete.unwrap_or(false) {
-            Level::Success
-        } else if item.in_progress.unwrap_or(false) {
-            Level::Wait
-        } else if item.paused.unwrap_or(false) {
-            // Below in-progress deliberately: an item cannot be both, and if
-            // stale data ever says otherwise, "being worked on" is the more
-            // useful lie to believe.
-            Level::Paused
-        } else {
-            Level::Pending
-        }
+        Level::of(item)
     }
 
     /// The id column, indented two further for a note that explains a task.
