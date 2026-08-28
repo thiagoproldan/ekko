@@ -280,10 +280,20 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// The id column, indented two further for a note that explains a task.
+    ///
+    /// The indent is the whole point of anchoring: a reason sitting at the
+    /// same depth as the work reads as another item competing for
+    /// attention, which is how a board of long notes became a wall. One
+    /// step in and it reads as belonging to the line above it.
+    ///
+    /// An unanchored note is untouched, so every board that does not use
+    /// this renders exactly as it did -- goldens included.
     fn build_prefix(&self, item: &Item) -> String {
         let id = item.id.to_string();
         let padding = " ".repeat(4usize.saturating_sub(id.len()));
-        format!("{padding} {}", self.painter.grey(&format!("{id}.")))
+        let indent = if item.anchor.is_some() { "  " } else { "" };
+        format!("{indent}{padding} {}", self.painter.grey(&format!("{id}.")))
     }
 
     /// Shortens a note that would wrap, to one line plus a count of what was
@@ -620,6 +630,16 @@ impl<'a> Renderer<'a> {
 
 
     /// Reports what an item now waits on, or that it waits on nothing.
+    pub fn success_anchored(&mut self, id: u32, target: Option<u32>) {
+        match target {
+            Some(target) => {
+                let suffix = self.painter.grey(&target.to_string());
+                self.success(" ", &format!("Note {id} now explains:"), &suffix);
+            }
+            None => self.success(" ", &format!("Note {id} explains nothing in particular"), ""),
+        }
+    }
+
     pub fn success_blocked(&mut self, id: u32, blockers: &[u32]) {
         if blockers.is_empty() {
             self.success(" ", &format!("Item {id} waits on nothing"), "");
@@ -1475,6 +1495,39 @@ mod tests {
             plain.lines().filter(|l| !l.trim().is_empty()).count(),
             2,
             "one line per phase: {plain:?}"
+        );
+    }
+
+    /// The indent is the visible half of anchoring. A reason sitting at the
+    /// same depth as the work reads as another item competing for
+    /// attention, which is how a board of long notes became a wall; one
+    /// step in and it reads as belonging to the line above.
+    #[test]
+    fn an_anchored_note_is_indented_and_an_ordinary_one_is_not() {
+        let mut anchored =
+            Item::new_note(2, "the reason".to_string(), vec!["@a".to_string()]);
+        anchored.date = GOLDEN_DAY.to_string();
+        anchored.timestamp = golden_now().timestamp_millis();
+        anchored.anchor = Some("some-task-uid".to_string());
+
+        let mut plain = Item::new_note(3, "unattached".to_string(), vec!["@a".to_string()]);
+        plain.date = GOLDEN_DAY.to_string();
+        plain.timestamp = golden_now().timestamp_millis();
+
+        let groups = vec![("@a".to_string(), vec![anchored, plain])];
+        let output = render_with(Config::default(), |r| r.display_by_board(&groups));
+        let plain_text = strip_ansi(&output);
+
+        let anchored_line =
+            plain_text.lines().find(|l| l.contains("the reason")).expect("rendered");
+        let plain_line =
+            plain_text.lines().find(|l| l.contains("unattached")).expect("rendered");
+
+        let depth = |line: &str| line.len() - line.trim_start().len();
+        assert_eq!(
+            depth(anchored_line),
+            depth(plain_line) + 2,
+            "anchored note not indented:\n{anchored_line}\n{plain_line}"
         );
     }
 }

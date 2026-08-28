@@ -34,6 +34,9 @@ pub enum EkkoError {
     MissingState,
     UnknownState(String),
     BlockingCycle(u32, u32),
+    AnchorNotANote(u32),
+    AnchorTargetNotATask(u32),
+    AnchorTargetHasNoUid(u32),
     InvalidCustomAppDir(String),
     MissingEkkoDirFlagValue,
     LockTimeout(String),
@@ -60,6 +63,9 @@ impl EkkoError {
             EkkoError::MissingState => "MISSING_STATE",
             EkkoError::UnknownState(_) => "UNKNOWN_STATE",
             EkkoError::BlockingCycle(_, _) => "BLOCKING_CYCLE",
+            EkkoError::AnchorNotANote(_) => "ANCHOR_NOT_A_NOTE",
+            EkkoError::AnchorTargetNotATask(_) => "ANCHOR_TARGET_NOT_A_TASK",
+            EkkoError::AnchorTargetHasNoUid(_) => "ANCHOR_TARGET_HAS_NO_UID",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
             EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
             EkkoError::LockTimeout(_) => "LOCK_TIMEOUT",
@@ -88,7 +94,10 @@ impl EkkoError {
             EkkoError::InvalidDueDate(_) => out.generic_error(&self.to_string()),
             EkkoError::MissingState => out.generic_error(&self.to_string()),
             EkkoError::UnknownState(_) => out.generic_error(&self.to_string()),
-            EkkoError::BlockingCycle(_, _) => out.generic_error(&self.to_string()),
+            EkkoError::BlockingCycle(_, _)
+            | EkkoError::AnchorNotANote(_)
+            | EkkoError::AnchorTargetNotATask(_)
+            | EkkoError::AnchorTargetHasNoUid(_) => out.generic_error(&self.to_string()),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
             EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
             EkkoError::LockTimeout(path) => out.lock_timeout(path),
@@ -119,6 +128,18 @@ impl std::fmt::Display for EkkoError {
             EkkoError::BlockingCycle(waiter, blocker) => write!(
                 f,
                 "Item {waiter} cannot wait on {blocker}: {blocker} already waits on {waiter}"
+            ),
+            EkkoError::AnchorNotANote(id) => write!(
+                f,
+                "Only a note can be anchored, and {id} is a task. A task under a task would be a subtask, which is a different thing"
+            ),
+            EkkoError::AnchorTargetNotATask(id) => write!(
+                f,
+                "A note anchors to a task, and {id} is a note. Anchoring notes to notes would allow chains, and so cycles"
+            ),
+            EkkoError::AnchorTargetHasNoUid(id) => write!(
+                f,
+                "Item {id} predates uids, so nothing can point at it reliably. Recreate it to give it one"
             ),
             EkkoError::UnknownState(term) => {
                 write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, cancelled, unstarted, starred, unstarred")
@@ -210,6 +231,7 @@ pub enum Outcome {
     Destroyed { name: String, tasks: u32, notes: u32, trash: std::path::PathBuf },
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
+    Anchored { item: Item, target: Option<u32> },
     Path { steps: Vec<PathStep>, rootless: u32 },
     Stats(Stats),
 }
@@ -242,6 +264,7 @@ impl Outcome {
             Outcome::Destroyed { .. } => "destroy",
             Outcome::Phases(_) => "phases",
             Outcome::Blocked { .. } => "blocked",
+            Outcome::Anchored { .. } => "anchor",
             Outcome::Path { .. } => "path",
             Outcome::Stats(_) => "stats",
         }
@@ -307,6 +330,7 @@ impl Outcome {
             }
             Outcome::Phases(names) => out.display_phases(names),
             Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
+            Outcome::Anchored { item, target } => out.success_anchored(item.id, *target),
             Outcome::Path { steps, rootless } => out.display_path(steps, *rootless),
             Outcome::Stats(stats) => out.display_stats(stats),
         }
@@ -487,6 +511,9 @@ impl Ekko {
                     }
                 }
             }
+        }
+        for (_, items) in &mut grouped {
+            reorder_anchored(items);
         }
         grouped
     }
@@ -945,6 +972,56 @@ impl Ekko {
     ///
     /// Ids are marked with `@`, matching `--priority`/`--move`, which
     /// leaves the bare words free to be state names.
+    /// Points a note at the task it explains.
+    ///
+    /// Reasons and work were siblings on the board, which is how a long
+    /// note about item 12 ended up either crammed into 12's description or
+    /// floating beside it with nothing connecting the two. Neither is a
+    /// good option and both were the only ones available.
+    ///
+    /// Only a note can be anchored, and only to a task. A task under a task
+    /// is a subtask -- a different feature, with real questions about whose
+    /// total it counts toward -- and a note under a note would allow chains
+    /// and so cycles. One level, always, and cycles impossible by shape.
+    ///
+    /// Passing no target clears, designed in from the start rather than
+    /// discovered missing: `--blocked-by` shipped without it and left a
+    /// wrong dependency with no way back.
+    pub fn set_anchor(&self, input: &[String]) -> Result<Outcome, EkkoError> {
+        let _lock = self.storage.acquire_lock()?;
+        let mut data = self.storage.get()?;
+
+        let (id_str, rest) = self.extract_single_id_target(input)?;
+        let id = self.validate_ids(&[id_str], &data)?[0];
+
+        if data.get(&id).is_some_and(|item| item.is_task) {
+            return Err(EkkoError::AnchorNotANote(id));
+        }
+
+        let raw: Vec<String> = rest.into_iter().cloned().collect();
+        let target = match raw.is_empty() {
+            true => None,
+            false => {
+                if raw.len() > 1 {
+                    return Err(EkkoError::InvalidIdsNumber);
+                }
+                let target_id = self.validate_ids(&raw, &data)?[0];
+                let target = data.get(&target_id).expect("id just validated against data");
+                if !target.is_task {
+                    return Err(EkkoError::AnchorTargetNotATask(target_id));
+                }
+                Some((target_id, target.uid.clone().ok_or(EkkoError::AnchorTargetHasNoUid(target_id))?))
+            }
+        };
+
+        let item = data.get_mut(&id).expect("id just validated against data");
+        item.anchor = target.as_ref().map(|(_, uid)| uid.clone());
+        let updated = item.clone();
+
+        self.save_touching(&mut data)?;
+        Ok(Outcome::Anchored { item: updated, target: target.map(|(id, _)| id) })
+    }
+
     /// Moves a whole project to the trash, reporting what went with it.
     ///
     /// The only irreversible-looking operation in Ekko, and the reason for
@@ -1215,6 +1292,39 @@ impl Ekko {
         let filtered = self.filter_by_attributes(&attributes, data);
         Ok(Outcome::List(self.group_by_board(&filtered, &boards)))
     }
+}
+
+/// Moves each anchored note to sit directly after the task it explains.
+///
+/// Only within one group, and only when the task is in it. A note whose
+/// task lives on another board stays exactly where it was rather than
+/// jumping between boards -- surprising placement is worse than an
+/// un-nested reason, and the note is still findable where it was filed.
+///
+/// A group with nothing anchored comes back untouched, which is what keeps
+/// every existing board -- goldens included -- rendering in id order.
+fn reorder_anchored(items: &mut Vec<Item>) {
+    if !items.iter().any(|item| item.anchor.is_some()) {
+        return;
+    }
+
+    let (anchored, mut rest): (Vec<Item>, Vec<Item>) =
+        items.drain(..).partition(|item| item.anchor.is_some());
+
+    let mut orphans = Vec::new();
+    for note in anchored {
+        let target = note.anchor.as_deref().expect("partitioned on anchor being set");
+        match rest.iter().position(|item| item.uid.as_deref() == Some(target)) {
+            Some(at) => rest.insert(at + 1, note),
+            None => orphans.push(note),
+        }
+    }
+
+    // Orphans keep their id order among themselves, appended rather than
+    // dropped: a note whose task is elsewhere is still this board's note.
+    orphans.sort_by_key(|item| item.id);
+    rest.extend(orphans);
+    *items = rest;
 }
 
 /// The display id of the item carrying `uid`, if any.
@@ -2308,6 +2418,93 @@ mod tests {
 
         assert!(matches!(by_uid, Err(EkkoError::InvalidId(_))));
         assert!(matches!(by_id, Err(EkkoError::InvalidId(_))));
+
+        cleanup(&dir);
+    }
+
+    /// A reason and the work it explains were siblings, so a long note
+    /// about item 2 either got crammed into 2's description or floated
+    /// beside it with nothing connecting them. Anchoring moves it under
+    /// its task and indents it, which is the whole feature.
+    #[test]
+    fn an_anchored_note_sits_under_the_task_it_explains() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["@a", "first"])).unwrap();
+        ekko.create_task(&words(&["@a", "second"])).unwrap();
+        ekko.create_note(&words(&["@a", "why second is hard"])).unwrap();
+        ekko.create_task(&words(&["@a", "third"])).unwrap();
+
+        ekko.set_anchor(&words(&["@3", "1"])).unwrap();
+
+        let Outcome::Board(groups) = ekko.display_by_board().unwrap() else { panic!() };
+        let order: Vec<u32> = groups[0].1.iter().map(|item| item.id).collect();
+
+        assert_eq!(order, vec![1, 3, 2, 4], "the note did not move under task 1");
+
+        cleanup(&dir);
+    }
+
+    /// Designed in from the start rather than discovered missing:
+    /// `--blocked-by` shipped with no way to unset and left a wrong
+    /// dependency with no way back.
+    #[test]
+    fn an_anchor_can_be_cleared() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["@a", "first"])).unwrap();
+        ekko.create_note(&words(&["@a", "why"])).unwrap();
+
+        ekko.set_anchor(&words(&["@2", "1"])).unwrap();
+        let Outcome::Anchored { target, .. } = ekko.set_anchor(&words(&["@2"])).unwrap() else {
+            panic!("expected an Anchored outcome")
+        };
+
+        assert_eq!(target, None);
+        let Outcome::Board(groups) = ekko.display_by_board().unwrap() else { panic!() };
+        assert!(groups[0].1.iter().all(|item| item.anchor.is_none()), "the anchor survived");
+
+        cleanup(&dir);
+    }
+
+    /// One level, always. A task under a task is a subtask, with real
+    /// questions about whose total it counts toward; a note under a note
+    /// would allow chains and therefore cycles. Both are refused by shape
+    /// rather than by a check that could be forgotten later.
+    #[test]
+    fn anchoring_is_a_note_pointing_at_a_task_and_nothing_else() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["@a", "a task"])).unwrap();
+        ekko.create_note(&words(&["@a", "a note"])).unwrap();
+        ekko.create_note(&words(&["@a", "another note"])).unwrap();
+
+        assert!(matches!(
+            ekko.set_anchor(&words(&["@1", "2"])),
+            Err(EkkoError::AnchorNotANote(1))
+        ));
+        assert!(matches!(
+            ekko.set_anchor(&words(&["@2", "3"])),
+            Err(EkkoError::AnchorTargetNotATask(3))
+        ));
+
+        cleanup(&dir);
+    }
+
+    /// A note whose task lives on another board stays where it was filed
+    /// rather than jumping boards. Surprising placement is worse than an
+    /// un-nested reason, and the note is still findable where it was put.
+    #[test]
+    fn a_note_whose_task_is_elsewhere_stays_put() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["@here", "the task"])).unwrap();
+        ekko.create_note(&words(&["@there", "the reason"])).unwrap();
+        ekko.create_note(&words(&["@there", "another"])).unwrap();
+
+        ekko.set_anchor(&words(&["@2", "1"])).unwrap();
+
+        let Outcome::Board(groups) = ekko.display_by_board().unwrap() else { panic!() };
+        let there = groups.iter().find(|(b, _)| b == "@there").expect("@there exists");
+        let order: Vec<u32> = there.1.iter().map(|item| item.id).collect();
+
+        assert_eq!(order, vec![3, 2], "the orphan is appended, in id order, never dropped");
 
         cleanup(&dir);
     }

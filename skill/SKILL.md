@@ -107,6 +107,7 @@ Add `--json` to anything whose result you will branch on.
   `{"command":"stats",...}` line. Parse line by line, not as one document.
 - Errors are `{"ok":false,"error":...,"code":...}` with a stable `code`
   (`INVALID_ID`, `UNKNOWN_LIST_TERM`, `UNKNOWN_STATE`, `INVALID_DUE_DATE`,
+  `ANCHOR_NOT_A_NOTE`, `ANCHOR_TARGET_NOT_A_TASK`,
   `BLOCKING_CYCLE`, `LOCK_TIMEOUT`, …). Branch on `code`; the message text is
   not an API. Exit status is `1`.
 - `--restore` especially: the pretty output reports the *archive* id, while the
@@ -223,6 +224,7 @@ Two things that will bite otherwise:
 | what can start | `ekko --list ready` | pending, no unmet blockers |
 | declare a blocker | `ekko --blocked-by @3 1 2` | `@` marks the **blocked** item |
 | clear a blocker | `ekko --blocked-by @3` | no blockers means none |
+| anchor a note | `ekko --anchor @16 12` | note first, then its task |
 | scope to a project | `ekko --project demo --list ready` | mutually exclusive with `--ekko-dir` |
 | the phase view | `ekko --project demo --path` | `--phase` itself only affects creation |
 | destroy a project | `ekko --project old --destroy` | whole board to the trash; ask first |
@@ -265,3 +267,19 @@ something the next session would otherwise re-derive — a design trade-off, a
 dead end, a constraint discovered the hard way — put it on the board next to
 the work it constrains. A note costs one short command and survives the
 conversation.
+
+**Anchor it to the task it explains.** `ekko --anchor @<note> <task>` renders
+the note indented under that task instead of beside it, and `--anchor @<note>`
+with no target clears it.
+
+    ekko --note @wayland 'damage is in surface coords, not output coords'
+    ekko --anchor @3 2
+
+This matters more for you than for the person you share the board with. You
+will write long notes — that is the point, the next session should not have to
+re-derive them — and a column of 900-character reasons is a wall to whoever
+opens the board next. Anchored, the reason sits under its work and the list
+they scan is the tasks. Write the long note; just attach it.
+
+Only a note can be anchored, and only to a task, so there is one level and no
+chains.

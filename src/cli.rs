@@ -7,6 +7,11 @@ use clap::Parser;
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 pub struct Cli {
+    /// Point a note at the task it explains, by id: the note first, then
+    /// its target. No target clears it.
+    #[arg(long, num_args = 0.., value_name = "IDS")]
+    pub anchor: Option<Vec<String>>,
+
     #[arg(long, short = 'a')]
     pub archive: bool,
     #[arg(long, short = 'b')]

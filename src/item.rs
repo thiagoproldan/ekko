@@ -100,6 +100,19 @@ pub struct Item {
     /// something nobody can finish.
     #[serde(rename = "blockedBy", default, skip_serializing_if = "Option::is_none")]
     pub blocked_by: Option<Vec<String>>,
+    /// The task this note explains, by `uid`.
+    ///
+    /// Only a note carries one, and it only ever points at a task. Both
+    /// restrictions keep the feature to one level: a task under a task
+    /// would be a subtask, which raises questions about whose total it
+    /// counts toward, and a note under a note would allow chains and
+    /// therefore cycles. Neither is what this is for.
+    ///
+    /// By uid for the same reason `blocked_by` is: display ids are
+    /// recycled, and a reason pointing at a recycled number would end up
+    /// explaining a different piece of work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -127,6 +140,7 @@ impl Item {
             cancelled: None,
             phase: None,
             blocked_by: None,
+            anchor: None,
             priority: Some(priority),
         }
     }
@@ -151,6 +165,7 @@ impl Item {
             cancelled: None,
             phase: None,
             blocked_by: None,
+            anchor: None,
         }
     }
 }

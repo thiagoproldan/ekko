@@ -23,6 +23,7 @@ const HELP: &str = r#"
 
     Options
         none             Display board view
+      --anchor <IDS>     Point a note at the task it explains
       --archive, -a      Display archived items
       --begin, -b        Start/pause task
       --blocked-by <IDS> Record what an item waits on
@@ -56,6 +57,7 @@ const HELP: &str = r#"
 
     Examples
       $ ekko
+      $ ekko --anchor @16 12
       $ ekko --archive
       $ ekko --begin 2 3
       $ ekko --check 1 2
@@ -191,6 +193,9 @@ fn dispatch(
     project: Option<&str>,
     home_dir: &Path,
 ) -> Result<Vec<Outcome>, EkkoError> {
+    if let Some(args) = cli.anchor.as_deref() {
+        return Ok(vec![ekko.set_anchor(args)?]);
+    }
     if let Some(args) = cli.blocked_by.as_deref() {
         return Ok(vec![ekko.set_blocked_by(args)?]);
     }

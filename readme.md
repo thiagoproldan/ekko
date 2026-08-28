@@ -95,6 +95,7 @@ $ ekko --help
 
     Options
         none             Display board view
+      --anchor <IDS>     Point a note at the task it explains
       --archive, -a      Display archived items
       --begin, -b        Start/pause task
       --blocked-by <IDS> Record what an item waits on
@@ -128,6 +129,7 @@ $ ekko --help
 
     Examples
       $ ekko
+      $ ekko --anchor @16 12
       $ ekko --archive
       $ ekko --begin 2 3
       $ ekko --check 1 2
@@ -330,6 +332,36 @@ This is an Ekko addition; taskbook has no equivalent. Items without a due date a
 
 
 
+
+### Anchored Notes
+
+A note explains something. Until now it explained it from beside the work rather than under it, so a long reason about item 2 had two homes and both were bad: crammed into 2's own description, or floating nearby with nothing connecting them.
+
+`--anchor` points a note at the task it is about. The note then renders under that task, indented:
+
+```
+$ ekko --anchor @3 2
+ ✔  Note 3 now explains: 2
+
+$ ekko
+  @wayland [0/3]
+    1. ☐  Vendor wlroots
+    2. ☐  Damage tracking
+      3. ●  Damage is in surface coordinates, not output coordinates
+    4. ☐  Ship the package
+    5. ●  a note about nothing in particular
+```
+
+Passing no target clears it: `ekko --anchor @3`.
+
+Four rules, each one narrowing the feature on purpose:
+
+- **Only a note can be anchored.** A task under a task is a subtask, which raises real questions about whose total it counts toward, and answering them by accident is worse than not having it.
+- **Only to a task.** A note under a note would allow chains, and chains allow cycles. One level, always, and cycles impossible by shape rather than by a check somebody has to remember.
+- **Stored by `uid`.** Ids are recycled, and a reason pointing at a recycled number would end up explaining different work.
+- **A note whose task lives on another board stays where it is.** It renders unnested rather than jumping boards -- surprising placement is worse than an un-nested reason, and the note is still where it was filed.
+
+The `[complete/tasks]` counter never counted notes and still does not. What changes is that anchored notes stop competing for sibling lines, so the list you scan is the work.
 
 ### Folded Notes
 
