@@ -188,20 +188,33 @@ In order to display all items in a timeline view, based on their creation date, 
 
 ```
 ┌─────────────────────── Results ───────────────────────┐  ┌─────────────────────── Preview ────────────────────────┐
+│@wayland [2/3]                                         │  │ ● note                                                 │
 │    1. ✔ Vendor wlroots                                │  │                                                        │
-│    2. … Damage tracking                               │  │ ● note                                                 │
-│>     3. ● Damage is in surface coordinates, not output│  │                                                        │
-│    4. ✔ Ship the package                              │  │ Damage is in surface coordinates, not output           │
-│    5. ☐ Write the readme                              │  │ coordinates -- getting this backwards is why the first  │
-│                                                       │  │ attempt flickered, and it cost most of an afternoon to  │
-│                                                       │  │ find                                                   │
-└───────────────────────────────────────────────────────┘  │ boards   @wayland                                      │
-┌─────────────────────── Prompt ────────────────────────┐  │ explains a task                                        │
-│ >                                               5 / 5 │  │ created  Fri Aug 28 2026                               │
+│    2. … Damage tracking                               │  │ Damage is in surface coordinates, not output            │
+│>     3. ● Damage is in surface coordinates, not output│  │ coordinates -- getting this backwards is why the first  │
+│    4. ✔ Ship the package                              │  │ attempt flickered                                      │
+│@docs [0/1]                                            │  │                                                        │
+│    5. ☐ Write the readme                              │  │ boards   @wayland                                      │
+│                                                       │  │ explains a task                                        │
 └───────────────────────────────────────────────────────┘  └────────────────────────────────────────────────────────┘
+┌─────────────────────── Prompt ────────────────────────┐  ┌─────────────────── August 2026 ────────────────────────┐
+│ >                                               5 / 5 │  │ Su Mo Tu We Th Fr Sa                                   │
+└───────────────────────────────────────────────────────┘  │  2  3  4  5  6  7  8                                   │
+                                                           └────────────────────────────────────────────────────────┘
+ 2 done · 1 in-progress · 1 pending · 1 note
 ```
 
-Type to filter, arrows or `Ctrl-n`/`Ctrl-p` to move, `Enter` to complete a task, `Tab` to start or pause one, click to select, `Esc` to leave.
+Type to filter, arrows or `Ctrl-n`/`Ctrl-p` to move, `Enter` to complete a task, `Tab` to start or pause one, `Ctrl-s` to stash it, click to select, `Esc` to leave.
+
+Five things are on screen at once, and each is there because the first version was missing it:
+
+- **Boards, with their counts.** A flat list of ninety items in id order tells you nothing about what you are looking at. The `[2/3]` is a fact about the whole board and does not move when you filter -- otherwise the same board would report different totals depending on what you had typed.
+- **A viewport that scrolls.** The first version stopped at the fold, which on a 96-item board meant 71 items you simply could not reach.
+- **The status line**, the same counts the CLI prints under the board, including `in-stash` and `in-trash`.
+- **The calendar**, in its own zone.
+- **What just changed**, briefly, in place of the status line. A picker puts navigation and mutation on neighbouring keys, so a write that leaves no trace is a write you cannot notice you made.
+
+`Enter` and `Tab` refuse to touch a task that is **done or cancelled**. Those are terminal, and setting `progress` clears `isComplete` by definition -- so a stray keypress used to destroy the fact that something was finished, which is exactly what happened to two items the hour this mode first shipped. Changing one is `--set`, deliberately.
 
 The split is the point rather than decoration. Notes hold the reasoning worth keeping, which is exactly why they run long -- on a real board they took 43 of 85 item lines. [Folding](#folded-notes) copes with that by truncating to fit one line; a picker does not have to truncate anything, because the list holds one line per item and the whole text lives in the preview, on demand. The long note stays long and stops being a wall.
 
