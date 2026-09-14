@@ -189,11 +189,11 @@ pub struct ProjectSummary {
     pub notes: u32,
 }
 
-/// One node of the path: a declared phase, how far it has got, and whether
+/// One node of the roadmap: a declared phase, how far it has got, and whether
 /// work currently sits in it. Lives here beside `Stats` for the same reason
 /// -- a shape the renderer is given, computed elsewhere.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct PathStep {
+pub struct RoadmapStep {
     pub name: String,
     pub complete: u32,
     pub total: u32,
@@ -367,17 +367,17 @@ impl<'a> Renderer<'a> {
 
     /// The id column, indented two further for a note that explains a task.
     ///
-    /// The indent is the whole point of anchoring: a reason sitting at the
+    /// The indent is the whole point of attaching: a reason sitting at the
     /// same depth as the work reads as another item competing for
     /// attention, which is how a board of long notes became a wall. One
     /// step in and it reads as belonging to the line above it.
     ///
-    /// An unanchored note is untouched, so every board that does not use
+    /// An unattached note is untouched, so every board that does not use
     /// this renders exactly as it did -- goldens included.
     fn build_prefix(&self, item: &Item) -> String {
         let id = item.id.to_string();
         let padding = " ".repeat(4usize.saturating_sub(id.len()));
-        let indent = if item.anchor.is_some() { "  " } else { "" };
+        let indent = if item.attached_to.is_some() { "  " } else { "" };
         format!("{indent}{padding} {}", self.painter.grey(&format!("{id}.")))
     }
 
@@ -629,14 +629,13 @@ impl<'a> Renderer<'a> {
         self.emit("\n ", None, &line, "");
     }
 
-    /// The projects that exist, or a nudge when there are none yet.
-    /// The journey through a project's phases: what is behind, where work
+    /// The roadmap through a project's phases: what is behind, where work
     /// sits now, and what is still ahead.
     ///
     /// Filled for phases that are done, marked for the one holding work,
     /// hollow for the ones nobody has started -- so the same picture reads
     /// backwards as history and forwards as a plan.
-    pub fn display_path(&mut self, steps: &[PathStep], rootless: u32) {
+    pub fn display_roadmap(&mut self, steps: &[RoadmapStep], rootless: u32) {
         if steps.is_empty() {
             self.emit(
                 "\n ",
@@ -801,13 +800,13 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    pub fn success_anchored(&mut self, id: u32, target: Option<u32>) {
+    pub fn success_attached(&mut self, id: u32, target: Option<u32>) {
         match target {
             Some(target) => {
                 let suffix = self.painter.grey(&target.to_string());
-                self.success(" ", &format!("Note {id} now explains:"), &suffix);
+                self.success(" ", &format!("Note {id} is now attached to:"), &suffix);
             }
-            None => self.success(" ", &format!("Note {id} explains nothing in particular"), ""),
+            None => self.success(" ", &format!("Note {id} is no longer attached to anything"), ""),
         }
     }
 
@@ -1612,18 +1611,18 @@ mod tests {
         assert!(output.contains("ship it"), "timeline lost the description: {output:?}");
     }
 
-    /// The path's three node glyphs carry the state, and the colour has to
+    /// The roadmap's three node glyphs carry the state, and the colour has to
     /// carry it with them. Painting only the name left every dot in the
     /// terminal default, so behind, here and ahead read as one weight.
     #[test]
-    fn path_nodes_are_painted_with_their_phase() {
+    fn roadmap_nodes_are_painted_with_their_phase() {
         let steps = vec![
-            PathStep { name: "setup".into(), complete: 2, total: 2, notes: 0, current: false },
-            PathStep { name: "build".into(), complete: 0, total: 3, notes: 0, current: true },
-            PathStep { name: "ship".into(), complete: 0, total: 1, notes: 0, current: false },
+            RoadmapStep { name: "setup".into(), complete: 2, total: 2, notes: 0, current: false },
+            RoadmapStep { name: "build".into(), complete: 0, total: 3, notes: 0, current: true },
+            RoadmapStep { name: "ship".into(), complete: 0, total: 1, notes: 0, current: false },
         ];
 
-        let output = render_with(Config::default(), |r| r.display_path(&steps, 0));
+        let output = render_with(Config::default(), |r| r.display_roadmap(&steps, 0));
 
         // Each glyph inside its colour's span, not after the close.
         assert!(output.contains("\u{1b}[32msetup \u{25cf}"), "done node unpainted: {output:?}");
@@ -1638,13 +1637,13 @@ mod tests {
     /// rows drifted apart -- only with colour on, which is to say only in a
     /// real terminal and never in a pipe.
     #[test]
-    fn path_rows_line_up_when_the_tally_is_wider_than_the_name() {
+    fn roadmap_rows_line_up_when_the_tally_is_wider_than_the_name() {
         let steps = vec![
-            PathStep { name: "ci".into(), complete: 0, total: 12, notes: 0, current: true },
-            PathStep { name: "build".into(), complete: 0, total: 0, notes: 0, current: false },
+            RoadmapStep { name: "ci".into(), complete: 0, total: 12, notes: 0, current: true },
+            RoadmapStep { name: "build".into(), complete: 0, total: 0, notes: 0, current: false },
         ];
 
-        let output = render_with(Config::default(), |r| r.display_path(&steps, 0));
+        let output = render_with(Config::default(), |r| r.display_roadmap(&steps, 0));
 
         let plain: String = strip_ansi(&output);
         let rows: Vec<&str> = plain.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -1723,36 +1722,36 @@ mod tests {
         );
     }
 
-    /// The indent is the visible half of anchoring. A reason sitting at the
+    /// The indent is the visible half of attaching. A reason sitting at the
     /// same depth as the work reads as another item competing for
     /// attention, which is how a board of long notes became a wall; one
     /// step in and it reads as belonging to the line above.
     #[test]
-    fn an_anchored_note_is_indented_and_an_ordinary_one_is_not() {
-        let mut anchored =
+    fn an_attached_note_is_indented_and_an_ordinary_one_is_not() {
+        let mut attached =
             Item::new_note(2, "the reason".to_string(), vec!["@a".to_string()]);
-        anchored.date = GOLDEN_DAY.to_string();
-        anchored.timestamp = golden_now().timestamp_millis();
-        anchored.anchor = Some("some-task-uid".to_string());
+        attached.date = GOLDEN_DAY.to_string();
+        attached.timestamp = golden_now().timestamp_millis();
+        attached.attached_to = Some("some-task-uid".to_string());
 
         let mut plain = Item::new_note(3, "unattached".to_string(), vec!["@a".to_string()]);
         plain.date = GOLDEN_DAY.to_string();
         plain.timestamp = golden_now().timestamp_millis();
 
-        let groups = vec![("@a".to_string(), vec![anchored, plain])];
+        let groups = vec![("@a".to_string(), vec![attached, plain])];
         let output = render_with(Config::default(), |r| r.display_by_board(&groups));
         let plain_text = strip_ansi(&output);
 
-        let anchored_line =
+        let attached_line =
             plain_text.lines().find(|l| l.contains("the reason")).expect("rendered");
         let plain_line =
             plain_text.lines().find(|l| l.contains("unattached")).expect("rendered");
 
         let depth = |line: &str| line.len() - line.trim_start().len();
         assert_eq!(
-            depth(anchored_line),
+            depth(attached_line),
             depth(plain_line) + 2,
-            "anchored note not indented:\n{anchored_line}\n{plain_line}"
+            "attached note not indented:\n{attached_line}\n{plain_line}"
         );
     }
 

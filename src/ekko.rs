@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use crate::config;
 use crate::directory::{self, DirectoryError};
 use crate::item::Item;
-use crate::render::{CalendarMonth, PathStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
+use crate::render::{CalendarMonth, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
 use crate::storage::{ItemMap, Storage, StorageError};
 
 #[derive(Debug)]
@@ -34,9 +34,10 @@ pub enum EkkoError {
     MissingState,
     UnknownState(String),
     BlockingCycle(u32, u32),
-    AnchorNotANote(u32),
-    AnchorTargetNotATask(u32),
-    AnchorTargetHasNoUid(u32),
+    AttachNotANote(u32),
+    AttachTargetNotATask(u32),
+    AttachTargetHasNoUid(u32),
+    RenamedFlag { old: &'static str, new: &'static str },
     InvalidCustomAppDir(String),
     MissingEkkoDirFlagValue,
     LockTimeout(String),
@@ -63,9 +64,10 @@ impl EkkoError {
             EkkoError::MissingState => "MISSING_STATE",
             EkkoError::UnknownState(_) => "UNKNOWN_STATE",
             EkkoError::BlockingCycle(_, _) => "BLOCKING_CYCLE",
-            EkkoError::AnchorNotANote(_) => "ANCHOR_NOT_A_NOTE",
-            EkkoError::AnchorTargetNotATask(_) => "ANCHOR_TARGET_NOT_A_TASK",
-            EkkoError::AnchorTargetHasNoUid(_) => "ANCHOR_TARGET_HAS_NO_UID",
+            EkkoError::AttachNotANote(_) => "ATTACH_NOT_A_NOTE",
+            EkkoError::AttachTargetNotATask(_) => "ATTACH_TARGET_NOT_A_TASK",
+            EkkoError::AttachTargetHasNoUid(_) => "ATTACH_TARGET_HAS_NO_UID",
+            EkkoError::RenamedFlag { .. } => "RENAMED_FLAG",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
             EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
             EkkoError::LockTimeout(_) => "LOCK_TIMEOUT",
@@ -95,9 +97,10 @@ impl EkkoError {
             EkkoError::MissingState => out.generic_error(&self.to_string()),
             EkkoError::UnknownState(_) => out.generic_error(&self.to_string()),
             EkkoError::BlockingCycle(_, _)
-            | EkkoError::AnchorNotANote(_)
-            | EkkoError::AnchorTargetNotATask(_)
-            | EkkoError::AnchorTargetHasNoUid(_) => out.generic_error(&self.to_string()),
+            | EkkoError::AttachNotANote(_)
+            | EkkoError::AttachTargetNotATask(_)
+            | EkkoError::AttachTargetHasNoUid(_)
+            | EkkoError::RenamedFlag { .. } => out.generic_error(&self.to_string()),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
             EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
             EkkoError::LockTimeout(path) => out.lock_timeout(path),
@@ -129,18 +132,19 @@ impl std::fmt::Display for EkkoError {
                 f,
                 "Item {waiter} cannot wait on {blocker}: {blocker} already waits on {waiter}"
             ),
-            EkkoError::AnchorNotANote(id) => write!(
+            EkkoError::AttachNotANote(id) => write!(
                 f,
-                "Only a note can be anchored, and {id} is a task. A task under a task would be a subtask, which is a different thing"
+                "Only a note can be attached, and {id} is a task. A task under a task would be a subtask, which is a different thing"
             ),
-            EkkoError::AnchorTargetNotATask(id) => write!(
+            EkkoError::AttachTargetNotATask(id) => write!(
                 f,
-                "A note anchors to a task, and {id} is a note. Anchoring notes to notes would allow chains, and so cycles"
+                "A note is attached to a task, and {id} is a note. Attaching notes to notes would allow chains, and so cycles"
             ),
-            EkkoError::AnchorTargetHasNoUid(id) => write!(
+            EkkoError::AttachTargetHasNoUid(id) => write!(
                 f,
                 "Item {id} predates uids, so nothing can point at it reliably. Recreate it to give it one"
             ),
+            EkkoError::RenamedFlag { old, new } => write!(f, "{old} was renamed to {new}"),
             EkkoError::UnknownState(term) => {
                 write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, cancelled, unstarted, starred, unstarred")
             }
@@ -231,13 +235,13 @@ pub enum Outcome {
     Destroyed { name: String, tasks: u32, notes: u32, trash: std::path::PathBuf },
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
-    Anchored { item: Item, target: Option<u32> },
+    Attached { item: Item, target: Option<u32> },
     Calendar(CalendarMonth),
     Stashed { ids: Vec<u32>, away: bool },
     Trashed { ids: Vec<u32>, away: bool },
     Stash(Vec<(String, Vec<Item>)>),
     Trash(Vec<Item>),
-    Path { steps: Vec<PathStep>, rootless: u32 },
+    Roadmap { steps: Vec<RoadmapStep>, rootless: u32 },
     Stats(Stats),
 }
 
@@ -269,13 +273,13 @@ impl Outcome {
             Outcome::Destroyed { .. } => "destroy",
             Outcome::Phases(_) => "phases",
             Outcome::Blocked { .. } => "blocked",
-            Outcome::Anchored { .. } => "anchor",
+            Outcome::Attached { .. } => "attached",
             Outcome::Calendar(_) => "calendar",
             Outcome::Stashed { away, .. } => if *away { "stash" } else { "unstash" },
             Outcome::Trashed { away, .. } => if *away { "trash" } else { "untrash" },
             Outcome::Stash(_) => "stash",
             Outcome::Trash(_) => "trash",
-            Outcome::Path { .. } => "path",
+            Outcome::Roadmap { .. } => "roadmap",
             Outcome::Stats(_) => "stats",
         }
     }
@@ -340,13 +344,13 @@ impl Outcome {
             }
             Outcome::Phases(names) => out.display_phases(names),
             Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
-            Outcome::Anchored { item, target } => out.success_anchored(item.id, *target),
+            Outcome::Attached { item, target } => out.success_attached(item.id, *target),
             Outcome::Calendar(month) => out.display_calendar(month),
             Outcome::Stashed { ids, away } => out.success_stashed(ids, *away),
             Outcome::Trashed { ids, away } => out.success_trashed(ids, *away),
             Outcome::Stash(groups) => out.display_stash(groups),
             Outcome::Trash(items) => out.display_trash(items),
-            Outcome::Path { steps, rootless } => out.display_path(steps, *rootless),
+            Outcome::Roadmap { steps, rootless } => out.display_roadmap(steps, *rootless),
             Outcome::Stats(stats) => out.display_stats(stats),
         }
     }
@@ -528,7 +532,7 @@ impl Ekko {
             }
         }
         for (_, items) in &mut grouped {
-            reorder_anchored(items);
+            reorder_attached(items);
         }
         grouped
     }
@@ -724,7 +728,7 @@ impl Ekko {
     }
 
     /// `phase` is the scope the CLI was invoked with. Items created without
-    /// one land at the project root, outside the path -- never in a guessed
+    /// one land at the project root, outside the roadmap -- never in a guessed
     /// current phase, because putting work somewhere nobody chose is exactly
     /// the plausible-wrong-answer this codebase keeps refusing.
     pub fn create_task_in(
@@ -1181,22 +1185,22 @@ impl Ekko {
         Ok(Outcome::Calendar(month))
     }
 
-    /// Points a note at the task it explains.
+    /// Attaches a note to the task it explains.
     ///
     /// Reasons and work were siblings on the board, which is how a long
     /// note about item 12 ended up either crammed into 12's description or
     /// floating beside it with nothing connecting the two. Neither is a
     /// good option and both were the only ones available.
     ///
-    /// Only a note can be anchored, and only to a task. A task under a task
+    /// Only a note can be attached, and only to a task. A task under a task
     /// is a subtask -- a different feature, with real questions about whose
     /// total it counts toward -- and a note under a note would allow chains
     /// and so cycles. One level, always, and cycles impossible by shape.
     ///
-    /// Passing no target clears, designed in from the start rather than
+    /// Passing no task detaches, designed in from the start rather than
     /// discovered missing: `--blocked-by` shipped without it and left a
     /// wrong dependency with no way back.
-    pub fn set_anchor(&self, input: &[String]) -> Result<Outcome, EkkoError> {
+    pub fn set_attached_to(&self, input: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let mut data = self.storage.get()?;
 
@@ -1204,7 +1208,7 @@ impl Ekko {
         let id = self.validate_ids(&[id_str], &data)?[0];
 
         if data.get(&id).is_some_and(|item| item.is_task) {
-            return Err(EkkoError::AnchorNotANote(id));
+            return Err(EkkoError::AttachNotANote(id));
         }
 
         let raw: Vec<String> = rest.into_iter().cloned().collect();
@@ -1217,18 +1221,18 @@ impl Ekko {
                 let target_id = self.validate_ids(&raw, &data)?[0];
                 let target = data.get(&target_id).expect("id just validated against data");
                 if !target.is_task {
-                    return Err(EkkoError::AnchorTargetNotATask(target_id));
+                    return Err(EkkoError::AttachTargetNotATask(target_id));
                 }
-                Some((target_id, target.uid.clone().ok_or(EkkoError::AnchorTargetHasNoUid(target_id))?))
+                Some((target_id, target.uid.clone().ok_or(EkkoError::AttachTargetHasNoUid(target_id))?))
             }
         };
 
         let item = data.get_mut(&id).expect("id just validated against data");
-        item.anchor = target.as_ref().map(|(_, uid)| uid.clone());
+        item.attached_to = target.as_ref().map(|(_, uid)| uid.clone());
         let updated = item.clone();
 
         self.save_touching(&mut data)?;
-        Ok(Outcome::Anchored { item: updated, target: target.map(|(id, _)| id) })
+        Ok(Outcome::Attached { item: updated, target: target.map(|(id, _)| id) })
     }
 
     /// Moves a whole project to the trash, reporting what went with it.
@@ -1435,13 +1439,13 @@ impl Ekko {
         Ok(Outcome::Phases(cleaned))
     }
 
-    /// The journey: declared phases in order, each with how far it has got,
+    /// The roadmap: declared phases in order, each with how far it has got,
     /// and which one holds work in progress.
     ///
     /// Nothing here is stored beyond the sequence itself -- the counts and
     /// the cursor are read off the items every time, so the view cannot
     /// drift from the board it describes.
-    pub fn display_path(&self) -> Result<Outcome, EkkoError> {
+    pub fn display_roadmap(&self) -> Result<Outcome, EkkoError> {
         let data = self.visible()?;
         let phases = self.storage.get_phases()?;
 
@@ -1456,7 +1460,7 @@ impl Ekko {
             let cancelled = tasks.iter().filter(|i| i.cancelled.unwrap_or(false)).count() as u32;
             let current = tasks.iter().any(|i| i.in_progress.unwrap_or(false));
 
-            steps.push(PathStep {
+            steps.push(RoadmapStep {
                 name: name.clone(),
                 complete,
                 // Cancelled work is not work, the same way it is left out of
@@ -1471,7 +1475,7 @@ impl Ekko {
         // than hidden: the root is a deliberate exception, not a hole.
         let rootless = data.values().filter(|i| i.phase.is_none()).count() as u32;
 
-        Ok(Outcome::Path { steps, rootless })
+        Ok(Outcome::Roadmap { steps, rootless })
     }
 
     pub fn list_by_attributes(&self, terms: &[String]) -> Result<Outcome, EkkoError> {
@@ -1514,26 +1518,26 @@ impl Ekko {
     }
 }
 
-/// Moves each anchored note to sit directly after the task it explains.
+/// Moves each attached note to sit directly after the task it explains.
 ///
 /// Only within one group, and only when the task is in it. A note whose
 /// task lives on another board stays exactly where it was rather than
 /// jumping between boards -- surprising placement is worse than an
 /// un-nested reason, and the note is still findable where it was filed.
 ///
-/// A group with nothing anchored comes back untouched, which is what keeps
+/// A group with nothing attached comes back untouched, which is what keeps
 /// every existing board -- goldens included -- rendering in id order.
-fn reorder_anchored(items: &mut Vec<Item>) {
-    if !items.iter().any(|item| item.anchor.is_some()) {
+fn reorder_attached(items: &mut Vec<Item>) {
+    if !items.iter().any(|item| item.attached_to.is_some()) {
         return;
     }
 
-    let (anchored, mut rest): (Vec<Item>, Vec<Item>) =
-        items.drain(..).partition(|item| item.anchor.is_some());
+    let (attached, mut rest): (Vec<Item>, Vec<Item>) =
+        items.drain(..).partition(|item| item.attached_to.is_some());
 
     let mut orphans = Vec::new();
-    for note in anchored {
-        let target = note.anchor.as_deref().expect("partitioned on anchor being set");
+    for note in attached {
+        let target = note.attached_to.as_deref().expect("partitioned on attached_to being set");
         match rest.iter().position(|item| item.uid.as_deref() == Some(target)) {
             Some(at) => rest.insert(at + 1, note),
             None => orphans.push(note),
@@ -2093,13 +2097,13 @@ mod tests {
     }
 
     #[test]
-    fn an_item_created_without_a_phase_lands_outside_the_path_and_is_counted() {
+    fn an_item_created_without_a_phase_lands_outside_the_roadmap_and_is_counted() {
         let (ekko, dir) = fresh_ekko();
         ekko.set_phases(&words(&["setup"])).unwrap();
         ekko.create_task_in(&words(&["@a", "in a phase"]), Some("setup")).unwrap();
         ekko.create_task_in(&words(&["@b", "at the root"]), None).unwrap();
 
-        let Outcome::Path { steps, rootless } = ekko.display_path().unwrap() else { panic!() };
+        let Outcome::Roadmap { steps, rootless } = ekko.display_roadmap().unwrap() else { panic!() };
 
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].total, 1, "only the phased task belongs to the step");
@@ -2117,7 +2121,7 @@ mod tests {
         ekko.create_task_in(&words(&["@render", "early"]), Some("setup")).unwrap();
         ekko.create_task_in(&words(&["@render", "later"]), Some("build")).unwrap();
 
-        let Outcome::Path { steps, .. } = ekko.display_path().unwrap() else { panic!() };
+        let Outcome::Roadmap { steps, .. } = ekko.display_roadmap().unwrap() else { panic!() };
 
         assert_eq!(steps[0].total, 1);
         assert_eq!(steps[1].total, 1, "the second @render did not join the first");
@@ -2132,11 +2136,11 @@ mod tests {
         ekko.create_task_in(&words(&["@a", "one"]), Some("setup")).unwrap();
         ekko.create_task_in(&words(&["@b", "two"]), Some("build")).unwrap();
 
-        let Outcome::Path { steps, .. } = ekko.display_path().unwrap() else { panic!() };
+        let Outcome::Roadmap { steps, .. } = ekko.display_roadmap().unwrap() else { panic!() };
         assert!(steps.iter().all(|s| !s.current), "nothing in progress means no cursor");
 
         ekko.set_state(&words(&["@2", "progress"])).unwrap();
-        let Outcome::Path { steps, .. } = ekko.display_path().unwrap() else { panic!() };
+        let Outcome::Roadmap { steps, .. } = ekko.display_roadmap().unwrap() else { panic!() };
         assert!(!steps[0].current && steps[1].current);
 
         cleanup(&dir);
@@ -2153,7 +2157,7 @@ mod tests {
         ekko.set_state(&words(&["@1", "done"])).unwrap();
         ekko.set_state(&words(&["@2", "cancelled"])).unwrap();
 
-        let Outcome::Path { steps, .. } = ekko.display_path().unwrap() else { panic!() };
+        let Outcome::Roadmap { steps, .. } = ekko.display_roadmap().unwrap() else { panic!() };
 
         assert_eq!((steps[0].complete, steps[0].total), (1, 1), "reads as finished");
 
@@ -2717,17 +2721,17 @@ mod tests {
 
     /// A reason and the work it explains were siblings, so a long note
     /// about item 2 either got crammed into 2's description or floated
-    /// beside it with nothing connecting them. Anchoring moves it under
+    /// beside it with nothing connecting them. Attaching moves it under
     /// its task and indents it, which is the whole feature.
     #[test]
-    fn an_anchored_note_sits_under_the_task_it_explains() {
+    fn an_attached_note_sits_under_the_task_it_explains() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["@a", "first"])).unwrap();
         ekko.create_task(&words(&["@a", "second"])).unwrap();
         ekko.create_note(&words(&["@a", "why second is hard"])).unwrap();
         ekko.create_task(&words(&["@a", "third"])).unwrap();
 
-        ekko.set_anchor(&words(&["@3", "1"])).unwrap();
+        ekko.set_attached_to(&words(&["@3", "1"])).unwrap();
 
         let Outcome::Board(groups) = ekko.display_by_board().unwrap() else { panic!() };
         let order: Vec<u32> = groups[0].1.iter().map(|item| item.id).collect();
@@ -2741,19 +2745,19 @@ mod tests {
     /// `--blocked-by` shipped with no way to unset and left a wrong
     /// dependency with no way back.
     #[test]
-    fn an_anchor_can_be_cleared() {
+    fn a_note_can_be_detached() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["@a", "first"])).unwrap();
         ekko.create_note(&words(&["@a", "why"])).unwrap();
 
-        ekko.set_anchor(&words(&["@2", "1"])).unwrap();
-        let Outcome::Anchored { target, .. } = ekko.set_anchor(&words(&["@2"])).unwrap() else {
-            panic!("expected an Anchored outcome")
+        ekko.set_attached_to(&words(&["@2", "1"])).unwrap();
+        let Outcome::Attached { target, .. } = ekko.set_attached_to(&words(&["@2"])).unwrap() else {
+            panic!("expected an Attached outcome")
         };
 
         assert_eq!(target, None);
         let Outcome::Board(groups) = ekko.display_by_board().unwrap() else { panic!() };
-        assert!(groups[0].1.iter().all(|item| item.anchor.is_none()), "the anchor survived");
+        assert!(groups[0].1.iter().all(|item| item.attached_to.is_none()), "the attachment survived");
 
         cleanup(&dir);
     }
@@ -2763,19 +2767,19 @@ mod tests {
     /// would allow chains and therefore cycles. Both are refused by shape
     /// rather than by a check that could be forgotten later.
     #[test]
-    fn anchoring_is_a_note_pointing_at_a_task_and_nothing_else() {
+    fn attaching_is_a_note_pointing_at_a_task_and_nothing_else() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["@a", "a task"])).unwrap();
         ekko.create_note(&words(&["@a", "a note"])).unwrap();
         ekko.create_note(&words(&["@a", "another note"])).unwrap();
 
         assert!(matches!(
-            ekko.set_anchor(&words(&["@1", "2"])),
-            Err(EkkoError::AnchorNotANote(1))
+            ekko.set_attached_to(&words(&["@1", "2"])),
+            Err(EkkoError::AttachNotANote(1))
         ));
         assert!(matches!(
-            ekko.set_anchor(&words(&["@2", "3"])),
-            Err(EkkoError::AnchorTargetNotATask(3))
+            ekko.set_attached_to(&words(&["@2", "3"])),
+            Err(EkkoError::AttachTargetNotATask(3))
         ));
 
         cleanup(&dir);
@@ -2791,7 +2795,7 @@ mod tests {
         ekko.create_note(&words(&["@there", "the reason"])).unwrap();
         ekko.create_note(&words(&["@there", "another"])).unwrap();
 
-        ekko.set_anchor(&words(&["@2", "1"])).unwrap();
+        ekko.set_attached_to(&words(&["@2", "1"])).unwrap();
 
         let Outcome::Board(groups) = ekko.display_by_board().unwrap() else { panic!() };
         let there = groups.iter().find(|(b, _)| b == "@there").expect("@there exists");

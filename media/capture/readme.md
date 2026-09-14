@@ -4,7 +4,7 @@
 
 ```bash
 $ media/capture/shot.sh media/header-boards.png ./target/debug/ekko --ekko-dir /tmp/demo
-$ media/capture/shot.sh media/path.png ./target/debug/ekko --project compositor --path
+$ media/capture/shot.sh media/roadmap.png ./target/debug/ekko --project compositor --roadmap
 ```
 
 It runs the command with `FORCE_COLOR=1`, converts the ANSI it emits to HTML

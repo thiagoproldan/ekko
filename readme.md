@@ -36,7 +36,7 @@ Added by Ekko, each of them invisible until you use it:
 - **A real paused state**, so "set aside" stops looking like "never started"
 - **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
 - **Projects**: one board per project via `--project`, with the filesystem as the registry
-- **Phases and `--path`**: a project's journey, read backwards as history and forwards as a plan
+- **Phases and `--roadmap`**: a project's roadmap, read backwards as history and forwards as a plan
 - **Dependencies**: `--blocked-by`, and `--list ready` for what can actually be started
 - **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
 - **Stable `uid`s**, accepted anywhere a display id is, because display ids get recycled and `--restore` hands out new ones
@@ -96,49 +96,49 @@ $ ekko --help
     $ ekko [<options> ...]
 
     Options
-        none             Display board view
-      --anchor <IDS>     Point a note at the task it explains
-      --archive, -a      Display archived items
-      --begin, -b        Start/pause task
-      --blocked-by <IDS> Record what an item waits on
-      --calendar         Show the current month
-      --check, -c        Check/uncheck task
-      --clear            Delete all checked items
-      --copy, -y         Copy item description
-      --create           Create the project named by --project
-      --delete, -d       Delete item
-      --destroy          Move the project named by --project to the trash
-      --edit, -e         Edit item description
-      --find, -f         Search for items
-      --help, -h         Display help message
-      --json, -j         Output machine-readable JSON instead of formatted text
-      --list, -l         List items by attributes
-      --move, -m         Move item between boards
-      --note, -n         Create note
-      --path             Show the project's journey through its phases
-      --phase <NAME>     Scope work to one phase of a project
-      --phases <NAME>... Declare the project's ordered phase sequence
-      --priority, -p     Update priority of task
-      --project <NAME>   Work against a named project instead of the default board
-      --projects         List the projects that exist
-      --restore, -r      Restore items from archive
-      --set              Set item state idempotently (retry-safe)
-      --since <MILLIS>   Only items changed at or after a timestamp
-      --star, -s         Star/unstar item
-      --stash [IDS]      Put items or a board away; no ids lists the stash
-      --trash            Show the trash, and how long each thing has left
-      --unstash <IDS>    Bring items back out of the stash
-      --untrash <IDS>    Bring items back out of the trash
-      --ekko-dir         Define a custom ekko directory
-      --task, -t         Create task
-      --timeline, -i     Display timeline view
-      --ui               Interactive mode: a picker in the terminal
-      --version, -v      Display installed version
+        none              Display board view
+      --archive, -a       Display archived items
+      --attached-to <IDS> Attach a note to the task it explains
+      --begin, -b         Start/pause task
+      --blocked-by <IDS>  Record what an item waits on
+      --calendar          Show the current month
+      --check, -c         Check/uncheck task
+      --clear             Delete all checked items
+      --copy, -y          Copy item description
+      --create            Create the project named by --project
+      --delete, -d        Delete item
+      --destroy           Move the project named by --project to the trash
+      --edit, -e          Edit item description
+      --find, -f          Search for items
+      --help, -h          Display help message
+      --json, -j          Output machine-readable JSON instead of formatted text
+      --list, -l          List items by attributes
+      --move, -m          Move item between boards
+      --note, -n          Create note
+      --phase <NAME>      Scope work to one phase of a project
+      --phases <NAME>...  Declare the project's ordered phase sequence
+      --priority, -p      Update priority of task
+      --project <NAME>    Work against a named project instead of the default board
+      --projects          List the projects that exist
+      --restore, -r       Restore items from archive
+      --roadmap           Show the project's roadmap through its phases
+      --set               Set item state idempotently (retry-safe)
+      --since <MILLIS>    Only items changed at or after a timestamp
+      --star, -s          Star/unstar item
+      --stash [IDS]       Put items or a board away; no ids lists the stash
+      --trash             Show the trash, and how long each thing has left
+      --unstash <IDS>     Bring items back out of the stash
+      --untrash <IDS>     Bring items back out of the trash
+      --ekko-dir          Define a custom ekko directory
+      --task, -t          Create task
+      --timeline, -i      Display timeline view
+      --ui                Interactive mode: a picker in the terminal
+      --version, -v       Display installed version
 
     Examples
       $ ekko
-      $ ekko --anchor @16 12
       $ ekko --archive
+      $ ekko --attached-to @16 12
       $ ekko --begin 2 3
       $ ekko --calendar
       $ ekko --check 1 2
@@ -154,6 +154,7 @@ $ ekko --help
       $ ekko --note @coding Mergesort worse-case O(nlogn)
       $ ekko --priority @3 2
       $ ekko --restore 4
+      $ ekko --project demo --roadmap
       $ ekko --star 2
       $ ekko --stash @due
       $ ekko --unstash 9
@@ -195,7 +196,7 @@ In order to display all items in a timeline view, based on their creation date, 
 │    4. ✔ Ship the package                              │  │ attempt flickered                                      │
 │@docs [0/1]                                            │  │                                                        │
 │    5. ☐ Write the readme                              │  │ boards   @wayland                                      │
-│                                                       │  │ explains a task                                        │
+│                                                       │  │ attached to a task                                     │
 └───────────────────────────────────────────────────────┘  └────────────────────────────────────────────────────────┘
 ┌─────────────────────── Prompt ────────────────────────┐  ┌─────────────────── August 2026 ────────────────────────┐
 │ >                                               5 / 5 │  │ Su Mo Tu We Th Fr Sa                                   │
@@ -245,15 +246,17 @@ $ ekko --calendar
 
 Weeks start on Sunday, matching `cal(1)`. The month is derived from the dates themselves rather than a table of lengths, so February in a leap year comes out right without the calendar being able to disagree with the calendar.
 
-### Path View
+### Roadmap View
 
-Inside a project with declared phases, `--path` shows the journey through them: filled for what is behind, marked for the phase holding work now, hollow for what is still ahead. The same picture reads backwards as history and forwards as a plan.
+Inside a project with declared phases, `--roadmap` shows the project's way through them: filled for what is behind, marked for the phase holding work now, hollow for what is still ahead. The same picture reads backwards as history and forwards as a plan.
 
 <div align="center">
-  <img alt="Path View" width="52%" src="media/path.png"/>
+  <img alt="Roadmap View" width="52%" src="media/roadmap.png"/>
 </div>
 
-Anything created in the project without `--phase` sits at the project root, outside the path, and is counted at the foot rather than guessed into a phase. See [Phases and the path](#phases-and-the-path).
+Anything created in the project without `--phase` sits at the project root, outside the roadmap, and is counted at the foot rather than guessed into a phase. See [Phases and the roadmap](#phases-and-the-roadmap).
+
+This was `--path` until it was renamed. The old name still parses, only to answer with this one (`RENAMED_FLAG`), so a script or an agent that remembers it is told where the feature went rather than that it is gone.
 
 ## Configuration
 
@@ -408,15 +411,15 @@ This is an Ekko addition; taskbook has no equivalent. Items without a due date a
 
 
 
-### Anchored Notes
+### Attached Notes
 
 A note explains something. Until now it explained it from beside the work rather than under it, so a long reason about item 2 had two homes and both were bad: crammed into 2's own description, or floating nearby with nothing connecting them.
 
-`--anchor` points a note at the task it is about. The note then renders under that task, indented:
+`--attached-to` attaches a note to the task it is about. The note then renders under that task, indented:
 
 ```
-$ ekko --anchor @3 2
- ✔  Note 3 now explains: 2
+$ ekko --attached-to @3 2
+ ✔  Note 3 is now attached to: 2
 
 $ ekko
   @wayland [0/3]
@@ -427,16 +430,16 @@ $ ekko
     5. ●  a note about nothing in particular
 ```
 
-Passing no target clears it: `ekko --anchor @3`.
+Passing no task detaches it: `ekko --attached-to @3`. This was `--anchor` until it was renamed; the old name now answers with `RENAMED_FLAG` and this one, and boards attached under the old name keep their attachments.
 
 Four rules, each one narrowing the feature on purpose:
 
-- **Only a note can be anchored.** A task under a task is a subtask, which raises real questions about whose total it counts toward, and answering them by accident is worse than not having it.
+- **Only a note can be attached.** A task under a task is a subtask, which raises real questions about whose total it counts toward, and answering them by accident is worse than not having it.
 - **Only to a task.** A note under a note would allow chains, and chains allow cycles. One level, always, and cycles impossible by shape rather than by a check somebody has to remember.
 - **Stored by `uid`.** Ids are recycled, and a reason pointing at a recycled number would end up explaining different work.
 - **A note whose task lives on another board stays where it is.** It renders unnested rather than jumping boards -- surprising placement is worse than an un-nested reason, and the note is still where it was filed.
 
-The `[complete/tasks]` counter never counted notes and still does not. What changes is that anchored notes stop competing for sibling lines, so the list you scan is the work.
+The `[complete/tasks]` counter never counted notes and still does not. What changes is that attached notes stop competing for sibling lines, so the list you scan is the work.
 
 ### Folded Notes
 
@@ -494,7 +497,7 @@ That matters more than it looks. A dependency you cannot undo does not stay a mi
 
 There is no picture yet, on purpose. The data is what a drawing would need anyway, and whether a drawing earns its keep is easier to answer after living with `--list ready` for a while than before.
 
-### Phases and the path
+### Phases and the roadmap
 
 Inside a project the shape is `project > phase > area`. The default board has no phases at all -- it stays what it always was, areas and tasks, for when you just want to write something down.
 
@@ -503,7 +506,7 @@ Declare the sequence, then work inside it:
 ```
 $ ekko --project winwayland --phases setup compositor packaging
 $ ekko --project winwayland --phase compositor --task @render Damage tracking
-$ ekko --project winwayland --path
+$ ekko --project winwayland --roadmap
 ```
 
 ```
@@ -522,8 +525,8 @@ Five decisions worth knowing:
 - **Each phase is its own world.** `@render` under `setup` and `@render` under `compositor` are two areas, not one appearing twice. Scoping is what tells them apart.
 - **`--phases` replaces the sequence.** Inserting a phase in the middle is the common case and appending cannot express it, so the whole list is given at once -- the same contract `--move` already has for an item's boards.
 - **Order cannot be derived.** "Setup comes before build" is knowledge, not a timestamp. It is the only thing in Ekko you have to state outright.
-- **No phase means the project root.** An item created without `--phase` is never filed into a guessed current phase; it sits outside the path, and the path says how many are out there.
-- **`--path` is invoked, never automatic.** The board view is unchanged whether phases exist or not.
+- **No phase means the project root.** An item created without `--phase` is never filed into a guessed current phase; it sits outside the roadmap, and the roadmap says how many are out there.
+- **`--roadmap` is invoked, never automatic.** The board view is unchanged whether phases exist or not.
 
 Cancelled tasks leave a phase's total, the same way they leave the percentage, so a phase that drops work can still read as finished.
 

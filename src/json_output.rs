@@ -69,13 +69,13 @@ fn success_value(outcome: &Outcome) -> Value {
             json!({"ok": true, "command": command, "boards": groups_to_value(groups)})
         }
         Outcome::Trash(items) => json!({"ok": true, "command": command, "items": items}),
-        Outcome::Anchored { item, target } => {
-            json!({"ok": true, "command": command, "item": item, "anchor": target})
+        Outcome::Attached { item, target } => {
+            json!({"ok": true, "command": command, "item": item, "target": target})
         }
         Outcome::Blocked { item, blockers } => {
             json!({"ok": true, "command": command, "item": item, "blockers": blockers})
         }
-        Outcome::Path { steps, rootless } => {
+        Outcome::Roadmap { steps, rootless } => {
             json!({"ok": true, "command": command, "steps": steps, "rootless": rootless})
         }
         Outcome::Stats(stats) => json!({"ok": true, "command": command, "stats": stats}),
@@ -88,6 +88,7 @@ fn error_value(error: &EkkoError) -> Value {
         EkkoError::InvalidId(id) => Some(("id", json!(id))),
         EkkoError::InvalidCustomAppDir(path) => Some(("path", json!(path))),
         EkkoError::LockTimeout(path) => Some(("path", json!(path))),
+        EkkoError::RenamedFlag { new, .. } => Some(("renamedTo", json!(new))),
         _ => None,
     };
     if let (Some((key, val)), Value::Object(map)) = (extra, &mut value) {

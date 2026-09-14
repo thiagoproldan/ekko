@@ -23,49 +23,49 @@ const HELP: &str = r#"
     $ ekko [<options> ...]
 
     Options
-        none             Display board view
-      --anchor <IDS>     Point a note at the task it explains
-      --archive, -a      Display archived items
-      --begin, -b        Start/pause task
-      --blocked-by <IDS> Record what an item waits on
-      --calendar         Show the current month
-      --check, -c        Check/uncheck task
-      --clear            Delete all checked items
-      --copy, -y         Copy item description
-      --create           Create the project named by --project
-      --delete, -d       Delete item
-      --destroy          Move the project named by --project to the trash
-      --edit, -e         Edit item description
-      --find, -f         Search for items
-      --help, -h         Display help message
-      --json, -j         Output machine-readable JSON instead of formatted text
-      --list, -l         List items by attributes
-      --move, -m         Move item between boards
-      --note, -n         Create note
-      --path             Show the project's journey through its phases
-      --phase <NAME>     Scope work to one phase of a project
-      --phases <NAME>... Declare the project's ordered phase sequence
-      --priority, -p     Update priority of task
-      --project <NAME>   Work against a named project instead of the default board
-      --projects         List the projects that exist
-      --restore, -r      Restore items from archive
-      --set              Set item state idempotently (retry-safe)
-      --since <MILLIS>   Only items changed at or after a timestamp
-      --star, -s         Star/unstar item
-      --stash [IDS]      Put items or a board away; no ids lists the stash
-      --trash            Show the trash, and how long each thing has left
-      --unstash <IDS>    Bring items back out of the stash
-      --untrash <IDS>    Bring items back out of the trash
-      --ekko-dir         Define a custom ekko directory
-      --task, -t         Create task
-      --timeline, -i     Display timeline view
-      --ui               Interactive mode: a picker in the terminal
-      --version, -v      Display installed version
+        none              Display board view
+      --archive, -a       Display archived items
+      --attached-to <IDS> Attach a note to the task it explains
+      --begin, -b         Start/pause task
+      --blocked-by <IDS>  Record what an item waits on
+      --calendar          Show the current month
+      --check, -c         Check/uncheck task
+      --clear             Delete all checked items
+      --copy, -y          Copy item description
+      --create            Create the project named by --project
+      --delete, -d        Delete item
+      --destroy           Move the project named by --project to the trash
+      --edit, -e          Edit item description
+      --find, -f          Search for items
+      --help, -h          Display help message
+      --json, -j          Output machine-readable JSON instead of formatted text
+      --list, -l          List items by attributes
+      --move, -m          Move item between boards
+      --note, -n          Create note
+      --phase <NAME>      Scope work to one phase of a project
+      --phases <NAME>...  Declare the project's ordered phase sequence
+      --priority, -p      Update priority of task
+      --project <NAME>    Work against a named project instead of the default board
+      --projects          List the projects that exist
+      --restore, -r       Restore items from archive
+      --roadmap           Show the project's roadmap through its phases
+      --set               Set item state idempotently (retry-safe)
+      --since <MILLIS>    Only items changed at or after a timestamp
+      --star, -s          Star/unstar item
+      --stash [IDS]       Put items or a board away; no ids lists the stash
+      --trash             Show the trash, and how long each thing has left
+      --unstash <IDS>     Bring items back out of the stash
+      --untrash <IDS>     Bring items back out of the trash
+      --ekko-dir          Define a custom ekko directory
+      --task, -t          Create task
+      --timeline, -i      Display timeline view
+      --ui                Interactive mode: a picker in the terminal
+      --version, -v       Display installed version
 
     Examples
       $ ekko
-      $ ekko --anchor @16 12
       $ ekko --archive
+      $ ekko --attached-to @16 12
       $ ekko --begin 2 3
       $ ekko --calendar
       $ ekko --check 1 2
@@ -81,6 +81,7 @@ const HELP: &str = r#"
       $ ekko --note @coding Mergesort worse-case O(nlogn)
       $ ekko --priority @3 2
       $ ekko --restore 4
+      $ ekko --project demo --roadmap
       $ ekko --star 2
       $ ekko --stash @due
       $ ekko --unstash 9
@@ -147,6 +148,13 @@ fn main() -> ExitCode {
     let project_env = std::env::var("EKKO_PROJECT").ok();
     let project = cli.project.as_deref().or(project_env.as_deref());
 
+    // Before opening anything: an old flag name gets the same answer
+    // whatever board it was aimed at, and a caller should learn what the
+    // flag is called now before learning, say, that a project is missing.
+    if let Some(err) = renamed_flag(&cli) {
+        return finish_with_error(&err, json_mode, &home_dir);
+    }
+
     let ekko = match Ekko::open(
         &home_dir,
         &cwd,
@@ -202,6 +210,21 @@ fn main() -> ExitCode {
     }
 }
 
+/// The error for a flag used under a name it no longer has.
+///
+/// `--anchor` became `--attached-to` and `--path` became `--roadmap`, each
+/// renamed to the word for what it does. The old spellings still parse,
+/// only so they can be answered with the new one.
+fn renamed_flag(cli: &cli::Cli) -> Option<EkkoError> {
+    if cli.anchor.is_some() {
+        return Some(EkkoError::RenamedFlag { old: "--anchor", new: "--attached-to" });
+    }
+    if cli.path {
+        return Some(EkkoError::RenamedFlag { old: "--path", new: "--roadmap" });
+    }
+    None
+}
+
 /// Priority order copied from index.js's chain of `if (flags.x)` checks --
 /// when more than one command flag is somehow set at once, the first
 /// match in this exact order wins, the rest are silently ignored, same as
@@ -214,8 +237,8 @@ fn dispatch(
     project: Option<&str>,
     home_dir: &Path,
 ) -> Result<Vec<Outcome>, EkkoError> {
-    if let Some(args) = cli.anchor.as_deref() {
-        return Ok(vec![ekko.set_anchor(args)?]);
+    if let Some(args) = cli.attached_to.as_deref() {
+        return Ok(vec![ekko.set_attached_to(args)?]);
     }
     if let Some(args) = cli.blocked_by.as_deref() {
         return Ok(vec![ekko.set_blocked_by(args)?]);
@@ -223,8 +246,8 @@ fn dispatch(
     if let Some(names) = cli.phases.as_deref() {
         return Ok(vec![ekko.set_phases(names)?]);
     }
-    if cli.path {
-        return Ok(vec![ekko.display_path()?]);
+    if cli.roadmap {
+        return Ok(vec![ekko.display_roadmap()?]);
     }
     if let Some(args) = cli.stash.as_deref() {
         return Ok(vec![if args.is_empty() {

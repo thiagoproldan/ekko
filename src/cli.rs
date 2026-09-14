@@ -7,10 +7,20 @@ use clap::Parser;
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 pub struct Cli {
-    /// Point a note at the task it explains, by id: the note first, then
-    /// its target. No target clears it.
-    #[arg(long, num_args = 0.., value_name = "IDS")]
+    /// Attach a note to the task it explains, by id: the note first, then
+    /// its task. No task detaches it.
+    #[arg(long = "attached-to", num_args = 0.., value_name = "IDS")]
+    pub attached_to: Option<Vec<String>>,
+
+    /// The names `--attached-to` and `--roadmap` had before each was renamed
+    /// to the word for what it does. Hidden, and kept only so a caller still
+    /// carrying an old name -- an agent with an older copy of the skill in
+    /// its context, above all -- is told the new one, rather than clap's
+    /// bare "unexpected argument", which reads as the feature being gone.
+    #[arg(long, num_args = 0.., hide = true)]
     pub anchor: Option<Vec<String>>,
+    #[arg(long, hide = true)]
+    pub path: bool,
 
     /// Put items or a whole board away, or with no ids, list what is away.
     #[arg(long, num_args = 0.., value_name = "IDS")]
@@ -77,10 +87,10 @@ pub struct Cli {
     #[arg(long, num_args = 0.., value_name = "NAME")]
     pub phases: Option<Vec<String>>,
 
-    /// Render the project's journey: phases in order, with progress and
+    /// Render the project's roadmap: phases in order, with progress and
     /// where work currently sits.
     #[arg(long)]
-    pub path: bool,
+    pub roadmap: bool,
     /// Work against a named project instead of the default board. Sugar over
     /// `--ekko-dir`: the project lives at `~/.ekko/projects/<name>`, so the
     /// filesystem is the registry and there is no list to keep in sync.

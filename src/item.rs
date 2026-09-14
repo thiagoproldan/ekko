@@ -82,7 +82,7 @@ pub struct Item {
     pub cancelled: Option<bool>,
     /// Which phase of a project this belongs to, when it belongs to one.
     ///
-    /// `None` means the project root -- outside the path, and the only shape
+    /// `None` means the project root -- outside the roadmap, and the only shape
     /// the default board ever has. Areas are scoped by phase, so `@render`
     /// under `setup` and `@render` under `compositor` are two distinct
     /// areas; this field is what tells them apart.
@@ -121,7 +121,7 @@ pub struct Item {
     /// out. A boolean could never answer "how long do I have".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trashed: Option<i64>,
-    /// The task this note explains, by `uid`.
+    /// The task this note is attached to, by `uid`.
     ///
     /// Only a note carries one, and it only ever points at a task. Both
     /// restrictions keep the feature to one level: a task under a task
@@ -132,8 +132,13 @@ pub struct Item {
     /// By uid for the same reason `blocked_by` is: display ids are
     /// recycled, and a reason pointing at a recycled number would end up
     /// explaining a different piece of work.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<String>,
+    ///
+    /// Stored as `attachedTo`, and read from `anchor` as well, which is what
+    /// it was called before `--anchor` became `--attached-to`. Boards
+    /// attached before the rename keep their attachments with nobody
+    /// migrating anything; the next write stores the new name.
+    #[serde(rename = "attachedTo", alias = "anchor", default, skip_serializing_if = "Option::is_none")]
+    pub attached_to: Option<String>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -161,7 +166,7 @@ impl Item {
             cancelled: None,
             phase: None,
             blocked_by: None,
-            anchor: None,
+            attached_to: None,
             stashed: None,
             trashed: None,
             priority: Some(priority),
@@ -188,7 +193,7 @@ impl Item {
             cancelled: None,
             phase: None,
             blocked_by: None,
-            anchor: None,
+            attached_to: None,
             stashed: None,
             trashed: None,
         }
@@ -346,5 +351,25 @@ mod tests {
         assert_eq!(note.id, 1);
         assert!(!note.is_task);
         assert_eq!(note.is_complete, None);
+    }
+
+    /// `--anchor` became `--attached-to`, and the stored field was renamed
+    /// with it. Every board attached before then says `anchor`: those
+    /// attachments have to survive being read, and the next write has to
+    /// store the new name rather than carry the old one forward.
+    #[test]
+    fn an_attachment_stored_under_its_old_name_is_read_and_written_under_the_new_one() {
+        let legacy = serde_json::json!({
+            "_id": 3, "_date": "Fri Aug 28 2026", "_timestamp": 0,
+            "description": "why", "isStarred": false, "boards": ["@a"],
+            "_isTask": false, "uid": "18d0-1", "anchor": "18cf-2"
+        });
+
+        let note: Item = serde_json::from_value(legacy).unwrap();
+        assert_eq!(note.attached_to.as_deref(), Some("18cf-2"));
+
+        let json = serde_json::to_value(&note).unwrap();
+        assert_eq!(json["attachedTo"], "18cf-2");
+        assert!(json.get("anchor").is_none(), "the old name was written back out");
     }
 }

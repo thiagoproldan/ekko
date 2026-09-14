@@ -450,7 +450,7 @@ fn draw_row(
         Row::Item(at) => {
             let item = &state.items[*at];
             let level = Level::of(item);
-            let indent = if item.anchor.is_some() { "  " } else { "" };
+            let indent = if item.attached_to.is_some() { "  " } else { "" };
             let marker = if selected { ">" } else { " " };
             (
                 format!(
@@ -517,8 +517,8 @@ fn draw_preview(
     if let Some(blockers) = &item.blocked_by {
         facts.push(format!("waits on {}", blockers.len()));
     }
-    if item.anchor.is_some() {
-        facts.push("explains a task".to_string());
+    if item.attached_to.is_some() {
+        facts.push("attached to a task".to_string());
     }
     if item.is_starred {
         facts.push("starred".to_string());

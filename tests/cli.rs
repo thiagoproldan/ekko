@@ -89,3 +89,27 @@ fn output_that_is_read_to_the_end_still_succeeds() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// `--anchor` and `--path` were renamed. An agent working from an older copy
+/// of the skill still sends the old names, and clap's own "unexpected
+/// argument" would read as the feature being gone -- so each old name is
+/// answered, under a stable code, with the name it has now.
+#[test]
+fn an_old_flag_name_is_answered_with_the_new_one() {
+    let dir = temp_ekko_dir();
+
+    for (old, new) in [("--anchor", "--attached-to"), ("--path", "--roadmap")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(["--ekko-dir", dir.to_str().unwrap(), "--json", old])
+            .output()
+            .expect("failed to run ekko");
+
+        assert!(!output.status.success(), "{old} succeeded");
+        let reply: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("a --json error reply");
+        assert_eq!(reply["code"], "RENAMED_FLAG", "{old}: {reply}");
+        assert_eq!(reply["renamedTo"], new, "{old}: {reply}");
+    }
+
+    fs::remove_dir_all(&dir).ok();
+}
