@@ -548,7 +548,7 @@ Five decisions worth knowing:
 - **No phase means the project root.** An item created without `--phase` is never filed into a guessed current phase; it sits outside the roadmap, and the roadmap says how many are out there.
 - **`--roadmap` is invoked, never automatic.** The board view is unchanged whether phases exist or not.
 
-Cancelled tasks leave a phase's total, the same way they leave the percentage, so a phase that drops work can still read as finished.
+Cancelled tasks leave a phase's total, the same way they leave the percentage and the board's `[done/total]`, so a phase that drops work can still read as finished.
 
 ### Projects
 
@@ -568,7 +568,7 @@ $ ekko --projects
 This is sugar over `--ekko-dir`, which could always point at a per-project board -- what it adds is not having to remember where each one lives. Four decisions worth knowing:
 
 - **The filesystem is the registry.** There is no list of projects kept alongside the directories, so nothing can drift out of step with what exists. `--projects` reads the directory.
-- **The listing says what each project holds**, in the same `[complete/tasks]` a board title uses, with notes counted separately and shown only when there are any. Its size should be visible before you act on it, not after.
+- **The listing says what each project holds**, in the same `[complete/tasks]` a board title uses and counted the way the project's own stats line counts it (cancelled tasks out of the total, stashed and trashed items not at all), with notes counted separately and shown only when there are any. Its size should be visible before you act on it, not after.
 - **An unknown name is an error**, and the message carries the fix. Creating on first use would turn a typo into a new, empty project -- the same failure as a filter that silently matches nothing.
 - **The active project is printed above the board.** `EKKO_PROJECT` set and forgotten would otherwise show a different board with nothing on screen saying so.
 - **The default board is untouched.** Projects are additional; a setup that never uses one behaves exactly as before.
@@ -611,7 +611,8 @@ Some work gets dropped without being finished, and deleting it loses the part wo
 Three consequences worth knowing, each of them deliberate:
 
 - **It is not pending.** `--list pending` excludes cancelled tasks, because a dropped task is not waiting to be done. `--list cancelled` finds them.
-- **It is not counted in the percentage.** Cancelled work is not work, so a board that drops something can still reach 100%. It still appears in the stats line, so nothing is hidden.
+- **It is not counted in any total.** Cancelled work is not work, so it is out of the percentage, the board's `[done/total]`, `--projects` and the roadmap alike, and a board that drops something can still reach 100%. It still appears in the stats line, so nothing is hidden.
+- **It is one state, not a flag beside the others.** A task is always exactly one of pending, in progress, paused, done or cancelled, and every command moves it from one to another. `--check` on a cancelled task makes it done, not done-and-cancelled; the board, the stats line and `--list` all read a task's state the same way, so they cannot disagree about it.
 - **Priority markers are dropped with it.** A struck-through line still shouting `(!!)` reads as a contradiction.
 
 The task keeps its description, so the record of what was dropped survives. If *why* matters, put it in the description (`--edit`) or leave a note beside it -- Ekko does not ask for a reason, and a field nobody fills in would be worse than the habit.
@@ -796,10 +797,11 @@ The by default supported listing attributes, together with their respective alia
 - `note`, `notes` - Items that are notes.
 - `pending`, `unchecked`, `incomplete` - Items that are pending tasks (note: an in-progress task is not yet complete either, so it matches this too).
 - `progress`, `started`, `begun` - Items that are in-progress tasks.
+- `paused` - Tasks that were started and then set aside.
 - `done`, `checked`, `complete` - Items that complete tasks.
 - `star`, `starred` - Items that are starred.
 - `due` - Tasks that have a due date.
-- `overdue` - Tasks whose due date has passed and that are not yet complete.
+- `overdue` - Tasks whose due date has passed and that are still open (a cancelled task is not late).
 - `cancelled`, `canceled` - Tasks that were dropped rather than finished.
 - `ready` - Open tasks with nothing outstanding blocking them.
 - `blocked` - Items blocked by something still open.

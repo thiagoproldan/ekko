@@ -201,6 +201,112 @@ impl Item {
     }
 }
 
+/// The five states a task can be in, as one value.
+///
+/// Storage keeps four flags -- `isComplete` and `inProgress` from taskbook,
+/// `paused` and `cancelled` from Ekko -- which is sixteen combinations for
+/// five meaningful states. Reading the flags in several places, each with its
+/// own precedence, is how a task once came out cancelled on the board, cancelled
+/// in the stats line and done in `--list done`, all at the same time. So every
+/// surface reads a task's state through `State::of`, and every command writes
+/// through `State::write`, which only ever produces one of five encodings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Pending,
+    Progress,
+    Paused,
+    Done,
+    Cancelled,
+}
+
+/// What a command asks of a task's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// `--check`: done becomes pending, anything else becomes done.
+    ToggleDone,
+    /// `--begin`: in progress becomes pending, anything else becomes in
+    /// progress. Pending rather than paused on the way back, because that is
+    /// what taskbook wrote and the flags have to stay readable by it.
+    ToggleProgress,
+    /// `--set done`, `--set paused`, ...: the state the task should end up in.
+    Become(State),
+    /// `--set undone`: done becomes pending, and anything else is left alone,
+    /// because a task that is not done already is what "undone" asks for.
+    Undo,
+}
+
+impl State {
+    #[cfg(test)]
+    pub const ALL: [State; 5] =
+        [State::Pending, State::Progress, State::Paused, State::Done, State::Cancelled];
+
+    /// The state of a task, or `None` for a note.
+    ///
+    /// Flag combinations that are not one of the five encodings -- older
+    /// data, a hand-edited file -- resolve by one fixed precedence: cancelled,
+    /// then done, then in progress, then paused. It is the precedence the
+    /// board has always drawn with, so reading through here changed no icon.
+    pub fn of(item: &Item) -> Option<State> {
+        if !item.is_task {
+            return None;
+        }
+        Some(if item.cancelled.unwrap_or(false) {
+            State::Cancelled
+        } else if item.is_complete.unwrap_or(false) {
+            State::Done
+        } else if item.in_progress.unwrap_or(false) {
+            State::Progress
+        } else if item.paused.unwrap_or(false) {
+            State::Paused
+        } else {
+            State::Pending
+        })
+    }
+
+    /// Writes this state onto a task as exactly one encoding. `isComplete`
+    /// and `inProgress` are always present, as taskbook wrote them; `paused`
+    /// and `cancelled` appear only when true, so a board that never uses them
+    /// stays byte-identical to what taskbook would have written.
+    pub fn write(self, item: &mut Item) {
+        item.is_complete = Some(self == State::Done);
+        item.in_progress = Some(self == State::Progress);
+        item.paused = (self == State::Paused).then_some(true);
+        item.cancelled = (self == State::Cancelled).then_some(true);
+    }
+
+    /// The one transition function. Total -- every state and every change
+    /// has an answer -- and every answer is one of the five states.
+    pub fn after(self, change: Change) -> State {
+        match change {
+            Change::ToggleDone if self == State::Done => State::Pending,
+            Change::ToggleDone => State::Done,
+            Change::ToggleProgress if self == State::Progress => State::Pending,
+            Change::ToggleProgress => State::Progress,
+            Change::Become(target) => target,
+            Change::Undo if self == State::Done => State::Pending,
+            Change::Undo => self,
+        }
+    }
+
+    /// Still work to do: pending, in progress or paused.
+    pub fn is_open(self) -> bool {
+        matches!(self, State::Pending | State::Progress | State::Paused)
+    }
+}
+
+/// `(done, total)` for a set of items, counted the one way Ekko counts
+/// progress everywhere. Notes are not work, and neither is a cancelled task,
+/// so both stay out of the total -- which is what lets a board that dropped
+/// something still reach 100%. The board title, `--projects`, the roadmap and
+/// the percentage agree because they all count through here.
+pub fn tally<'a>(items: impl IntoIterator<Item = &'a Item>) -> (u32, u32) {
+    items.into_iter().filter_map(State::of).fold((0, 0), |(done, total), state| match state {
+        State::Cancelled => (done, total),
+        State::Done => (done + 1, total + 1),
+        _ => (done, total + 1),
+    })
+}
+
 /// `(_date, _timestamp)` for a freshly created item, computed *now* -- not
 /// once at startup and reused. That was a real bug in the JS version: `now`
 /// was a module-level `const`, so every item created within one long-lived
@@ -352,6 +458,121 @@ mod tests {
         assert_eq!(note.id, 1);
         assert!(!note.is_task);
         assert_eq!(note.is_complete, None);
+    }
+
+    fn task_in(state: State) -> Item {
+        let mut item = Item::new_task(1, "t".into(), vec![], 1);
+        state.write(&mut item);
+        item
+    }
+
+    /// The four flags a state is stored in -- compared on their own, because
+    /// every freshly made item also carries its own uid and timestamp.
+    fn flags(item: &Item) -> (Option<bool>, Option<bool>, Option<bool>, Option<bool>) {
+        (item.is_complete, item.in_progress, item.paused, item.cancelled)
+    }
+
+    /// Every state against every change, spelled out rather than derived, so
+    /// the table is a statement of what the commands mean and not a copy of
+    /// the code under test. Each answer must also land as exactly the one
+    /// encoding of its state.
+    #[test]
+    fn every_change_from_every_state_lands_on_one_canonical_state() {
+        use Change::*;
+        use State::*;
+        let table = [
+            (Pending, ToggleDone, Done), (Pending, ToggleProgress, Progress), (Pending, Undo, Pending),
+            (Progress, ToggleDone, Done), (Progress, ToggleProgress, Pending), (Progress, Undo, Progress),
+            (Paused, ToggleDone, Done), (Paused, ToggleProgress, Progress), (Paused, Undo, Paused),
+            (Done, ToggleDone, Pending), (Done, ToggleProgress, Progress), (Done, Undo, Pending),
+            (Cancelled, ToggleDone, Done), (Cancelled, ToggleProgress, Progress), (Cancelled, Undo, Cancelled),
+        ];
+        let mut cases: Vec<(State, Change, State)> = table.to_vec();
+        for from in State::ALL {
+            for target in State::ALL {
+                cases.push((from, Become(target), target));
+            }
+        }
+        assert_eq!(cases.len(), 5 * 8, "five states times eight changes");
+
+        for (from, change, to) in cases {
+            assert_eq!(from.after(change), to, "{from:?} after {change:?}");
+
+            let mut item = task_in(from);
+            from.after(change).write(&mut item);
+            assert_eq!(State::of(&item), Some(to), "{from:?} after {change:?} read back");
+            assert_eq!(flags(&item), flags(&task_in(to)), "{from:?} after {change:?} is not the canonical {to:?}");
+        }
+    }
+
+    /// `--set` is retry-safe only if every target is idempotent.
+    #[test]
+    fn asking_for_the_same_state_twice_is_asking_once() {
+        for from in State::ALL {
+            for change in State::ALL.map(Change::Become).into_iter().chain([Change::Undo]) {
+                let once = from.after(change);
+                assert_eq!(once.after(change), once, "{from:?} then {change:?} twice");
+            }
+        }
+    }
+
+    /// All sixteen flag combinations read as one state, by one precedence,
+    /// and writing that state back yields its canonical encoding.
+    #[test]
+    fn every_flag_combination_reads_as_exactly_one_state() {
+        for bits in 0u8..16 {
+            let mut item = Item::new_task(1, "t".into(), vec![], 1);
+            item.is_complete = Some(bits & 1 != 0);
+            item.in_progress = Some(bits & 2 != 0);
+            item.paused = (bits & 4 != 0).then_some(true);
+            item.cancelled = (bits & 8 != 0).then_some(true);
+
+            let expected = if bits & 8 != 0 {
+                State::Cancelled
+            } else if bits & 1 != 0 {
+                State::Done
+            } else if bits & 2 != 0 {
+                State::Progress
+            } else if bits & 4 != 0 {
+                State::Paused
+            } else {
+                State::Pending
+            };
+            let state = State::of(&item).expect("a task has a state");
+            assert_eq!(state, expected, "flags {bits:04b}");
+
+            state.write(&mut item);
+            assert_eq!(flags(&item), flags(&task_in(expected)), "flags {bits:04b} did not normalise");
+        }
+    }
+
+    /// `--check` and `--begin` on the three states taskbook knew must write
+    /// what taskbook wrote: both flags present, and no Ekko-only key.
+    #[test]
+    fn the_toggles_write_what_taskbook_wrote() {
+        for (from, change) in [
+            (State::Pending, Change::ToggleDone),
+            (State::Done, Change::ToggleDone),
+            (State::Pending, Change::ToggleProgress),
+            (State::Progress, Change::ToggleProgress),
+        ] {
+            let mut item = task_in(from);
+            from.after(change).write(&mut item);
+            let json = serde_json::to_value(&item).unwrap();
+            assert!(json.get("isComplete").is_some() && json.get("inProgress").is_some());
+            assert!(json.get("paused").is_none() && json.get("cancelled").is_none(), "{json}");
+        }
+    }
+
+    #[test]
+    fn the_total_leaves_out_notes_and_cancelled_tasks() {
+        let done = task_in(State::Done);
+        let pending = task_in(State::Pending);
+        let paused = task_in(State::Paused);
+        let cancelled = task_in(State::Cancelled);
+        let note = Item::new_note(9, "n".into(), vec![]);
+
+        assert_eq!(tally([&done, &pending, &paused, &cancelled, &note]), (1, 3));
     }
 
     /// `--anchor` became `--attached-to`, and the stored field was renamed

@@ -33,7 +33,9 @@ use crossterm::terminal::{
 use crossterm::{cursor, execute, queue};
 
 use crate::ekko::{Ekko, EkkoError, Outcome};
-use crate::item::Item;
+// Imported under another name: `State` in this module is the picker's own
+// state, not a task's.
+use crate::item::{tally, Item, State as TaskState};
 use crate::render::{CalendarMonth, Level, Stats};
 
 /// Restores the terminal when it goes out of scope, however that happens.
@@ -130,9 +132,7 @@ impl State {
             // `[18/28]` is a fact about the board, and recomputing it per
             // filter would make the same board report different totals
             // depending on what you had typed.
-            let tasks = group.iter().filter(|i| i.is_task).count() as u32;
-            let complete =
-                group.iter().filter(|i| i.is_complete.unwrap_or(false)).count() as u32;
+            let (complete, tasks) = tally(group.iter());
             rows.push(Row::Board { name: board.clone(), complete, tasks });
 
             for item in matching {
@@ -311,7 +311,7 @@ fn act(ekko: &Ekko, state: &mut State, action: Action) -> Result<(), EkkoError> 
     // stray Tab on a finished task used to destroy the fact that it was
     // finished -- which is exactly how two items got un-completed the hour
     // this mode shipped.
-    let terminal = item.is_complete.unwrap_or(false) || item.cancelled.unwrap_or(false);
+    let terminal = matches!(TaskState::of(item), Some(TaskState::Done | TaskState::Cancelled));
 
     let result = match action {
         Action::Stash => ekko.set_stashed(&[id.to_string()], true).map(|_| format!("{id} stashed")),
@@ -330,7 +330,8 @@ fn act(ekko: &Ekko, state: &mut State, action: Action) -> Result<(), EkkoError> 
             .set_state(&[format!("@{id}"), "done".to_string()], false)
             .map(|_| format!("{id} → done")),
         Action::Progress => {
-            let next = if item.in_progress.unwrap_or(false) { "paused" } else { "progress" };
+            let next =
+                if TaskState::of(item) == Some(TaskState::Progress) { "paused" } else { "progress" };
             ekko.set_state(&[format!("@{id}"), next.to_string()], false)
                 .map(|_| format!("{id} → {next}"))
         }

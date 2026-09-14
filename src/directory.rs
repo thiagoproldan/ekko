@@ -196,19 +196,13 @@ fn count_items(storage_file: &Path) -> (u32, u32, u32) {
         return (0, 0, 0);
     };
 
-    let mut complete = 0;
-    let mut tasks = 0;
-    let mut notes = 0;
-    for item in items.values() {
-        if item.is_task {
-            tasks += 1;
-            if item.is_complete.unwrap_or(false) {
-                complete += 1;
-            }
-        } else {
-            notes += 1;
-        }
-    }
+    // What is in front of you, counted the way the project's own stats line
+    // counts it: stashed and trashed items are away, and `tally` keeps
+    // cancelled tasks out of the total. The listing used to count everything
+    // and show winwayland at [46/54] while the project itself said 88%.
+    let visible = items.values().filter(|item| item.stashed.is_none() && item.trashed.is_none());
+    let (complete, tasks) = crate::item::tally(visible.clone());
+    let notes = visible.filter(|item| !item.is_task).count() as u32;
     (complete, tasks, notes)
 }
 

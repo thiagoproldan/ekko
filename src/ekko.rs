@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use crate::config;
 use crate::directory::{self, DirectoryError};
-use crate::item::Item;
+use crate::item::{tally, Change, Item, State};
 use crate::render::{CalendarMonth, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
 use crate::storage::{ItemMap, Storage, StorageError};
 
@@ -608,24 +608,17 @@ impl Ekko {
                 stashed += 1;
                 continue;
             }
-            if item.is_task {
-                if item.cancelled.unwrap_or(false) {
-                    cancelled += 1;
-                } else if item.is_complete.unwrap_or(false) {
-                    complete += 1;
-                } else if item.in_progress.unwrap_or(false) {
-                    in_progress += 1;
-                } else if item.paused.unwrap_or(false) {
-                    // Counted apart from pending on purpose: lumping them back
-                    // together is exactly the conflation this state exists to
-                    // undo, and "0 pending" while two tasks sit half-done was
-                    // the original lie.
-                    paused += 1;
-                } else {
-                    pending += 1;
-                }
-            } else {
-                notes += 1;
+            match State::of(item) {
+                Some(State::Cancelled) => cancelled += 1,
+                Some(State::Done) => complete += 1,
+                Some(State::Progress) => in_progress += 1,
+                // Counted apart from pending on purpose: lumping them back
+                // together is exactly the conflation this state exists to
+                // undo, and "0 pending" while two tasks sit half-done was the
+                // original lie.
+                Some(State::Paused) => paused += 1,
+                Some(State::Pending) => pending += 1,
+                None => notes += 1,
             }
         }
         // `cancelled` is absent from the total on purpose: counting it would
@@ -646,12 +639,16 @@ impl Ekko {
         for attribute in attributes {
             match attribute.as_str() {
                 "star" | "starred" => data.retain(|_, item| item.is_starred),
+                // Every state term reads through `State::of`, the same function
+                // the board and the stats line use, so no combination of flags
+                // can be done here and cancelled there.
                 "done" | "checked" | "complete" => {
-                    data.retain(|_, item| item.is_task && item.is_complete.unwrap_or(false));
+                    data.retain(|_, item| State::of(item) == Some(State::Done));
                 }
                 "progress" | "started" | "begun" => {
-                    data.retain(|_, item| item.is_task && item.in_progress.unwrap_or(false));
+                    data.retain(|_, item| State::of(item) == Some(State::Progress));
                 }
+                "paused" => data.retain(|_, item| State::of(item) == Some(State::Paused)),
                 // Matches the JS version exactly: "pending" only checks
                 // `!isComplete`, so an in-progress task passes this filter
                 // too. Not something this port introduced or should
@@ -661,11 +658,7 @@ impl Ekko {
                     // state to exclude. A dropped task is not waiting to be done,
                     // and listing it as pending is the same conflation the
                     // paused state was added to undo.
-                    data.retain(|_, item| {
-                        item.is_task
-                            && !item.is_complete.unwrap_or(false)
-                            && !item.cancelled.unwrap_or(false)
-                    });
+                    data.retain(|_, item| State::of(item).is_some_and(State::is_open));
                 }
                 "todo" | "task" | "tasks" => data.retain(|_, item| item.is_task),
                 "note" | "notes" => data.retain(|_, item| !item.is_task),
@@ -676,9 +669,7 @@ impl Ekko {
                 // drew it -- two surfaces answering one question differently.
                 "ready" => {
                     data.retain(|_, item| {
-                        item.is_task
-                            && !item.is_complete.unwrap_or(false)
-                            && !item.cancelled.unwrap_or(false)
+                        State::of(item).is_some_and(State::is_open)
                             && Self::unmet_blockers(all, item).is_empty()
                     });
                 }
@@ -686,16 +677,17 @@ impl Ekko {
                     data.retain(|_, item| !Self::unmet_blockers(all, item).is_empty());
                 }
                 "cancelled" | "canceled" => {
-                    data.retain(|_, item| item.cancelled.unwrap_or(false));
+                    data.retain(|_, item| State::of(item) == Some(State::Cancelled));
                 }
                 "due" => data.retain(|_, item| item.due_date.is_some()),
                 // Only tasks that are still open: a finished task is not
                 // late, however long its deadline has been past.
                 "overdue" => {
                     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    // Open, not merely unfinished: a cancelled task is not late
+                    // either, and used to be listed here as if it were.
                     data.retain(|_, item| {
-                        item.is_task
-                            && !item.is_complete.unwrap_or(false)
+                        State::of(item).is_some_and(State::is_open)
                             && item.due_date.as_deref().is_some_and(|d| d < today.as_str())
                     });
                 }
@@ -839,11 +831,10 @@ impl Ekko {
         let (mut checked, mut unchecked) = (Vec::new(), Vec::new());
         for id in ids {
             if let Some(item) = data.get_mut(&id) {
-                if item.is_task {
-                    item.in_progress = Some(false);
-                    let now_complete = !item.is_complete.unwrap_or(false);
-                    item.is_complete = Some(now_complete);
-                    if now_complete { checked.push(id) } else { unchecked.push(id) }
+                if let Some(state) = State::of(item) {
+                    let next = state.after(Change::ToggleDone);
+                    next.write(item);
+                    if next == State::Done { checked.push(id) } else { unchecked.push(id) }
                 }
             }
         }
@@ -858,11 +849,10 @@ impl Ekko {
         let (mut started, mut paused) = (Vec::new(), Vec::new());
         for id in ids {
             if let Some(item) = data.get_mut(&id) {
-                if item.is_task {
-                    item.is_complete = Some(false);
-                    let now_in_progress = !item.in_progress.unwrap_or(false);
-                    item.in_progress = Some(now_in_progress);
-                    if now_in_progress { started.push(id) } else { paused.push(id) }
+                if let Some(state) = State::of(item) {
+                    let next = state.after(Change::ToggleProgress);
+                    next.write(item);
+                    if next == State::Progress { started.push(id) } else { paused.push(id) }
                 }
             }
         }
@@ -1005,7 +995,7 @@ impl Ekko {
         let ids: Vec<String> = data
             .iter()
             .filter(|(_, item)| {
-                item.is_complete.unwrap_or(false)
+                State::of(item) == Some(State::Done)
                     && item.stashed.is_none()
                     && item.trashed.is_none()
             })
@@ -1446,7 +1436,8 @@ impl Ekko {
 
     /// The blockers of `item` that are still outstanding, as current display
     /// ids. A finished, cancelled or trashed blocker is not one -- which is
-    /// why nothing ever has to be unblocked by hand.
+    /// why nothing ever has to be unblocked by hand -- and neither is a note,
+    /// which has no state and so could never be finished.
     ///
     /// `data` has to be the whole of storage, and every caller passes it.
     /// Trashed is checked here rather than filtered out beforehand because
@@ -1462,9 +1453,7 @@ impl Ekko {
             .iter()
             .filter_map(|uid| data.iter().find(|(_, i)| i.uid.as_deref() == Some(uid)))
             .filter(|(_, blocker)| {
-                !blocker.is_complete.unwrap_or(false)
-                    && !blocker.cancelled.unwrap_or(false)
-                    && blocker.trashed.is_none()
+                State::of(blocker).is_some_and(State::is_open) && blocker.trashed.is_none()
             })
             .map(|(id, _)| *id)
             .collect();
@@ -1495,7 +1484,7 @@ impl Ekko {
             .iter()
             .filter_map(|id| {
                 let item = data.get(id)?;
-                if !item.is_task || item.is_complete.unwrap_or(false) {
+                if State::of(item).is_none_or(|state| state == State::Done) {
                     return None;
                 }
                 let open = Self::unmet_blockers(data, item);
@@ -1535,18 +1524,15 @@ impl Ekko {
             let items: Vec<&Item> =
                 data.values().filter(|i| i.phase.as_deref() == Some(name.as_str())).collect();
 
-            let tasks: Vec<&&Item> = items.iter().filter(|i| i.is_task).collect();
-            let complete =
-                tasks.iter().filter(|i| i.is_complete.unwrap_or(false)).count() as u32;
-            let cancelled = tasks.iter().filter(|i| i.cancelled.unwrap_or(false)).count() as u32;
-            let current = tasks.iter().any(|i| i.in_progress.unwrap_or(false));
+            // Counted by `tally`, the one definition of a total: cancelled work
+            // is not work, here as in the percentage and the board title.
+            let (complete, total) = tally(items.iter().copied());
+            let current = items.iter().any(|i| State::of(i) == Some(State::Progress));
 
             steps.push(RoadmapStep {
                 name: name.clone(),
                 complete,
-                // Cancelled work is not work, the same way it is left out of
-                // the percentage.
-                total: tasks.len() as u32 - cancelled,
+                total,
                 notes: items.iter().filter(|i| !i.is_task).count() as u32,
                 current,
             });
@@ -1709,49 +1695,34 @@ fn canonical_state(term: &str) -> Option<&'static str> {
     }
 }
 
-/// Applies one canonical state. Task-only states are skipped on notes,
-/// matching how `--check` and `--begin` already ignore them; starring is
-/// the one that applies to both.
+/// Applies one canonical state. Task states go through `State::after` and
+/// `State::write`, so the result is always one of the five encodings; notes
+/// have no state and skip them, matching how `--check` and `--begin` ignore
+/// notes. Starring is the one that applies to both.
 fn apply_state(item: &mut Item, state: &str) {
     match state {
-        "done" if item.is_task => {
-            item.is_complete = Some(true);
-            item.in_progress = Some(false);
-            // Finishing something settles it: there is nothing left paused.
-            item.paused = None;
-            item.cancelled = None;
-        }
-        "undone" if item.is_task => item.is_complete = Some(false),
-        "progress" if item.is_task => {
-            item.in_progress = Some(true);
-            item.is_complete = Some(false);
-            item.paused = None;
-            item.cancelled = None;
-        }
-        "paused" if item.is_task => {
-            item.in_progress = Some(false);
-            item.paused = Some(true);
-            item.cancelled = None;
-        }
-        // Terminal, like done, and mutually exclusive with it. Reviving a
-        // cancelled task goes through `unstarted`.
-        "cancelled" if item.is_task => {
-            item.cancelled = Some(true);
-            item.is_complete = Some(false);
-            item.in_progress = Some(false);
-            item.paused = None;
-        }
-        // Back to never-started: clears both flags, which is what undoes a
-        // `--set progress` aimed at the wrong id.
-        "unstarted" if item.is_task => {
-            item.in_progress = Some(false);
-            item.paused = None;
-            item.cancelled = None;
-        }
         "starred" => item.is_starred = true,
         "unstarred" => item.is_starred = false,
-        _ => {}
+        other => {
+            if let (Some(current), Some(change)) = (State::of(item), change_for(other)) {
+                current.after(change).write(item);
+            }
+        }
     }
+}
+
+/// The state change a canonical `--set` word asks for. `unstarted` is the
+/// way back to never-started from anywhere, done and cancelled included.
+fn change_for(state: &str) -> Option<Change> {
+    Some(match state {
+        "done" => Change::Become(State::Done),
+        "undone" => Change::Undo,
+        "progress" => Change::Become(State::Progress),
+        "paused" => Change::Become(State::Paused),
+        "cancelled" => Change::Become(State::Cancelled),
+        "unstarted" => Change::Become(State::Pending),
+        _ => return None,
+    })
 }
 /// The attribute terms `--list` filters on. Kept beside
 /// `Ekko::filter_by_attributes`, which is the code that acts on them --
@@ -1778,6 +1749,7 @@ fn is_known_attribute(term: &str) -> bool {
             | "notes"
             | "cancelled"
             | "canceled"
+            | "paused"
             | "ready"
             | "blocked"
             | "due"
@@ -3138,5 +3110,130 @@ mod tests {
         assert!(rendered.contains("Checked task: 2 (blockers overridden: 1)"), "{rendered:?}");
 
         cleanup(&dir);
+    }
+
+    /// Ids a `--list <term>` returns, sorted and without the repeats an item
+    /// on several boards would add.
+    fn listed(ekko: &Ekko, term: &str) -> Vec<u32> {
+        let Outcome::List(groups) = ekko.list_by_attributes(&words(&[term])).unwrap() else {
+            panic!("expected a List outcome")
+        };
+        let mut ids: Vec<u32> =
+            groups.iter().flat_map(|(_, items)| items.iter().map(|item| item.id)).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// The case the rigor audit measured: cancelled, then --check. The flags
+    /// ended up both done and cancelled, so the board drew the task cancelled,
+    /// the stats counted it cancelled and --list done listed it as done. The
+    /// check is now a transition like any other, and every surface agrees.
+    #[test]
+    fn cancelled_then_checked_is_done_on_every_surface() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["dropped, then checked"])).unwrap();
+        ekko.set_state(&words(&["@1", "cancelled"]), false).unwrap();
+
+        ekko.check_tasks(&words(&["1"]), false).unwrap();
+
+        let item = &ekko.storage.get().unwrap()[&1];
+        assert_eq!(item.cancelled, None, "the cancellation survived the check");
+        assert!(matches!(crate::render::Level::of(item), crate::render::Level::Success));
+        let Outcome::Stats(stats) = ekko.display_stats().unwrap() else { panic!() };
+        assert_eq!((stats.complete, stats.cancelled), (1, 0));
+        assert_eq!(listed(&ekko, "done"), vec![1]);
+        assert!(listed(&ekko, "cancelled").is_empty());
+
+        cleanup(&dir);
+    }
+
+    /// All sixteen flag combinations written straight into storage, as old
+    /// data or a hand edit could leave them. The board's icon, the stats line
+    /// and every state filter must agree on each one -- including paused,
+    /// which --set accepted and --list used to reject.
+    #[test]
+    fn every_surface_agrees_on_every_flag_combination() {
+        let (ekko, dir) = fresh_ekko();
+        for _ in 0..16 {
+            ekko.create_task(&words(&["combination"])).unwrap();
+        }
+        let mut data = ekko.storage.get().unwrap();
+        for bits in 0u8..16 {
+            let item = data.get_mut(&(u32::from(bits) + 1)).unwrap();
+            item.is_complete = Some(bits & 1 != 0);
+            item.in_progress = Some(bits & 2 != 0);
+            item.paused = (bits & 4 != 0).then_some(true);
+            item.cancelled = (bits & 8 != 0).then_some(true);
+        }
+        ekko.storage.set(&data).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        let with = |wanted: State| -> Vec<u32> {
+            data.values().filter(|item| State::of(item) == Some(wanted)).map(|item| item.id).collect()
+        };
+
+        assert_eq!(listed(&ekko, "done"), with(State::Done));
+        assert_eq!(listed(&ekko, "progress"), with(State::Progress));
+        assert_eq!(listed(&ekko, "paused"), with(State::Paused));
+        assert_eq!(listed(&ekko, "cancelled"), with(State::Cancelled));
+        let mut open: Vec<u32> =
+            [State::Pending, State::Progress, State::Paused].into_iter().flat_map(&with).collect();
+        open.sort_unstable();
+        assert_eq!(listed(&ekko, "pending"), open);
+
+        let Outcome::Stats(stats) = ekko.display_stats().unwrap() else { panic!() };
+        let count = |state: State| with(state).len() as u32;
+        assert_eq!(
+            (stats.complete, stats.in_progress, stats.paused, stats.cancelled, stats.pending),
+            (count(State::Done), count(State::Progress), count(State::Paused), count(State::Cancelled), count(State::Pending))
+        );
+
+        for item in data.values() {
+            use crate::render::Level;
+            let level = Level::of(item);
+            let agrees = match State::of(item).expect("every item here is a task") {
+                State::Done => matches!(level, Level::Success),
+                State::Progress => matches!(level, Level::Wait),
+                State::Paused => matches!(level, Level::Paused),
+                State::Cancelled => matches!(level, Level::Cancelled),
+                State::Pending => matches!(level, Level::Pending),
+            };
+            assert!(agrees, "item {} is drawn as a different state than it has", item.id);
+        }
+
+        cleanup(&dir);
+    }
+
+    /// `--projects` counts what the project's own stats line counts: stashed
+    /// and trashed items are away, and a cancelled task is not in the total.
+    /// It used to count everything, and showed winwayland at [46/54] while
+    /// the project itself said 88%.
+    #[test]
+    fn the_project_listing_counts_the_way_the_project_does() {
+        let home = std::env::temp_dir().join(format!(
+            "ekko-core-listing-{}-{}",
+            process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let storage = home.join(".ekko").join("projects").join("p").join(".ekko").join("storage");
+        fs::create_dir_all(&storage).unwrap();
+
+        let mut done = Item::new_task(1, "done".into(), vec![], 1);
+        State::Done.write(&mut done);
+        let mut dropped = Item::new_task(2, "dropped".into(), vec![], 1);
+        State::Cancelled.write(&mut dropped);
+        let mut away = Item::new_task(3, "stashed".into(), vec![], 1);
+        away.stashed = Some(1);
+        let mut gone = Item::new_task(4, "trashed".into(), vec![], 1);
+        gone.trashed = Some(1);
+        let why = Item::new_note(5, "why".into(), vec![]);
+        let items: ItemMap = [done, dropped, away, gone, why].into_iter().map(|i| (i.id, i)).collect();
+        fs::write(storage.join("storage.json"), serde_json::to_string(&items).unwrap()).unwrap();
+
+        let listing = directory::list_projects(&home);
+        assert_eq!((listing[0].complete, listing[0].tasks, listing[0].notes), (1, 1, 1));
+
+        fs::remove_dir_all(&home).ok();
     }
 }

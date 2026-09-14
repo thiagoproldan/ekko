@@ -25,7 +25,7 @@ use std::io::{IsTerminal, Write};
 use chrono::{DateTime, Local};
 
 use crate::config::Config;
-use crate::item::Item;
+use crate::item::{tally, Item, State};
 
 const PRIORITY_NORMAL: u8 = 1;
 const PRIORITY_MEDIUM: u8 = 2;
@@ -248,27 +248,19 @@ pub enum Level {
 }
 
 impl Level {
-    /// Which appearance an item has, decided in one place.
+    /// Which appearance an item has: a straight mapping from its state.
     ///
-    /// The precedence matters and is easy to get subtly different on a
-    /// second reading: cancelled wins over complete because both are
-    /// terminal, and in-progress wins over paused because if stale data
-    /// ever claims both, "being worked on" is the more useful lie to
-    /// believe.
+    /// The precedence between flags used to be decided here, and separately
+    /// in the stats and in the filters -- three readings that could disagree
+    /// about one item. It now lives in `State::of` alone.
     pub fn of(item: &Item) -> Level {
-        if !item.is_task {
-            return Level::Note;
-        }
-        if item.cancelled.unwrap_or(false) {
-            Level::Cancelled
-        } else if item.is_complete.unwrap_or(false) {
-            Level::Success
-        } else if item.in_progress.unwrap_or(false) {
-            Level::Wait
-        } else if item.paused.unwrap_or(false) {
-            Level::Paused
-        } else {
-            Level::Pending
+        match State::of(item) {
+            None => Level::Note,
+            Some(State::Cancelled) => Level::Cancelled,
+            Some(State::Done) => Level::Success,
+            Some(State::Progress) => Level::Wait,
+            Some(State::Paused) => Level::Paused,
+            Some(State::Pending) => Level::Pending,
         }
     }
 
@@ -417,13 +409,15 @@ impl<'a> Renderer<'a> {
     }
 
     fn build_message(&self, item: &Item) -> String {
-        let is_complete = item.is_complete.unwrap_or(false);
+        let state = State::of(item);
+        let is_complete = state == Some(State::Done);
+        let cancelled = state == Some(State::Cancelled);
         let priority = item.priority.unwrap_or(0);
         let description = self.fold_note(item);
 
         let mut parts = Vec::new();
 
-        if item.cancelled.unwrap_or(false) {
+        if cancelled {
             // Struck through in the same grey the icon uses: the strike carries
             // "dropped", the grey carries "no longer live". Priority markers
             // are left off -- an abandoned task has no urgency left.
@@ -443,7 +437,7 @@ impl<'a> Renderer<'a> {
         // Cancelled excluded alongside complete: an abandoned task has no
         // urgency left, and a struck-through line still shouting "(!!)" reads
         // as a contradiction.
-        if !is_complete && !item.cancelled.unwrap_or(false) && priority > PRIORITY_NORMAL {
+        if !is_complete && !cancelled && priority > PRIORITY_NORMAL {
             parts.push(if priority == PRIORITY_MEDIUM {
                 self.painter.yellow("(!)")
             } else {
@@ -490,8 +484,8 @@ impl<'a> Renderer<'a> {
     fn get_due(&self, item: &Item) -> String {
         let Some(due) = item.due_date.as_deref() else { return String::new() };
 
-        // A finished task's deadline is history, not a warning.
-        if item.is_complete.unwrap_or(false) {
+        // A finished or cancelled task's deadline is history, not a warning.
+        if !State::of(item).is_some_and(State::is_open) {
             return self.painter.grey(due);
         }
 
@@ -507,20 +501,12 @@ impl<'a> Renderer<'a> {
         boards.iter().map(|b| self.painter.grey(b)).collect::<Vec<_>>().join(" ")
     }
 
+    /// `(tasks, complete, notes)` for a group. The task total comes from
+    /// `tally`, so a cancelled task is out of `[done/total]` here exactly as
+    /// it is out of the percentage below the board.
     fn item_stats(&self, items: &[Item]) -> (u32, u32, u32) {
-        let mut tasks = 0;
-        let mut complete = 0;
-        let mut notes = 0;
-        for item in items {
-            if item.is_task {
-                tasks += 1;
-                if item.is_complete.unwrap_or(false) {
-                    complete += 1;
-                }
-            } else {
-                notes += 1;
-            }
-        }
+        let (complete, tasks) = tally(items);
+        let notes = items.iter().filter(|item| !item.is_task).count() as u32;
         (tasks, complete, notes)
     }
 
@@ -894,7 +880,7 @@ impl<'a> Renderer<'a> {
             }
             self.display_title(board, items, &today);
             for item in items {
-                if item.is_task && item.is_complete.unwrap_or(false) && !self.config.display_complete_tasks {
+                if State::of(item) == Some(State::Done) && !self.config.display_complete_tasks {
                     continue;
                 }
                 self.display_item_by_board(item, now_millis);
@@ -910,7 +896,7 @@ impl<'a> Renderer<'a> {
             }
             self.display_title(date, items, &today);
             for item in items {
-                if item.is_task && item.is_complete.unwrap_or(false) && !self.config.display_complete_tasks {
+                if State::of(item) == Some(State::Done) && !self.config.display_complete_tasks {
                     continue;
                 }
                 self.display_item_by_date(item);
@@ -1785,6 +1771,26 @@ mod tests {
             depth(plain_line) + 2,
             "attached note not indented:\n{attached_line}\n{plain_line}"
         );
+    }
+
+    /// One definition of a total: a cancelled task is out of the board's
+    /// [done/total] exactly as it is out of the percentage. The two used to
+    /// sit one line apart, saying [1/2] and 100% about the same board.
+    #[test]
+    fn a_cancelled_task_is_out_of_the_board_total() {
+        let mut done = Item::new_task(1, "finished".to_string(), vec!["@x".to_string()], 1);
+        done.date = GOLDEN_DAY.to_string();
+        done.timestamp = golden_now().timestamp_millis();
+        State::Done.write(&mut done);
+        let mut dropped = Item::new_task(2, "dropped".to_string(), vec!["@x".to_string()], 1);
+        dropped.date = GOLDEN_DAY.to_string();
+        dropped.timestamp = golden_now().timestamp_millis();
+        State::Cancelled.write(&mut dropped);
+
+        let groups = vec![("@x".to_string(), vec![done, dropped])];
+        let output = render_with(Config::default(), |r| r.display_by_board(&groups));
+
+        assert!(strip_ansi(&output).contains("@x [1/1]"), "{output:?}");
     }
 
     /// August 2026 starts on a Saturday and has 31 days, so it needs six
