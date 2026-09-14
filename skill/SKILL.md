@@ -148,7 +148,9 @@ with `⇠ 1, 2` after the description.
 Blockers are stored as `uid` and **evaluated live**, never latched. Reopening
 a finished blocker re-blocks everything waiting on it, with no command to
 run. Cycles are refused at write time (`BLOCKING_CYCLE`), so the graph cannot
-be made inconsistent.
+be made inconsistent. A deleted blocker stops holding the moment it goes to
+the trash; a stashed one keeps holding, because stashing hides an item without
+finishing it.
 
 `ekko --list ready` is the filter this exists for: pending items with no
 unmet blockers — what can actually be started right now. Reach for it instead

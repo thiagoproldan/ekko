@@ -599,7 +599,10 @@ impl Ekko {
         Stats { percent, complete, in_progress, paused, cancelled, pending, notes, stashed, trashed }
     }
 
-    fn filter_by_attributes(&self, attributes: &[String], mut data: ItemMap) -> ItemMap {
+    /// `all` is the whole of storage, stashed and trashed included, and is
+    /// only consulted to resolve blockers -- see `unmet_blockers` for why a
+    /// blocker has to be judged against everything rather than the view.
+    fn filter_by_attributes(&self, attributes: &[String], mut data: ItemMap, all: &ItemMap) -> ItemMap {
         if data.is_empty() {
             return data;
         }
@@ -629,20 +632,21 @@ impl Ekko {
                 }
                 "todo" | "task" | "tasks" => data.retain(|_, item| item.is_task),
                 "note" | "notes" => data.retain(|_, item| !item.is_task),
-                // Needs the whole map, not just the retained subset: a
-                // blocker can sit outside whatever else is being filtered.
+                // Resolved against `all`, not the retained subset: a blocker
+                // can sit outside whatever else is being filtered, and outside
+                // the view altogether. Judging it against the view is how a
+                // stashed blocker stopped holding here while the board still
+                // drew it -- two surfaces answering one question differently.
                 "ready" => {
-                    let all = data.clone();
                     data.retain(|_, item| {
                         item.is_task
                             && !item.is_complete.unwrap_or(false)
                             && !item.cancelled.unwrap_or(false)
-                            && Self::unmet_blockers(&all, item).is_empty()
+                            && Self::unmet_blockers(all, item).is_empty()
                     });
                 }
                 "blocked" => {
-                    let all = data.clone();
-                    data.retain(|_, item| !Self::unmet_blockers(&all, item).is_empty());
+                    data.retain(|_, item| !Self::unmet_blockers(all, item).is_empty());
                 }
                 "cancelled" | "canceled" => {
                     data.retain(|_, item| item.cancelled.unwrap_or(false));
@@ -1395,8 +1399,16 @@ impl Ekko {
     }
 
     /// The blockers of `item` that are still outstanding, as current display
-    /// ids. A finished, cancelled or deleted blocker is not one -- which is
+    /// ids. A finished, cancelled or trashed blocker is not one -- which is
     /// why nothing ever has to be unblocked by hand.
+    ///
+    /// `data` has to be the whole of storage, and every caller passes it.
+    /// Trashed is checked here rather than filtered out beforehand because
+    /// `--delete` stopped removing items when the trash arrived: a deleted
+    /// blocker stayed in storage, still open, and went on blocking on the
+    /// board while `--list ready` -- reading the view, where it was gone --
+    /// called the same task ready. A stashed blocker, on the other hand,
+    /// still holds: stashing hides an item without finishing it.
     pub fn unmet_blockers(data: &ItemMap, item: &Item) -> Vec<u32> {
         let Some(uids) = item.blocked_by.as_ref() else { return Vec::new() };
 
@@ -1404,7 +1416,9 @@ impl Ekko {
             .iter()
             .filter_map(|uid| data.iter().find(|(_, i)| i.uid.as_deref() == Some(uid)))
             .filter(|(_, blocker)| {
-                !blocker.is_complete.unwrap_or(false) && !blocker.cancelled.unwrap_or(false)
+                !blocker.is_complete.unwrap_or(false)
+                    && !blocker.cancelled.unwrap_or(false)
+                    && blocker.trashed.is_none()
             })
             .map(|(id, _)| *id)
             .collect();
@@ -1494,7 +1508,8 @@ impl Ekko {
         let boards = remove_duplicates(boards);
         let attributes = remove_duplicates(attributes);
 
-        let filtered = self.filter_by_attributes(&attributes, data);
+        let all = self.storage.get()?;
+        let filtered = self.filter_by_attributes(&attributes, data, &all);
         Ok(Outcome::List(self.group_by_board(&filtered, &boards)))
     }
 }
@@ -2017,9 +2032,48 @@ mod tests {
 
         ekko.delete_items(&words(&["1"])).unwrap();
 
+        // By id, not `values().next()`. Written when deleting removed the
+        // item, that picked the waiter; once deleting started trashing, the
+        // blocker stayed in storage and came first -- so this went on
+        // passing by inspecting the blocker, which blocks nothing.
         let data = ekko.storage.get().unwrap();
-        let waiter = data.values().next().unwrap();
-        assert!(Ekko::unmet_blockers(&data, waiter).is_empty());
+        assert!(Ekko::unmet_blockers(&data, &data[&2]).is_empty());
+
+        // And every surface agrees: the marker, and the filters.
+        assert_eq!(ekko.blocker_map().unwrap().get(&2), None, "the board still draws the marker");
+        let listed = |term: &str| -> Vec<u32> {
+            let Outcome::List(groups) = ekko.list_by_attributes(&words(&[term])).unwrap() else {
+                panic!()
+            };
+            groups.iter().flat_map(|(_, items)| items.iter().map(|x| x.id)).collect()
+        };
+        assert_eq!(listed("ready"), vec![2]);
+        assert!(listed("blocked").is_empty());
+
+        cleanup(&dir);
+    }
+
+    /// Stashing hides an item without finishing it, so a pending blocker put
+    /// away still holds -- on the board and in the filters alike. The view
+    /// dropping it was how `--list ready` came to disagree with the marker.
+    #[test]
+    fn a_stashed_blocker_is_hidden_not_finished_so_it_still_holds() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["waiter"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        ekko.set_stashed(&words(&["1"]), true).unwrap();
+
+        assert_eq!(ekko.blocker_map().unwrap().get(&2), Some(&vec![1]));
+        let listed = |term: &str| -> Vec<u32> {
+            let Outcome::List(groups) = ekko.list_by_attributes(&words(&[term])).unwrap() else {
+                panic!()
+            };
+            groups.iter().flat_map(|(_, items)| items.iter().map(|x| x.id)).collect()
+        };
+        assert!(listed("ready").is_empty(), "a hidden blocker stopped holding");
+        assert_eq!(listed("blocked"), vec![2]);
 
         cleanup(&dir);
     }

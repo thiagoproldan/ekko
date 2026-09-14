@@ -95,9 +95,10 @@ pub struct Item {
     /// moment the original was deleted and the number reused. That is the
     /// exact hazard `uid` was added for.
     ///
-    /// A blocker that no longer exists does not block -- deleting it is a
-    /// way to unblock, and the alternative is an item stuck forever on
-    /// something nobody can finish.
+    /// A blocker that no longer exists, or sits in the trash, does not
+    /// block -- deleting it is a way to unblock, and the alternative is an
+    /// item stuck forever on something nobody can finish. A stashed one
+    /// still does: stashing hides an item, it does not finish it.
     #[serde(rename = "blockedBy", default, skip_serializing_if = "Option::is_none")]
     pub blocked_by: Option<Vec<String>>,
     /// When this was put away, in epoch millis.

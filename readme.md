@@ -479,7 +479,7 @@ $ ekko --blocked-by @3 1 2
 Four properties, each of them a consequence rather than a feature:
 
 - **Blockers are evaluated live, never latched.** Finishing a blocker unblocks whatever waited on it, with nothing to do by hand; the marker only ever names what is holding the item up *now*. Reopening a finished blocker blocks it again, which is what makes going back to an earlier link work at all.
-- **A blocker that is cancelled or deleted stops blocking.** Neither can ever be finished, so treating them as outstanding would strand the waiter forever.
+- **A blocker that is cancelled or deleted stops blocking.** Neither can ever be finished, so treating them as outstanding would strand the waiter forever. A *stashed* blocker still blocks: stashing hides an item, it does not finish it.
 - **Stored by `uid`, not by display id.** Ids are recycled, and a dependency stored as a number would quietly follow the number to a different item.
 - **Cycles are refused.** Two items waiting on each other is a pair nothing can make ready, and the board would state it as calmly as any other fact.
 
