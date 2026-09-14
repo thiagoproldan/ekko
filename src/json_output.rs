@@ -23,9 +23,10 @@ fn success_value(outcome: &Outcome) -> Value {
     let command = outcome.command_name();
     match outcome {
         Outcome::Task(item) | Outcome::Note(item) => json!({"ok": true, "command": command, "item": item}),
-        Outcome::Check { checked, unchecked, overridden } => with_overridden(
+        Outcome::Check { checked, unchecked, overridden, reopened } => with_overrides(
             json!({"ok": true, "command": command, "checked": checked, "unchecked": unchecked}),
             overridden,
+            reopened,
         ),
         Outcome::Begin { started, paused } => {
             json!({"ok": true, "command": command, "started": started, "paused": paused})
@@ -33,9 +34,10 @@ fn success_value(outcome: &Outcome) -> Value {
         Outcome::Star { starred, unstarred } => {
             json!({"ok": true, "command": command, "starred": starred, "unstarred": unstarred})
         }
-        Outcome::Set { ids, states, overridden } => with_overridden(
+        Outcome::Set { ids, states, overridden, reopened } => with_overrides(
             json!({"ok": true, "command": command, "ids": ids, "states": states}),
             overridden,
+            reopened,
         ),
         Outcome::Delete(items) => json!({"ok": true, "command": command, "items": items}),
         Outcome::Restore(items) => json!({"ok": true, "command": command, "items": items}),
@@ -77,8 +79,14 @@ fn success_value(outcome: &Outcome) -> Value {
         Outcome::Blocked { item, blockers } => {
             json!({"ok": true, "command": command, "item": item, "blockers": blockers})
         }
-        Outcome::Roadmap { steps, rootless } => {
-            json!({"ok": true, "command": command, "steps": steps, "rootless": rootless})
+        Outcome::Roadmap { steps, rootless, inversions } => {
+            let mut value = json!({"ok": true, "command": command, "steps": steps, "rootless": rootless});
+            if !inversions.is_empty() {
+                if let Value::Object(map) = &mut value {
+                    map.insert("inversions".to_string(), json!(inversions));
+                }
+            }
+            value
         }
         Outcome::Stats(stats) => json!({"ok": true, "command": command, "stats": stats}),
     }
@@ -91,7 +99,10 @@ fn error_value(error: &EkkoError) -> Value {
         EkkoError::InvalidCustomAppDir(path) => Some(("path", json!(path))),
         EkkoError::LockTimeout(path) => Some(("path", json!(path))),
         EkkoError::RenamedFlag { new, .. } => Some(("renamedTo", json!(new))),
-        EkkoError::Blocked(blocked) => Some(("blocked", blocked_value(blocked))),
+        EkkoError::Blocked(blocked) => Some(("blocked", pairs_value(blocked, "blockers"))),
+        EkkoError::CompletedDependents(found) => Some(("dependents", pairs_value(found, "dependents"))),
+        EkkoError::AlreadyDone(found) => Some(("blocked", pairs_value(found, "blockers"))),
+        EkkoError::PhaseOrder(inversion) => Some(("inversion", json!(inversion))),
         _ => None,
     };
     if let (Some((key, val)), Value::Object(map)) = (extra, &mut value) {
@@ -103,20 +114,23 @@ fn error_value(error: &EkkoError) -> Value {
 /// Adds `overridden` to a completion's reply, and only when `--force`
 /// actually overrode something -- so every reply that forced nothing stays
 /// exactly what it was before the key existed.
-fn with_overridden(mut value: Value, overridden: &[(u32, Vec<u32>)]) -> Value {
-    if !overridden.is_empty() {
-        if let Value::Object(map) = &mut value {
-            map.insert("overridden".to_string(), blocked_value(overridden));
+fn with_overrides(mut value: Value, overridden: &[(u32, Vec<u32>)], reopened: &[(u32, Vec<u32>)]) -> Value {
+    if let Value::Object(map) = &mut value {
+        if !overridden.is_empty() {
+            map.insert("overridden".to_string(), pairs_value(overridden, "blockers"));
+        }
+        if !reopened.is_empty() {
+            map.insert("reopenedOver".to_string(), pairs_value(reopened, "dependents"));
         }
     }
     value
 }
 
-/// `[(id, blockers), ...]` -> `[{"id": 2, "blockers": [1]}, ...]`: named
-/// fields rather than bare pairs, so a caller never has to know which half
-/// of a tuple is which.
-fn blocked_value(blocked: &[(u32, Vec<u32>)]) -> Value {
-    Value::Array(blocked.iter().map(|(id, blockers)| json!({"id": id, "blockers": blockers})).collect())
+/// `[(id, others), ...]` -> `[{"id": 2, "<key>": [1]}, ...]`: named fields
+/// rather than bare pairs, so a caller never has to know which half of a
+/// tuple is which.
+fn pairs_value(pairs: &[(u32, Vec<u32>)], key: &str) -> Value {
+    Value::Array(pairs.iter().map(|(id, others)| json!({"id": id, key: others})).collect())
 }
 
 /// `[(name, items), ...]` -> `{"name": [items], ...}`, preserving the

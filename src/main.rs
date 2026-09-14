@@ -37,7 +37,7 @@ const HELP: &str = r#"
       --destroy           Move the project named by --project to the trash
       --edit, -e          Edit item description
       --find, -f          Search for items
-      --force             Complete a task even while it is blocked
+      --force             Override the blocked-by rule: complete or reopen anyway
       --help, -h          Display help message
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes
@@ -156,7 +156,8 @@ fn main() -> ExitCode {
     if let Some(err) = renamed_flag(&cli) {
         return finish_with_error(&err, json_mode, &home_dir);
     }
-    // `--force` overrides one rule in one place: completing a blocked task.
+    // `--force` overrides one rule, from either side: completing a blocked
+    // task, or reopening one that completed work depends on.
     // Anywhere else it would be accepted and do nothing, and a flag that
     // silently does nothing is one somebody eventually believes did something.
     if cli.force && !(cli.check || cli.set) {

@@ -201,6 +201,17 @@ pub struct RoadmapStep {
     pub current: bool,
 }
 
+/// A dependency that runs against the declared phase order: `blocked` sits
+/// in an earlier phase than the `blocker` it waits on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Inversion {
+    pub blocked: u32,
+    pub blocked_phase: String,
+    pub blocker: u32,
+    pub blocker_phase: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
@@ -699,6 +710,23 @@ impl<'a> Renderer<'a> {
     }
 
 
+    /// The dependencies that run against the declared phase order, named so a
+    /// reordering that left some behind does not pass unnoticed. Printed only
+    /// when there are any, like every other addition to this view.
+    pub fn display_inversions(&mut self, inversions: &[Inversion]) {
+        if inversions.is_empty() {
+            return;
+        }
+        let list = inversions
+            .iter()
+            .map(|i| format!("{} ({}) blocked by {} ({})", i.blocked, i.blocked_phase, i.blocker, i.blocker_phase))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let noun = if inversions.len() == 1 { "dependency runs" } else { "dependencies run" };
+        let line = self.painter.yellow(&format!("{} {noun} against the phase order: {list}", inversions.len()));
+        self.emit(" ", None, &line, "");
+    }
+
     pub fn success_stashed(&mut self, ids: &[u32], away: bool) {
         let verb = if away { "Stashed" } else { "Unstashed" };
         self.mark(verb, "items", "item", ids);
@@ -1070,16 +1098,16 @@ impl<'a> Renderer<'a> {
         self.mark_with("Checked", "tasks", "task", ids, &note);
     }
 
-    pub fn mark_incomplete(&mut self, ids: &[u32]) {
-        self.mark("Unchecked", "tasks", "task", ids);
+    pub fn mark_incomplete(&mut self, ids: &[u32], reopened: &[(u32, Vec<u32>)]) {
+        self.mark_reopening("Unchecked", ids, reopened);
     }
 
-    pub fn mark_started(&mut self, ids: &[u32]) {
-        self.mark("Started", "tasks", "task", ids);
+    pub fn mark_started(&mut self, ids: &[u32], reopened: &[(u32, Vec<u32>)]) {
+        self.mark_reopening("Started", ids, reopened);
     }
 
-    pub fn mark_paused(&mut self, ids: &[u32]) {
-        self.mark("Paused", "tasks", "task", ids);
+    pub fn mark_paused(&mut self, ids: &[u32], reopened: &[(u32, Vec<u32>)]) {
+        self.mark_reopening("Paused", ids, reopened);
     }
 
     pub fn mark_cancelled(&mut self, ids: &[u32]) {
@@ -1089,8 +1117,8 @@ impl<'a> Renderer<'a> {
     /// `unstarted` clears progress, pause and cancellation at once, so no
     /// single past participle names it. "Reset" describes what the caller
     /// asked for, which is most often undoing a `--set` aimed at a wrong id.
-    pub fn mark_reset(&mut self, ids: &[u32]) {
-        self.mark("Reset", "tasks", "task", ids);
+    pub fn mark_reset(&mut self, ids: &[u32], reopened: &[(u32, Vec<u32>)]) {
+        self.mark_reopening("Reset", ids, reopened);
     }
 
     pub fn mark_starred(&mut self, ids: &[u32]) {
@@ -1191,6 +1219,27 @@ impl<'a> Renderer<'a> {
             suffix.push_str(extra);
         }
         self.success("\n", &message, &suffix);
+    }
+
+    /// A mark for tasks that may have left done or cancelled, saying which
+    /// completed dependents `--force` reopened them over -- written the way
+    /// the board writes a dependency, `2 ⇠ 1` for 2 blocked by 1. With
+    /// nothing overridden it is the plain mark, byte for byte.
+    fn mark_reopening(&mut self, verb: &str, ids: &[u32], reopened: &[(u32, Vec<u32>)]) {
+        if reopened.is_empty() {
+            self.mark(verb, "tasks", "task", ids);
+            return;
+        }
+        let detail = match reopened {
+            [(_, dependents)] if ids.len() == 1 => join_ids(dependents),
+            _ => reopened
+                .iter()
+                .map(|(id, dependents)| format!("{} \u{21e0} {id}", join_ids(dependents)))
+                .collect::<Vec<_>>()
+                .join("; "),
+        };
+        let note = self.painter.yellow(&format!("(completed dependents overridden: {detail})"));
+        self.mark_with(verb, "tasks", "task", ids, &note);
     }
 
     fn success(&mut self, prefix: &str, message: &str, suffix: &str) {

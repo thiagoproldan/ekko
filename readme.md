@@ -110,7 +110,7 @@ $ ekko --help
       --destroy           Move the project named by --project to the trash
       --edit, -e          Edit item description
       --find, -f          Search for items
-      --force             Complete a task even while it is blocked
+      --force             Override the blocked-by rule: complete or reopen anyway
       --help, -h          Display help message
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes
@@ -515,6 +515,12 @@ $ ekko --check 3 --force
 
 The dependency is left in place, so the task shows `✔` beside `⇠ 1, 2` for as long as those stay open: the override leaves a trace instead of erasing the reason it was needed. `--force` has no short form, since `-f` is `--find` and overriding a rule should take typing the word, and on any command other than `--check` and `--set` it is an error (`FORCE_WITHOUT_COMPLETING`) rather than a flag quietly accepted and ignored. `--ui` never forces: a picker is exactly where a key gets pressed without deliberation.
 
+**The same rule holds from the other side.** A task that completed work is blocked by cannot be reopened -- not by `--check`, `--begin`, or `--set undone`, `progress`, `paused` or `unstarted` -- because, open again, it would be holding up work that is already done. Reviving a cancelled blocker counts as reopening it; cancelling a done one does not, since it stays closed. The refusal names the completed dependents (`COMPLETED_DEPENDENTS`), and `--force` with `--check` or `--set` reopens anyway and says what it overrode. A blocker whose dependents are still open reopens freely: live evaluation simply blocks them again.
+
+**And from the third side:** a task already done cannot be given a blocker that is still open. `--blocked-by` refuses it as `ALREADY_DONE`, and nothing forces that one.
+
+All three are one rule -- completed work never waits on open work -- checked on the board a command would leave, not task by task. So a blocker and the task it blocks can be completed in one command, or reopened in one, and a pair an earlier `--force` left behind does not make later commands fail. Bringing items back with `--restore` or `--untrash` returns them as they were, and is not checked.
+
 There is no picture yet, on purpose. The data is what a drawing would need anyway, and whether a drawing earns its keep is easier to answer after living with `--list ready` for a while than before.
 
 ### Phases and the roadmap
@@ -547,6 +553,7 @@ Five decisions worth knowing:
 - **Order cannot be derived.** "Setup comes before build" is knowledge, not a timestamp. It is the only thing in Ekko you have to state outright.
 - **No phase means the project root.** An item created without `--phase` is never filed into a guessed current phase; it sits outside the roadmap, and the roadmap says how many are out there.
 - **`--roadmap` is invoked, never automatic.** The board view is unchanged whether phases exist or not.
+- **Dependencies follow the phase order.** A task cannot be blocked by one in a later phase: `--blocked-by` refuses it as `PHASE_ORDER`, because a phase cannot wait on one that comes after it. Reordering the phases is never refused, and when a new order leaves dependencies running backwards, `--roadmap` names each of them.
 
 Cancelled tasks leave a phase's total, the same way they leave the percentage and the board's `[done/total]`, so a phase that drops work can still read as finished.
 

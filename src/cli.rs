@@ -58,7 +58,8 @@ pub struct Cli {
 
     #[arg(long, short = 'c')]
     pub check: bool,
-    /// Complete a task that is still blocked by open items. Only means
+    /// Override the blocked-by rule from either side: complete a task that is
+    /// still blocked, or reopen one that completed work depends on. Only means
     /// something beside `--check` or `--set`, and deliberately has no short
     /// form: `-f` is `--find`, and overriding a rule should take typing the
     /// word.

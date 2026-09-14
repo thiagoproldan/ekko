@@ -13,12 +13,12 @@
 //! into either pretty or `--json` output -- doesn't need this module to
 //! know which of those two output modes is active at all.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config;
 use crate::directory::{self, DirectoryError};
 use crate::item::{tally, Change, Item, State};
-use crate::render::{CalendarMonth, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
+use crate::render::{CalendarMonth, Inversion, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
 use crate::storage::{ItemMap, Storage, StorageError};
 
 #[derive(Debug)]
@@ -38,6 +38,13 @@ pub enum EkkoError {
     /// blocked by is still open, each with those blockers.
     Blocked(Vec<(u32, Vec<u32>)>),
     ForceWithoutCompleting,
+    /// Tasks a command would have reopened while completed work is blocked
+    /// by them, each with those completed dependents.
+    CompletedDependents(Vec<(u32, Vec<u32>)>),
+    /// Completed tasks a --blocked-by would have left waiting on open work,
+    /// each with those open blockers.
+    AlreadyDone(Vec<(u32, Vec<u32>)>),
+    PhaseOrder(Inversion),
     AttachNotANote(u32),
     AttachTargetNotATask(u32),
     AttachTargetHasNoUid(u32),
@@ -70,6 +77,9 @@ impl EkkoError {
             EkkoError::BlockingCycle(_, _) => "BLOCKING_CYCLE",
             EkkoError::Blocked(_) => "BLOCKED",
             EkkoError::ForceWithoutCompleting => "FORCE_WITHOUT_COMPLETING",
+            EkkoError::CompletedDependents(_) => "COMPLETED_DEPENDENTS",
+            EkkoError::AlreadyDone(_) => "ALREADY_DONE",
+            EkkoError::PhaseOrder(_) => "PHASE_ORDER",
             EkkoError::AttachNotANote(_) => "ATTACH_NOT_A_NOTE",
             EkkoError::AttachTargetNotATask(_) => "ATTACH_TARGET_NOT_A_TASK",
             EkkoError::AttachTargetHasNoUid(_) => "ATTACH_TARGET_HAS_NO_UID",
@@ -105,6 +115,9 @@ impl EkkoError {
             EkkoError::BlockingCycle(_, _)
             | EkkoError::Blocked(_)
             | EkkoError::ForceWithoutCompleting
+            | EkkoError::CompletedDependents(_)
+            | EkkoError::AlreadyDone(_)
+            | EkkoError::PhaseOrder(_)
             | EkkoError::AttachNotANote(_)
             | EkkoError::AttachTargetNotATask(_)
             | EkkoError::AttachTargetHasNoUid(_)
@@ -160,7 +173,49 @@ impl std::fmt::Display for EkkoError {
             },
             EkkoError::ForceWithoutCompleting => write!(
                 f,
-                "--force only applies to --check and --set, where it completes a task that is still blocked"
+                "--force only applies to --check and --set, where it completes a task that is still blocked or reopens one that completed work depends on"
+            ),
+            EkkoError::CompletedDependents(found) => match found.as_slice() {
+                [(id, dependents)] => write!(
+                    f,
+                    "Cannot reopen task {id}: completed {} {} blocked by it. Reopen {} first, clear the dependency with --blocked-by, or use --force with --check or --set",
+                    if dependents.len() == 1 { format!("task {}", join_ids(dependents)) } else { format!("tasks {}", join_ids(dependents)) },
+                    if dependents.len() == 1 { "is" } else { "are" },
+                    if dependents.len() == 1 { "it" } else { "them" },
+                ),
+                _ => write!(
+                    f,
+                    "Cannot reopen tasks {}: {}. Reopen those first, clear the dependencies with --blocked-by, or use --force with --check or --set",
+                    join_ids(&found.iter().map(|(id, _)| *id).collect::<Vec<_>>()),
+                    found
+                        .iter()
+                        .map(|(id, dependents)| format!("completed {} blocked by {id}", join_ids(dependents)))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
+            },
+            EkkoError::AlreadyDone(found) => match found.as_slice() {
+                [(id, blockers)] => write!(
+                    f,
+                    "Task {id} is already done, so it cannot be blocked by {} (open): completed work cannot wait on open work. Reopen {id} first, or finish or cancel {}",
+                    join_ids(blockers),
+                    if blockers.len() == 1 { "it" } else { "them" },
+                ),
+                _ => write!(
+                    f,
+                    "Tasks {} are already done, so they cannot be blocked by open work: {}. Reopen them first, or finish or cancel the blockers",
+                    join_ids(&found.iter().map(|(id, _)| *id).collect::<Vec<_>>()),
+                    found
+                        .iter()
+                        .map(|(id, blockers)| format!("{id} by {}", join_ids(blockers)))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
+            },
+            EkkoError::PhaseOrder(inversion) => write!(
+                f,
+                "Task {} is in phase {} and cannot be blocked by {} in {}, which comes after it: a phase cannot wait on a later one. Reorder the phases with --phases if the order is what is wrong",
+                inversion.blocked, inversion.blocked_phase, inversion.blocker, inversion.blocker_phase
             ),
             EkkoError::AttachNotANote(id) => write!(
                 f,
@@ -247,12 +302,25 @@ pub enum Outcome {
     /// `overridden` is what `--force` pushed past: each task completed while
     /// still blocked, with the blockers that were open. Empty whenever
     /// nothing needed forcing, which is nearly always.
-    Check { checked: Vec<u32>, unchecked: Vec<u32>, overridden: Vec<(u32, Vec<u32>)> },
+    ///
+    /// `reopened` is the other half: each task reopened while completed work
+    /// was blocked by it, with those completed dependents.
+    Check {
+        checked: Vec<u32>,
+        unchecked: Vec<u32>,
+        overridden: Vec<(u32, Vec<u32>)>,
+        reopened: Vec<(u32, Vec<u32>)>,
+    },
     Begin { started: Vec<u32>, paused: Vec<u32> },
     Star { starred: Vec<u32>, unstarred: Vec<u32> },
     /// Idempotent form of Check/Begin/Star: the states asked for, not
     /// the flips performed.
-    Set { ids: Vec<u32>, states: Vec<String>, overridden: Vec<(u32, Vec<u32>)> },
+    Set {
+        ids: Vec<u32>,
+        states: Vec<String>,
+        overridden: Vec<(u32, Vec<u32>)>,
+        reopened: Vec<(u32, Vec<u32>)>,
+    },
     Delete(Vec<DeleteResult>),
     Restore(Vec<RestoreResult>),
     Edit(Item),
@@ -274,7 +342,7 @@ pub enum Outcome {
     Trashed { ids: Vec<u32>, away: bool },
     Stash(Vec<(String, Vec<Item>)>),
     Trash(Vec<Item>),
-    Roadmap { steps: Vec<RoadmapStep>, rootless: u32 },
+    Roadmap { steps: Vec<RoadmapStep>, rootless: u32, inversions: Vec<Inversion> },
     Stats(Stats),
 }
 
@@ -320,11 +388,11 @@ impl Outcome {
     pub fn render(&self, out: &mut Renderer) {
         match self {
             Outcome::Task(item) | Outcome::Note(item) => out.success_create(item),
-            Outcome::Check { checked, unchecked, overridden } => {
+            Outcome::Check { checked, unchecked, overridden, reopened } => {
                 out.mark_complete_overriding(checked, overridden);
-                out.mark_incomplete(unchecked);
+                out.mark_incomplete(unchecked, reopened);
             }
-            Outcome::Set { ids, states, overridden } => {
+            Outcome::Set { ids, states, overridden, reopened } => {
                 // Reuses the toggles' own messages where one exists, rather
                 // than inventing a parallel vocabulary: the same transition
                 // should read the same way however it was requested. The two
@@ -338,11 +406,11 @@ impl Outcome {
                 for state in states {
                     match state.as_str() {
                         "done" => out.mark_complete_overriding(ids, overridden),
-                        "undone" => out.mark_incomplete(ids),
-                        "progress" => out.mark_started(ids),
-                        "paused" => out.mark_paused(ids),
+                        "undone" => out.mark_incomplete(ids, reopened),
+                        "progress" => out.mark_started(ids, reopened),
+                        "paused" => out.mark_paused(ids, reopened),
                         "cancelled" => out.mark_cancelled(ids),
-                        "unstarted" => out.mark_reset(ids),
+                        "unstarted" => out.mark_reset(ids, reopened),
                         "starred" => out.mark_starred(ids),
                         "unstarred" => out.mark_unstarred(ids),
                         _ => {}
@@ -350,8 +418,9 @@ impl Outcome {
                 }
             }
             Outcome::Begin { started, paused } => {
-                out.mark_started(started);
-                out.mark_paused(paused);
+                // --begin never forces, so it never reopens over anything.
+                out.mark_started(started, &[]);
+                out.mark_paused(paused, &[]);
             }
             Outcome::Star { starred, unstarred } => {
                 out.mark_starred(starred);
@@ -383,7 +452,10 @@ impl Outcome {
             Outcome::Trashed { ids, away } => out.success_trashed(ids, *away),
             Outcome::Stash(groups) => out.display_stash(groups),
             Outcome::Trash(items) => out.display_trash(items),
-            Outcome::Roadmap { steps, rootless } => out.display_roadmap(steps, *rootless),
+            Outcome::Roadmap { steps, rootless, inversions } => {
+                out.display_roadmap(steps, *rootless);
+                out.display_inversions(inversions);
+            }
             Outcome::Stats(stats) => out.display_stats(stats),
         }
     }
@@ -668,13 +740,15 @@ impl Ekko {
                 // stashed blocker stopped holding here while the board still
                 // drew it -- two surfaces answering one question differently.
                 "ready" => {
+                    let index = uid_index(all);
                     data.retain(|_, item| {
                         State::of(item).is_some_and(State::is_open)
-                            && Self::unmet_blockers(all, item).is_empty()
+                            && Self::unmet_blockers_indexed(&index, all, item).is_empty()
                     });
                 }
                 "blocked" => {
-                    data.retain(|_, item| !Self::unmet_blockers(all, item).is_empty());
+                    let index = uid_index(all);
+                    data.retain(|_, item| !Self::unmet_blockers_indexed(&index, all, item).is_empty());
                 }
                 "cancelled" | "canceled" => {
                     data.retain(|_, item| State::of(item) == Some(State::Cancelled));
@@ -821,13 +895,14 @@ impl Ekko {
         Ok(Outcome::Note(item))
     }
 
-    /// Toggles completion. Completing a task that is still blocked is
-    /// refused unless `force` -- see `refuse_blocked_completion`.
+    /// Toggles completion. A toggle that would complete a task still
+    /// blocked, or reopen one completed work depends on, is refused unless
+    /// `force` -- see `refuse_broken_dependencies`.
     pub fn check_tasks(&self, ids: &[String], force: bool) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let mut data = self.storage.get()?;
         let ids = self.validate_ids(ids, &data)?;
-        let overridden = Self::refuse_blocked_completion(&data, &ids, force)?;
+        let before = data.clone();
         let (mut checked, mut unchecked) = (Vec::new(), Vec::new());
         for id in ids {
             if let Some(item) = data.get_mut(&id) {
@@ -838,14 +913,16 @@ impl Ekko {
                 }
             }
         }
+        let (overridden, reopened) = Self::refuse_broken_dependencies(&before, &data, force)?;
         self.save_touching(&mut data)?;
-        Ok(Outcome::Check { checked, unchecked, overridden })
+        Ok(Outcome::Check { checked, unchecked, overridden, reopened })
     }
 
     pub fn begin_tasks(&self, ids: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let mut data = self.storage.get()?;
         let ids = self.validate_ids(ids, &data)?;
+        let before = data.clone();
         let (mut started, mut paused) = (Vec::new(), Vec::new());
         for id in ids {
             if let Some(item) = data.get_mut(&id) {
@@ -856,6 +933,9 @@ impl Ekko {
                 }
             }
         }
+        // Starting a done or cancelled task reopens it. No force here:
+        // `--force` belongs to --check and --set, and the refusal says so.
+        Self::refuse_broken_dependencies(&before, &data, false)?;
         self.save_touching(&mut data)?;
         Ok(Outcome::Begin { started, paused })
     }
@@ -1325,12 +1405,7 @@ impl Ekko {
         }
         let states = remove_duplicates(states);
 
-        let overridden = if states.iter().any(|state| state == "done") {
-            Self::refuse_blocked_completion(&data, &ids, force)?
-        } else {
-            Vec::new()
-        };
-
+        let before = data.clone();
         for id in &ids {
             if let Some(item) = data.get_mut(id) {
                 for state in &states {
@@ -1338,9 +1413,10 @@ impl Ekko {
                 }
             }
         }
+        let (overridden, reopened) = Self::refuse_broken_dependencies(&before, &data, force)?;
 
         self.save_touching(&mut data)?;
-        Ok(Outcome::Set { ids, states, overridden })
+        Ok(Outcome::Set { ids, states, overridden, reopened })
     }
 
     /// The board, restricted to items changed at or after `since` (epoch
@@ -1364,9 +1440,10 @@ impl Ekko {
     /// Unmet blockers for every item that has any, keyed by display id.
     pub fn blocker_map(&self) -> Result<std::collections::HashMap<u32, Vec<u32>>, EkkoError> {
         let data = self.storage.get()?;
+        let index = uid_index(&data);
         let mut map = std::collections::HashMap::new();
         for (id, item) in &data {
-            let unmet = Self::unmet_blockers(&data, item);
+            let unmet = Self::unmet_blockers_indexed(&index, &data, item);
             if !unmet.is_empty() {
                 map.insert(*id, unmet);
             }
@@ -1407,31 +1484,61 @@ impl Ekko {
             }
         }
 
+        // Refused where the dependency is made rather than discovered later:
+        // a phase cannot wait on one that comes after it. Reordering phases
+        // afterwards is not refused -- the roadmap names what it leaves behind.
+        let phases = self.storage.get_phases()?;
+        let order = phase_order(&phases);
+        for blocker in &blocker_ids {
+            if let Some(inversion) = phase_inversion(&order, &data[&id], &data[blocker]) {
+                return Err(EkkoError::PhaseOrder(inversion));
+            }
+        }
+
         let uids: Vec<String> =
             blocker_ids.iter().filter_map(|b| data.get(b)?.uid.clone()).collect();
 
+        let before = data.clone();
         let item = data.get_mut(&id).expect("id just validated against data");
         item.blocked_by = if uids.is_empty() { None } else { Some(uids) };
         let updated = item.clone();
+        // Completed work cannot be declared to wait on open work either.
+        Self::refuse_broken_dependencies(&before, &data, false)?;
 
         self.save_touching(&mut data)?;
         Ok(Outcome::Blocked { item: updated, blockers: blocker_ids })
     }
 
     /// Whether `from` is already blocked, directly or through others, by `target`.
+    ///
+    /// A depth-first walk that visits each item once. It used to recurse along
+    /// every path with no record of where it had been, so a chain of 26
+    /// diamonds -- 80 tasks -- took 12.5 s to accept one dependency, and the
+    /// time doubled with each diamond. Uids resolve through one index built up
+    /// front instead of a scan of the whole board at every step.
     fn reaches(&self, data: &ItemMap, from: u32, target: u32) -> bool {
-        let Some(item) = data.get(&from) else { return false };
-        let Some(blockers) = item.blocked_by.as_ref() else { return false };
-
-        for uid in blockers {
-            let Some(id) = find_by_uid(data, uid) else {
-                continue;
-            };
-            if id == target || self.reaches(data, id, target) {
+        let index = uid_index(data);
+        let mut seen = HashSet::new();
+        let mut stack = vec![from];
+        while let Some(id) = stack.pop() {
+            if id == target {
                 return true;
+            }
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(blockers) = data.get(&id).and_then(|item| item.blocked_by.as_ref()) {
+                stack.extend(blockers.iter().filter_map(|uid| index.get(uid.as_str()).copied()));
             }
         }
         false
+    }
+
+    /// `unmet_blockers_indexed` with the index built on the spot, for tests
+    /// asking about a single item.
+    #[cfg(test)]
+    pub fn unmet_blockers(data: &ItemMap, item: &Item) -> Vec<u32> {
+        Self::unmet_blockers_indexed(&uid_index(data), data, item)
     }
 
     /// The blockers of `item` that are still outstanding, as current display
@@ -1446,57 +1553,85 @@ impl Ekko {
     /// board while `--list ready` -- reading the view, where it was gone --
     /// called the same task ready. A stashed blocker, on the other hand,
     /// still holds: stashing hides an item without finishing it.
-    pub fn unmet_blockers(data: &ItemMap, item: &Item) -> Vec<u32> {
+    ///
+    /// `index` is `uid_index(data)`, built once by the caller: every caller
+    /// asks about many items, and a scan of the board per blocker made each
+    /// of them quadratic.
+    fn unmet_blockers_indexed(index: &HashMap<&str, u32>, data: &ItemMap, item: &Item) -> Vec<u32> {
         let Some(uids) = item.blocked_by.as_ref() else { return Vec::new() };
 
         let mut ids: Vec<u32> = uids
             .iter()
-            .filter_map(|uid| data.iter().find(|(_, i)| i.uid.as_deref() == Some(uid)))
-            .filter(|(_, blocker)| {
-                State::of(blocker).is_some_and(State::is_open) && blocker.trashed.is_none()
-            })
-            .map(|(id, _)| *id)
+            .filter_map(|uid| index.get(uid.as_str()).copied())
+            .filter(|id| data.get(id).is_some_and(holds))
             .collect();
         ids.sort_unstable();
+        ids.dedup();
         ids
     }
 
-    /// Stops a command from completing a task that something it is blocked
-    /// by still holds open -- or, with `force`, lets it and returns which
-    /// blockers it pushed past, so the reply can say so.
+    /// Refuses a command that would break the rule a dependency states --
+    /// completed work never waits on open work -- or, with `force`, lets it
+    /// and returns what it pushed past, so the reply can say so.
     ///
-    /// Only tasks that would actually become complete are checked. One
-    /// already done is left alone, which keeps `--set @3 done` safe to
-    /// retry: a retry after a forced completion must not start failing
-    /// because the blocker is still open. Cancelling, starting and reopening
-    /// are never checked either -- none of them claims the work is finished,
-    /// which is the one thing a blocker says it cannot be yet.
+    /// One rule, checked in one place, whichever command runs. `after` is the
+    /// board as the command would leave it, and only a pair it breaks that
+    /// `before` did not already break counts. Three things follow:
     ///
-    /// All or nothing, like an invalid id: one blocked task stops the whole
-    /// command before anything is written, rather than leaving the caller
-    /// to work out which half landed.
-    fn refuse_blocked_completion(
-        data: &ItemMap,
-        ids: &[u32],
+    /// - A blocker and what it blocks can be completed together, or reopened
+    ///   together, in one command: the board they leave keeps the rule.
+    /// - A pair an earlier `--force` broke does not make later commands fail,
+    ///   so `--set @3 done` stays safe to retry after a forced completion.
+    /// - Starting, pausing and cancelling an open task never break it. Only
+    ///   completing, reopening -- reviving a cancelled task included -- and
+    ///   declaring a dependency can.
+    ///
+    /// Each broken pair is reported from the side the command moved: a task
+    /// it completed (`BLOCKED`), a blocker it reopened
+    /// (`COMPLETED_DEPENDENTS`), or, when neither moved, the dependency it
+    /// declared (`ALREADY_DONE`, which only `--blocked-by` reaches, and which
+    /// nothing forces). All or nothing, like an invalid id: nothing is
+    /// written, rather than leaving the caller to work out which half landed.
+    ///
+    /// Recovering items -- `--restore`, `--untrash` -- brings them back as
+    /// they were, and is not checked: refusing to give back what was removed
+    /// would be the worse surprise.
+    fn refuse_broken_dependencies(
+        before: &ItemMap,
+        after: &ItemMap,
         force: bool,
-    ) -> Result<Vec<(u32, Vec<u32>)>, EkkoError> {
-        let blocked: Vec<(u32, Vec<u32>)> = ids
-            .iter()
-            .filter_map(|id| {
-                let item = data.get(id)?;
-                if State::of(item).is_none_or(|state| state == State::Done) {
-                    return None;
-                }
-                let open = Self::unmet_blockers(data, item);
-                (!open.is_empty()).then_some((*id, open))
-            })
-            .collect();
+    ) -> Result<(Linked, Linked), EkkoError> {
+        let mut completed_over: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        let mut reopened_under: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        let mut declared: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
 
-        if blocked.is_empty() || force {
-            Ok(blocked)
-        } else {
-            Err(EkkoError::Blocked(blocked))
+        let already = broken_dependencies(before);
+        for (task, blocker) in broken_dependencies(after) {
+            if already.contains(&(task, blocker)) {
+                continue;
+            }
+            if !before.get(&task).is_some_and(completed) {
+                completed_over.entry(task).or_default().push(blocker);
+            } else if !before.get(&blocker).is_some_and(holds) {
+                reopened_under.entry(blocker).or_default().push(task);
+            } else {
+                declared.entry(task).or_default().push(blocker);
+            }
         }
+
+        let completed_over: Linked = completed_over.into_iter().collect();
+        let reopened_under: Linked = reopened_under.into_iter().collect();
+        let declared: Linked = declared.into_iter().collect();
+        if !declared.is_empty() {
+            return Err(EkkoError::AlreadyDone(declared));
+        }
+        if !force && !completed_over.is_empty() {
+            return Err(EkkoError::Blocked(completed_over));
+        }
+        if !force && !reopened_under.is_empty() {
+            return Err(EkkoError::CompletedDependents(reopened_under));
+        }
+        Ok((completed_over, reopened_under))
     }
 
     /// Replaces the project's phase sequence.
@@ -1542,7 +1677,22 @@ impl Ekko {
         // than hidden: the root is a deliberate exception, not a hole.
         let rootless = data.values().filter(|i| i.phase.is_none()).count() as u32;
 
-        Ok(Outcome::Roadmap { steps, rootless })
+        // Dependencies that run against the phase order -- possible only when
+        // phases were reordered underneath them, since --blocked-by refuses
+        // making one. Named rather than hidden.
+        let order = phase_order(&phases);
+        let index = uid_index(&data);
+        let inversions: Vec<Inversion> = data
+            .values()
+            .flat_map(|item| {
+                item.blocked_by.iter().flatten().filter_map(|uid| {
+                    let blocker = data.get(index.get(uid.as_str())?)?;
+                    phase_inversion(&order, item, blocker)
+                })
+            })
+            .collect();
+
+        Ok(Outcome::Roadmap { steps, rootless, inversions })
     }
 
     pub fn list_by_attributes(&self, terms: &[String]) -> Result<Outcome, EkkoError> {
@@ -1625,6 +1775,70 @@ fn reorder_attached(items: &mut Vec<Item>) {
 /// resolve the same way whether a cycle check or a caller is asking.
 fn find_by_uid(items: &ItemMap, uid: &str) -> Option<u32> {
     items.iter().find(|(_, item)| item.uid.as_deref() == Some(uid)).map(|(id, _)| *id)
+}
+
+/// Ids, each with the ids on the other side of a dependency: what blocks it,
+/// or what it blocks, as the name holding it says.
+type Linked = Vec<(u32, Vec<u32>)>;
+
+/// Whether `item` is completed work as dependencies see it: a done task, not
+/// in the trash.
+fn completed(item: &Item) -> bool {
+    item.trashed.is_none() && State::of(item) == Some(State::Done)
+}
+
+/// Whether `item` holds up what it blocks: an open task, not in the trash.
+/// Done and cancelled are closed, and a note has no state to finish. A
+/// stashed task still holds -- stashing hides an item without finishing it.
+fn holds(item: &Item) -> bool {
+    item.trashed.is_none() && State::of(item).is_some_and(State::is_open)
+}
+
+/// Every place a board breaks the rule its dependencies state -- completed
+/// work waiting on open work -- as (task, blocker) display ids, in order.
+///
+/// Empty unless `--force` overrode the rule or a recovery brought back
+/// something that breaks it; every other write refuses to. Display ids are
+/// safe to compare across one command, which never renumbers.
+fn broken_dependencies(data: &ItemMap) -> BTreeSet<(u32, u32)> {
+    let index = uid_index(data);
+    let mut broken = BTreeSet::new();
+    for (id, item) in data.iter().filter(|(_, item)| completed(item)) {
+        for uid in item.blocked_by.iter().flatten() {
+            let Some(&blocker) = index.get(uid.as_str()) else { continue };
+            if data.get(&blocker).is_some_and(holds) {
+                broken.insert((*id, blocker));
+            }
+        }
+    }
+    broken
+}
+
+/// Every uid on a board, resolved to its display id in one pass.
+fn uid_index(items: &ItemMap) -> HashMap<&str, u32> {
+    items.iter().filter_map(|(id, item)| Some((item.uid.as_deref()?, *id))).collect()
+}
+
+/// Each declared phase with its position in the sequence.
+fn phase_order(phases: &[String]) -> HashMap<&str, usize> {
+    phases.iter().enumerate().map(|(at, name)| (name.as_str(), at)).collect()
+}
+
+/// The inversion `blocked` waiting on `blocker` would be, if `blocker` sits in
+/// a declared phase later than `blocked`'s. Items at the project root, or in a
+/// phase no longer declared, are outside the order and never inverted.
+///
+/// The one definition, shared by the refusal in --blocked-by and the report
+/// in --roadmap, so the two cannot disagree about what counts.
+fn phase_inversion(order: &HashMap<&str, usize>, blocked: &Item, blocker: &Item) -> Option<Inversion> {
+    let blocked_phase = blocked.phase.as_deref()?;
+    let blocker_phase = blocker.phase.as_deref()?;
+    (order.get(blocker_phase)? > order.get(blocked_phase)?).then(|| Inversion {
+        blocked: blocked.id,
+        blocked_phase: blocked_phase.to_string(),
+        blocker: blocker.id,
+        blocker_phase: blocker_phase.to_string(),
+    })
 }
 
 fn is_priority_opt(token: &str) -> bool {
@@ -2160,7 +2374,7 @@ mod tests {
         ekko.create_task_in(&words(&["@a", "in a phase"]), Some("setup")).unwrap();
         ekko.create_task_in(&words(&["@b", "at the root"]), None).unwrap();
 
-        let Outcome::Roadmap { steps, rootless } = ekko.display_roadmap().unwrap() else { panic!() };
+        let Outcome::Roadmap { steps, rootless, .. } = ekko.display_roadmap().unwrap() else { panic!() };
 
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].total, 1, "only the phased task belongs to the step");
@@ -3235,5 +3449,287 @@ mod tests {
         assert_eq!((listing[0].complete, listing[0].tasks, listing[0].notes), (1, 1, 1));
 
         fs::remove_dir_all(&home).ok();
+    }
+
+    /// The completion rule from the other side: a blocker that completed work
+    /// rests on cannot be reopened, whichever command tries -- the check
+    /// toggle, --set undone, --set progress or --begin -- and nothing is
+    /// written.
+    #[test]
+    fn a_blocker_that_completed_work_depends_on_cannot_be_reopened() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["dependent"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
+        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
+
+        let attempts = [
+            ekko.check_tasks(&words(&["1"]), false),
+            ekko.set_state(&words(&["@1", "undone"]), false),
+            ekko.set_state(&words(&["@1", "progress"]), false),
+            ekko.begin_tasks(&words(&["1"])),
+        ];
+        for result in &attempts {
+            let Err(EkkoError::CompletedDependents(found)) = result else {
+                panic!("expected COMPLETED_DEPENDENTS, got {result:?}")
+            };
+            assert_eq!(found, &vec![(1, vec![2])]);
+        }
+        assert_eq!(State::of(&ekko.storage.get().unwrap()[&1]), Some(State::Done), "it reopened anyway");
+
+        cleanup(&dir);
+    }
+
+    /// Reviving a cancelled blocker is a reopening too: cancelled did not hold
+    /// its dependents up, so they could complete, and open again it would.
+    /// Cancelling a done blocker is not one -- it stays closed.
+    #[test]
+    fn reviving_a_cancelled_blocker_counts_and_cancelling_a_done_one_does_not() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["dependent"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
+        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
+
+        ekko.set_state(&words(&["@1", "cancelled"]), false).expect("cancelling a done blocker was refused");
+        assert!(matches!(
+            ekko.set_state(&words(&["@1", "unstarted"]), false),
+            Err(EkkoError::CompletedDependents(_))
+        ));
+
+        cleanup(&dir);
+    }
+
+    /// --force reopens anyway and says what it pushed past, and the dependents
+    /// stay completed. A blocker whose dependents are still open reopens
+    /// freely, because live evaluation simply blocks them again.
+    #[test]
+    fn force_reopens_and_open_dependents_never_stop_a_reopening() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["completed dependent"])).unwrap();
+        ekko.create_task(&words(&["another blocker"])).unwrap();
+        ekko.create_task(&words(&["open dependent"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        ekko.set_blocked_by(&words(&["@4", "3"])).unwrap();
+        ekko.set_state(&words(&["@1", "@3", "done"]), false).unwrap();
+        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
+
+        let Outcome::Set { reopened, .. } = ekko.set_state(&words(&["@1", "undone"]), true).unwrap() else {
+            panic!("expected a Set outcome")
+        };
+        assert_eq!(reopened, vec![(1, vec![2])]);
+        assert_eq!(State::of(&ekko.storage.get().unwrap()[&2]), Some(State::Done));
+
+        ekko.set_state(&words(&["@3", "undone"]), false).expect("an open dependent stopped a reopening");
+        assert_eq!(ekko.blocker_map().unwrap().get(&4), Some(&vec![3]), "live evaluation did not block again");
+
+        cleanup(&dir);
+    }
+
+    /// A dependency against the declared phase order is refused where it is
+    /// made: a task in an earlier phase cannot wait on one in a later phase.
+    /// The forward direction, the same phase and the project root are free.
+    #[test]
+    fn a_dependency_against_the_phase_order_is_refused() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.set_phases(&words(&["early", "late"])).unwrap();
+        ekko.create_task_in(&words(&["@a", "early work"]), Some("early")).unwrap();
+        ekko.create_task_in(&words(&["@a", "late work"]), Some("late")).unwrap();
+        ekko.create_task_in(&words(&["@a", "more early work"]), Some("early")).unwrap();
+        ekko.create_task_in(&words(&["@a", "at the root"]), None).unwrap();
+
+        let Err(EkkoError::PhaseOrder(inversion)) = ekko.set_blocked_by(&words(&["@1", "2"])) else {
+            panic!("expected PHASE_ORDER")
+        };
+        assert_eq!((inversion.blocked, inversion.blocker), (1, 2));
+
+        ekko.set_blocked_by(&words(&["@2", "1"])).expect("a later phase waiting on an earlier one was refused");
+        ekko.set_blocked_by(&words(&["@3", "1"])).expect("the same phase was refused");
+        ekko.set_blocked_by(&words(&["@4", "2"])).expect("the root was held to the order");
+
+        cleanup(&dir);
+    }
+
+    /// Phases can still be reordered underneath existing dependencies -- that
+    /// is not refused -- and the roadmap then names each inversion it finds.
+    #[test]
+    fn the_roadmap_names_the_inversions_a_reordering_left_behind() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.set_phases(&words(&["early", "late"])).unwrap();
+        ekko.create_task_in(&words(&["@a", "early work"]), Some("early")).unwrap();
+        ekko.create_task_in(&words(&["@a", "late work"]), Some("late")).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        ekko.set_phases(&words(&["late", "early"])).unwrap();
+
+        let Outcome::Roadmap { inversions, .. } = ekko.display_roadmap().unwrap() else { panic!() };
+        assert_eq!(inversions.len(), 1);
+        assert_eq!((inversions[0].blocked, inversions[0].blocker), (2, 1));
+
+        cleanup(&dir);
+    }
+
+    /// The cycle check visits each item once. It used to walk every path, and
+    /// a chain of 26 diamonds took 12.5 s to accept one dependency, doubling
+    /// with each diamond -- 40 would have run for days. A real cycle through
+    /// the chain is still refused.
+    #[test]
+    fn the_cycle_check_is_linear_on_a_chain_of_diamonds() {
+        let (ekko, dir) = fresh_ekko();
+        let layers = 40u32;
+        let uid = |id: u32| format!("d{id}-0");
+        let mut data = ItemMap::new();
+        let mut add = |id: u32, blockers: Vec<u32>| {
+            let mut item = Item::new_task(id, format!("n{id}"), vec!["@g".into()], 1);
+            item.uid = Some(uid(id));
+            item.blocked_by = (!blockers.is_empty()).then(|| blockers.into_iter().map(uid).collect());
+            data.insert(id, item);
+        };
+        add(1, vec![]);
+        for k in 1..=layers {
+            add(3 * k - 1, vec![3 * (k - 1) + 1]);
+            add(3 * k, vec![3 * (k - 1) + 1]);
+            add(3 * k + 1, vec![3 * k - 1, 3 * k]);
+        }
+        let bottom = 3 * layers + 1;
+        let outside = bottom + 1;
+        add(outside, vec![]);
+        ekko.storage.set(&data).unwrap();
+
+        let blocked = format!("@{outside}");
+        let blocker = bottom.to_string();
+        let started = std::time::Instant::now();
+        ekko.set_blocked_by(&words(&[blocked.as_str(), blocker.as_str()])).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "took {:?}", started.elapsed());
+
+        assert!(matches!(
+            ekko.set_blocked_by(&words(&["@1", blocker.as_str()])),
+            Err(EkkoError::BlockingCycle(_, _))
+        ));
+
+        cleanup(&dir);
+    }
+
+    /// The rule is checked on the board a command would leave, not task by
+    /// task: a blocker and what it blocks complete together in one command,
+    /// and reopen together, because neither board breaks anything.
+    #[test]
+    fn a_blocker_and_what_it_blocks_close_and_reopen_together() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["blocked"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        ekko.set_state(&words(&["@1", "@2", "done"]), false).expect("completing both at once was refused");
+        ekko.set_state(&words(&["@1", "@2", "undone"]), false).expect("reopening both at once was refused");
+        ekko.check_tasks(&words(&["1", "2"]), false).expect("toggling both at once was refused");
+        assert!(broken_dependencies(&ekko.storage.get().unwrap()).is_empty());
+
+        cleanup(&dir);
+    }
+
+    /// --blocked-by cannot state the contradiction outright either: a task
+    /// already done cannot be given a blocker that is still open. A closed
+    /// blocker is fine, and clearing is always allowed.
+    #[test]
+    fn completed_work_cannot_be_declared_to_wait_on_open_work() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["open"])).unwrap();
+        ekko.create_task(&words(&["finished"])).unwrap();
+        ekko.create_task(&words(&["done already"])).unwrap();
+        ekko.set_state(&words(&["@2", "@3", "done"]), false).unwrap();
+
+        let result = ekko.set_blocked_by(&words(&["@3", "1"]));
+        let Err(EkkoError::AlreadyDone(found)) = &result else {
+            panic!("expected ALREADY_DONE, got {result:?}")
+        };
+        assert_eq!(found, &vec![(3, vec![1])]);
+        assert!(ekko.storage.get().unwrap()[&3].blocked_by.is_none(), "it was recorded anyway");
+
+        ekko.set_blocked_by(&words(&["@3", "2"])).expect("a closed blocker was refused");
+        ekko.set_blocked_by(&words(&["@3"])).expect("clearing was refused");
+
+        cleanup(&dir);
+    }
+
+    /// What --force reopened over is said on the same line, the way a forced
+    /// completion says what it was blocked by.
+    #[test]
+    fn a_forced_reopening_says_so() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["dependent"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        ekko.set_state(&words(&["@1", "@2", "done"]), false).unwrap();
+
+        let outcome = ekko.set_state(&words(&["@1", "undone"]), true).unwrap();
+        let mut buffer: Vec<u8> = Vec::new();
+        {
+            let mut renderer = Renderer::new(Painter::forced(false), Config::default(), &mut buffer);
+            outcome.render(&mut renderer);
+        }
+        let rendered = String::from_utf8(buffer).unwrap();
+
+        assert!(rendered.contains("Unchecked task: 1 (completed dependents overridden: 2)"), "{rendered:?}");
+
+        cleanup(&dir);
+    }
+
+    /// The rule as a property rather than a list of cases: from a fresh
+    /// board, no sequence of commands short of --force leaves completed work
+    /// waiting on open work -- whatever each command was, and whether it
+    /// landed or was refused. The sequence has to reach every refusal, or it
+    /// proved nothing about that side of the rule.
+    #[test]
+    fn no_sequence_of_commands_short_of_force_breaks_a_dependency() {
+        let (ekko, dir) = fresh_ekko();
+        for n in 1..=6 {
+            ekko.create_task(&words(&[format!("task {n}").as_str()])).unwrap();
+        }
+        // Xorshift: the same sequence every run, so a failure replays, and no
+        // crate to pull in for it.
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut roll = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        let states = ["done", "undone", "progress", "paused", "cancelled", "unstarted"];
+        let mut refused: HashSet<String> = HashSet::new();
+
+        for step in 0..500 {
+            let (a, b) = ((roll(6) + 1).to_string(), (roll(6) + 1).to_string());
+            let (at_a, at_b) = (format!("@{a}"), format!("@{b}"));
+            let (tried, result) = match roll(6) {
+                0 => (format!("--check {a} {b}"), ekko.check_tasks(&words(&[a.as_str(), b.as_str()]), false)),
+                1 => (format!("--begin {a}"), ekko.begin_tasks(&words(&[a.as_str()]))),
+                2 => {
+                    let state = states[roll(6) as usize];
+                    (format!("--set {at_a} {state}"), ekko.set_state(&words(&[at_a.as_str(), state]), false))
+                }
+                3 => {
+                    let state = states[roll(6) as usize];
+                    let input = words(&[at_a.as_str(), at_b.as_str(), state]);
+                    (format!("--set {at_a} {at_b} {state}"), ekko.set_state(&input, false))
+                }
+                4 => (format!("--blocked-by {at_a}"), ekko.set_blocked_by(&words(&[at_a.as_str()]))),
+                _ => (format!("--blocked-by {at_a} {b}"), ekko.set_blocked_by(&words(&[at_a.as_str(), b.as_str()]))),
+            };
+            if let Err(error) = &result {
+                refused.insert(error.code().to_string());
+            }
+            let broken = broken_dependencies(&ekko.storage.get().unwrap());
+            assert!(broken.is_empty(), "step {step}, after {tried}: {broken:?}");
+        }
+
+        for code in ["BLOCKED", "COMPLETED_DEPENDENTS", "ALREADY_DONE"] {
+            assert!(refused.contains(code), "the sequence never reached {code}: {refused:?}");
+        }
+
+        cleanup(&dir);
     }
 }
