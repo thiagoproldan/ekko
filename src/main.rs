@@ -27,7 +27,7 @@ const HELP: &str = r#"
       --archive, -a       Display archived items
       --attached-to <IDS> Attach a note to the task it explains
       --begin, -b         Start/pause task
-      --blocked-by <IDS>  Record what an item waits on
+      --blocked-by <IDS>  Record what an item is blocked by
       --calendar          Show the current month
       --check, -c         Check/uncheck task
       --clear             Delete all checked items
@@ -37,6 +37,7 @@ const HELP: &str = r#"
       --destroy           Move the project named by --project to the trash
       --edit, -e          Edit item description
       --find, -f          Search for items
+      --force             Complete a task even while it is blocked
       --help, -h          Display help message
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes
@@ -69,6 +70,7 @@ const HELP: &str = r#"
       $ ekko --begin 2 3
       $ ekko --calendar
       $ ekko --check 1 2
+      $ ekko --check 2 --force
       $ ekko --clear
       $ ekko --copy 1 2 3
       $ ekko --delete 4
@@ -153,6 +155,12 @@ fn main() -> ExitCode {
     // flag is called now before learning, say, that a project is missing.
     if let Some(err) = renamed_flag(&cli) {
         return finish_with_error(&err, json_mode, &home_dir);
+    }
+    // `--force` overrides one rule in one place: completing a blocked task.
+    // Anywhere else it would be accepted and do nothing, and a flag that
+    // silently does nothing is one somebody eventually believes did something.
+    if cli.force && !(cli.check || cli.set) {
+        return finish_with_error(&EkkoError::ForceWithoutCompleting, json_mode, &home_dir);
     }
 
     let ekko = match Ekko::open(
@@ -296,7 +304,7 @@ fn dispatch(
         return Ok(vec![ekko.delete_items(&cli.input)?]);
     }
     if cli.check {
-        return Ok(vec![ekko.check_tasks(&cli.input)?]);
+        return Ok(vec![ekko.check_tasks(&cli.input, cli.force)?]);
     }
     if cli.begin {
         return Ok(vec![ekko.begin_tasks(&cli.input)?]);
@@ -305,7 +313,7 @@ fn dispatch(
         return Ok(vec![ekko.star_items(&cli.input)?]);
     }
     if cli.set {
-        return Ok(vec![ekko.set_state(&cli.input)?]);
+        return Ok(vec![ekko.set_state(&cli.input, cli.force)?]);
     }
     if cli.priority {
         return Ok(vec![ekko.update_priority(&cli.input)?]);

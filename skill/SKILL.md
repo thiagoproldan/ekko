@@ -107,7 +107,7 @@ Add `--json` to anything whose result you will branch on.
   `{"command":"stats",...}` line. Parse line by line, not as one document.
 - Errors are `{"ok":false,"error":...,"code":...}` with a stable `code`
   (`INVALID_ID`, `UNKNOWN_LIST_TERM`, `UNKNOWN_STATE`, `INVALID_DUE_DATE`,
-  `ATTACH_NOT_A_NOTE`, `ATTACH_TARGET_NOT_A_TASK`,
+  `ATTACH_NOT_A_NOTE`, `ATTACH_TARGET_NOT_A_TASK`, `BLOCKED`,
   `BLOCKING_CYCLE`, `LOCK_TIMEOUT`, `RENAMED_FLAG`, …). Branch on `code`; the
   message text is not an API. Exit status is `1`.
 - `RENAMED_FLAG` means a flag you remembered has a new name, given in
@@ -144,7 +144,7 @@ Leave the toggles to the user — they are the shorter thing to type by hand.
 
 ## Dependencies, and the one filter to reach for
 
-`ekko --blocked-by @3 1 2` records that item 3 waits on 1 and 2. The `@`
+`ekko --blocked-by @3 1 2` records that item 3 is blocked by 1 and 2. The `@`
 marks the item being blocked; the blockers are bare ids. Blocked items render
 with `⇠ 1, 2` after the description.
 
@@ -163,6 +163,20 @@ more expensive and easier to get wrong.
 `--blocked-by @3` with no blockers **clears** them. Reach for it the moment a
 dependency turns out to be wrong — a blocker you cannot undo becomes a false
 statement the board then carries as if it were data.
+
+**A blocked task cannot be completed.** `--check` and `--set done` fail with
+`BLOCKED`, listing each refused task and its open blockers under `blocked`,
+and nothing is written — one blocked id stops the whole command. Starting,
+pausing, cancelling and reopening are never refused, and neither is
+`--set done` on a task that is already done, so retries stay safe.
+
+`--force` completes it anyway. **Do not reach for it on your own judgement.**
+A refusal means one of two things, and forcing fixes neither: the blocker
+really is unfinished (finish it first, or tell the user), or the dependency is
+wrong (clear it with `--blocked-by @3`, and say so). Force only when the user
+has said the blocker was dealt with some other way. The reply then carries
+`overridden`, and the task keeps showing `⇠` while its blockers stay open.
+`--force` on anything but `--check` and `--set` is `FORCE_WITHOUT_COMPLETING`.
 
 ## Projects and phases
 
@@ -229,6 +243,7 @@ Two things that will bite otherwise:
 | what can start | `ekko --list ready` | pending, no unmet blockers |
 | declare a blocker | `ekko --blocked-by @3 1 2` | `@` marks the **blocked** item |
 | clear a blocker | `ekko --blocked-by @3` | no blockers means none |
+| complete anyway | `ekko --set @3 done --force` | only on the user's word |
 | put away | `ekko --stash @due` | ids or a board; no ids lists the stash |
 | bring it back | `ekko --unstash 9` | comes back as what it was |
 | remove | `ekko --delete 4` | to the trash, kept 30 days |

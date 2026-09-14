@@ -23,18 +23,20 @@ fn success_value(outcome: &Outcome) -> Value {
     let command = outcome.command_name();
     match outcome {
         Outcome::Task(item) | Outcome::Note(item) => json!({"ok": true, "command": command, "item": item}),
-        Outcome::Check { checked, unchecked } => {
-            json!({"ok": true, "command": command, "checked": checked, "unchecked": unchecked})
-        }
+        Outcome::Check { checked, unchecked, overridden } => with_overridden(
+            json!({"ok": true, "command": command, "checked": checked, "unchecked": unchecked}),
+            overridden,
+        ),
         Outcome::Begin { started, paused } => {
             json!({"ok": true, "command": command, "started": started, "paused": paused})
         }
         Outcome::Star { starred, unstarred } => {
             json!({"ok": true, "command": command, "starred": starred, "unstarred": unstarred})
         }
-        Outcome::Set { ids, states } => {
-            json!({"ok": true, "command": command, "ids": ids, "states": states})
-        }
+        Outcome::Set { ids, states, overridden } => with_overridden(
+            json!({"ok": true, "command": command, "ids": ids, "states": states}),
+            overridden,
+        ),
         Outcome::Delete(items) => json!({"ok": true, "command": command, "items": items}),
         Outcome::Restore(items) => json!({"ok": true, "command": command, "items": items}),
         Outcome::Edit(item) | Outcome::Move(item) | Outcome::Priority(item) => {
@@ -89,12 +91,32 @@ fn error_value(error: &EkkoError) -> Value {
         EkkoError::InvalidCustomAppDir(path) => Some(("path", json!(path))),
         EkkoError::LockTimeout(path) => Some(("path", json!(path))),
         EkkoError::RenamedFlag { new, .. } => Some(("renamedTo", json!(new))),
+        EkkoError::Blocked(blocked) => Some(("blocked", blocked_value(blocked))),
         _ => None,
     };
     if let (Some((key, val)), Value::Object(map)) = (extra, &mut value) {
         map.insert(key.to_string(), val);
     }
     value
+}
+
+/// Adds `overridden` to a completion's reply, and only when `--force`
+/// actually overrode something -- so every reply that forced nothing stays
+/// exactly what it was before the key existed.
+fn with_overridden(mut value: Value, overridden: &[(u32, Vec<u32>)]) -> Value {
+    if !overridden.is_empty() {
+        if let Value::Object(map) = &mut value {
+            map.insert("overridden".to_string(), blocked_value(overridden));
+        }
+    }
+    value
+}
+
+/// `[(id, blockers), ...]` -> `[{"id": 2, "blockers": [1]}, ...]`: named
+/// fields rather than bare pairs, so a caller never has to know which half
+/// of a tuple is which.
+fn blocked_value(blocked: &[(u32, Vec<u32>)]) -> Value {
+    Value::Array(blocked.iter().map(|(id, blockers)| json!({"id": id, "blockers": blockers})).collect())
 }
 
 /// `[(name, items), ...]` -> `{"name": [items], ...}`, preserving the

@@ -323,12 +323,15 @@ fn act(ekko: &Ekko, state: &mut State, action: Action) -> Result<(), EkkoError> 
             state.flash = Some(format!("{id} is finished -- use --set to change it"));
             return Ok(());
         }
+        // Never forced from here. `--force` is a deliberate override, and a
+        // picker is exactly where a key gets pressed without deliberation --
+        // the same reason Enter already refuses a finished task.
         Action::Done => ekko
-            .set_state(&[format!("@{id}"), "done".to_string()])
+            .set_state(&[format!("@{id}"), "done".to_string()], false)
             .map(|_| format!("{id} → done")),
         Action::Progress => {
             let next = if item.in_progress.unwrap_or(false) { "paused" } else { "progress" };
-            ekko.set_state(&[format!("@{id}"), next.to_string()])
+            ekko.set_state(&[format!("@{id}"), next.to_string()], false)
                 .map(|_| format!("{id} → {next}"))
         }
     };
@@ -337,6 +340,15 @@ fn act(ekko: &Ekko, state: &mut State, action: Action) -> Result<(), EkkoError> 
         Ok(said) => {
             state.flash = Some(said);
             reload(ekko, state)?;
+        }
+        // The CLI's message ends in "or use --force", which a picker has no
+        // way to do -- so say where that lives instead.
+        Err(EkkoError::Blocked(blocked)) => {
+            let by: Vec<String> = blocked.iter().flat_map(|(_, b)| b).map(u32::to_string).collect();
+            state.flash = Some(format!(
+                "{id} is blocked by {} -- finish that first, or --force it from the CLI",
+                by.join(", ")
+            ));
         }
         Err(e) => state.flash = Some(e.to_string()),
     }
@@ -515,7 +527,8 @@ fn draw_preview(
         facts.push(format!("priority {priority}"));
     }
     if let Some(blockers) = &item.blocked_by {
-        facts.push(format!("waits on {}", blockers.len()));
+        let noun = if blockers.len() == 1 { "item" } else { "items" };
+        facts.push(format!("blocked  by {} {noun}", blockers.len()));
     }
     if item.attached_to.is_some() {
         facts.push("attached to a task".to_string());

@@ -113,3 +113,39 @@ fn an_old_flag_name_is_answered_with_the_new_one() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// The refusal and the override both have to survive the real argument
+/// parser: `--force` is a flag no unit test ever parses, and one accepted
+/// where it means nothing would be a flag that silently does nothing.
+#[test]
+fn a_blocked_task_needs_force_and_force_needs_a_task_to_complete() {
+    let dir = temp_ekko_dir();
+    let ekko = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
+            .args(args)
+            .output()
+            .expect("failed to run ekko")
+    };
+    let reply = |output: &process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout).expect("a --json reply")
+    };
+
+    assert!(ekko(&["--task", "blocker"]).status.success());
+    assert!(ekko(&["--task", "blocked"]).status.success());
+    assert!(ekko(&["--blocked-by", "@2", "1"]).status.success());
+
+    let refused = ekko(&["--check", "2"]);
+    assert!(!refused.status.success(), "a blocked task was completed");
+    assert_eq!(reply(&refused)["code"], "BLOCKED");
+
+    let forced = ekko(&["--check", "2", "--force"]);
+    assert!(forced.status.success(), "{}", reply(&forced));
+    assert_eq!(reply(&forced)["overridden"][0]["blockers"][0], 1);
+
+    let pointless = ekko(&["--force"]);
+    assert!(!pointless.status.success(), "--force alone was accepted");
+    assert_eq!(reply(&pointless)["code"], "FORCE_WITHOUT_COMPLETING");
+
+    fs::remove_dir_all(&dir).ok();
+}

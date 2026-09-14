@@ -88,7 +88,8 @@ pub struct Item {
     /// areas; this field is what tells them apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
-    /// Items this one waits on, by `uid`.
+    /// Items blocking this one, by `uid`. While any of them is open, this
+    /// task cannot be completed short of `--force`.
     ///
     /// By uid and not by display id: ids are recycled, so a dependency
     /// stored as `3` would silently start pointing at a different item the

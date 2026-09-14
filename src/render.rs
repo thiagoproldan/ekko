@@ -713,7 +713,6 @@ impl<'a> Renderer<'a> {
     }
 
 
-    /// Reports what an item now waits on, or that it waits on nothing.
     pub fn success_stashed(&mut self, ids: &[u32], away: bool) {
         let verb = if away { "Stashed" } else { "Unstashed" };
         self.mark(verb, "items", "item", ids);
@@ -810,13 +809,14 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// Reports what an item is now blocked by, or that nothing blocks it.
     pub fn success_blocked(&mut self, id: u32, blockers: &[u32]) {
         if blockers.is_empty() {
-            self.success(" ", &format!("Item {id} waits on nothing"), "");
+            self.success(" ", &format!("Item {id} is no longer blocked"), "");
             return;
         }
         let suffix = self.painter.grey(&join_ids(blockers));
-        self.success(" ", &format!("Item {id} now waits on:"), &suffix);
+        self.success(" ", &format!("Item {id} is now blocked by:"), &suffix);
     }
     /// A month, with today picked out.
     ///
@@ -1062,6 +1062,28 @@ impl<'a> Renderer<'a> {
         self.mark("Checked", "tasks", "task", ids);
     }
 
+    /// `mark_complete`, saying which open blockers `--force` pushed past.
+    ///
+    /// On the same line rather than after it: the override is part of what
+    /// happened to those tasks, not a separate event. With nothing
+    /// overridden it is `mark_complete` exactly.
+    pub fn mark_complete_overriding(&mut self, ids: &[u32], overridden: &[(u32, Vec<u32>)]) {
+        if overridden.is_empty() {
+            self.mark_complete(ids);
+            return;
+        }
+        let detail = match overridden {
+            [(_, blockers)] if ids.len() == 1 => join_ids(blockers),
+            _ => overridden
+                .iter()
+                .map(|(id, blockers)| format!("{id} \u{21e0} {}", join_ids(blockers)))
+                .collect::<Vec<_>>()
+                .join("; "),
+        };
+        let note = self.painter.yellow(&format!("(blockers overridden: {detail})"));
+        self.mark_with("Checked", "tasks", "task", ids, &note);
+    }
+
     pub fn mark_incomplete(&mut self, ids: &[u32]) {
         self.mark("Unchecked", "tasks", "task", ids);
     }
@@ -1166,12 +1188,22 @@ impl<'a> Renderer<'a> {
     // ---- shared plumbing for the mark_*/success_*/error_* families ----
 
     fn mark(&mut self, verb: &str, plural: &str, singular: &str, ids: &[u32]) {
+        self.mark_with(verb, plural, singular, ids, "");
+    }
+
+    /// `mark`, with something more said after the ids on the same line.
+    /// Given nothing, it is exactly `mark`, byte for byte.
+    fn mark_with(&mut self, verb: &str, plural: &str, singular: &str, ids: &[u32], extra: &str) {
         if ids.is_empty() {
             return;
         }
         let word = if ids.len() > 1 { plural } else { singular };
         let message = format!("{verb} {word}:");
-        let suffix = self.painter.grey(&join_ids(ids));
+        let mut suffix = self.painter.grey(&join_ids(ids));
+        if !extra.is_empty() {
+            suffix.push(' ');
+            suffix.push_str(extra);
+        }
         self.success("\n", &message, &suffix);
     }
 

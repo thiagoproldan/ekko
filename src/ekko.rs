@@ -34,6 +34,10 @@ pub enum EkkoError {
     MissingState,
     UnknownState(String),
     BlockingCycle(u32, u32),
+    /// Tasks a command would have completed while something they are
+    /// blocked by is still open, each with those blockers.
+    Blocked(Vec<(u32, Vec<u32>)>),
+    ForceWithoutCompleting,
     AttachNotANote(u32),
     AttachTargetNotATask(u32),
     AttachTargetHasNoUid(u32),
@@ -64,6 +68,8 @@ impl EkkoError {
             EkkoError::MissingState => "MISSING_STATE",
             EkkoError::UnknownState(_) => "UNKNOWN_STATE",
             EkkoError::BlockingCycle(_, _) => "BLOCKING_CYCLE",
+            EkkoError::Blocked(_) => "BLOCKED",
+            EkkoError::ForceWithoutCompleting => "FORCE_WITHOUT_COMPLETING",
             EkkoError::AttachNotANote(_) => "ATTACH_NOT_A_NOTE",
             EkkoError::AttachTargetNotATask(_) => "ATTACH_TARGET_NOT_A_TASK",
             EkkoError::AttachTargetHasNoUid(_) => "ATTACH_TARGET_HAS_NO_UID",
@@ -97,6 +103,8 @@ impl EkkoError {
             EkkoError::MissingState => out.generic_error(&self.to_string()),
             EkkoError::UnknownState(_) => out.generic_error(&self.to_string()),
             EkkoError::BlockingCycle(_, _)
+            | EkkoError::Blocked(_)
+            | EkkoError::ForceWithoutCompleting
             | EkkoError::AttachNotANote(_)
             | EkkoError::AttachTargetNotATask(_)
             | EkkoError::AttachTargetHasNoUid(_)
@@ -130,7 +138,29 @@ impl std::fmt::Display for EkkoError {
             EkkoError::MissingState => write!(f, "No state was given as input"),
             EkkoError::BlockingCycle(waiter, blocker) => write!(
                 f,
-                "Item {waiter} cannot wait on {blocker}: {blocker} already waits on {waiter}"
+                "Item {waiter} cannot be blocked by {blocker}: {blocker} is already blocked by {waiter}"
+            ),
+            EkkoError::Blocked(blocked) => match blocked.as_slice() {
+                [(id, blockers)] => write!(
+                    f,
+                    "Cannot complete task {id}: blocked by {} (open). Finish or cancel {}, clear the dependency with --blocked-by @{id}, or use --force",
+                    join_ids(blockers),
+                    if blockers.len() == 1 { "it" } else { "them" },
+                ),
+                _ => write!(
+                    f,
+                    "Cannot complete tasks {}: {} (open). Finish or cancel the blockers, clear a wrong dependency with --blocked-by, or use --force",
+                    join_ids(&blocked.iter().map(|(id, _)| *id).collect::<Vec<_>>()),
+                    blocked
+                        .iter()
+                        .map(|(id, blockers)| format!("{id} is blocked by {}", join_ids(blockers)))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
+            },
+            EkkoError::ForceWithoutCompleting => write!(
+                f,
+                "--force only applies to --check and --set, where it completes a task that is still blocked"
             ),
             EkkoError::AttachNotANote(id) => write!(
                 f,
@@ -214,12 +244,15 @@ pub struct RestoreResult {
 pub enum Outcome {
     Task(Item),
     Note(Item),
-    Check { checked: Vec<u32>, unchecked: Vec<u32> },
+    /// `overridden` is what `--force` pushed past: each task completed while
+    /// still blocked, with the blockers that were open. Empty whenever
+    /// nothing needed forcing, which is nearly always.
+    Check { checked: Vec<u32>, unchecked: Vec<u32>, overridden: Vec<(u32, Vec<u32>)> },
     Begin { started: Vec<u32>, paused: Vec<u32> },
     Star { starred: Vec<u32>, unstarred: Vec<u32> },
     /// Idempotent form of Check/Begin/Star: the states asked for, not
     /// the flips performed.
-    Set { ids: Vec<u32>, states: Vec<String> },
+    Set { ids: Vec<u32>, states: Vec<String>, overridden: Vec<(u32, Vec<u32>)> },
     Delete(Vec<DeleteResult>),
     Restore(Vec<RestoreResult>),
     Edit(Item),
@@ -287,11 +320,11 @@ impl Outcome {
     pub fn render(&self, out: &mut Renderer) {
         match self {
             Outcome::Task(item) | Outcome::Note(item) => out.success_create(item),
-            Outcome::Check { checked, unchecked } => {
-                out.mark_complete(checked);
+            Outcome::Check { checked, unchecked, overridden } => {
+                out.mark_complete_overriding(checked, overridden);
                 out.mark_incomplete(unchecked);
             }
-            Outcome::Set { ids, states } => {
+            Outcome::Set { ids, states, overridden } => {
                 // Reuses the toggles' own messages where one exists, rather
                 // than inventing a parallel vocabulary: the same transition
                 // should read the same way however it was requested. The two
@@ -304,7 +337,7 @@ impl Outcome {
                 // `unstarted` shipped mute. Add the arm when adding a state.
                 for state in states {
                     match state.as_str() {
-                        "done" => out.mark_complete(ids),
+                        "done" => out.mark_complete_overriding(ids, overridden),
                         "undone" => out.mark_incomplete(ids),
                         "progress" => out.mark_started(ids),
                         "paused" => out.mark_paused(ids),
@@ -796,10 +829,13 @@ impl Ekko {
         Ok(Outcome::Note(item))
     }
 
-    pub fn check_tasks(&self, ids: &[String]) -> Result<Outcome, EkkoError> {
+    /// Toggles completion. Completing a task that is still blocked is
+    /// refused unless `force` -- see `refuse_blocked_completion`.
+    pub fn check_tasks(&self, ids: &[String], force: bool) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let mut data = self.storage.get()?;
         let ids = self.validate_ids(ids, &data)?;
+        let overridden = Self::refuse_blocked_completion(&data, &ids, force)?;
         let (mut checked, mut unchecked) = (Vec::new(), Vec::new());
         for id in ids {
             if let Some(item) = data.get_mut(&id) {
@@ -812,7 +848,7 @@ impl Ekko {
             }
         }
         self.save_touching(&mut data)?;
-        Ok(Outcome::Check { checked, unchecked })
+        Ok(Outcome::Check { checked, unchecked, overridden })
     }
 
     pub fn begin_tasks(&self, ids: &[String]) -> Result<Outcome, EkkoError> {
@@ -1272,7 +1308,7 @@ impl Ekko {
         Ok(Outcome::Destroyed { name: name.to_string(), tasks, notes, trash })
     }
 
-    pub fn set_state(&self, input: &[String]) -> Result<Outcome, EkkoError> {
+    pub fn set_state(&self, input: &[String], force: bool) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let mut data = self.storage.get()?;
 
@@ -1299,6 +1335,12 @@ impl Ekko {
         }
         let states = remove_duplicates(states);
 
+        let overridden = if states.iter().any(|state| state == "done") {
+            Self::refuse_blocked_completion(&data, &ids, force)?
+        } else {
+            Vec::new()
+        };
+
         for id in &ids {
             if let Some(item) = data.get_mut(id) {
                 for state in &states {
@@ -1308,7 +1350,7 @@ impl Ekko {
         }
 
         self.save_touching(&mut data)?;
-        Ok(Outcome::Set { ids, states })
+        Ok(Outcome::Set { ids, states, overridden })
     }
 
     /// The board, restricted to items changed at or after `since` (epoch
@@ -1342,8 +1384,8 @@ impl Ekko {
         Ok(map)
     }
 
-    /// Records that one item waits on others, replacing whatever it waited
-    /// on before -- the same contract `--move` and `--phases` use.
+    /// Records what one item is blocked by, replacing whatever blocked it
+    /// before -- the same contract `--move` and `--phases` use.
     ///
     /// Refuses to create a cycle. Without one, A waiting on B while B waits
     /// on A is a pair nothing can ever make ready, and the board would state
@@ -1386,7 +1428,7 @@ impl Ekko {
         Ok(Outcome::Blocked { item: updated, blockers: blocker_ids })
     }
 
-    /// Whether `from` already waits, directly or through others, on `target`.
+    /// Whether `from` is already blocked, directly or through others, by `target`.
     fn reaches(&self, data: &ItemMap, from: u32, target: u32) -> bool {
         let Some(item) = data.get(&from) else { return false };
         let Some(blockers) = item.blocked_by.as_ref() else { return false };
@@ -1429,6 +1471,45 @@ impl Ekko {
         ids.sort_unstable();
         ids
     }
+
+    /// Stops a command from completing a task that something it is blocked
+    /// by still holds open -- or, with `force`, lets it and returns which
+    /// blockers it pushed past, so the reply can say so.
+    ///
+    /// Only tasks that would actually become complete are checked. One
+    /// already done is left alone, which keeps `--set @3 done` safe to
+    /// retry: a retry after a forced completion must not start failing
+    /// because the blocker is still open. Cancelling, starting and reopening
+    /// are never checked either -- none of them claims the work is finished,
+    /// which is the one thing a blocker says it cannot be yet.
+    ///
+    /// All or nothing, like an invalid id: one blocked task stops the whole
+    /// command before anything is written, rather than leaving the caller
+    /// to work out which half landed.
+    fn refuse_blocked_completion(
+        data: &ItemMap,
+        ids: &[u32],
+        force: bool,
+    ) -> Result<Vec<(u32, Vec<u32>)>, EkkoError> {
+        let blocked: Vec<(u32, Vec<u32>)> = ids
+            .iter()
+            .filter_map(|id| {
+                let item = data.get(id)?;
+                if !item.is_task || item.is_complete.unwrap_or(false) {
+                    return None;
+                }
+                let open = Self::unmet_blockers(data, item);
+                (!open.is_empty()).then_some((*id, open))
+            })
+            .collect();
+
+        if blocked.is_empty() || force {
+            Ok(blocked)
+        } else {
+            Err(EkkoError::Blocked(blocked))
+        }
+    }
+
     /// Replaces the project's phase sequence.
     pub fn set_phases(&self, names: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
@@ -1594,6 +1675,10 @@ fn parse_due_date(token: &str) -> Option<String> {
 fn has_terms(text: &str, terms: &[String]) -> bool {
     let lower = text.to_lowercase();
     terms.iter().any(|term| lower.contains(&term.to_lowercase()))
+}
+
+fn join_ids(ids: &[u32]) -> String {
+    ids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
 }
 
 fn remove_duplicates(items: Vec<String>) -> Vec<String> {
@@ -1788,11 +1873,11 @@ mod tests {
         ekko.create_task(&words(&["a task"])).unwrap();
         ekko.create_note(&words(&["a note"])).unwrap();
 
-        let Outcome::Check { checked, unchecked } = ekko.check_tasks(&words(&["1", "2"])).unwrap() else { panic!() };
+        let Outcome::Check { checked, unchecked, .. } = ekko.check_tasks(&words(&["1", "2"]), false).unwrap() else { panic!() };
         assert_eq!(checked, vec![1]);
         assert_eq!(unchecked, Vec::<u32>::new());
 
-        let Outcome::Check { checked, unchecked } = ekko.check_tasks(&words(&["1"])).unwrap() else { panic!() };
+        let Outcome::Check { checked, unchecked, .. } = ekko.check_tasks(&words(&["1"]), false).unwrap() else { panic!() };
         assert_eq!(checked, Vec::<u32>::new());
         assert_eq!(unchecked, vec![1]);
 
@@ -1818,7 +1903,7 @@ mod tests {
     fn clearing_reports_both_the_storage_id_and_the_new_unrelated_archive_id() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["first"])).unwrap();
-        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
 
         let Outcome::Delete(results) = ekko.clear().unwrap() else { panic!() };
 
@@ -1832,7 +1917,7 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["a"])).unwrap();
         ekko.create_task(&words(&["b"])).unwrap();
-        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
         ekko.clear().unwrap(); // archive id 1
 
         let Outcome::Restore(results) = ekko.restore_items(&words(&["1"])).unwrap() else { panic!() };
@@ -1855,7 +1940,7 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["a"])).unwrap();
         ekko.create_task(&words(&["b"])).unwrap(); // id 2
-        ekko.set_state(&words(&["@2", "done"])).unwrap();
+        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
         ekko.clear().unwrap();
 
         let Outcome::Task(item) = ekko.create_task(&words(&["c"])).unwrap() else { panic!() };
@@ -1916,7 +2001,7 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["done"])).unwrap();
         ekko.create_task(&words(&["not done"])).unwrap();
-        ekko.check_tasks(&words(&["1"])).unwrap();
+        ekko.check_tasks(&words(&["1"]), false).unwrap();
 
         let Outcome::Delete(results) = ekko.clear().unwrap() else { panic!() };
         assert_eq!(results.len(), 1);
@@ -1958,7 +2043,7 @@ mod tests {
         let data = ekko.storage.get().unwrap();
         assert_eq!(Ekko::unmet_blockers(&data, &data[&2]), vec![1]);
 
-        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
 
         let data = ekko.storage.get().unwrap();
         assert!(Ekko::unmet_blockers(&data, &data[&2]).is_empty(), "nothing to unblock by hand");
@@ -2139,7 +2224,7 @@ mod tests {
         let Outcome::Roadmap { steps, .. } = ekko.display_roadmap().unwrap() else { panic!() };
         assert!(steps.iter().all(|s| !s.current), "nothing in progress means no cursor");
 
-        ekko.set_state(&words(&["@2", "progress"])).unwrap();
+        ekko.set_state(&words(&["@2", "progress"]), false).unwrap();
         let Outcome::Roadmap { steps, .. } = ekko.display_roadmap().unwrap() else { panic!() };
         assert!(!steps[0].current && steps[1].current);
 
@@ -2154,8 +2239,8 @@ mod tests {
         ekko.set_phases(&words(&["setup"])).unwrap();
         ekko.create_task_in(&words(&["@a", "done"]), Some("setup")).unwrap();
         ekko.create_task_in(&words(&["@a", "dropped"]), Some("setup")).unwrap();
-        ekko.set_state(&words(&["@1", "done"])).unwrap();
-        ekko.set_state(&words(&["@2", "cancelled"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
+        ekko.set_state(&words(&["@2", "cancelled"]), false).unwrap();
 
         let Outcome::Roadmap { steps, .. } = ekko.display_roadmap().unwrap() else { panic!() };
 
@@ -2168,9 +2253,9 @@ mod tests {
     fn cancelling_is_terminal_and_mutually_exclusive_with_the_other_states() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["dropped"])).unwrap();
-        ekko.set_state(&words(&["@1", "progress"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
 
-        ekko.set_state(&words(&["@1", "cancelled"])).unwrap();
+        ekko.set_state(&words(&["@1", "cancelled"]), false).unwrap();
 
         let item = &ekko.storage.get().unwrap()[&1];
         assert_eq!(item.cancelled, Some(true));
@@ -2186,8 +2271,8 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         for (id, revive) in [("@1", "progress"), ("@2", "done"), ("@3", "unstarted")] {
             ekko.create_task(&words(&["dropped"])).unwrap();
-            ekko.set_state(&words(&[id, "cancelled"])).unwrap();
-            ekko.set_state(&words(&[id, revive])).unwrap();
+            ekko.set_state(&words(&[id, "cancelled"]), false).unwrap();
+            ekko.set_state(&words(&[id, revive]), false).unwrap();
         }
 
         let data = ekko.storage.get().unwrap();
@@ -2205,8 +2290,8 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["real work"])).unwrap();
         ekko.create_task(&words(&["dropped"])).unwrap();
-        ekko.set_state(&words(&["@1", "done"])).unwrap();
-        ekko.set_state(&words(&["@2", "cancelled"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
+        ekko.set_state(&words(&["@2", "cancelled"]), false).unwrap();
 
         let Outcome::List(groups) = ekko.list_by_attributes(&words(&["pending"])).unwrap() else {
             panic!()
@@ -2227,8 +2312,8 @@ mod tests {
         ekko.create_task(&words(&["set aside"])).unwrap();
         ekko.create_task(&words(&["never touched"])).unwrap();
 
-        ekko.set_state(&words(&["@1", "progress"])).unwrap();
-        ekko.set_state(&words(&["@1", "paused"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        ekko.set_state(&words(&["@1", "paused"]), false).unwrap();
 
         let data = ekko.storage.get().unwrap();
         assert_eq!(data[&1].paused, Some(true));
@@ -2242,9 +2327,9 @@ mod tests {
     fn unstarted_undoes_a_progress_aimed_at_the_wrong_id() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["typo victim"])).unwrap();
-        ekko.set_state(&words(&["@1", "progress"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
 
-        ekko.set_state(&words(&["@1", "unstarted"])).unwrap();
+        ekko.set_state(&words(&["@1", "unstarted"]), false).unwrap();
 
         let item = &ekko.storage.get().unwrap()[&1];
         assert_eq!(item.in_progress, Some(false));
@@ -2259,12 +2344,12 @@ mod tests {
         ekko.create_task(&words(&["one"])).unwrap();
         ekko.create_task(&words(&["two"])).unwrap();
         for id in ["@1", "@2"] {
-            ekko.set_state(&words(&[id, "progress"])).unwrap();
-            ekko.set_state(&words(&[id, "paused"])).unwrap();
+            ekko.set_state(&words(&[id, "progress"]), false).unwrap();
+            ekko.set_state(&words(&[id, "paused"]), false).unwrap();
         }
 
-        ekko.set_state(&words(&["@1", "progress"])).unwrap();
-        ekko.set_state(&words(&["@2", "done"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
 
         let data = ekko.storage.get().unwrap();
         assert_eq!(data[&1].paused, None, "resuming un-pauses");
@@ -2280,8 +2365,8 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["paused one"])).unwrap();
         ekko.create_task(&words(&["never started"])).unwrap();
-        ekko.set_state(&words(&["@1", "progress"])).unwrap();
-        ekko.set_state(&words(&["@1", "paused"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        ekko.set_state(&words(&["@1", "paused"]), false).unwrap();
 
         let Outcome::Stats(stats) = ekko.display_stats().unwrap() else { panic!() };
 
@@ -2303,7 +2388,7 @@ mod tests {
 
         let mark = chrono::Local::now().timestamp_millis() + 1;
         std::thread::sleep(std::time::Duration::from_millis(5));
-        ekko.set_state(&words(&["@2", "done"])).unwrap();
+        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
 
         let Outcome::Board(groups) = ekko.display_since(mark).unwrap() else { panic!() };
         let ids: Vec<u32> = groups.iter().flat_map(|(_, i)| i.iter().map(|x| x.id)).collect();
@@ -2335,11 +2420,11 @@ mod tests {
         // that turns out to be a no-op must not make an item look modified.
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["a task"])).unwrap();
-        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
         let after_first = ekko.storage.get().unwrap()[&1].updated_at;
 
         std::thread::sleep(std::time::Duration::from_millis(5));
-        ekko.set_state(&words(&["@1", "done"])).unwrap(); // idempotent: no change
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap(); // idempotent: no change
 
         assert_eq!(ekko.storage.get().unwrap()[&1].updated_at, after_first);
 
@@ -2358,7 +2443,7 @@ mod tests {
         ekko.create_task(&words(&["second"])).unwrap();
         let old_uid = ekko.storage.get().unwrap()[&2].uid.clone();
 
-        ekko.set_state(&words(&["@2", "done"])).unwrap();
+        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
         ekko.clear().unwrap();
         ekko.create_task(&words(&["reuses id 2"])).unwrap();
 
@@ -2376,7 +2461,7 @@ mod tests {
         ekko.create_task(&words(&["archived then restored"])).unwrap();
         let before = ekko.storage.get().unwrap()[&1].uid.clone();
 
-        ekko.check_tasks(&words(&["1"])).unwrap();
+        ekko.check_tasks(&words(&["1"]), false).unwrap();
         ekko.clear().unwrap();
         ekko.restore_items(&words(&["1"])).unwrap();
 
@@ -2410,12 +2495,12 @@ mod tests {
         ekko.create_task(&words(&["a task"])).unwrap();
 
         // The whole point: a retried command must not undo itself.
-        ekko.set_state(&words(&["@1", "done"])).unwrap();
-        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
         assert_eq!(ekko.storage.get().unwrap()[&1].is_complete, Some(true));
 
         // Contrast, on the same data: the toggle flips back.
-        ekko.check_tasks(&words(&["1"])).unwrap();
+        ekko.check_tasks(&words(&["1"]), false).unwrap();
         assert_eq!(ekko.storage.get().unwrap()[&1].is_complete, Some(false));
 
         cleanup(&dir);
@@ -2427,7 +2512,7 @@ mod tests {
         ekko.create_task(&words(&["one"])).unwrap();
         ekko.create_task(&words(&["two"])).unwrap();
 
-        ekko.set_state(&words(&["@1", "@2", "progress", "starred"])).unwrap();
+        ekko.set_state(&words(&["@1", "@2", "progress", "starred"]), false).unwrap();
 
         let data = ekko.storage.get().unwrap();
         for id in [1, 2] {
@@ -2444,7 +2529,7 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_note(&words(&["a note"])).unwrap();
 
-        ekko.set_state(&words(&["@1", "done", "starred"])).unwrap();
+        ekko.set_state(&words(&["@1", "done", "starred"]), false).unwrap();
 
         let data = ekko.storage.get().unwrap();
         assert_eq!(data[&1].is_complete, None, "a note never gains task fields");
@@ -2458,9 +2543,9 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["a task"])).unwrap();
 
-        assert!(matches!(ekko.set_state(&words(&["@1"])), Err(EkkoError::MissingState)));
+        assert!(matches!(ekko.set_state(&words(&["@1"]), false), Err(EkkoError::MissingState)));
         assert!(matches!(
-            ekko.set_state(&words(&["@1", "finished"])),
+            ekko.set_state(&words(&["@1", "finished"]), false),
             Err(EkkoError::UnknownState(ref t)) if t == "finished"
         ));
         assert_eq!(ekko.storage.get().unwrap()[&1].is_complete, Some(false), "nothing applied");
@@ -2501,7 +2586,7 @@ mod tests {
         ekko.create_task(&words(&["also late but done", "d:2000-01-01"])).unwrap();
         ekko.create_task(&words(&["ages away", "d:3000-01-01"])).unwrap();
         ekko.create_task(&words(&["no deadline at all"])).unwrap();
-        ekko.check_tasks(&words(&["2"])).unwrap();
+        ekko.check_tasks(&words(&["2"]), false).unwrap();
 
         let Outcome::List(groups) = ekko.list_by_attributes(&words(&["overdue"])).unwrap() else {
             panic!()
@@ -2589,8 +2674,8 @@ mod tests {
     fn validation_errors_carry_the_right_codes() {
         let (ekko, dir) = fresh_ekko();
 
-        assert_eq!(ekko.check_tasks(&[]).unwrap_err().code(), "MISSING_ID");
-        assert_eq!(ekko.check_tasks(&words(&["999"])).unwrap_err().code(), "INVALID_ID");
+        assert_eq!(ekko.check_tasks(&[], false).unwrap_err().code(), "MISSING_ID");
+        assert_eq!(ekko.check_tasks(&words(&["999"]), false).unwrap_err().code(), "INVALID_ID");
         assert_eq!(ekko.create_task(&[]).unwrap_err().code(), "MISSING_DESC");
         assert_eq!(ekko.edit_description(&words(&["@1", "@2", "x"])).unwrap_err().code(), "INVALID_IDS_NUMBER");
         assert_eq!(ekko.move_boards(&words(&["@1"])).unwrap_err().code(), "INVALID_ID"); // no item 1 exists yet -> caught before boards are even checked
@@ -2623,7 +2708,7 @@ mod tests {
         ];
 
         for state in states {
-            let outcome = ekko.set_state(&words(&["@1", state])).unwrap();
+            let outcome = ekko.set_state(&words(&["@1", state]), false).unwrap();
 
             let mut buffer: Vec<u8> = Vec::new();
             {
@@ -2682,7 +2767,7 @@ mod tests {
         let uid = item.uid.clone().expect("a created task carries a uid");
         let marked = format!("@{uid}");
 
-        ekko.set_state(&[marked.clone(), "done".to_string()]).unwrap();
+        ekko.set_state(&[marked.clone(), "done".to_string()], false).unwrap();
         ekko.update_priority(&[marked.clone(), "2".to_string()]).unwrap();
         ekko.edit_description(&[marked, "renamed by uid".to_string()]).unwrap();
         // A toggle takes the id bare, with no `@`, so it exercises the
@@ -2710,8 +2795,8 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["only one"])).unwrap();
 
-        let by_uid = ekko.set_state(&words(&["@18cfdfefd310bd35-10468b", "done"]));
-        let by_id = ekko.set_state(&words(&["@999", "done"]));
+        let by_uid = ekko.set_state(&words(&["@18cfdfefd310bd35-10468b", "done"]), false);
+        let by_id = ekko.set_state(&words(&["@999", "done"]), false);
 
         assert!(matches!(by_uid, Err(EkkoError::InvalidId(_))));
         assert!(matches!(by_id, Err(EkkoError::InvalidId(_))));
@@ -2814,7 +2899,7 @@ mod tests {
     fn stashing_hides_an_item_without_changing_what_it_is() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["done and put away"])).unwrap();
-        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
 
         ekko.set_stashed(&words(&["1"]), true).unwrap();
 
@@ -2840,7 +2925,7 @@ mod tests {
         ekko.create_task(&words(&["done and stashed"])).unwrap();
         ekko.create_task(&words(&["plain pending"])).unwrap();
         ekko.create_note(&words(&["a note, trashed"])).unwrap();
-        ekko.set_state(&words(&["@1", "done"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
         ekko.set_stashed(&words(&["1"]), true).unwrap();
         ekko.set_trashed(&words(&["3"]), true).unwrap();
 
@@ -2883,7 +2968,7 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["stashed and done"])).unwrap();
         ekko.create_task(&words(&["visible and done"])).unwrap();
-        ekko.set_state(&words(&["@1", "@2", "done"])).unwrap();
+        ekko.set_state(&words(&["@1", "@2", "done"]), false).unwrap();
         ekko.set_stashed(&words(&["1"]), true).unwrap();
 
         ekko.clear().unwrap();
@@ -2936,6 +3021,121 @@ mod tests {
 
         ekko.create_task(&words(&["anything at all"])).unwrap();
         assert!(!ekko.storage.get().unwrap().contains_key(&1), "a write did not sweep it");
+
+        cleanup(&dir);
+    }
+
+    /// A task blocked by something still open cannot be completed. The
+    /// dependency used to be advice only: `--list ready` left the task out
+    /// and `--check` closed it anyway, leaving a board that showed a tick
+    /// beside the marker naming what the task was still waiting for.
+    #[test]
+    fn a_blocked_task_cannot_be_completed_and_nothing_is_written() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["blocked"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        let by_check = ekko.check_tasks(&words(&["2"]), false);
+        let by_set = ekko.set_state(&words(&["@2", "done"]), false);
+
+        for result in [by_check, by_set] {
+            let Err(EkkoError::Blocked(blocked)) = &result else {
+                panic!("expected BLOCKED, got {result:?}")
+            };
+            assert_eq!(blocked, &vec![(2, vec![1])]);
+            assert_eq!(result.unwrap_err().code(), "BLOCKED");
+        }
+        assert!(!ekko.storage.get().unwrap()[&2].is_complete.unwrap_or(false), "it closed anyway");
+
+        cleanup(&dir);
+    }
+
+    /// `--force` completes it anyway and says what it pushed past. The
+    /// dependency stays recorded, so the board keeps naming what the task
+    /// was waiting on for as long as that stays open: the override leaves a
+    /// trace instead of erasing the reason it was needed.
+    #[test]
+    fn force_completes_a_blocked_task_and_reports_what_it_overrode() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["blocked"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        let Outcome::Check { checked, overridden, .. } =
+            ekko.check_tasks(&words(&["2"]), true).unwrap()
+        else {
+            panic!("expected a Check outcome")
+        };
+
+        assert_eq!(checked, vec![2]);
+        assert_eq!(overridden, vec![(2, vec![1])]);
+        assert!(ekko.storage.get().unwrap()[&2].is_complete.unwrap_or(false));
+        assert_eq!(ekko.blocker_map().unwrap().get(&2), Some(&vec![1]), "the trace was erased");
+
+        cleanup(&dir);
+    }
+
+    /// One blocked task stops the whole command, the way one invalid id
+    /// already does. Completing the rest and refusing one would leave the
+    /// caller to work out which half landed.
+    #[test]
+    fn one_blocked_task_stops_the_whole_command() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["free"])).unwrap();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["blocked"])).unwrap();
+        ekko.set_blocked_by(&words(&["@3", "2"])).unwrap();
+
+        let result = ekko.set_state(&words(&["@1", "@3", "done"]), false);
+
+        assert!(matches!(result, Err(EkkoError::Blocked(_))), "{result:?}");
+        assert!(!ekko.storage.get().unwrap()[&1].is_complete.unwrap_or(false), "half the command landed");
+
+        cleanup(&dir);
+    }
+
+    /// Only completing is refused. Starting, pausing, cancelling and
+    /// reopening claim nothing about the work being finished. And a task
+    /// already done stays retry-safe: `--set done` again after a forced
+    /// completion is a no-op, not a fresh refusal.
+    #[test]
+    fn only_completing_is_refused() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["blocked"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        for state in ["progress", "paused", "cancelled", "unstarted"] {
+            ekko.set_state(&words(&["@2", state]), false)
+                .unwrap_or_else(|e| panic!("--set {state} was refused: {e}"));
+        }
+
+        ekko.set_state(&words(&["@2", "done"]), true).unwrap();
+        ekko.set_state(&words(&["@2", "done"]), false).expect("a retry after --force was refused");
+        ekko.check_tasks(&words(&["2"]), false).expect("reopening was refused");
+
+        cleanup(&dir);
+    }
+
+    /// What `--force` overrode is said on the same line as the completion,
+    /// because it is part of what happened to that task.
+    #[test]
+    fn a_forced_completion_says_so() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["blocked"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        let outcome = ekko.set_state(&words(&["@2", "done"]), true).unwrap();
+        let mut buffer: Vec<u8> = Vec::new();
+        {
+            let mut renderer = Renderer::new(Painter::forced(false), Config::default(), &mut buffer);
+            outcome.render(&mut renderer);
+        }
+        let rendered = String::from_utf8(buffer).unwrap();
+
+        assert!(rendered.contains("Checked task: 2 (blockers overridden: 1)"), "{rendered:?}");
 
         cleanup(&dir);
     }

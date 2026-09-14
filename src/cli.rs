@@ -50,13 +50,20 @@ pub struct Cli {
     pub archive: bool,
     #[arg(long, short = 'b')]
     pub begin: bool,
-    /// Record what an item waits on: the target id prefixed with `@`, then
-    /// the ids it should wait for. Replaces whatever it waited on before.
+    /// Record what an item is blocked by: the blocked id prefixed with `@`,
+    /// then the ids blocking it. Replaces whatever blocked it before, and no
+    /// ids clears it. A blocked task cannot be completed, short of `--force`.
     #[arg(long = "blocked-by", num_args = 0.., value_name = "IDS")]
     pub blocked_by: Option<Vec<String>>,
 
     #[arg(long, short = 'c')]
     pub check: bool,
+    /// Complete a task that is still blocked by open items. Only means
+    /// something beside `--check` or `--set`, and deliberately has no short
+    /// form: `-f` is `--find`, and overriding a rule should take typing the
+    /// word.
+    #[arg(long)]
+    pub force: bool,
     #[arg(long)]
     pub clear: bool,
     #[arg(long, short = 'y')]

@@ -37,7 +37,7 @@ Added by Ekko, each of them invisible until you use it:
 - **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
 - **Projects**: one board per project via `--project`, with the filesystem as the registry
 - **Phases and `--roadmap`**: a project's roadmap, read backwards as history and forwards as a plan
-- **Dependencies**: `--blocked-by`, and `--list ready` for what can actually be started
+- **Dependencies**: `--blocked-by`, so a task cannot be completed while what blocks it is open, and `--list ready` for what can actually be started
 - **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
 - **Stable `uid`s**, accepted anywhere a display id is, because display ids get recycled and `--restore` hands out new ones
 - **`--since`**, reading only what changed rather than the whole board every time
@@ -100,7 +100,7 @@ $ ekko --help
       --archive, -a       Display archived items
       --attached-to <IDS> Attach a note to the task it explains
       --begin, -b         Start/pause task
-      --blocked-by <IDS>  Record what an item waits on
+      --blocked-by <IDS>  Record what an item is blocked by
       --calendar          Show the current month
       --check, -c         Check/uncheck task
       --clear             Delete all checked items
@@ -110,6 +110,7 @@ $ ekko --help
       --destroy           Move the project named by --project to the trash
       --edit, -e          Edit item description
       --find, -f          Search for items
+      --force             Complete a task even while it is blocked
       --help, -h          Display help message
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes
@@ -142,6 +143,7 @@ $ ekko --help
       $ ekko --begin 2 3
       $ ekko --calendar
       $ ekko --check 1 2
+      $ ekko --check 2 --force
       $ ekko --clear
       $ ekko --copy 1 2 3
       $ ekko --delete 4
@@ -215,7 +217,7 @@ Five things are on screen at once, and each is there because the first version w
 - **The calendar**, in its own zone.
 - **What just changed**, briefly, in place of the status line. A picker puts navigation and mutation on neighbouring keys, so a write that leaves no trace is a write you cannot notice you made.
 
-`Enter` and `Tab` refuse to touch a task that is **done or cancelled**. Those are terminal, and setting `progress` clears `isComplete` by definition -- so a stray keypress used to destroy the fact that something was finished, which is exactly what happened to two items the hour this mode first shipped. Changing one is `--set`, deliberately.
+`Enter` and `Tab` refuse to touch a task that is **done or cancelled**. Those are terminal, and setting `progress` clears `isComplete` by definition -- so a stray keypress used to destroy the fact that something was finished, which is exactly what happened to two items the hour this mode first shipped. Changing one is `--set`, deliberately. `Enter` also refuses a task that is still blocked, and says by what: completing one anyway takes `--force`, typed in the CLI, never a keypress in a picker.
 
 The split is the point rather than decoration. Notes hold the reasoning worth keeping, which is exactly why they run long -- on a real board they took 43 of 85 item lines. [Folding](#folded-notes) copes with that by truncating to fit one line; a picker does not have to truncate anything, because the list holds one line per item and the whole text lives in the preview, on demand. The long note stays long and stops being a wall.
 
@@ -463,11 +465,11 @@ To read a folded note in full, pipe the output (`ekko | less`) or use `--json`, 
 
 ### Dependencies
 
-Record what an item waits on, and the board stops pretending everything is equally startable:
+Record what an item is blocked by, and the board stops pretending everything is equally startable -- or finishable:
 
 ```
 $ ekko --blocked-by @3 1 2
- ✔  Item 3 now waits on: 1, 2
+ ✔  Item 3 is now blocked by: 1, 2
 ```
 
 ```
@@ -490,10 +492,28 @@ Four properties, each of them a consequence rather than a feature:
 
 ```
 $ ekko --blocked-by @3
- ✔  Item 3 waits on nothing
+ ✔  Item 3 is no longer blocked
 ```
 
 That matters more than it looks. A dependency you cannot undo does not stay a mistake quietly — it becomes a false statement the board carries as if it were data, and only a person reading the description will ever notice.
+
+**A blocked task cannot be completed.** `--check` and `--set done` refuse it, and say what is still open and the ways out:
+
+```
+$ ekko --check 3
+ ✖  Cannot complete task 3: blocked by 1, 2 (open). Finish or cancel them, clear the dependency with --blocked-by @3, or use --force
+```
+
+Until this, a dependency was advice: `--list ready` left the task out, and `--check` closed it anyway, which left a board showing `✔` beside the marker naming what the task was still waiting for. Some things are deliberately never refused -- starting, pausing, cancelling and reopening -- because none of them claims the work is finished. A task that is already done is not refused either, so `--set @3 done` stays safe to retry. And one blocked task stops the whole command before anything is written, the way an invalid id already does, rather than completing the rest and leaving you to work out which half landed.
+
+When the world got there first -- the blocker was worked around some other way, and the board just needs to catch up -- `--force` completes it anyway, and says so on the same line:
+
+```
+$ ekko --check 3 --force
+ ✔  Checked task: 3 (blockers overridden: 1, 2)
+```
+
+The dependency is left in place, so the task shows `✔` beside `⇠ 1, 2` for as long as those stay open: the override leaves a trace instead of erasing the reason it was needed. `--force` has no short form, since `-f` is `--find` and overriding a rule should take typing the word, and on any command other than `--check` and `--set` it is an error (`FORCE_WITHOUT_COMPLETING`) rather than a flag quietly accepted and ignored. `--ui` never forces: a picker is exactly where a key gets pressed without deliberation.
 
 There is no picture yet, on purpose. The data is what a drawing would need anyway, and whether a drawing earns its keep is easier to answer after living with `--list ready` for a while than before.
 
@@ -782,7 +802,7 @@ The by default supported listing attributes, together with their respective alia
 - `overdue` - Tasks whose due date has passed and that are not yet complete.
 - `cancelled`, `canceled` - Tasks that were dropped rather than finished.
 - `ready` - Open tasks with nothing outstanding blocking them.
-- `blocked` - Items still waiting on something.
+- `blocked` - Items blocked by something still open.
 
 A board can be named either bare or in the `@name` form the board view prints, so `--list release` and `--list @release` are equivalent. A term matching neither a board nor an attribute above is an error (`UNKNOWN_LIST_TERM`), not a silent no-op.
 
