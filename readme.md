@@ -46,6 +46,7 @@ Added by Ekko, each of them invisible until you use it:
 - **A `flock` lock and atomic writes**, so concurrent invocations queue rather than lose updates
 - **Stash and trash**: put finished work out of the way and keep it reachable, or remove it with 30 days to change your mind
 - **`--ui`**, an interactive picker in the terminal, where a long note is one line in the list and whole in the preview
+- **An agent frontend**: `ekko --mcp`, a Model Context Protocol server with the resume view, the work order and structured writes, packaged as a Claude Code plugin that starts each session with the board in context
 - **A reproducible `nix develop` shell**, and a flake package you can `nix run` without cloning
 
 <div align="center">
@@ -59,6 +60,7 @@ Added by Ekko, each of them invisible until you use it:
 - [Install](#install)
 - [Usage](#usage)
 - [Views](#views)
+- [Agents](#agents)
 - [Configuration](#configuration)
 - [Flight Manual](#flight-manual)
 - [Development](#development)
@@ -266,6 +268,52 @@ Inside a project with declared phases, `--roadmap` shows the project's way throu
 Anything created in the project without `--phase` sits at the project root, outside the roadmap, and is counted at the foot rather than guessed into a phase. See [Phases and the roadmap](#phases-and-the-roadmap).
 
 This was `--path` until it was renamed. The old name still parses, only to answer with this one (`RENAMED_FLAG`), so a script or an agent that remembers it is told where the feature went rather than that it is gone.
+
+## Agents
+
+Ekko has a frontend for each kind of reader: the board and `--ui` for a person, and for an agent, a server of its own.
+
+### The MCP server
+
+`ekko --mcp` serves the board over the [Model Context Protocol](https://modelcontextprotocol.io) on stdin and stdout, until stdin closes. It speaks the 2026-07-28 revision (per-request `_meta`, `server/discover`) and the handshake revisions before it (`initialize`, back to 2024-11-05).
+
+| tool | what it does |
+|---|---|
+| `prime` | the resume view: in progress, ready in order, blocked, recent notes, what needs attention, and a cursor |
+| `next` | what to take up next, best first |
+| `context` | one item with its blockers, what it blocks and its notes, in full |
+| `search` | items matching a text and/or the `--list` filters |
+| `changes` | what was written since a cursor, including items stashed or trashed since |
+| `roadmap`, `projects` | as the flags of the same name |
+| `create` | a task or a note, with every field apart from the text, relations included |
+| `set_state`, `force_state` | idempotent state changes; `force_state` overrides the dependency rule, and is a tool of its own so it can be permissioned apart |
+| `edit` | the whole text, one exact replacement, or an append -- optionally conditioned on the `updatedAt` last read |
+| `update` | boards, priority, due date, phase, star |
+| `link` | `blocked_by`, or `attached_to` |
+| `batch` | several of the writes above in one write, all or nothing, with `$1`, `$2` naming the items earlier operations created |
+| `stash`, `trash` | put items away, or bring them back |
+
+There is no `clear` and no `destroy`: an agent that needs either asks the user to run it.
+
+A write that is wrong in any way is refused and writes nothing, and the refusal comes back as a tool result reading `CODE: message` -- the codes `--json` uses, plus `INVALID_INPUT` for an argument that makes no sense, `STALE` for an edit made against an older version of the item, and `EDIT_MATCH` for a replacement whose text is not there exactly once. A misspelled field is refused rather than ignored: an ignored `blockedBy` would create the task and silently drop the dependency. Text is never read for `@board`, `p:N` or `d:DATE` the way the CLI reads a description, so prose keeps every word.
+
+Reads come back as plain text and writes as compact JSON, never coloured, whatever `FORCE_COLOR` says.
+
+### The plugin
+
+[`plugin/`](plugin/.claude-plugin/plugin.json) is a Claude Code plugin: the MCP server, and a SessionStart hook running `ekko --prime`, so a session starts with the board's resume view in context. The flake builds it as `packages.plugin` with the binary pinned by store path. Placed as a skills-directory plugin, at `~/.claude/skills/ekko/.claude-plugin/plugin.json`, it loads with no marketplace; `claude --plugin-dir plugin` loads it for one session. Its tools are named `mcp__plugin_ekko_ekko__<tool>` for permissions.
+
+It replaced the `/ekko` skill, which sat in every conversation whether the board was used or not.
+
+### Reading the board as an agent
+
+The same views are flags, for scripts, for the hook, and for a person curious what an agent sees:
+
+- `--prime` is the resume view. With nothing else choosing a board, it reads the project named after the repository it runs in -- a session in `~/src/minium` primes the `minium` project -- and its first line says which board it read and why.
+- `--next [N]` is the order to take work up in: work in progress first, then earlier phases (the project root after every phase), higher priority, the nearer deadline, more open work waiting downstream, and the older item. Each key only breaks the ties the ones before it leave.
+- `--context <id|uid>` is one item and everything one hop away from it.
+
+Every line of these views starts with the item's id, and each note sits directly under the task it explains. [`evals/resume/run.sh`](evals/resume/run.sh) measures how much of a resume each way of reading a board delivers, against ground truth computed independently with `jq`: on the boards it was run against, `--prime` delivered every task in progress, every ready task and every attached reason in 2-6 KB, where the board view took 77-99 KB and `--list ready` delivered none of the reasons.
 
 ## Configuration
 
@@ -867,7 +915,7 @@ $ ekko --json --task @coding Review PR #42
 {"ok":true,"command":"task","item":{"_id":7,"_date":"Mon Aug 24 2026","_timestamp":1787532527693,"description":"Review PR #42","isStarred":false,"boards":["@coding"],"_isTask":true,"isComplete":false,"inProgress":false,"priority":1}}
 ```
 
-On success, the object always has `ok: true` and a `command` field naming what ran, plus whatever data that command produces (a `create`d/`edit`ed/`move`d/`priority`-updated item's full record, id lists for `check`/`begin`/`star`, board- or date-grouped items for the view commands, etc). On failure it's `ok: false` with an `error` message and a stable `code` (`MISSING_ID`, `INVALID_ID`, `MISSING_DESC`, `INVALID_IDS_NUMBER`, `INVALID_PRIORITY`, `MISSING_BOARDS`, `UNKNOWN_LIST_TERM`, `INVALID_DUE_DATE`, `MISSING_STATE`, `UNKNOWN_STATE`, `INVALID_CUSTOM_APP_DIR`, `MISSING_EKKO_DIR_FLAG_VALUE`, `LOCK_TIMEOUT`) to branch on instead of matching on the message text -- the process also exits `1`, same as without `--json`.
+On success, the object always has `ok: true` and a `command` field naming what ran, plus whatever data that command produces (a `create`d/`edit`ed/`move`d/`priority`-updated item's full record, id lists for `check`/`begin`/`star`, board- or date-grouped items for the view commands, etc). On failure it's `ok: false` with an `error` message and a stable `code` (`MISSING_ID`, `INVALID_ID`, `MISSING_DESC`, `INVALID_IDS_NUMBER`, `INVALID_PRIORITY`, `MISSING_BOARDS`, `UNKNOWN_LIST_TERM`, `INVALID_DUE_DATE`, `MISSING_STATE`, `UNKNOWN_STATE`, `BLOCKING_CYCLE`, `BLOCKED`, `COMPLETED_DEPENDENTS`, `ALREADY_DONE`, `PHASE_ORDER`, `FORCE_WITHOUT_COMPLETING`, `ATTACH_NOT_A_NOTE`, `ATTACH_TARGET_NOT_A_TASK`, `RENAMED_FLAG`, `INVALID_CUSTOM_APP_DIR`, `MISSING_EKKO_DIR_FLAG_VALUE`, `LOCK_TIMEOUT`) to branch on instead of matching on the message text -- the process also exits `1`, same as without `--json`.
 
 A couple of things worth knowing:
 
