@@ -45,7 +45,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Errors instead of silence** when a filter term matches nothing
 - **A `flock` lock and atomic writes**, so concurrent invocations queue rather than lose updates
 - **Stash and trash**: put finished work out of the way and keep it reachable, or remove it with 30 days to change your mind
-- **`--ui`**, an interactive picker in the terminal, where a long note is one line in the list and whole in the preview
+- **`--ui`**, the board as a dashboard in the shape of VS Code, live while other terminals and agents write to it
 - **An agent frontend**: `ekko --mcp`, a Model Context Protocol server with the resume view, the work order and structured writes, packaged as a Claude Code plugin that starts each session with the board in context
 - **A reproducible `nix develop` shell**, and a flake package you can `nix run` without cloning
 
@@ -139,7 +139,7 @@ $ ekko --help
       --ekko-dir          Define a custom ekko directory
       --task, -t          Create task
       --timeline, -i      Display timeline view
-      --ui                Interactive mode: a picker in the terminal
+      --ui                Interactive mode: the board as a dashboard
       --version, -v       Display installed version
 
     Examples
@@ -197,44 +197,52 @@ In order to display all items in a timeline view, based on their creation date, 
 
 ### Interactive Mode
 
-`ekko --ui` opens a picker in the terminal: the items on the left, whatever is selected in full on the right, and a prompt that filters as you type.
+`ekko --ui` opens the board as a dashboard in the shape of VS Code's current look: every part is a box with rounded corners standing slightly apart from its neighbours, titles and tabs are pills, a command centre runs across the top and a status bar under everything. The colours were measured off VS Code's Dark Modern theme on a real screen rather than picked to resemble it.
 
 ```
-┌─────────────────────── Results ───────────────────────┐  ┌─────────────────────── Preview ────────────────────────┐
-│@wayland [2/3]                                         │  │ ● note                                                 │
-│    1. ✔ Vendor wlroots                                │  │                                                        │
-│    2. … Damage tracking                               │  │ Damage is in surface coordinates, not output            │
-│>     3. ● Damage is in surface coordinates, not output│  │ coordinates -- getting this backwards is why the first  │
-│    4. ✔ Ship the package                              │  │ attempt flickered                                      │
-│@docs [0/1]                                            │  │                                                        │
-│    5. ☐ Write the readme                              │  │ boards   @wayland                                      │
-│                                                       │  │ attached to a task                                     │
-└───────────────────────────────────────────────────────┘  └────────────────────────────────────────────────────────┘
-┌─────────────────────── Prompt ────────────────────────┐  ┌─────────────────── August 2026 ────────────────────────┐
-│ >                                               5 / 5 │  │ Su Mo Tu We Th Fr Sa                                   │
-└───────────────────────────────────────────────────────┘  │  2  3  4  5  6  7  8                                   │
-                                                           └────────────────────────────────────────────────────────┘
- 2 done · 1 in-progress · 1 pending · 1 note
+                               / wayland                                                    [ _ ]
+╭──────────────────────────────╮╭───────────────────────────────────────────────╮╭─────────────────────────────────┬───╮
+│  Next                        ││  ▤ Board                                      ││ Explorer                     …  │ ≡ │
+│ 1 in progress · 1 ready      ││  wayland ▸ Board                              ││ ▾ wayland                  25%  │   │
+├──────────────────────────────┤│                                               ││   ▸ @wayland               1/3  │ / │
+│ … 2 Damage tracking          ││  @wayland  [1/3]                              ││   ▸ @docs                  0/1  │   │
+│ ☐ 4 Ship the package         ││    1. ✔ Vendor wlroots                        ││                                 │   │
+│                              ││    2. … Damage tracking                       ││                                 │   │
+│                              ││      3. ● Damage is in surface coordinate…    ││                                 │   │
+│                              ││    4. ☐ Ship the package             ◷ 09-30  ││                                 │   │
+│                              ││  @docs  [0/1]                                 ││ ──────────────────────────────  │   │
+│                              ││    5. ☐ Write the readme                 ⇠ 4  ││ ▾ Item                          │   │
+│                              ││                                               ││   ✔ done  #1                    │   │
+│                              ││                                               ││   Vendor wlroots                │   │
+│                              ││                                               ││   @wayland                      │   │
+│                              ││                                               ││   created Tue Sep 15 2026       │   │
+╰──────────────────────────────╯╰───────────────────────────────────────────────╯╰─────────────────────────────────┤   │
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│   │
+│  Problems 1   Output   Agent                                                                                  × ││   │
+│                                                                                                                 ││   │
+│  ⊗ Write the readme  blocked by 4  #5                                                                           ││   │
+│                                                                                                                 ││   │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯╰───╯
+  ⎇ main  ↻  ⊗ 1  ! 0  » 2 Damage tracking  ⌂ ~/Projects/wayland                                                     ○
 ```
 
-Type to filter, arrows or `Ctrl-n`/`Ctrl-p` to move, `Enter` to complete a task, `Tab` to start or pause one, `Ctrl-s` to stash it, click to select, `Esc` to leave.
+That is a terminal without a Nerd Font (`EKKO_ICONS=plain`). With one, the icons are VS Code's own codicons, and the pills and the active icon get their rounded ends.
 
-Five things are on screen at once, and each is there because the first version was missing it:
+- **Next**, on the left: what to take up next, best first, in the order `--next` gives an agent.
+- **The board**, in the editor: items grouped by board, one line each. A board's `[1/3]` counts the whole board and does not move when you filter -- otherwise the same board would report different totals depending on what you had typed.
+- **The explorer**, on the right: the project, its boards, and the selected item in full. A long note takes one line on the board and is read whole here, so it stays long without becoming a wall; [folding](#folded-notes) has to cut it to fit, and this does not.
+- **The panel**, underneath: *Problems* lists what `--prime` finds wrong with the board -- blocked work, missed dates, work completed over an open blocker, dependencies that run against the phase order -- *Output* keeps what this session did and what changed elsewhere, and *Agent* shows the text an agent starts from.
+- **The status bar**: the branch, whether the board just changed, the blocked and warning counts, the next item, the folder, and a bell for changes made elsewhere.
 
-- **Boards, with their counts.** A flat list of ninety items in id order tells you nothing about what you are looking at. The `[2/3]` is a fact about the whole board and does not move when you filter -- otherwise the same board would report different totals depending on what you had typed.
-- **A viewport that scrolls.** The first version stopped at the fold, which on a 96-item board meant 71 items you simply could not reach.
-- **The status line**, the same counts the CLI prints under the board, including `in-stash` and `in-trash`.
-- **The calendar**, in its own zone.
-- **What just changed**, briefly, in place of the status line. A picker puts navigation and mutation on neighbouring keys, so a write that leaves no trace is a write you cannot notice you made.
+The keys are VS Code's. `Ctrl+P` filters by words, `#id` or `@board`; `Ctrl+B` opens and closes the explorer, `Ctrl+Alt+B` the Next box and `Ctrl+J` the panel; `Tab` or `F6` moves between boxes; `Esc` clears the filter; `Ctrl+Q` leaves. On the board, `Enter` completes a task, `Space` starts or pauses it, `Ctrl+S` stashes it, and typing anything else starts a filter. The mouse selects, switches tabs and scrolls whatever it points at, and the three toggles beside the command centre open and close the boxes. As the terminal narrows, boxes give way in the order VS Code drops them, and below 60×16 it says what it needs instead of drawing a broken frame.
 
-`Enter` and `Tab` refuse to touch a task that is **done or cancelled**. Those are terminal, and setting `progress` clears `isComplete` by definition -- so a stray keypress used to destroy the fact that something was finished, which is exactly what happened to two items the hour this mode first shipped. Changing one is `--set`, deliberately. `Enter` also refuses a task that is still blocked, and says by what: completing one anyway takes `--force`, typed in the CLI, never a keypress in a picker.
+`Enter` and `Space` refuse to touch a task that is **done or cancelled**. Those are terminal, and setting `progress` clears `isComplete` by definition -- so a stray keypress used to destroy the fact that something was finished, which is exactly what happened to two items the hour the first version of this mode shipped. Changing one is `--set`, deliberately. `Enter` also refuses a task that is still blocked, and says by what: completing one anyway takes `--force`, typed in the CLI, never a keypress.
 
-The split is the point rather than decoration. Notes hold the reasoning worth keeping, which is exactly why they run long -- on a real board they took 43 of 85 item lines. [Folding](#folded-notes) copes with that by truncating to fit one line; a picker does not have to truncate anything, because the list holds one line per item and the whole text lives in the preview, on demand. The long note stays long and stops being a wall.
-
-Three things about how it behaves, each of them a consequence of the board being shared:
+Four things about how it behaves, each of them a consequence of the board being shared:
 
 - **It never holds the lock while idle.** A write takes the lock and releases it immediately, the same as any other command. A UI parked on the `flock` would block your other terminal and every agent -- the exact failure the lock exists to prevent, caused by the thing meant to help.
-- **It reloads after every write**, so the screen reports what landed rather than what was asked for. That costs under 10ms on a real board.
+- **It is live.** It watches the board's files and redraws when another terminal or an agent writes, keeping the same item selected, and Output and the bell say it happened. Nothing on screen goes stale while you look at it.
+- **A write names its item by uid**, so a board renumbered elsewhere since the last frame cannot turn a keypress into a write to some other item.
 - **It changes nothing about the CLI.** Interactive mode is a separate frontend on the same core and never goes through the renderer the golden tests pin, so the byte-for-byte guarantee is untouched by construction rather than by care.
 
 ### Calendar
@@ -569,7 +577,7 @@ $ ekko --check 3 --force
  ✔  Checked task: 3 (blockers overridden: 1, 2)
 ```
 
-The dependency is left in place, so the task shows `✔` beside `⇠ 1, 2` for as long as those stay open: the override leaves a trace instead of erasing the reason it was needed. `--force` has no short form, since `-f` is `--find` and overriding a rule should take typing the word, and on any command other than `--check` and `--set` it is an error (`FORCE_WITHOUT_COMPLETING`) rather than a flag quietly accepted and ignored. `--ui` never forces: a picker is exactly where a key gets pressed without deliberation.
+The dependency is left in place, so the task shows `✔` beside `⇠ 1, 2` for as long as those stay open: the override leaves a trace instead of erasing the reason it was needed. `--force` has no short form, since `-f` is `--find` and overriding a rule should take typing the word, and on any command other than `--check` and `--set` it is an error (`FORCE_WITHOUT_COMPLETING`) rather than a flag quietly accepted and ignored. `--ui` never forces: a frame full of keys is exactly where one gets pressed without deliberation.
 
 **The same rule holds from the other side.** A task that completed work is blocked by cannot be reopened -- not by `--check`, `--begin`, or `--set undone`, `progress`, `paused` or `unstarted` -- because, open again, it would be holding up work that is already done. Reviving a cancelled blocker counts as reopening it; cancelling a done one does not, since it stays closed. The refusal names the completed dependents (`COMPLETED_DEPENDENTS`), and `--force` with `--check` or `--set` reopens anyway and says what it overrode. A blocker whose dependents are still open reopens freely: live evaluation simply blocks them again.
 

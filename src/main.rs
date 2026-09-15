@@ -12,7 +12,7 @@ mod project;
 mod paths;
 mod render;
 mod storage;
-mod ui;
+mod tui;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -68,7 +68,7 @@ const HELP: &str = r#"
       --ekko-dir          Define a custom ekko directory
       --task, -t          Create task
       --timeline, -i      Display timeline view
-      --ui                Interactive mode: a picker in the terminal
+      --ui                Interactive mode: the board as a dashboard
       --version, -v       Display installed version
 
     Examples
@@ -211,7 +211,7 @@ fn main() -> ExitCode {
     // frontend, not a command. It produces no `Outcome` because it is not
     // one answer to one question -- it takes the terminal and stays.
     if cli.ui {
-        return match ui::run(&ekko) {
+        return match tui::run(&ekko, &location, &board_label, &home_dir, &cwd) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => finish_with_error(&err, json_mode, &home_dir),
         };
