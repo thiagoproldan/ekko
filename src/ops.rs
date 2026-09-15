@@ -161,6 +161,29 @@ fn boards(names: &[String]) -> Vec<String> {
     if named.is_empty() { vec!["My Board".to_string()] } else { remove_duplicates(named) }
 }
 
+/// How a refusal names the items it involves.
+///
+/// An item already on the board is its display id. One this draft created
+/// exists nowhere -- a refusal writes nothing -- so the id it held in the
+/// draft would name nothing, or worse, whatever takes that number next. It is
+/// named by the operation that created it instead, the way `$N` refers to it.
+pub struct Names {
+    existing: std::collections::HashSet<u32>,
+    created: Vec<Option<u32>>,
+}
+
+impl Names {
+    pub fn name(&self, id: u32) -> String {
+        if self.existing.contains(&id) {
+            return id.to_string();
+        }
+        match self.created.iter().position(|created| *created == Some(id)) {
+            Some(at) => format!("${} (from operation {})", at + 1, at + 1),
+            None => "the new item".to_string(),
+        }
+    }
+}
+
 /// A board being written: the lock, what storage held when it was taken, and
 /// the copy every operation changes.
 pub struct Draft<'a> {
@@ -187,6 +210,11 @@ impl<'a> Draft<'a> {
         let data = ekko.storage.get()?;
         let phases = ekko.storage.get_phases()?;
         Ok(Draft { ekko, _lock: lock, before: data.clone(), data, phases, created: Vec::new() })
+    }
+
+    /// How a refusal of this draft should name its items; see `Names`.
+    pub fn names(&self) -> Names {
+        Names { existing: self.before.keys().copied().collect(), created: self.created.clone() }
     }
 
     fn resolve(&self, reference: &Ref) -> Result<u32, EkkoError> {
@@ -551,6 +579,25 @@ mod tests {
         assert!(matches!(bad_ref, Err(EkkoError::InvalidInput(_))));
 
         assert!(ekko.storage.get().unwrap().is_empty(), "a refused batch wrote something");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A refusal names an item on the board by its id, and one the refused
+    /// write would have created -- which exists nowhere -- by the operation
+    /// that created it, never by the number it held in the draft.
+    #[test]
+    fn a_refusal_names_what_it_would_have_created_by_operation() {
+        let (ekko, dir) = board("names");
+        batch(&ekko, &[json!({"op": "create", "text": "on the board"})]).unwrap();
+
+        let mut draft = Draft::open(&ekko).unwrap();
+        draft.apply(&op(json!({"op": "create", "text": "drafted"}))).unwrap();
+        let names = draft.names();
+        assert_eq!(names.name(1), "1");
+        assert_eq!(names.name(2), "$1 (from operation 1)");
+        assert_eq!(names.name(3), "the new item");
+        drop(draft);
 
         std::fs::remove_dir_all(&dir).ok();
     }

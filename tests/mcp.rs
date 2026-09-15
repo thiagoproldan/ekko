@@ -82,10 +82,12 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
             call(5, "prime", json!({})),
             call(6, "create", json!({"text": "x", "blockedBy": [1]})),
             request(7, "ping", json!({})),
+            call(8, "create", json!({"text": "waits on the first", "blocked_by": [1]})),
+            call(9, "set_state", json!({"items": [2], "state": "done"})),
         ],
     );
 
-    assert_eq!(replies.len(), 7, "a notification was answered, or a request was not: {replies:?}");
+    assert_eq!(replies.len(), 9, "a notification was answered, or a request was not: {replies:?}");
 
     let init = &replies["1"]["result"];
     assert_eq!(init["protocolVersion"], "2025-06-18");
@@ -105,6 +107,17 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
     // together -- so the refusal names the batch, not one operation.
     assert_eq!(replies["4"]["result"]["isError"], true);
     assert!(text(&replies["4"]).starts_with("BLOCKED: the batch as a whole was refused"), "{}", text(&replies["4"]));
+    // The items it would have created exist nowhere, so they are named by
+    // operation rather than by the ids they held in the draft -- and the way
+    // out is named in tools, not in CLI flags the agent does not have.
+    let refusal = text(&replies["4"]);
+    assert!(refusal.contains("$2 (from operation 2) is blocked by $1 (from operation 1)"), "{refusal}");
+    assert!(!refusal.contains("--"), "{refusal}");
+
+    let blocked = text(&replies["9"]);
+    assert!(blocked.starts_with("BLOCKED: Cannot complete: 2 is blocked by 1, still open."), "{blocked}");
+    assert!(blocked.contains("with link") && blocked.contains("force_state"), "{blocked}");
+    assert!(!blocked.contains("--"), "{blocked}");
 
     let prime = text(&replies["5"]);
     assert!(prime.contains("   1. write the server for @agent, p:3 is just text"), "{prime}");

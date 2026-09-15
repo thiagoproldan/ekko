@@ -82,8 +82,13 @@ struct ToolError {
 
 impl From<EkkoError> for ToolError {
     fn from(error: EkkoError) -> Self {
-        ToolError { code: error.code(), message: error.to_string() }
+        ToolError { code: error.code(), message: agent_message(&error, &|id| id.to_string()) }
     }
+}
+
+/// A refusal of a draft, with its items named the way `ops::Names` names them.
+fn refusal(error: &EkkoError, names: &ops::Names) -> ToolError {
+    ToolError { code: error.code(), message: agent_message(error, &|id| names.name(id)) }
 }
 
 fn invalid(message: impl Into<String>) -> ToolError {
@@ -320,16 +325,25 @@ fn batch(ekko: &Ekko, ops: Value) -> Result<String, ToolError> {
         match draft.apply(op) {
             Ok(ids) => touched.push(ids),
             Err(error) => {
+                let refused = refusal(&error, &draft.names());
                 return Err(ToolError {
-                    code: error.code(),
-                    message: format!("operation {} was refused, and nothing in the batch was written: {error}", at + 1),
-                })
+                    code: refused.code,
+                    message: format!(
+                        "operation {} was refused, and nothing in the batch was written: {}",
+                        at + 1,
+                        refused.message
+                    ),
+                });
             }
         }
     }
-    let committed = draft.commit(false).map_err(|error| ToolError {
-        code: error.code(),
-        message: format!("the batch as a whole was refused, and nothing was written: {error}"),
+    let names = draft.names();
+    let committed = draft.commit(false).map_err(|error| {
+        let refused = refusal(&error, &names);
+        ToolError {
+            code: refused.code,
+            message: format!("the batch as a whole was refused, and nothing was written: {}", refused.message),
+        }
     })?;
     let results: Vec<Value> = touched
         .iter()
@@ -344,8 +358,12 @@ fn write(
     apply: impl FnOnce(&mut Draft) -> Result<Vec<u32>, EkkoError>,
 ) -> Result<String, ToolError> {
     let mut draft = Draft::open(ekko)?;
-    let ids = apply(&mut draft)?;
-    let committed = draft.commit(force)?;
+    let ids = match apply(&mut draft) {
+        Ok(ids) => ids,
+        Err(error) => return Err(refusal(&error, &draft.names())),
+    };
+    let names = draft.names();
+    let committed = draft.commit(force).map_err(|error| refusal(&error, &names))?;
     let items: Vec<Value> = ids.iter().map(|id| ops::written(&committed.data, *id)).collect();
     let mut reply = json!({"ok": true, "items": items});
     let pairs = |pairs: &[(u32, Vec<u32>)], key: &str| {
@@ -358,6 +376,95 @@ fn write(
         reply["reopenedOver"] = pairs(&committed.reopened, "dependents");
     }
     Ok(reply.to_string())
+}
+
+/// A refusal worded for an agent.
+///
+/// The terminal message names the CLI flags that resolve it -- `--blocked-by`,
+/// `--force` -- which an agent over MCP does not have; this names the tools
+/// instead, and leaves a command only where the step is the user's to take.
+/// Every item is named through `name`, so one a refused write would have
+/// created is spoken of by the operation that created it: the id it held in
+/// the draft names nothing, and would name whatever takes that number next.
+fn agent_message(error: &EkkoError, name: &dyn Fn(u32) -> String) -> String {
+    let list = |ids: &[u32]| ids.iter().map(|id| name(*id)).collect::<Vec<_>>().join(", ");
+    let verb = |ids: &[u32]| if ids.len() == 1 { "is" } else { "are" };
+    match error {
+        EkkoError::Blocked(found) => format!(
+            "Cannot complete: {}, still open. Finish or cancel what blocks it, clear a dependency that is wrong with link, or use force_state if the user has said the dependency was dealt with",
+            found
+                .iter()
+                .map(|(task, blockers)| format!("{} is blocked by {}", name(*task), list(blockers)))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        EkkoError::CompletedDependents(found) => format!(
+            "Cannot reopen: {}. Open again, it would be holding up work already done. Reopen that work first, clear a dependency that is wrong with link, or use force_state if the user has said so",
+            found
+                .iter()
+                .map(|(task, done)| format!("completed {} {} blocked by {}", list(done), verb(done), name(*task)))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        EkkoError::AlreadyDone(found) => format!(
+            "Cannot record that dependency: {}, and completed work cannot wait on open work. Reopen it with set_state first, or finish or cancel what would block it",
+            found
+                .iter()
+                .map(|(task, blockers)| {
+                    format!("{} is already done while {} {} still open", name(*task), list(blockers), verb(blockers))
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        EkkoError::PhaseOrder(inversion) => format!(
+            "{} is in phase {} and cannot be blocked by {} in {}, which comes after it: a phase cannot wait on a later one. If the phase order itself is wrong, reordering it is for the user (ekko --phases)",
+            name(inversion.blocked),
+            inversion.blocked_phase,
+            name(inversion.blocker),
+            inversion.blocker_phase
+        ),
+        EkkoError::BlockingCycle(waiter, blocker) if waiter == blocker => {
+            format!("{} cannot be blocked by itself", name(*waiter))
+        }
+        EkkoError::BlockingCycle(waiter, blocker) => format!(
+            "{} cannot be blocked by {}: {} is already blocked by {}, directly or through other items, and the dependency would close a cycle",
+            name(*waiter),
+            name(*blocker),
+            name(*blocker),
+            name(*waiter)
+        ),
+        EkkoError::AttachNotANote(id) => {
+            format!("Only a note can be attached, and {} is a task", name(*id))
+        }
+        EkkoError::AttachTargetNotATask(id) => {
+            format!("A note is attached to a task, and {} is a note", name(*id))
+        }
+        EkkoError::AttachTargetHasNoUid(id) => {
+            format!("{} predates uids, so nothing can point at it reliably", name(*id))
+        }
+        EkkoError::Stale { id, current } => format!(
+            "{} changed since it was read (its updatedAt is now {current}), so the edit was not made. Read it again with context and redo the edit against what it says now",
+            name(*id)
+        ),
+        EkkoError::EditMatch { id, found: 0 } => format!(
+            "{} does not contain that text, so nothing was replaced. Read it with context and quote the text exactly",
+            name(*id)
+        ),
+        EkkoError::EditMatch { id, found } => format!(
+            "That text occurs {found} times in {}, so which one to replace is ambiguous and nothing was replaced. Quote enough of the surrounding text to make it unique",
+            name(*id)
+        ),
+        EkkoError::InvalidDueDate(value) => {
+            format!("due must be a date written YYYY-MM-DD, got: {}", value.trim_start_matches("d:"))
+        }
+        EkkoError::Directory(directory::DirectoryError::UnknownProject(project)) => format!(
+            "No project named {project}; projects lists the ones that exist. Creating one is for the user (ekko --project {project} --create)"
+        ),
+        EkkoError::Directory(directory::DirectoryError::MissingProjectName) => {
+            "project is empty; leave it out to work on this session's board".to_string()
+        }
+        other => other.to_string(),
+    }
 }
 
 fn parse<T: serde::de::DeserializeOwned>(args: &mut Map<String, Value>) -> Result<T, ToolError> {
