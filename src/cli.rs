@@ -4,6 +4,21 @@
 
 use clap::Parser;
 
+/// `ekko init [<folder>] [--name <name>]`, parsed apart from the board's
+/// flags: `init` is a command word, the way git's is.
+#[derive(Parser, Debug)]
+#[command(name = "ekko init", disable_help_flag = true, disable_version_flag = true)]
+pub struct InitCli {
+    /// The folder to make a project -- the current one when absent. Inside a
+    /// git repository, the top of the repository.
+    pub folder: Option<String>,
+    /// The project's name; the folder's own when absent.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    #[arg(long, short = 'j')]
+    pub json: bool,
+}
+
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 pub struct Cli {
@@ -125,10 +140,9 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub project: Option<String>,
 
-    /// Create the project named by `--project` rather than failing when it
-    /// does not exist. Separate on purpose: creating on first use would turn
-    /// a typo into a new, empty project.
-    #[arg(long)]
+    /// Retired with the move of projects into their folders: answered with
+    /// `ekko init`, the way a renamed flag is answered with its new name.
+    #[arg(long, hide = true)]
     pub create: bool,
 
     /// Move the project named by `--project` to the trash.

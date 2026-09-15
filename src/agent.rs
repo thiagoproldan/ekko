@@ -851,25 +851,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A session opened anywhere inside a repository primes the project named
-    /// after it, and a directory with no such project matches nothing.
-    #[test]
-    fn a_repository_is_matched_to_the_project_named_after_it() {
-        let home = scratch("home");
-        crate::directory::retrieve_project_directory(&home, "minium", true).unwrap();
-        let repo = home.join("src").join("minium");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::create_dir_all(repo.join("deep").join("inside")).unwrap();
-        let elsewhere = home.join("src").join("other");
-        std::fs::create_dir_all(&elsewhere).unwrap();
-
-        let matched = crate::directory::project_named_after(&home, &repo.join("deep").join("inside"));
-        assert_eq!(matched.as_deref(), Some("minium"));
-        assert_eq!(crate::directory::project_named_after(&home, &elsewhere), None);
-
-        std::fs::remove_dir_all(&home).ok();
-    }
-
     /// Everything written at or after the cursor, put away or not, and
     /// nothing written before it.
     #[test]

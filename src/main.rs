@@ -8,6 +8,7 @@ mod json;
 mod json_output;
 mod mcp;
 mod ops;
+mod project;
 mod paths;
 mod render;
 mod storage;
@@ -24,6 +25,7 @@ use render::{Painter, Renderer};
 const HELP: &str = r#"
   Usage
     $ ekko [<options> ...]
+    $ ekko init [<folder>] [--name <name>]
 
     Options
         none              Display board view
@@ -36,9 +38,8 @@ const HELP: &str = r#"
       --clear             Delete all checked items
       --context <ID>      Show one item with its dependencies and notes
       --copy, -y          Copy item description
-      --create            Create the project named by --project
       --delete, -d        Delete item
-      --destroy           Move the project named by --project to the trash
+      --destroy           Move a project's board to the trash
       --edit, -e          Edit item description
       --find, -f          Search for items
       --force             Override the blocked-by rule: complete or reopen anyway
@@ -72,6 +73,7 @@ const HELP: &str = r#"
 
     Examples
       $ ekko
+      $ ekko init
       $ ekko --archive
       $ ekko --attached-to @16 12
       $ ekko --begin 2 3
@@ -139,6 +141,13 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // `init` is a command word, as in git, and comes first -- after `--json`
+    // at most. Anywhere else it is an ordinary word.
+    let leading_json = args.iter().take_while(|a| *a == "--json" || *a == "-j").count();
+    if args.get(leading_json).map(String::as_str) == Some("init") {
+        return run_init(&args[leading_json + 1..], leading_json > 0);
+    }
+
     let cli = match cli::Cli::try_parse_from(std::iter::once("ekko".to_string()).chain(args)) {
         Ok(cli) => cli,
         Err(e) => {
@@ -164,28 +173,6 @@ fn main() -> ExitCode {
         return mcp::run(home_dir, cwd, ekko_dir_env, project_env);
     }
 
-    // `--prime` with nothing else choosing a board looks for a project named
-    // after the repository it runs in, because it is what a session start
-    // runs: an agent opening /projects/minium wants the minium board, not the
-    // default one. Only `--prime`, never the plain board -- and its first
-    // line says which board it read and why, so the choice is never silent.
-    let matched = if cli.prime
-        && cli.project.is_none()
-        && project_env.is_none()
-        && cli.ekko_dir.is_none()
-        && ekko_dir_env.is_none()
-    {
-        directory::project_named_after(&home_dir, &cwd)
-    } else {
-        None
-    };
-    let project = cli.project.as_deref().or(project_env.as_deref()).or(matched.as_deref());
-    let board_label = match (project, matched.is_some()) {
-        (Some(name), true) => format!("project {name}, named after this directory"),
-        (Some(name), false) => format!("project {name}"),
-        (None, _) => "default board".to_string(),
-    };
-
     // Before opening anything: an old flag name gets the same answer
     // whatever board it was aimed at, and a caller should learn what the
     // flag is called now before learning, say, that a project is missing.
@@ -200,14 +187,22 @@ fn main() -> ExitCode {
         return finish_with_error(&EkkoError::ForceWithoutCompleting, json_mode, &home_dir);
     }
 
-    let ekko = match Ekko::open(
-        &home_dir,
-        &cwd,
-        cli.ekko_dir.as_deref(),
-        ekko_dir_env.as_deref(),
-        project,
-        cli.create,
-    ) {
+    // Which board: one named, the project found from the folder, or the
+    // default -- `directory::locate` has the order. A project found from the
+    // folder is named above the board, so the folder never changes what
+    // `ekko` shows without saying so.
+    let project_name = cli.project.as_deref().or(project_env.as_deref());
+    let location =
+        match directory::locate(&home_dir, &cwd, cli.ekko_dir.as_deref(), ekko_dir_env.as_deref(), project_name) {
+            Ok(location) => location,
+            Err(err) => return finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
+        };
+    let board_label = match (&location.project, location.discovered) {
+        (Some(project), true) => format!("project {}, found from this folder", project.name),
+        (Some(project), false) => format!("project {}", project.name),
+        (None, _) => "default board".to_string(),
+    };
+    let ekko = match Ekko::at(&location.dir) {
         Ok(ekko) => ekko,
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
@@ -222,7 +217,7 @@ fn main() -> ExitCode {
         };
     }
 
-    match dispatch(&cli, &ekko, project, &home_dir, &board_label) {
+    match dispatch(&cli, &ekko, location.project.as_ref(), &home_dir, &board_label) {
         Ok(outcomes) => {
             if json_mode {
                 for outcome in &outcomes {
@@ -239,9 +234,9 @@ fn main() -> ExitCode {
                     // and for --destroy, whose reply names the project it
                     // just removed -- a header above that would announce a
                     // board nobody can open any more.
-                    if let Some(name) = project {
+                    if let Some(project) = &location.project {
                         if !cli.projects && !cli.destroy && !cli.prime {
-                            r.display_project(name);
+                            r.display_project(&project.name);
                         }
                     }
                     for outcome in &outcomes {
@@ -267,7 +262,41 @@ fn renamed_flag(cli: &cli::Cli) -> Option<EkkoError> {
     if cli.path {
         return Some(EkkoError::RenamedFlag { old: "--path", new: "--roadmap" });
     }
+    // Not a rename, strictly: projects moved into their folders, and what
+    // made one is `ekko init` there now. Answered the same way, because what
+    // the caller needs is the same -- the command to use instead.
+    if cli.create {
+        return Some(EkkoError::RenamedFlag { old: "--create", new: "ekko init" });
+    }
     None
+}
+
+/// `ekko init [<folder>] [--name <name>]`: makes a folder a project -- see
+/// `project::init`.
+fn run_init(args: &[String], json_first: bool) -> ExitCode {
+    let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let init = match cli::InitCli::try_parse_from(std::iter::once("ekko init".to_string()).chain(args.iter().cloned())) {
+        Ok(init) => init,
+        Err(e) => {
+            eprint!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let json_mode = json_first || init.json;
+    let now = chrono::Local::now().timestamp_millis();
+    match project::init(&home_dir, &cwd, init.folder.as_deref(), init.name.as_deref(), now) {
+        Ok(done) => {
+            let outcome = Outcome::Init(Box::new(done));
+            if json_mode {
+                json_output::print_success(&outcome);
+            } else {
+                with_renderer(&home_dir, |r| outcome.render(r));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
+    }
 }
 
 /// Priority order copied from index.js's chain of `if (flags.x)` checks --
@@ -279,7 +308,7 @@ fn renamed_flag(cli: &cli::Cli) -> Option<EkkoError> {
 fn dispatch(
     cli: &cli::Cli,
     ekko: &Ekko,
-    project: Option<&str>,
+    project: Option<&project::Project>,
     home_dir: &Path,
     board_label: &str,
 ) -> Result<Vec<Outcome>, EkkoError> {
@@ -327,13 +356,13 @@ fn dispatch(
         // Ahead of every view and every write: whatever else the line said,
         // a --destroy line is about removing the project, and running some
         // other command first would act on something about to disappear.
-        let Some(name) = project else {
+        let Some(project) = project else {
             return Err(directory::DirectoryError::DestroyNeedsProject.into());
         };
-        return Ok(vec![ekko.destroy_project(home_dir, name, chrono::Local::now().timestamp_millis())?]);
+        return Ok(vec![ekko.destroy_project(home_dir, project, chrono::Local::now().timestamp_millis())?]);
     }
     if cli.projects {
-        return Ok(vec![Outcome::Projects(directory::list_projects(home_dir))]);
+        return Ok(vec![Outcome::Projects(project::list(home_dir))]);
     }
     if cli.archive {
         return Ok(vec![ekko.display_archive()?]);

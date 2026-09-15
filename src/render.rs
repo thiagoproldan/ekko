@@ -186,6 +186,12 @@ pub struct ProjectSummary {
     pub complete: u32,
     pub tasks: u32,
     pub notes: u32,
+    /// The folder it belongs to; absent for a legacy project not adopted yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// `here`; `missing`, when its folder no longer holds it; or `legacy`,
+    /// when it still lives under `~/.ekko/projects/` waiting for `ekko init`.
+    pub status: &'static str,
 }
 
 /// One node of the roadmap: a declared phase, how far it has got, and whether
@@ -890,7 +896,7 @@ impl<'a> Renderer<'a> {
     /// stats line treats paused and cancelled.
     pub fn display_projects(&mut self, projects: &[ProjectSummary]) {
         if projects.is_empty() {
-            self.emit("\n ", None, "No projects yet -- create one with `ekko --project <name> --create`", "");
+            self.emit("\n ", None, "No projects yet -- run `ekko init` in a folder or repository", "");
             return;
         }
         for project in projects {
@@ -901,6 +907,15 @@ impl<'a> Renderer<'a> {
                 let word = if project.notes == 1 { "note" } else { "notes" };
                 suffix.push_str(&self.painter.grey(&format!(" · {} {word}", project.notes)));
             }
+            // Where each one lives, since a name no longer says: projects are
+            // in their own folders now, anywhere on disk.
+            let place = match (project.status, project.path.as_deref()) {
+                ("missing", Some(path)) => self.painter.yellow(&format!("  missing from {path}")),
+                ("legacy", _) => self.painter.yellow("  not in a folder yet: run ekko init in its folder"),
+                (_, Some(path)) => self.painter.grey(&format!("  {path}")),
+                _ => String::new(),
+            };
+            suffix.push_str(&place);
             self.emit("\n ", None, &title, &suffix);
         }
     }
@@ -1161,6 +1176,31 @@ impl<'a> Renderer<'a> {
         let suffix = format!("{} {}", self.painter.grey(name), self.painter.grey(&format!("({held})")));
         self.success("\n", "Destroyed project:", &suffix);
         self.emit(" ", None, &self.painter.grey(&format!("moved to {}", trash.display())), "");
+    }
+
+    /// What `ekko init` did: the project and where its board is, then each
+    /// thing it did beyond that -- a legacy project moved in, a board already
+    /// in the folder kept, the board kept out of git -- so nothing it changed
+    /// goes unsaid.
+    pub fn success_init(&mut self, init: &crate::project::Initialized) {
+        let verb = if init.existing { "Already a project:" } else { "Initialized project:" };
+        let board = init.root.join(".ekko").display().to_string();
+        let suffix = format!("{} {}", init.name, self.painter.grey(&board));
+        self.success("\n", verb, &suffix);
+        if let Some(adopted) = &init.adopted {
+            let line = format!(
+                "moved its board in from {}; the old copy is in {}",
+                adopted.from.display(),
+                adopted.parked.display()
+            );
+            self.emit(" ", None, &self.painter.grey(&line), "");
+        }
+        if init.claimed {
+            self.emit(" ", None, &self.painter.grey("kept the board that was already in this folder"), "");
+        }
+        if init.excluded {
+            self.emit(" ", None, &self.painter.grey(".ekko/ is ignored by git, through .git/info/exclude"), "");
+        }
     }
 
     pub fn success_edit(&mut self, id: u32) {
@@ -1763,15 +1803,18 @@ mod tests {
     #[test]
     fn the_project_listing_says_what_each_one_holds() {
         let projects = vec![
-            ProjectSummary { name: "plan".into(), complete: 0, tasks: 15, notes: 4 },
-            ProjectSummary { name: "solo".into(), complete: 1, tasks: 2, notes: 0 },
-            ProjectSummary { name: "empty".into(), complete: 0, tasks: 0, notes: 0 },
+            ProjectSummary { name: "plan".into(), complete: 0, tasks: 15, notes: 4, path: Some("/work/plan".into()), status: "here" },
+            ProjectSummary { name: "solo".into(), complete: 1, tasks: 2, notes: 0, path: Some("/work/solo".into()), status: "here" },
+            ProjectSummary { name: "empty".into(), complete: 0, tasks: 0, notes: 0, path: None, status: "legacy" },
+            ProjectSummary { name: "gone".into(), complete: 0, tasks: 0, notes: 0, path: Some("/old/gone".into()), status: "missing" },
         ];
 
         let output = render_with(Config::default(), |r| r.display_projects(&projects));
         let plain = strip_ansi(&output);
 
-        assert!(plain.contains("plan [0/15] · 4 notes"), "{plain:?}");
+        assert!(plain.contains("plan [0/15] · 4 notes  /work/plan"), "{plain:?}");
+        assert!(plain.contains("empty [0/0]  not in a folder yet: run ekko init in its folder"), "{plain:?}");
+        assert!(plain.contains("gone [0/0]  missing from /old/gone"), "{plain:?}");
         assert!(plain.contains("solo [1/2]"), "{plain:?}");
         assert!(!plain.contains("solo [1/2] ·"), "no note tail when there are none: {plain:?}");
         assert!(plain.contains("empty [0/0]"), "{plain:?}");

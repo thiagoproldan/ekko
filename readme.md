@@ -35,7 +35,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Due dates** via `d:YYYY-MM-DD`, coloured by urgency and filterable with `--list due|overdue`
 - **A real paused state**, so "set aside" stops looking like "never started"
 - **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
-- **Projects**: one board per project via `--project`, with the filesystem as the registry
+- **Projects**: a board per folder or repository, made with `ekko init` and found from inside it the way git finds a repository
 - **Phases and `--roadmap`**: a project's roadmap, read backwards as history and forwards as a plan
 - **Dependencies**: `--blocked-by`, so a task cannot be completed while what blocks it is open, and `--list ready` for what can actually be started
 - **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
@@ -96,6 +96,7 @@ $ ekko --help
 
   Usage
     $ ekko [<options> ...]
+    $ ekko init [<folder>] [--name <name>]
 
     Options
         none              Display board view
@@ -108,9 +109,8 @@ $ ekko --help
       --clear             Delete all checked items
       --context <ID>      Show one item with its dependencies and notes
       --copy, -y          Copy item description
-      --create            Create the project named by --project
       --delete, -d        Delete item
-      --destroy           Move the project named by --project to the trash
+      --destroy           Move a project's board to the trash
       --edit, -e          Edit item description
       --find, -f          Search for items
       --force             Override the blocked-by rule: complete or reopen anyway
@@ -144,6 +144,7 @@ $ ekko --help
 
     Examples
       $ ekko
+      $ ekko init
       $ ekko --archive
       $ ekko --attached-to @16 12
       $ ekko --begin 2 3
@@ -309,7 +310,7 @@ It replaced the `/ekko` skill, which sat in every conversation whether the board
 
 The same views are flags, for scripts, for the hook, and for a person curious what an agent sees:
 
-- `--prime` is the resume view. With nothing else choosing a board, it reads the project named after the repository it runs in -- a session in `~/src/minium` primes the `minium` project -- and its first line says which board it read and why.
+- `--prime` is the resume view of the board `ekko` would show where it runs -- inside a project's folder, the project -- and its first line says which board it read and why. The MCP server resolves its board the same way, from the folder the session started in.
 - `--next [N]` is the order to take work up in: work in progress first, then earlier phases (the project root after every phase), higher priority, the nearer deadline, more open work waiting downstream, and the older item. Each key only breaks the ties the ones before it leave.
 - `--context <id|uid>` is one item and everything one hop away from it.
 
@@ -614,26 +615,35 @@ Cancelled tasks leave a phase's total, the same way they leave the percentage an
 
 ### Projects
 
-One board per project, without typing paths. `--project <name>` works against `~/.ekko/projects/<name>` instead of the default board:
+A project is a board that belongs to a folder -- a repository, or any folder you work in. Make one with `ekko init` there, the way `git init` makes a repository:
 
 ```
-$ ekko --project winwayland --create      # first time only
-$ ekko --project winwayland --task @setup Build the compositor
+$ cd ~/src/winwayland
+$ ekko init
+ ✔  Initialized project: winwayland /home/you/src/winwayland/.ekko
+  .ekko/ is ignored by git, through .git/info/exclude
+
+$ ekko --task @setup Build the compositor      # anywhere inside the folder
 
 $ ekko --projects
-  compositor [3/12] · 2 notes
-  winwayland [0/0]
+  compositor [3/12] · 2 notes  /home/you/src/compositor
+  winwayland [0/1]  /home/you/src/winwayland
 ```
 
-`EKKO_PROJECT` does the same for a whole shell, the way `EKKO_DIR` already does for a directory.
+`ekko init <folder>` does the same for another folder, and `--name <name>` gives the project a name other than the folder's. From then on:
 
-This is sugar over `--ekko-dir`, which could always point at a per-project board -- what it adds is not having to remember where each one lives. Four decisions worth knowing:
+- **`ekko` inside the folder works on the project**, at any depth, the way `git` finds its repository -- and outside every project, on the default board. The project is named above the board, so the folder never changes what `ekko` shows without saying so.
+- **A repository has one project, at its top.** `ekko init` anywhere inside a repository puts the project at the top of it, and a linked worktree shares its main checkout's project. Discovery stops at the top of the repository you are in, so a repository inside a folder project is a world of its own -- and can be a project of its own, which a plain folder inside a project cannot.
+- **The board lives beside what it is about**, in `<folder>/.ekko/`, kept out of git through the clone's own `.git/info/exclude`, which touches no tracked file. Remove that line to share the board through the repository.
+- **`--project <name>` reaches a project from anywhere**, and `EKKO_PROJECT` does the same for a whole shell. Named beats found: `--ekko-dir` > `--project` or `EKKO_PROJECT` > `EKKO_DIR` > the folder's project > the config file > `~/.ekko`.
+- **A name belongs to one project that still exists.** `ekko init` refuses a taken name and says whose it is, and an unknown name is an error, never a new empty project.
+- **A project that moved is reported as moved.** `ekko init` in its new folder records where it went; nothing is looked up and rewritten behind your back, because a read never writes.
+- **The listing says what each project holds and where it is**, counted the way the project's own stats line counts it, and marks a project its folder no longer holds.
+- **Home is not a project.** `~/.ekko/` is the default board, and `ekko init` in home is refused.
 
-- **The filesystem is the registry.** There is no list of projects kept alongside the directories, so nothing can drift out of step with what exists. `--projects` reads the directory.
-- **The listing says what each project holds**, in the same `[complete/tasks]` a board title uses and counted the way the project's own stats line counts it (cancelled tasks out of the total, stashed and trashed items not at all), with notes counted separately and shown only when there are any. Its size should be visible before you act on it, not after.
-- **An unknown name is an error**, and the message carries the fix. Creating on first use would turn a typo into a new, empty project -- the same failure as a filter that silently matches nothing.
-- **The active project is printed above the board.** `EKKO_PROJECT` set and forgotten would otherwise show a different board with nothing on screen saying so.
-- **The default board is untouched.** Projects are additional; a setup that never uses one behaves exactly as before.
+#### Projects from before
+
+Projects used to live in `~/.ekko/projects/<name>/`. They keep working with `--project <name>`, and `--projects` shows them as not in a folder yet, until `ekko init` in the folder of the same name moves the board in: copied under the board's own lock, the old copy parked in `~/.ekko/.trash/`, and `~/.ekko/projects/` removed once it is empty. If the folder already holds a board of its own, init refuses rather than merge the two. `--create` is gone, and answers with `ekko init`.
 
 #### Destroying a project
 
@@ -643,13 +653,15 @@ $ ekko --project old --destroy
   moved to /home/you/.ekko/.trash/old-1787708896450
 ```
 
+`--destroy` removes a project's board -- the one named with `--project`, or the one found from the folder -- and leaves the folder itself alone.
+
 The word is `--destroy` and not `--delete` because `--delete` already means "remove items": `--project old --delete 3` removes item 3 *inside* `old`. One word with both meanings would turn a command that lost its ids into one that destroyed the whole project, and the failure would look like success.
 
 Four things it does, each answering something the `rm -rf` it replaces got wrong:
 
 - **It takes the project's lock first**, so a concurrent write finishes instead of having its directory pulled out from under it. `flock` protects writers from each other; it never protected anything from the directory vanishing, because whoever ran `rm -rf` did not go through Ekko.
 - **It counts before it moves**, because afterwards nothing could say how big the thing was.
-- **It moves rather than deletes.** Every other removal in Ekko has somewhere to come back from; this one had nothing. Destroyed projects go to `~/.ekko/.trash/<name>-<epoch-millis>`, which sits *beside* `projects/` rather than inside it -- inside would make every destroyed project show up in `--projects` until a filter hid it, and that filter would reserve `.trash` as a name nobody could give a project. The timestamp is what lets destroy, recreate and destroy again keep both copies. Nothing empties the trash for you; `mv` a directory back into `~/.ekko/projects/` to restore it.
+- **It moves rather than deletes.** Every other removal in Ekko has somewhere to come back from; this one had nothing. A destroyed project's board goes to `~/.ekko/.trash/<name>-<epoch-millis>`, and the project is forgotten. The timestamp is what lets destroy, init again and destroy again keep both copies. Nothing empties the trash for you; to restore one, move it back into its folder as `.ekko/` and run `ekko init` there.
 - **It does not ask.** No command in Ekko prompts, and one that did would break every script and agent driving it. The count in the reply is the confirmation, and the trash is the safety net.
 
 One race is left on purpose: a second process already blocked on the lock will acquire it *after* the move and write into the trashed copy rather than a live project. Nothing is lost -- the writes land somewhere no longer listed. Closing it would need a tombstone protocol for the case of two processes racing on one project at the moment it is destroyed.

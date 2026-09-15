@@ -53,12 +53,13 @@ Each session starts with the board's prime already in context -- in progress, re
 - trash is recoverable for 30 days and still needs the user's consent. For work decided against, set_state cancelled keeps the record.
 - Refusals come back as CODE: message. Branch on the code; nothing was written.";
 
-/// What a call without `project` works on, settled once when the server starts.
+/// Where calls find their board: the folder the server was started in, and
+/// its environment -- the same way `ekko` typed in that folder would.
 pub struct Server {
     home: PathBuf,
+    cwd: PathBuf,
     ekko_dir_env: Option<String>,
-    project: Option<String>,
-    matched: bool,
+    project_env: Option<String>,
 }
 
 struct RpcError {
@@ -115,15 +116,7 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
 
 impl Server {
     pub fn new(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>) -> Self {
-        // The same choice `--prime` makes at a session start, so the prime in
-        // context and the tools answer about the same board.
-        let matched = if project_env.is_none() && ekko_dir_env.is_none() {
-            directory::project_named_after(&home, &cwd)
-        } else {
-            None
-        };
-        let is_match = matched.is_some();
-        Server { home, ekko_dir_env, project: project_env.or(matched), matched: is_match }
+        Server { home, cwd, ekko_dir_env, project_env }
     }
 
     /// One incoming line to at most one reply: notifications and stray
@@ -209,36 +202,39 @@ impl Server {
         })
     }
 
-    fn open(&self, project: Option<&str>) -> Result<Ekko, EkkoError> {
-        let project = project.or(self.project.as_deref());
-        Ekko::open(&self.home, &self.home, None, self.ekko_dir_env.as_deref(), project, false)
+    /// The board one call works on, resolved afresh each time: the same
+    /// session start `--prime` ran from, and a project made with `ekko init`
+    /// mid-session is the one the next call sees.
+    fn open(&self, project: Option<&str>) -> Result<(Ekko, directory::Location), EkkoError> {
+        let name = project.or(self.project_env.as_deref());
+        let location = directory::locate(&self.home, &self.cwd, None, self.ekko_dir_env.as_deref(), name)?;
+        Ok((Ekko::at(&location.dir)?, location))
     }
 
-    fn label(&self, project: Option<&str>) -> String {
-        match (project, self.project.as_deref()) {
-            (Some(name), _) => format!("project {name}"),
-            (None, Some(name)) if self.matched => format!("project {name}, named after this directory"),
-            (None, Some(name)) => format!("project {name}"),
-            (None, None) => "default board".to_string(),
+    fn label(location: &directory::Location) -> String {
+        match (&location.project, location.discovered) {
+            (Some(project), true) => format!("project {}, found from this folder", project.name),
+            (Some(project), false) => format!("project {}", project.name),
+            (None, _) => "default board".to_string(),
         }
     }
 
     fn tool(&self, name: &str, args: &mut Map<String, Value>) -> Result<String, ToolError> {
         if name == "projects" {
             finish(args)?;
-            return Ok(render(&self.home, &Outcome::Projects(directory::list_projects(&self.home))));
+            return Ok(render(&self.home, &Outcome::Projects(crate::project::list(&self.home))));
         }
         let project = match args.remove("project") {
             None | Some(Value::Null) => None,
             Some(Value::String(name)) => Some(name),
             Some(_) => return Err(invalid("project must be a string")),
         };
-        let ekko = self.open(project.as_deref())?;
+        let (ekko, location) = self.open(project.as_deref())?;
 
         match name {
             "prime" => {
                 finish(args)?;
-                Ok(agent::prime(&ekko, &self.label(project.as_deref()))?.text())
+                Ok(agent::prime(&ekko, &Self::label(&location))?.text())
             }
             "next" => {
                 let limit = take(args, "limit", Value::as_u64, "a positive integer")?;
@@ -458,7 +454,7 @@ fn agent_message(error: &EkkoError, name: &dyn Fn(u32) -> String) -> String {
             format!("due must be a date written YYYY-MM-DD, got: {}", value.trim_start_matches("d:"))
         }
         EkkoError::Directory(directory::DirectoryError::UnknownProject(project)) => format!(
-            "No project named {project}; projects lists the ones that exist. Creating one is for the user (ekko --project {project} --create)"
+            "No project named {project}; projects lists the ones that exist. A project is made by the user, with ekko init in its folder"
         ),
         EkkoError::Directory(directory::DirectoryError::MissingProjectName) => {
             "project is empty; leave it out to work on this session's board".to_string()

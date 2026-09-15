@@ -114,6 +114,54 @@ fn an_old_flag_name_is_answered_with_the_new_one() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// `ekko init` makes a folder a project, and from then on `ekko` anywhere
+/// inside that folder works on the project, while outside it works on the
+/// default board. The old way of making a project answers with the new one.
+#[test]
+fn init_makes_a_folder_a_project_that_ekko_finds_from_inside_it() {
+    let home = temp_ekko_dir();
+    let app = home.join("work").join("app");
+    let deep = app.join("src");
+    let elsewhere = home.join("elsewhere");
+    for dir in [&deep, &elsewhere] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let ekko = |cwd: &PathBuf, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &home)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .output()
+            .expect("failed to run ekko")
+    };
+    let reply = |output: &process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stdout)))
+    };
+
+    let init = ekko(&app, &["--json", "init"]);
+    assert!(init.status.success(), "{}", reply(&init));
+    assert_eq!(reply(&init)["project"]["name"], "app");
+
+    assert!(ekko(&deep, &["--task", "inside the project"]).status.success());
+    assert!(ekko(&elsewhere, &["--task", "on the default board"]).status.success());
+
+    let project_board = fs::read_to_string(app.join(".ekko").join("storage").join("storage.json")).unwrap();
+    let default_board = fs::read_to_string(home.join(".ekko").join("storage").join("storage.json")).unwrap();
+    assert!(project_board.contains("inside the project"), "{project_board}");
+    assert!(!project_board.contains("on the default board"), "{project_board}");
+    assert!(default_board.contains("on the default board"), "{default_board}");
+    assert!(!default_board.contains("inside the project"), "{default_board}");
+
+    let retired = ekko(&elsewhere, &["--json", "--project", "app", "--create"]);
+    assert_eq!(reply(&retired)["code"], "RENAMED_FLAG");
+    assert_eq!(reply(&retired)["renamedTo"], "ekko init");
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// The refusal and the override both have to survive the real argument
 /// parser: `--force` is a flag no unit test ever parses, and one accepted
 /// where it means nothing would be a flag that silently does nothing.

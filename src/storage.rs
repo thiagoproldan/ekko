@@ -191,40 +191,44 @@ impl Storage {
     /// the same state, derived the same next id, and one silently
     /// overwrote the other. `tests/concurrency.rs` is what caught it.
     pub fn acquire_lock(&self) -> Result<LockGuard<'_>, StorageError> {
-        let deadline = Instant::now() + LOCK_ACQUIRE_TIMEOUT;
+        Ok(LockGuard { _storage: self, _file: lock_path(&self.lock_file)? })
+    }
+}
 
-        // Opened once, outside the loop: a `flock` belongs to the open file
-        // description, not to the path or the process, so re-opening per
-        // attempt would be both wasteful and easy to get subtly wrong.
-        // `truncate(false)` because the file's *contents* are irrelevant now
-        // -- it exists purely as something to lock.
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.lock_file)?;
+/// Takes an exclusive `flock` on `path`, creating the file if needed, and
+/// returns the open file that holds it -- closing it is the release. The
+/// storage lock is one use; the project registry's is the other, and they
+/// must behave alike, which is why this is the one place the loop lives.
+pub fn lock_path(path: &Path) -> Result<File, StorageError> {
+    let deadline = Instant::now() + LOCK_ACQUIRE_TIMEOUT;
 
-        loop {
-            // SAFETY: `file` owns this descriptor and outlives the call.
-            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if result == 0 {
-                return Ok(LockGuard { _storage: self, _file: file });
-            }
+    // Opened once, outside the loop: a `flock` belongs to the open file
+    // description, not to the path or the process, so re-opening per
+    // attempt would be both wasteful and easy to get subtly wrong.
+    // `truncate(false)` because the file's *contents* are irrelevant now
+    // -- it exists purely as something to lock.
+    let file = OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
 
-            let error = io::Error::last_os_error();
-            // EWOULDBLOCK is the only "someone else is holding it" answer.
-            // Anything else is a genuine failure and shouldn't be retried
-            // silently until the timeout.
-            if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
-                return Err(error.into());
-            }
-
-            if Instant::now() >= deadline {
-                return Err(StorageError::LockTimeout(self.lock_file.clone()));
-            }
-
-            std::thread::sleep(LOCK_RETRY_DELAY);
+    loop {
+        // SAFETY: `file` owns this descriptor and outlives the call.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            return Ok(file);
         }
+
+        let error = io::Error::last_os_error();
+        // EWOULDBLOCK is the only "someone else is holding it" answer.
+        // Anything else is a genuine failure and shouldn't be retried
+        // silently until the timeout.
+        if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+            return Err(error.into());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(StorageError::LockTimeout(path.to_path_buf()));
+        }
+
+        std::thread::sleep(LOCK_RETRY_DELAY);
     }
 }
 

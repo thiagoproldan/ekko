@@ -346,7 +346,7 @@ where
 /// reason -- unique enough without pulling in a `rand` dependency. Two
 /// items created back to back in one process get different nanos; two
 /// processes racing get different pids.
-fn new_uid() -> String {
+pub(crate) fn new_uid() -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     format!("{:x}-{:x}", nanos, process::id())
 }

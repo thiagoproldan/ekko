@@ -278,15 +278,17 @@ fn destroying_a_project_waits_for_a_writer_to_finish() {
     let exe = env!("CARGO_BIN_EXE_ekko");
     let home = temp_ekko_dir();
 
+    let folder = home.join("work").join("doomed");
+    fs::create_dir_all(&folder).unwrap();
     let create = process::Command::new(exe)
-        .args(["--project", "doomed", "--create"])
+        .args(["init", folder.to_str().unwrap()])
         .env("HOME", &home)
         .output()
         .expect("failed to create the project");
-    assert!(create.status.success());
+    assert!(create.status.success(), "{}", String::from_utf8_lossy(&create.stderr));
 
-    // A write, not just the create: the lock file is made on first
-    // acquire, and --create only lays out the directories.
+    // A write, not just the init: the lock file is made on first acquire,
+    // and init only writes the project's marker.
     let seeded = process::Command::new(exe)
         .args(["--project", "doomed", "--task", "something to lose"])
         .env("HOME", &home)
@@ -294,8 +296,7 @@ fn destroying_a_project_waits_for_a_writer_to_finish() {
         .expect("failed to seed the project");
     assert!(seeded.status.success());
 
-    let project_lock =
-        home.join(".ekko").join("projects").join("doomed").join(".ekko").join(".lock");
+    let project_lock = folder.join(".ekko").join(".lock");
     assert!(project_lock.exists(), "expected a lock at {}", project_lock.display());
 
     // `-o` closes the locked descriptor before running the command, so the
@@ -327,7 +328,7 @@ fn destroying_a_project_waits_for_a_writer_to_finish() {
     // The project is still there, which is the point: a destroy that could
     // not take the lock must not have moved anything.
     assert!(
-        home.join(".ekko").join("projects").join("doomed").is_dir(),
+        folder.join(".ekko").is_dir(),
         "a destroy that timed out still removed the project"
     );
 

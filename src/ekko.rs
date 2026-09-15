@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config;
-use crate::directory::{self, DirectoryError};
+use crate::directory::DirectoryError;
 use crate::item::{tally, Change, Item, State};
 use crate::render::{CalendarMonth, Inversion, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
 use crate::storage::{ItemMap, Storage, StorageError};
@@ -360,6 +360,7 @@ pub enum Outcome {
     List(Vec<(String, Vec<Item>)>),
     Projects(Vec<ProjectSummary>),
     Destroyed { name: String, tasks: u32, notes: u32, trash: std::path::PathBuf },
+    Init(Box<crate::project::Initialized>),
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
     Attached { item: Item, target: Option<u32> },
@@ -403,6 +404,7 @@ impl Outcome {
             Outcome::List(_) => "list",
             Outcome::Projects(_) => "projects",
             Outcome::Destroyed { .. } => "destroy",
+            Outcome::Init(_) => "init",
             Outcome::Phases(_) => "phases",
             Outcome::Blocked { .. } => "blocked",
             Outcome::Attached { .. } => "attached",
@@ -475,6 +477,7 @@ impl Outcome {
             Outcome::Board(groups) | Outcome::Find(groups) | Outcome::List(groups) => out.display_by_board(groups),
             Outcome::Timeline(groups) | Outcome::Archive(groups) => out.display_by_date(groups),
             Outcome::Projects(projects) => out.display_projects(projects),
+            Outcome::Init(init) => out.success_init(init),
             Outcome::Destroyed { name, tasks, notes, trash } => {
                 out.success_destroy(name, *tasks, *notes, trash)
             }
@@ -507,35 +510,10 @@ impl Ekko {
         Ekko { storage }
     }
 
-    /// Resolves the ekko directory and opens storage in it.
-    ///
-    /// Precedence: `--ekko-dir` > `--project` > `EKKO_DIR` > config >
-    /// default. `--ekko-dir` and `--project` together is an error rather
-    /// than a silent winner: both say where data lives, and guessing which
-    /// one someone meant is how you end up writing to the wrong board.
-    ///
-    /// Everything is a parameter here for the same reason `directory` and
-    /// `config` take them explicitly -- fully deterministic, no hidden reach
-    /// into `std::env` inside business logic.
-    pub fn open(
-        home_dir: &std::path::Path,
-        cwd: &std::path::Path,
-        ekko_dir_flag: Option<&str>,
-        ekko_dir_env: Option<&str>,
-        project: Option<&str>,
-        create_project: bool,
-    ) -> Result<Self, EkkoError> {
-        let dir = match project {
-            Some(name) if ekko_dir_flag.is_some() => {
-                let _ = name;
-                return Err(directory::DirectoryError::ProjectAndEkkoDirTogether.into());
-            }
-            Some(name) => directory::retrieve_project_directory(home_dir, name, create_project)?,
-            None => {
-                directory::retrieve_ekko_directory(home_dir, cwd, ekko_dir_flag, ekko_dir_env)?
-            }
-        };
-        Ok(Self::new(Storage::new(&dir)?))
+    /// Opens the board in `dir` -- wherever `directory::locate` said this
+    /// invocation's board lives.
+    pub fn at(dir: &std::path::Path) -> Result<Self, EkkoError> {
+        Ok(Self::new(Storage::new(dir)?))
     }
 
     // ---- id / option parsing -------------------------------------------
@@ -1412,7 +1390,7 @@ impl Ekko {
     pub fn destroy_project(
         &self,
         home_dir: &std::path::Path,
-        name: &str,
+        project: &crate::project::Project,
         now_millis: i64,
     ) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
@@ -1421,9 +1399,9 @@ impl Ekko {
         let tasks = data.values().filter(|item| item.is_task).count() as u32;
         let notes = data.len() as u32 - tasks;
 
-        let trash = directory::destroy_project(home_dir, name, now_millis)?;
+        let trash = crate::project::destroy(home_dir, project, now_millis)?;
 
-        Ok(Outcome::Destroyed { name: name.to_string(), tasks, notes, trash })
+        Ok(Outcome::Destroyed { name: project.name.clone(), tasks, notes, trash })
     }
 
     pub fn set_state(&self, input: &[String], force: bool) -> Result<Outcome, EkkoError> {
@@ -3488,7 +3466,10 @@ mod tests {
             process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
         ));
-        let storage = home.join(".ekko").join("projects").join("p").join(".ekko").join("storage");
+        let folder = home.join("work").join("p");
+        fs::create_dir_all(&folder).unwrap();
+        crate::project::init(&home, &folder, None, None, 0).unwrap();
+        let storage = folder.join(".ekko").join("storage");
         fs::create_dir_all(&storage).unwrap();
 
         let mut done = Item::new_task(1, "done".into(), vec![], 1);
@@ -3503,7 +3484,7 @@ mod tests {
         let items: ItemMap = [done, dropped, away, gone, why].into_iter().map(|i| (i.id, i)).collect();
         fs::write(storage.join("storage.json"), serde_json::to_string(&items).unwrap()).unwrap();
 
-        let listing = directory::list_projects(&home);
+        let listing = crate::project::list(&home);
         assert_eq!((listing[0].complete, listing[0].tasks, listing[0].notes), (1, 1, 1));
 
         fs::remove_dir_all(&home).ok();

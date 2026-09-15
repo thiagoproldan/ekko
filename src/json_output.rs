@@ -64,6 +64,18 @@ fn success_value(outcome: &Outcome) -> Value {
             // other way to work out where the project went.
             "trash": trash.display().to_string(),
         }),
+        Outcome::Init(init) => json!({
+            "ok": true,
+            "command": command,
+            "project": {"name": init.name, "id": init.id, "root": init.root.display().to_string()},
+            "existing": init.existing,
+            "claimed": init.claimed,
+            "adopted": init.adopted.as_ref().map(|adopted| json!({
+                "from": adopted.from.display().to_string(),
+                "parked": adopted.parked.display().to_string(),
+            })),
+            "excluded": init.excluded,
+        }),
         Outcome::Phases(names) => json!({"ok": true, "command": command, "phases": names}),
         Outcome::Calendar(month) => json!({"ok": true, "command": command, "month": month}),
         Outcome::Stashed { ids, away } | Outcome::Trashed { ids, away } => {
