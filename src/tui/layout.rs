@@ -6,7 +6,7 @@
 //! everything. Boxes sit edge to edge, and the gap between two of them is the
 //! window showing between their rounded borders -- a border line runs through
 //! the middle of its cell, so neighbouring borders already stand apart. The
-//! explorer is the exception, as it is in VS Code: its right edge is the
+//! sidebar is the exception, as it is in VS Code: its right edge is the
 //! activity bar's left one.
 //!
 //! Pure geometry, so every size can be tested without a terminal.
@@ -19,19 +19,19 @@ pub const MIN_HEIGHT: u16 = 16;
 
 const ACTIVITY_WIDTH: u16 = 5;
 const NEXT_WIDTH: u16 = 32;
-const EXPLORER_WIDTH: u16 = 34;
+const SIDEBAR_WIDTH: u16 = 34;
 
 /// Which optional boxes are open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Visibility {
     pub next: bool,
-    pub explorer: bool,
+    pub sidebar: bool,
     pub panel: bool,
 }
 
 impl Default for Visibility {
     fn default() -> Self {
-        Visibility { next: true, explorer: true, panel: true }
+        Visibility { next: true, sidebar: true, panel: true }
     }
 }
 
@@ -42,7 +42,7 @@ pub struct Regions {
     pub command: Rect,
     pub next: Option<Rect>,
     pub editor: Rect,
-    pub explorer: Option<Rect>,
+    pub sidebar: Option<Rect>,
     pub activity: Rect,
     pub panel: Option<Rect>,
     pub status: Rect,
@@ -54,7 +54,7 @@ pub enum Region {
     Command,
     Next,
     Editor,
-    Explorer,
+    Sidebar,
     Panel,
 }
 
@@ -62,7 +62,7 @@ pub enum Region {
 ///
 /// As the terminal narrows the optional boxes give way in the order VS Code's
 /// own layout drops them -- the box beside the editor first, then the
-/// explorer -- and the bottom panel goes when the height runs short. The
+/// sidebar -- and the bottom panel goes when the height runs short. The
 /// editor, the activity bar and the status bar always stay.
 pub fn regions(area: Rect, wanted: Visibility) -> Option<Regions> {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
@@ -79,7 +79,7 @@ pub fn regions(area: Rect, wanted: Visibility) -> Option<Regions> {
     let work_width = area.width - ACTIVITY_WIDTH;
 
     let next_shown = wanted.next && work_width >= 110;
-    let explorer_shown = wanted.explorer && work_width >= 80;
+    let sidebar_shown = wanted.sidebar && work_width >= 80;
     let panel_shown = wanted.panel && body_height >= 22;
 
     let panel_height = if panel_shown { (body_height * 3 / 10).clamp(6, 14) } else { 0 };
@@ -87,12 +87,12 @@ pub fn regions(area: Rect, wanted: Visibility) -> Option<Regions> {
 
     let next = next_shown.then(|| Rect::new(area.x, body_y, NEXT_WIDTH, top_height));
     let editor_x = area.x + if next_shown { NEXT_WIDTH } else { 0 };
-    let explorer_width = if explorer_shown { EXPLORER_WIDTH } else { 0 };
-    let editor = Rect::new(editor_x, body_y, work_width - (editor_x - area.x) - explorer_width, top_height);
-    let explorer = explorer_shown.then(|| Rect::new(editor.x + editor.width, body_y, EXPLORER_WIDTH, top_height));
+    let sidebar_width = if sidebar_shown { SIDEBAR_WIDTH } else { 0 };
+    let editor = Rect::new(editor_x, body_y, work_width - (editor_x - area.x) - sidebar_width, top_height);
+    let sidebar = sidebar_shown.then(|| Rect::new(editor.x + editor.width, body_y, SIDEBAR_WIDTH, top_height));
     let panel = panel_shown.then(|| Rect::new(area.x, body_y + top_height, work_width, panel_height));
 
-    Some(Regions { command, next, editor, explorer, activity, panel, status })
+    Some(Regions { command, next, editor, sidebar, activity, panel, status })
 }
 
 #[cfg(test)]
@@ -100,7 +100,7 @@ mod tests {
     use super::*;
 
     fn all(frame: &Regions) -> Vec<Rect> {
-        [Some(frame.command), frame.next, Some(frame.editor), frame.explorer, Some(frame.activity), frame.panel, Some(frame.status)]
+        [Some(frame.command), frame.next, Some(frame.editor), frame.sidebar, Some(frame.activity), frame.panel, Some(frame.status)]
             .into_iter()
             .flatten()
             .collect()
@@ -116,7 +116,7 @@ mod tests {
     fn a_wide_terminal_shows_every_box_without_overlap() {
         let area = Rect::new(0, 0, 180, 50);
         let frame = regions(area, Visibility::default()).unwrap();
-        assert!(frame.next.is_some() && frame.explorer.is_some() && frame.panel.is_some());
+        assert!(frame.next.is_some() && frame.sidebar.is_some() && frame.panel.is_some());
 
         let boxes = all(&frame);
         for (i, a) in boxes.iter().enumerate() {
@@ -126,7 +126,7 @@ mod tests {
             }
         }
         assert_eq!(frame.activity.x + frame.activity.width, area.width, "the activity bar is not on the edge");
-        assert_eq!(frame.explorer.unwrap().right(), frame.activity.x, "the explorer does not meet the activity bar");
+        assert_eq!(frame.sidebar.unwrap().right(), frame.activity.x, "the sidebar does not meet the activity bar");
         assert_eq!(frame.status.y, area.height - 1);
         let panel = frame.panel.unwrap();
         assert_eq!(panel.width + frame.activity.width, area.width, "the bottom panel does not span the work area");
@@ -137,10 +137,10 @@ mod tests {
     #[test]
     fn boxes_give_way_as_the_terminal_shrinks() {
         let medium = regions(Rect::new(0, 0, 100, 40), Visibility::default()).unwrap();
-        assert!(medium.next.is_none() && medium.explorer.is_some());
+        assert!(medium.next.is_none() && medium.sidebar.is_some());
 
         let narrow = regions(Rect::new(0, 0, 70, 40), Visibility::default()).unwrap();
-        assert!(narrow.explorer.is_none());
+        assert!(narrow.sidebar.is_none());
         assert_eq!(narrow.editor.width, 65);
 
         let short = regions(Rect::new(0, 0, 180, 20), Visibility::default()).unwrap();
@@ -159,8 +159,8 @@ mod tests {
     fn a_closed_box_gives_its_room_to_the_editor() {
         let area = Rect::new(0, 0, 180, 50);
         let open = regions(area, Visibility::default()).unwrap();
-        let closed = regions(area, Visibility { next: false, explorer: false, panel: false }).unwrap();
-        assert!(closed.next.is_none() && closed.explorer.is_none() && closed.panel.is_none());
+        let closed = regions(area, Visibility { next: false, sidebar: false, panel: false }).unwrap();
+        assert!(closed.next.is_none() && closed.sidebar.is_none() && closed.panel.is_none());
         assert!(closed.editor.width > open.editor.width && closed.editor.height > open.editor.height);
     }
 }

@@ -3,19 +3,25 @@
 //! Nothing here draws or touches the terminal, so every rule -- which key
 //! moves, which one writes, what a refusal says -- is tested without one.
 //! Moving and writing are kept apart by type: a key or a click changes what is
-//! selected, shown or focused, and only an `Action` handed back by `key`
-//! writes, through `act`.
+//! selected, shown, opened or focused, and only an `Action` handed back by
+//! `key` writes, through `act`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use chrono::Datelike;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use super::board::{Row, Snapshot};
+use super::board::{self, Reading, Row, Snapshot};
 use super::layout::{Region, Visibility};
+use super::list::Cursor;
+use super::search;
+use super::tabs::{Doc, Page, Tabs};
+use super::tree::{self, Tree};
 use crate::ekko::{Ekko, EkkoError};
-use crate::item::{Item, State};
+use crate::item::State;
 
 /// How long a message stays in the status bar.
 const FLASH: Duration = Duration::from_secs(6);
@@ -23,6 +29,10 @@ const FLASH: Duration = Duration::from_secs(6);
 const PULSE: Duration = Duration::from_secs(2);
 /// Lines Output keeps.
 const LOG_LINES: usize = 500;
+/// Two clicks on one cell closer together than this are a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(450);
+/// How long Ctrl+K waits for the second key of its chord.
+const CHORD: Duration = Duration::from_secs(3);
 
 /// Where the interactive mode was opened.
 pub struct Workspace {
@@ -33,25 +43,46 @@ pub struct Workspace {
     /// The folder, with home shortened to `~`.
     pub folder: String,
     pub cwd: PathBuf,
+    pub home: PathBuf,
     pub branch: Option<String>,
 }
 
 /// The bottom panel's tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tab {
+pub enum PanelTab {
     Problems,
     Output,
     Agent,
 }
 
-impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Problems, Tab::Output, Tab::Agent];
+impl PanelTab {
+    pub const ALL: [PanelTab; 3] = [PanelTab::Problems, PanelTab::Output, PanelTab::Agent];
 
     pub fn title(self) -> &'static str {
         match self {
-            Tab::Problems => "Problems",
-            Tab::Output => "Output",
-            Tab::Agent => "Agent",
+            PanelTab::Problems => "Problems",
+            PanelTab::Output => "Output",
+            PanelTab::Agent => "Agent",
+        }
+    }
+}
+
+/// What the activity bar puts in the sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Explorer,
+    Search,
+    Projects,
+    Changes,
+}
+
+impl View {
+    pub fn title(self) -> &'static str {
+        match self {
+            View::Explorer => "Explorer",
+            View::Search => "Search",
+            View::Projects => "Projects",
+            View::Changes => "Changes",
         }
     }
 }
@@ -60,7 +91,7 @@ impl Tab {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Next,
-    Explorer,
+    Sidebar,
     Panel,
 }
 
@@ -70,12 +101,28 @@ pub enum Target {
     Region(Region),
     Command,
     Toggle(Part),
+    Activity(View),
     BoardRow(usize),
     NextRow(usize),
-    ExplorerRow(usize),
     ProblemRow(usize),
-    PanelTab(Tab),
+    PanelTab(PanelTab),
     Bell,
+    Tab(usize),
+    CloseTab(usize),
+    Page(Page),
+    TreeRow(usize),
+    SearchField,
+    Chip(usize),
+    SearchRow(usize),
+    ProjectRow(usize),
+    ChangeRow(usize),
+    /// An item named in a document, by its place in `App::hit_keys`.
+    Key(usize),
+    RoadmapRow(usize),
+    Day(u32),
+    /// The calendar's month arrows, and 0 for today.
+    Month(i32),
+    Welcome(usize),
 }
 
 /// The writes a key can ask for.
@@ -99,40 +146,50 @@ pub struct Logged {
     pub kind: Kind,
 }
 
-/// A selection in a list, and the first line of the list on screen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Cursor {
-    pub selected: usize,
-    pub offset: usize,
+/// One line of the search results: a board heading, or an item under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchLine {
+    Board { group: usize, count: usize },
+    Item(usize),
 }
 
-impl Cursor {
-    /// Pulls the viewport to the selection by the least scrolling that does it.
-    pub fn follow(&mut self, height: usize) {
-        if height == 0 {
-            return;
-        }
-        if self.selected < self.offset {
-            self.offset = self.selected;
-        } else if self.selected >= self.offset + height {
-            self.offset = self.selected + 1 - height;
-        }
-    }
+/// One line of the roadmap: a phase, or an item in a phase that is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoadmapLine {
+    Phase(usize),
+    Item(u32),
+}
 
-    fn step(&mut self, by: isize, len: usize) {
-        if len > 0 {
-            self.selected = (self.selected as isize + by).clamp(0, len as isize - 1) as usize;
-        }
-    }
+/// What a link on the Welcome page does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Welcome {
+    Page(Page),
+    View(View),
+    Problems,
+    Project(usize),
+}
 
-    fn clamp(&mut self, len: usize) {
-        self.selected = self.selected.min(len.saturating_sub(1));
-    }
+/// Where each document is: its cursors, and the calendar's month.
+pub struct DocState {
+    /// The relation under the cursor in an item's tab, and how far it scrolled.
+    pub links: Cursor,
+    pub scroll: usize,
+    /// The link the tab last scrolled to, so scrolling by hand is not undone.
+    pub followed: Option<usize>,
+    pub roadmap: Cursor,
+    pub open_phases: HashSet<String>,
+    pub welcome: Cursor,
+    pub month: (i32, u32),
+    pub day: u32,
+    /// The document these cursors were last used for.
+    pub seen: Doc,
 }
 
 pub struct App {
     pub workspace: Workspace,
     pub snapshot: Snapshot,
+    /// When the session began, in epoch millis: what Changes counts from.
+    pub since: i64,
     pub rows: Vec<Row>,
     pub filter: String,
     pub focus: Region,
@@ -141,11 +198,18 @@ pub struct App {
     /// The boxes the last frame drew: `wanted`, less what the terminal had no
     /// room for.
     pub shown: Visibility,
-    pub tab: Tab,
+    pub view: View,
+    pub panel: PanelTab,
+    pub tabs: Tabs,
+    pub doc: DocState,
     pub board: Cursor,
     pub next: Cursor,
-    pub explorer: Cursor,
     pub problems: Cursor,
+    pub tree: Tree,
+    pub search: String,
+    pub found: Cursor,
+    pub projects: Cursor,
+    pub changes: Cursor,
     /// Lines scrolled past in Output or Agent.
     pub scroll: usize,
     pub log: Vec<Logged>,
@@ -153,50 +217,107 @@ pub struct App {
     /// Changes made elsewhere since Output was last in view.
     pub unseen: usize,
     pulse: Option<Instant>,
+    chord: Option<Instant>,
+    last_click: Option<(Instant, u16, u16)>,
     pub hits: Vec<(Rect, Target)>,
+    pub hit_keys: Vec<String>,
     /// Rows the board list had room for in the last frame, for Page Up/Down.
     pub page: usize,
+    /// A project chosen to switch to, by name, for the loop to open.
+    pub switch: Option<String>,
     pub quit: bool,
 }
 
-/// What names an item across reloads: its uid, which survives renumbering.
-fn key_of(item: &Item) -> String {
-    item.uid.clone().unwrap_or_else(|| format!("#{}", item.id))
+/// An item's relations in the order its tab lists them.
+pub fn relations(snapshot: &Snapshot, id: u32) -> Vec<(&'static str, Vec<u32>)> {
+    let links = snapshot.links.get(&id).cloned().unwrap_or_default();
+    vec![
+        ("Blocked by", links.blockers),
+        ("Blocks", links.dependents),
+        ("Attached to", links.attached_to.into_iter().collect()),
+        ("Notes", links.notes),
+    ]
+}
+
+fn days_in(year: i32, month: u32) -> u32 {
+    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|first| first.pred_opt())
+        .map_or(28, |last| last.day())
 }
 
 impl App {
-    pub fn new(workspace: Workspace, snapshot: Snapshot) -> Self {
+    pub fn new(workspace: Workspace, snapshot: Snapshot, since: i64) -> Self {
+        let today = chrono::Local::now().date_naive();
+        let open_phases = snapshot.roadmap.iter().filter(|step| step.current).map(|step| step.name.clone()).collect();
+        let first_run = snapshot.all.is_empty();
         let mut app = App {
             workspace,
             snapshot,
+            since,
             rows: Vec::new(),
             filter: String::new(),
             focus: Region::Editor,
             wanted: Visibility::default(),
             shown: Visibility::default(),
-            tab: Tab::Problems,
+            view: View::Explorer,
+            panel: PanelTab::Problems,
+            tabs: Tabs::default(),
+            doc: DocState {
+                links: Cursor::default(),
+                scroll: 0,
+                followed: Some(0),
+                roadmap: Cursor::default(),
+                open_phases,
+                welcome: Cursor::default(),
+                month: (today.year(), today.month()),
+                day: today.day(),
+                seen: Doc::Board,
+            },
             board: Cursor::default(),
             next: Cursor::default(),
-            explorer: Cursor::default(),
             problems: Cursor::default(),
+            tree: Tree::default(),
+            search: String::new(),
+            found: Cursor::default(),
+            projects: Cursor::default(),
+            changes: Cursor::default(),
             scroll: 0,
             log: Vec::new(),
             flash: None,
             unseen: 0,
             pulse: None,
+            chord: None,
+            last_click: None,
             hits: Vec::new(),
+            hit_keys: Vec::new(),
             page: 10,
+            switch: None,
             quit: false,
         };
+        // A board with nothing on it yet opens on the Welcome page, as a fresh
+        // VS Code window does.
+        if first_run {
+            app.tabs.open(Doc::Welcome, false);
+        }
         app.restore(None, true);
         app
     }
 
-    /// The selected item, by its index in `snapshot.items`.
+    /// The selected board row's item, by its index in `snapshot.items`.
     pub fn selected(&self) -> Option<usize> {
         match self.rows.get(self.board.selected) {
             Some(Row::Item { item, .. }) => Some(*item),
             _ => None,
+        }
+    }
+
+    /// The item the outline and the item tabs are about: the open item tab's,
+    /// or else the one selected on the board.
+    pub fn active_item(&self) -> Option<u32> {
+        match self.tabs.active() {
+            Doc::Item(key) => self.snapshot.find(key).filter(|(_, archived)| !archived).map(|(item, _)| item.id),
+            _ => self.selected().map(|at| self.snapshot.items[at].id),
         }
     }
 
@@ -212,12 +333,63 @@ impl App {
         self.pulse.is_some_and(|at| at.elapsed() < PULSE)
     }
 
+    /// Whether Ctrl+K is waiting for the rest of its chord.
+    pub fn chording(&self) -> bool {
+        self.chord.is_some_and(|at| at.elapsed() < CHORD)
+    }
+
+    pub fn tree_rows(&self) -> Vec<tree::Row> {
+        self.tree.rows(&self.snapshot, &self.tabs, &self.workspace.name, self.active_item())
+    }
+
+    pub fn search_lines(&self) -> Vec<SearchLine> {
+        let query = search::parse(&self.search);
+        let mut lines = Vec::new();
+        for hit in search::results(&self.snapshot, &query) {
+            lines.push(SearchLine::Board { group: hit.group, count: hit.items.len() });
+            lines.extend(hit.items.into_iter().map(SearchLine::Item));
+        }
+        lines
+    }
+
+    pub fn roadmap_lines(&self) -> Vec<RoadmapLine> {
+        let mut lines = Vec::new();
+        for (at, step) in self.snapshot.roadmap.iter().enumerate() {
+            lines.push(RoadmapLine::Phase(at));
+            if self.doc.open_phases.contains(&step.name) {
+                lines.extend(self.snapshot.in_phase(&step.name).iter().map(|item| RoadmapLine::Item(item.id)));
+            }
+        }
+        lines
+    }
+
+    pub fn welcome_links(&self) -> Vec<Welcome> {
+        let mut links = vec![
+            Welcome::Page(Page::Board),
+            Welcome::Page(Page::Roadmap),
+            Welcome::Page(Page::Calendar),
+            Welcome::View(View::Search),
+            Welcome::Problems,
+        ];
+        links.extend((0..self.snapshot.projects.len()).map(Welcome::Project));
+        links
+    }
+
+    /// The items an item's tab links to, in the order it lists them.
+    pub fn item_links(&self, key: &str) -> Vec<u32> {
+        match self.snapshot.find(key) {
+            Some((item, false)) => relations(&self.snapshot, item.id).into_iter().flat_map(|(_, ids)| ids).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     // ---- reading the board ----------------------------------------------
 
     /// Reads the board again, keeping the same item selected.
     pub fn reload(&mut self, ekko: &Ekko) -> Result<(), EkkoError> {
         let kept = self.kept();
-        self.snapshot = Snapshot::load(ekko, &self.workspace.label)?;
+        let reading = Reading { label: &self.workspace.label, home: &self.workspace.home, since: self.since };
+        self.snapshot = Snapshot::load(ekko, &reading)?;
         self.restore(kept, false);
         Ok(())
     }
@@ -226,7 +398,7 @@ impl App {
     pub fn outside_change(&mut self, ekko: &Ekko) -> Result<(), EkkoError> {
         self.reload(ekko)?;
         self.log("The board changed elsewhere, and is shown as it is now", Kind::Outside);
-        if !(self.shown.panel && self.tab == Tab::Output) {
+        if !(self.shown.panel && self.panel == PanelTab::Output) {
             self.unseen += 1;
         }
         self.pulse = Some(Instant::now());
@@ -236,7 +408,7 @@ impl App {
     /// The selected item's board and key, to find it again after the rows change.
     fn kept(&self) -> Option<(String, String)> {
         let Some(Row::Item { group, item }) = self.rows.get(self.board.selected) else { return None };
-        Some((self.snapshot.groups[*group].name.clone(), key_of(&self.snapshot.items[*item])))
+        Some((self.snapshot.groups[*group].name.clone(), board::key(&self.snapshot.items[*item])))
     }
 
     /// Rebuilds the rows and selects `kept` again: under the same board when
@@ -248,7 +420,7 @@ impl App {
             let at = |same_board: bool| {
                 self.rows.iter().position(|row| match row {
                     Row::Item { group, item } => {
-                        key_of(&self.snapshot.items[*item]) == key
+                        board::key(&self.snapshot.items[*item]) == key
                             && (!same_board || self.snapshot.groups[*group].name == board)
                     }
                     Row::Board(_) => false,
@@ -263,8 +435,9 @@ impl App {
             .unwrap_or(0);
 
         self.next.clamp(self.snapshot.next().len());
-        self.explorer.clamp(self.snapshot.groups.len());
         self.problems.clamp(self.snapshot.problems.len());
+        self.projects.clamp(self.snapshot.projects.len());
+        self.changes.clamp(self.snapshot.changes.len());
     }
 
     /// The nearest item row from `at` in direction `by`, `at` included.
@@ -285,7 +458,7 @@ impl App {
         self.restore(kept, true);
     }
 
-    // ---- moving -----------------------------------------------------------
+    // ---- moving and opening ------------------------------------------------
 
     /// Moves the board selection by `by` rows, stepping over headings and
     /// stopping at either end.
@@ -293,7 +466,7 @@ impl App {
         if self.rows.is_empty() {
             return;
         }
-        let target = (self.board.selected as isize + by).clamp(0, self.rows.len() as isize - 1) as usize;
+        let target = (self.board.selected as isize).saturating_add(by).clamp(0, self.rows.len() as isize - 1) as usize;
         let ahead = if by < 0 { -1 } else { 1 };
         if let Some(row) = self.item_row(target, ahead).or_else(|| self.item_row(target, -ahead)) {
             self.board.selected = row;
@@ -314,25 +487,45 @@ impl App {
         }
     }
 
-    /// Brings a board's heading to the top of the list, and selects its first item.
-    fn reveal_board(&mut self, group: usize) {
-        let position = |app: &App| {
-            app.rows.iter().position(|row| matches!(row, Row::Item { group: g, .. } if *g == group))
-        };
-        if position(self).is_none() && !self.filter.is_empty() {
-            self.filter.clear();
-            self.rows = self.snapshot.rows("");
+    fn open_page(&mut self, page: Page) {
+        self.tabs.open(page.doc(), false);
+        self.focus = Region::Editor;
+    }
+
+    /// Opens an item's tab: in passing as a preview, or on purpose, which
+    /// pins it and moves to the editor.
+    fn open_item(&mut self, key: String, preview: bool) {
+        self.tabs.open(Doc::Item(key), preview);
+        if !preview {
+            self.focus = Region::Editor;
         }
-        if let Some(row) = position(self) {
-            self.board.selected = row;
-            self.board.offset = row.saturating_sub(1);
+    }
+
+    fn open_selected(&mut self) {
+        if let Some(at) = self.selected() {
+            let key = board::key(&self.snapshot.items[at]);
+            self.open_item(key, false);
+        }
+    }
+
+    fn show_view(&mut self, view: View) {
+        self.view = view;
+        self.wanted.sidebar = true;
+        self.focus = Region::Sidebar;
+    }
+
+    fn show_panel(&mut self, tab: PanelTab) {
+        self.panel = tab;
+        self.scroll = 0;
+        if tab == PanelTab::Output {
+            self.unseen = 0;
         }
     }
 
     fn toggle(&mut self, part: Part) {
         let (open, region) = match part {
             Part::Next => (&mut self.wanted.next, Region::Next),
-            Part::Explorer => (&mut self.wanted.explorer, Region::Explorer),
+            Part::Sidebar => (&mut self.wanted.sidebar, Region::Sidebar),
             Part::Panel => (&mut self.wanted.panel, Region::Panel),
         };
         *open = !*open;
@@ -347,7 +540,7 @@ impl App {
     fn cycle(&mut self, by: isize) {
         let order: Vec<Region> = [
             (Region::Editor, true),
-            (Region::Explorer, self.shown.explorer),
+            (Region::Sidebar, self.shown.sidebar),
             (Region::Panel, self.shown.panel),
             (Region::Next, self.shown.next),
         ]
@@ -358,52 +551,179 @@ impl App {
         self.focus = order[(at as isize + by).rem_euclid(order.len() as isize) as usize];
     }
 
-    fn show_tab(&mut self, tab: Tab) {
-        self.tab = tab;
-        self.scroll = 0;
-        if tab == Tab::Output {
-            self.unseen = 0;
+    fn choose_project(&mut self, at: usize) {
+        let Some(project) = self.snapshot.projects.get(at) else { return };
+        if project.name == self.workspace.name {
+            self.say(format!("{} is the project already open", project.name), Kind::Refused);
+            return;
+        }
+        match project.status {
+            "here" => self.switch = Some(project.name.clone()),
+            "missing" => self.say(
+                format!("{}'s folder no longer holds it; ekko init in the folder it moved to finds it again", project.name),
+                Kind::Refused,
+            ),
+            _ => self.say(format!("{} is not in a folder yet; ekko init in its folder adopts it", project.name), Kind::Refused),
+        }
+    }
+
+    fn welcome(&mut self, link: Welcome) {
+        match link {
+            Welcome::Page(page) => self.open_page(page),
+            Welcome::View(view) => self.show_view(view),
+            Welcome::Problems => {
+                self.wanted.panel = true;
+                self.focus = Region::Panel;
+                self.show_panel(PanelTab::Problems);
+            }
+            Welcome::Project(at) => self.choose_project(at),
+        }
+    }
+
+    fn move_day(&mut self, by: i64) {
+        let (year, month) = self.doc.month;
+        let Some(date) = chrono::NaiveDate::from_ymd_opt(year, month, self.doc.day) else { return };
+        let moved = date + chrono::Duration::days(by);
+        self.doc.month = (moved.year(), moved.month());
+        self.doc.day = moved.day();
+    }
+
+    fn move_month(&mut self, by: i32) {
+        let (year, month) = self.doc.month;
+        let months = year * 12 + month as i32 - 1 + by;
+        self.doc.month = (months.div_euclid(12), months.rem_euclid(12) as u32 + 1);
+        self.doc.day = self.doc.day.min(days_in(self.doc.month.0, self.doc.month.1));
+    }
+
+    fn today(&mut self) {
+        let today = chrono::Local::now().date_naive();
+        self.doc.month = (today.year(), today.month());
+        self.doc.day = today.day();
+    }
+
+    /// The first item due on the calendar's selected day, opened on purpose.
+    fn open_day(&mut self) {
+        let (year, month) = self.doc.month;
+        let key = self.snapshot.due_in(year, month).get(&self.doc.day).and_then(|items| items.first()).map(|item| board::key(item));
+        if let Some(key) = key {
+            self.open_item(key, false);
+        }
+    }
+
+    fn change_key(&self, at: usize) -> Option<String> {
+        self.snapshot.changes.get(at).map(|entry| entry.uid.clone().unwrap_or_else(|| format!("#{}", entry.id)))
+    }
+
+    /// The nearest item line of the search results from `at` towards `by`.
+    fn found_item(lines: &[SearchLine], at: usize, by: isize) -> Option<usize> {
+        let mut line = at as isize;
+        while line >= 0 && (line as usize) < lines.len() {
+            if matches!(lines[line as usize], SearchLine::Item(_)) {
+                return Some(line as usize);
+            }
+            line += by;
+        }
+        None
+    }
+
+    fn reset_found(&mut self) {
+        let lines = self.search_lines();
+        self.found = Cursor { selected: Self::found_item(&lines, 0, 1).unwrap_or(0), offset: 0 };
+    }
+
+    fn choose_found(&mut self, at: usize, preview: bool) {
+        if let Some(SearchLine::Item(index)) = self.search_lines().get(at).copied() {
+            let key = board::key(&self.snapshot.items[index]);
+            self.open_item(key, preview);
+        }
+    }
+
+    /// Chooses a row of the tree: an item opens, an open editor comes to the
+    /// front, and anything else with rows under it opens or closes.
+    fn choose_row(&mut self, at: usize, preview: bool) {
+        let rows = self.tree_rows();
+        let Some(row) = rows.get(at) else { return };
+        match &row.node {
+            tree::Node::Item { key, .. } => self.open_item(key.clone(), preview),
+            tree::Node::Tab(tab) => {
+                self.tabs.activate(*tab);
+                if !preview {
+                    self.focus = Region::Editor;
+                }
+            }
+            node if row.expandable => self.tree.toggle(node),
+            _ => {}
         }
     }
 
     // ---- keys -------------------------------------------------------------
 
-    /// What a key does: moves, and hands back the write it asks for, if any.
+    /// What a key does: moves or opens, and hands back the write it asks for.
     pub fn key(&mut self, key: KeyEvent) -> Option<Action> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if let Some(at) = self.chord.take() {
+            if at.elapsed() < CHORD {
+                self.chord(key);
+                return None;
+            }
+        }
         match key.code {
             KeyCode::Char('q' | 'c') if ctrl => self.quit = true,
-            KeyCode::Char('p') if ctrl => self.focus = Region::Command,
+            KeyCode::Char('k') if ctrl => self.chord = Some(Instant::now()),
+            KeyCode::Char('p') if ctrl => {
+                self.tabs.open(Doc::Board, false);
+                self.focus = Region::Command;
+            }
             KeyCode::Char('b') if ctrl && alt => self.toggle(Part::Next),
-            KeyCode::Char('b') if ctrl => self.toggle(Part::Explorer),
+            KeyCode::Char('b') if ctrl => self.toggle(Part::Sidebar),
             KeyCode::Char('j') if ctrl => self.toggle(Part::Panel),
+            KeyCode::Char('w') if ctrl => {
+                if !self.tabs.close(self.tabs.active) {
+                    self.say("The board stays open: it is where the writes are".to_string(), Kind::Refused);
+                }
+            }
+            KeyCode::PageUp if ctrl => self.tabs.step(-1),
+            KeyCode::PageDown if ctrl => self.tabs.step(1),
             KeyCode::F(6) => self.cycle(if key.modifiers.contains(KeyModifiers::SHIFT) { -1 } else { 1 }),
             KeyCode::Tab => self.cycle(1),
             KeyCode::BackTab => self.cycle(-1),
             _ => {
-                return match self.focus {
-                    Region::Command => {
-                        self.command_key(key);
-                        None
-                    }
-                    Region::Next => {
-                        self.next_key(key);
-                        None
-                    }
-                    Region::Explorer => {
-                        self.explorer_key(key);
-                        None
-                    }
-                    Region::Panel => {
-                        self.panel_key(key);
-                        None
-                    }
-                    _ => self.board_key(key),
-                };
+                match self.focus {
+                    Region::Command => self.command_key(key),
+                    Region::Next => self.next_key(key),
+                    Region::Sidebar => self.sidebar_key(key),
+                    Region::Panel => self.panel_key(key),
+                    Region::Editor => return self.editor_key(key),
+                }
             }
         }
         None
+    }
+
+    /// The second key of a Ctrl+K chord, with or without Ctrl held, as VS Code
+    /// takes either.
+    fn chord(&mut self, key: KeyEvent) {
+        let KeyCode::Char(c) = key.code else {
+            if key.code != KeyCode::Esc {
+                self.say("The key combination (Ctrl+K, …) is not a command".to_string(), Kind::Refused);
+            }
+            return;
+        };
+        match c.to_ascii_lowercase() {
+            'b' => self.open_page(Page::Board),
+            'w' => self.open_page(Page::Welcome),
+            'r' => self.open_page(Page::Roadmap),
+            'c' => self.open_page(Page::Calendar),
+            'e' => self.show_view(View::Explorer),
+            'f' => self.show_view(View::Search),
+            'p' => self.show_view(View::Projects),
+            'h' => self.show_view(View::Changes),
+            other => self.say(
+                format!("The key combination (Ctrl+K, {}) is not a command", other.to_ascii_uppercase()),
+                Kind::Refused,
+            ),
+        }
     }
 
     fn typed(key: &KeyEvent) -> Option<char> {
@@ -437,11 +757,28 @@ impl App {
         }
     }
 
-    /// The board list is where the writes are, on the keys the picker had:
-    /// Enter completes, Space starts or pauses, Ctrl+S stashes. Anything else
-    /// printable starts a filter, as it did there.
+    fn editor_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match self.tabs.active().clone() {
+            Doc::Board => return self.board_key(key),
+            Doc::Item(item) => self.item_key(&item, key),
+            Doc::Roadmap => self.roadmap_key(key),
+            Doc::Calendar => self.calendar_key(key),
+            Doc::Welcome => self.welcome_key(key),
+        }
+        None
+    }
+
+    /// The board is where the writes are, on the keys the picker had: Enter
+    /// completes, Space starts or pauses, Ctrl+S stashes. Anything printable
+    /// starts a filter, as it did there.
+    ///
+    /// Opening the selected item takes Alt+Enter, or Ctrl+Enter where the
+    /// terminal reports Ctrl on Enter at all. Most terminals send Ctrl+Enter as
+    /// a plain Enter, and a plain Enter here completes the task -- so Ctrl only
+    /// opens when it arrives, and never falls through to a write when it does.
     fn board_key(&mut self, key: KeyEvent) -> Option<Action> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Up => self.move_board(-1),
             KeyCode::Down => self.move_board(1),
@@ -451,6 +788,7 @@ impl App {
             KeyCode::End => {
                 self.board.selected = self.item_row(self.rows.len().saturating_sub(1), -1).unwrap_or(0)
             }
+            KeyCode::Enter if ctrl || alt => self.open_selected(),
             KeyCode::Enter => return Some(Action::Done),
             KeyCode::Char(' ') if !ctrl => return Some(Action::Progress),
             KeyCode::Char('s') if ctrl => return Some(Action::Stash),
@@ -471,6 +809,181 @@ impl App {
         None
     }
 
+    fn item_key(&mut self, item: &str, key: KeyEvent) {
+        let links = self.item_links(item);
+        match key.code {
+            KeyCode::Up if links.is_empty() => self.doc.scroll = self.doc.scroll.saturating_sub(1),
+            KeyCode::Down if links.is_empty() => self.doc.scroll += 1,
+            KeyCode::Up => self.doc.links.step(-1, links.len()),
+            KeyCode::Down => self.doc.links.step(1, links.len()),
+            KeyCode::Home => self.doc.links.selected = 0,
+            KeyCode::End => self.doc.links.selected = links.len().saturating_sub(1),
+            KeyCode::PageUp => self.doc.scroll = self.doc.scroll.saturating_sub(self.page.max(1)),
+            KeyCode::PageDown => self.doc.scroll += self.page.max(1),
+            KeyCode::Enter => {
+                let key = links.get(self.doc.links.selected).and_then(|id| self.snapshot.all.get(id)).map(board::key);
+                if let Some(key) = key {
+                    self.open_item(key, false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn roadmap_key(&mut self, key: KeyEvent) {
+        let lines = self.roadmap_lines();
+        match key.code {
+            KeyCode::Up => self.doc.roadmap.step(-1, lines.len()),
+            KeyCode::Down => self.doc.roadmap.step(1, lines.len()),
+            KeyCode::Home => self.doc.roadmap.selected = 0,
+            KeyCode::End => self.doc.roadmap.selected = lines.len().saturating_sub(1),
+            KeyCode::Right | KeyCode::Left | KeyCode::Enter => self.choose_roadmap(key.code, false),
+            _ => {}
+        }
+    }
+
+    fn choose_roadmap(&mut self, code: KeyCode, preview: bool) {
+        let lines = self.roadmap_lines();
+        match lines.get(self.doc.roadmap.selected).copied() {
+            Some(RoadmapLine::Phase(at)) => {
+                let name = self.snapshot.roadmap[at].name.clone();
+                let open = self.doc.open_phases.contains(&name);
+                match code {
+                    KeyCode::Right if !open => {
+                        self.doc.open_phases.insert(name);
+                    }
+                    KeyCode::Left if open => {
+                        self.doc.open_phases.remove(&name);
+                    }
+                    KeyCode::Enter if open => {
+                        self.doc.open_phases.remove(&name);
+                    }
+                    KeyCode::Enter => {
+                        self.doc.open_phases.insert(name);
+                    }
+                    _ => {}
+                }
+            }
+            Some(RoadmapLine::Item(id)) => match code {
+                KeyCode::Enter => {
+                    if let Some(key) = self.snapshot.all.get(&id).map(board::key) {
+                        self.open_item(key, preview);
+                    }
+                }
+                KeyCode::Left => {
+                    let at = self.doc.roadmap.selected;
+                    if let Some(phase) = lines[..at].iter().rposition(|line| matches!(line, RoadmapLine::Phase(_))) {
+                        self.doc.roadmap.selected = phase;
+                    }
+                }
+                _ => {}
+            },
+            None => {}
+        }
+    }
+
+    fn calendar_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Left => self.move_day(-1),
+            KeyCode::Right => self.move_day(1),
+            KeyCode::Up => self.move_day(-7),
+            KeyCode::Down => self.move_day(7),
+            KeyCode::PageUp => self.move_month(-1),
+            KeyCode::PageDown => self.move_month(1),
+            KeyCode::Home => self.today(),
+            KeyCode::Enter => self.open_day(),
+            _ => {}
+        }
+    }
+
+    fn welcome_key(&mut self, key: KeyEvent) {
+        let links = self.welcome_links();
+        match key.code {
+            KeyCode::Up => self.doc.welcome.step(-1, links.len()),
+            KeyCode::Down => self.doc.welcome.step(1, links.len()),
+            KeyCode::Home => self.doc.welcome.selected = 0,
+            KeyCode::End => self.doc.welcome.selected = links.len().saturating_sub(1),
+            KeyCode::Enter => {
+                if let Some(link) = links.get(self.doc.welcome.selected).copied() {
+                    self.welcome(link);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn sidebar_key(&mut self, key: KeyEvent) {
+        match self.view {
+            View::Explorer => self.tree_key(key),
+            View::Search => self.search_key(key),
+            View::Projects => match key.code {
+                KeyCode::Up => self.projects.step(-1, self.snapshot.projects.len()),
+                KeyCode::Down => self.projects.step(1, self.snapshot.projects.len()),
+                KeyCode::Enter => self.choose_project(self.projects.selected),
+                _ => {}
+            },
+            View::Changes => match key.code {
+                KeyCode::Up => self.changes.step(-1, self.snapshot.changes.len()),
+                KeyCode::Down => self.changes.step(1, self.snapshot.changes.len()),
+                KeyCode::Enter => {
+                    if let Some(key) = self.change_key(self.changes.selected) {
+                        self.open_item(key, false);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    /// The tree takes VS Code's keys: arrows move, Right opens or steps in,
+    /// Left closes or steps out, Enter opens an item on purpose and Space opens
+    /// it in passing.
+    fn tree_key(&mut self, key: KeyEvent) {
+        let rows = self.tree_rows();
+        self.tree.settle(&rows);
+        match key.code {
+            KeyCode::Up => self.tree.step(-1, &rows),
+            KeyCode::Down => self.tree.step(1, &rows),
+            KeyCode::PageUp => self.tree.step(-(self.page.max(1) as isize), &rows),
+            KeyCode::PageDown => self.tree.step(self.page.max(1) as isize, &rows),
+            KeyCode::Home => self.tree.select(0, &rows),
+            KeyCode::End => self.tree.select(rows.len().saturating_sub(1), &rows),
+            KeyCode::Right => self.tree.right(&rows),
+            KeyCode::Left => self.tree.left(&rows),
+            KeyCode::Enter => self.choose_row(self.tree.cursor.selected, false),
+            KeyCode::Char(' ') => self.choose_row(self.tree.cursor.selected, true),
+            _ => {}
+        }
+    }
+
+    fn search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.search.clear();
+                self.reset_found();
+            }
+            KeyCode::Backspace => {
+                self.search.pop();
+                self.reset_found();
+            }
+            KeyCode::Up | KeyCode::Down => {
+                let lines = self.search_lines();
+                let by = if key.code == KeyCode::Up { -1 } else { 1 };
+                let from = (self.found.selected as isize + by).max(0) as usize;
+                if let Some(line) = Self::found_item(&lines, from, by) {
+                    self.found.selected = line;
+                }
+            }
+            KeyCode::Enter => self.choose_found(self.found.selected, false),
+            _ => {
+                if let Some(c) = Self::typed(&key) {
+                    self.search.push(c);
+                    self.reset_found();
+                }
+            }
+        }
+    }
+
     fn next_key(&mut self, key: KeyEvent) {
         let len = self.snapshot.next().len();
         match key.code {
@@ -480,6 +993,7 @@ impl App {
             KeyCode::End => self.next.selected = len.saturating_sub(1),
             KeyCode::Enter => {
                 if let Some(id) = self.snapshot.next().get(self.next.selected).map(|entry| entry.id) {
+                    self.tabs.open(Doc::Board, false);
                     self.reveal(id);
                     self.focus = Region::Editor;
                 }
@@ -488,32 +1002,18 @@ impl App {
         }
     }
 
-    fn explorer_key(&mut self, key: KeyEvent) {
-        let len = self.snapshot.groups.len();
-        match key.code {
-            KeyCode::Up => self.explorer.step(-1, len),
-            KeyCode::Down => self.explorer.step(1, len),
-            KeyCode::Home => self.explorer.selected = 0,
-            KeyCode::End => self.explorer.selected = len.saturating_sub(1),
-            KeyCode::Enter if len > 0 => {
-                self.reveal_board(self.explorer.selected);
-                self.focus = Region::Editor;
-            }
-            _ => {}
-        }
-    }
-
     fn panel_key(&mut self, key: KeyEvent) {
         let step = match key.code {
             KeyCode::Left | KeyCode::Right => {
-                let at = Tab::ALL.iter().position(|tab| *tab == self.tab).unwrap_or(0) as isize;
+                let at = PanelTab::ALL.iter().position(|tab| *tab == self.panel).unwrap_or(0) as isize;
                 let by = if key.code == KeyCode::Left { -1 } else { 1 };
-                self.show_tab(Tab::ALL[(at + by).rem_euclid(Tab::ALL.len() as isize) as usize]);
+                self.show_panel(PanelTab::ALL[(at + by).rem_euclid(PanelTab::ALL.len() as isize) as usize]);
                 return;
             }
             KeyCode::Enter => {
-                if self.tab == Tab::Problems {
+                if self.panel == PanelTab::Problems {
                     if let Some(id) = self.snapshot.problems.get(self.problems.selected).map(|p| p.id) {
+                        self.tabs.open(Doc::Board, false);
                         self.reveal(id);
                         self.focus = Region::Editor;
                     }
@@ -532,8 +1032,8 @@ impl App {
     }
 
     fn scroll_panel(&mut self, by: isize) {
-        match self.tab {
-            Tab::Problems => self.problems.step(by, self.snapshot.problems.len()),
+        match self.panel {
+            PanelTab::Problems => self.problems.step(by, self.snapshot.problems.len()),
             _ => self.scroll = (self.scroll as isize).saturating_add(by).max(0) as usize,
         }
     }
@@ -554,8 +1054,12 @@ impl App {
             .map(|(_, target)| *target);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                let double = self.last_click.is_some_and(|(at, column, row)| {
+                    at.elapsed() < DOUBLE_CLICK && column == mouse.column && row == mouse.row
+                });
+                self.last_click = if double { None } else { Some((Instant::now(), mouse.column, mouse.row)) };
                 if let Some(target) = target {
-                    self.click(target);
+                    self.click(target, double);
                 }
             }
             MouseEventKind::ScrollDown => self.wheel(target, 1),
@@ -564,15 +1068,33 @@ impl App {
         }
     }
 
-    fn click(&mut self, target: Target) {
+    /// A click, and what a second click on the same place makes of it: things
+    /// a single click opens in passing, a double click opens on purpose.
+    fn click(&mut self, target: Target, double: bool) {
         match target {
             Target::Region(region) => self.focus = region,
-            Target::Command => self.focus = Region::Command,
+            Target::Command => {
+                self.tabs.open(Doc::Board, false);
+                self.focus = Region::Command;
+            }
             Target::Toggle(part) => self.toggle(part),
+            Target::Activity(view) => {
+                if self.view == view && self.shown.sidebar {
+                    self.wanted.sidebar = false;
+                    if self.focus == Region::Sidebar {
+                        self.focus = Region::Editor;
+                    }
+                } else {
+                    self.show_view(view);
+                }
+            }
             Target::BoardRow(row) => {
                 self.focus = Region::Editor;
                 if matches!(self.rows.get(row), Some(Row::Item { .. })) {
                     self.board.selected = row;
+                    if double {
+                        self.open_selected();
+                    }
                 }
             }
             Target::NextRow(at) => {
@@ -581,11 +1103,6 @@ impl App {
                 if let Some(id) = self.snapshot.next().get(at).map(|entry| entry.id) {
                     self.reveal(id);
                 }
-            }
-            Target::ExplorerRow(group) => {
-                self.focus = Region::Explorer;
-                self.explorer.selected = group;
-                self.reveal_board(group);
             }
             Target::ProblemRow(at) => {
                 self.focus = Region::Panel;
@@ -598,12 +1115,81 @@ impl App {
             Target::PanelTab(tab) => {
                 self.wanted.panel = true;
                 self.focus = Region::Panel;
-                self.show_tab(tab);
+                self.show_panel(tab);
             }
             Target::Bell => {
                 self.wanted.panel = true;
                 self.focus = Region::Panel;
-                self.show_tab(Tab::Output);
+                self.show_panel(PanelTab::Output);
+            }
+            Target::Tab(at) => {
+                self.tabs.activate(at);
+                if double {
+                    self.tabs.pin(at);
+                }
+                self.focus = Region::Editor;
+            }
+            Target::CloseTab(at) => {
+                self.tabs.close(at);
+            }
+            Target::Page(page) => self.open_page(page),
+            Target::TreeRow(at) => {
+                self.focus = Region::Sidebar;
+                let rows = self.tree_rows();
+                self.tree.select(at, &rows);
+                self.choose_row(at, !double);
+            }
+            Target::SearchField => {
+                self.view = View::Search;
+                self.focus = Region::Sidebar;
+            }
+            Target::Chip(at) => {
+                self.search = search::toggle_chip(&self.search, search::CHIPS[at]);
+                self.reset_found();
+                self.focus = Region::Sidebar;
+            }
+            Target::SearchRow(at) => {
+                self.focus = Region::Sidebar;
+                self.found.selected = at;
+                self.choose_found(at, !double);
+            }
+            Target::ProjectRow(at) => {
+                self.focus = Region::Sidebar;
+                self.projects.selected = at;
+                if double {
+                    self.choose_project(at);
+                }
+            }
+            Target::ChangeRow(at) => {
+                self.focus = Region::Sidebar;
+                self.changes.selected = at;
+                if let Some(key) = self.change_key(at) {
+                    self.open_item(key, !double);
+                }
+            }
+            Target::Key(at) => {
+                if let Some(key) = self.hit_keys.get(at).cloned() {
+                    self.open_item(key, false);
+                }
+            }
+            Target::RoadmapRow(at) => {
+                self.focus = Region::Editor;
+                self.doc.roadmap.selected = at;
+                self.choose_roadmap(KeyCode::Enter, !double);
+            }
+            Target::Day(day) => {
+                self.focus = Region::Editor;
+                self.doc.day = day;
+                if double {
+                    self.open_day();
+                }
+            }
+            Target::Month(0) => self.today(),
+            Target::Month(by) => self.move_month(by),
+            Target::Welcome(at) => {
+                if let Some(link) = self.welcome_links().get(at).copied() {
+                    self.welcome(link);
+                }
             }
         }
     }
@@ -612,18 +1198,43 @@ impl App {
     fn wheel(&mut self, target: Option<Target>, by: isize) {
         let region = match target {
             Some(Target::Region(region)) => region,
-            Some(Target::BoardRow(_)) => Region::Editor,
+            Some(Target::BoardRow(_) | Target::Key(_) | Target::RoadmapRow(_) | Target::Day(_) | Target::Welcome(_)) => {
+                Region::Editor
+            }
             Some(Target::NextRow(_)) => Region::Next,
-            Some(Target::ExplorerRow(_)) => Region::Explorer,
+            Some(Target::TreeRow(_) | Target::SearchRow(_) | Target::ProjectRow(_) | Target::ChangeRow(_) | Target::Chip(_)) => {
+                Region::Sidebar
+            }
             Some(Target::ProblemRow(_) | Target::PanelTab(_)) => Region::Panel,
             _ => return,
         };
         match region {
-            Region::Editor => self.move_board(by),
+            Region::Editor => match self.tabs.active().clone() {
+                Doc::Board => self.move_board(by),
+                Doc::Item(_) => self.doc.scroll = (self.doc.scroll as isize).saturating_add(by * 3).max(0) as usize,
+                Doc::Roadmap => self.doc.roadmap.step(by, self.roadmap_lines().len()),
+                Doc::Calendar => self.move_day(by as i64 * 7),
+                Doc::Welcome => self.doc.welcome.step(by, self.welcome_links().len()),
+            },
             Region::Next => self.next.step(by, self.snapshot.next().len()),
-            Region::Explorer => self.explorer.step(by, self.snapshot.groups.len()),
-            Region::Panel => self.scroll_panel(by * if self.tab == Tab::Problems { 1 } else { 3 }),
-            _ => {}
+            Region::Sidebar => match self.view {
+                View::Explorer => {
+                    let rows = self.tree_rows();
+                    self.tree.settle(&rows);
+                    self.tree.step(by, &rows);
+                }
+                View::Search => {
+                    let lines = self.search_lines();
+                    let from = (self.found.selected as isize + by).max(0) as usize;
+                    if let Some(line) = Self::found_item(&lines, from, by) {
+                        self.found.selected = line;
+                    }
+                }
+                View::Projects => self.projects.step(by, self.snapshot.projects.len()),
+                View::Changes => self.changes.step(by, self.snapshot.changes.len()),
+            },
+            Region::Panel => self.scroll_panel(by * if self.panel == PanelTab::Problems { 1 } else { 3 }),
+            Region::Command => {}
         }
     }
 
@@ -637,7 +1248,7 @@ impl App {
         }
     }
 
-    fn say(&mut self, text: String, kind: Kind) {
+    pub fn say(&mut self, text: String, kind: Kind) {
         self.log(text.clone(), kind);
         self.flash = Some((text, kind, Instant::now()));
     }
@@ -707,7 +1318,8 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::tui::board::tests::{board, words};
+    use crate::render::ProjectSummary;
+    use crate::tui::board::tests::{board, snapshot, words};
 
     fn open(dir: &Path, ekko: &Ekko) -> App {
         let workspace = Workspace {
@@ -715,17 +1327,22 @@ mod tests {
             name: "test".into(),
             folder: "~/test".into(),
             cwd: dir.to_path_buf(),
+            home: dir.to_path_buf(),
             branch: None,
         };
-        App::new(workspace, Snapshot::load(ekko, "test").unwrap())
+        App::new(workspace, snapshot(dir, ekko), 0)
     }
 
     fn press(app: &mut App, code: KeyCode) -> Option<Action> {
         app.key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
+    fn with(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        app.key(KeyEvent::new(code, modifiers))
+    }
+
     fn ctrl(app: &mut App, c: char) -> Option<Action> {
-        app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+        with(app, KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     fn state(ekko: &Ekko, id: u32) -> Option<State> {
@@ -734,6 +1351,15 @@ mod tests {
 
     fn selected_description(app: &App) -> &str {
         &app.snapshot.items[app.selected().expect("nothing is selected")].description
+    }
+
+    fn click(app: &mut App, column: u16, row: u16) {
+        app.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
     }
 
     /// Enter completes the selected task, and no key undoes a finished one.
@@ -873,9 +1499,10 @@ mod tests {
     fn boxes_open_and_close_and_focus_visits_only_what_is_shown() {
         let (dir, ekko) = board("boxes");
         let mut app = open(&dir, &ekko);
+        app.tabs.open(Doc::Board, false);
 
         ctrl(&mut app, 'b');
-        assert!(!app.wanted.explorer);
+        assert!(!app.wanted.sidebar);
         app.shown = app.wanted;
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Region::Panel);
@@ -886,16 +1513,76 @@ mod tests {
 
         press(&mut app, KeyCode::BackTab);
         assert_eq!(app.focus, Region::Next);
-        app.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL | KeyModifiers::ALT));
+        with(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL | KeyModifiers::ALT);
         assert!(!app.wanted.next);
         assert_eq!(app.focus, Region::Editor, "focus stayed on a closed box");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A click lands on whatever the last frame recorded under it, the most
-    /// specific thing first.
+    /// Alt+Enter, and Ctrl+Enter where it arrives as such, open the selected
+    /// item; a plain Enter still completes it.
     #[test]
-    fn a_click_lands_on_what_was_drawn_under_it() {
+    fn enter_with_a_modifier_opens_the_item_and_plain_enter_completes_it() {
+        let (dir, ekko) = board("open");
+        ekko.create_task(&words(&["@a", "one"])).unwrap();
+        let mut app = open(&dir, &ekko);
+        let key = board::key(&app.snapshot.all[&1]);
+
+        assert_eq!(with(&mut app, KeyCode::Enter, KeyModifiers::ALT), None);
+        assert_eq!(app.tabs.active(), &Doc::Item(key.clone()));
+        assert!(!app.tabs.open[app.tabs.active].preview);
+
+        ctrl(&mut app, 'w');
+        assert_eq!(app.tabs.active(), &Doc::Board);
+        assert_eq!(with(&mut app, KeyCode::Enter, KeyModifiers::CONTROL), None);
+        assert_eq!(app.tabs.active(), &Doc::Item(key));
+
+        ctrl(&mut app, 'w');
+        assert_eq!(press(&mut app, KeyCode::Enter), Some(Action::Done));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Ctrl+K chords open the pages and the views; an unknown second key says so.
+    #[test]
+    fn ctrl_k_chords_open_pages_and_views() {
+        let (dir, ekko) = board("chords");
+        let mut app = open(&dir, &ekko);
+
+        ctrl(&mut app, 'k');
+        assert!(app.chording());
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!((app.tabs.active(), app.focus), (&Doc::Roadmap, Region::Editor));
+
+        ctrl(&mut app, 'k');
+        ctrl(&mut app, 'f');
+        assert_eq!((app.view, app.focus), (View::Search, Region::Sidebar));
+
+        ctrl(&mut app, 'k');
+        press(&mut app, KeyCode::Char('z'));
+        assert!(app.flash().unwrap().0.contains("(Ctrl+K, Z) is not a command"));
+        assert!(!app.chording());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ctrl_w_closes_a_tab_but_never_the_board() {
+        let (dir, ekko) = board("close");
+        ekko.create_task(&words(&["@a", "one"])).unwrap();
+        let mut app = open(&dir, &ekko);
+        app.tabs.open(Doc::Calendar, false);
+
+        ctrl(&mut app, 'w');
+        assert_eq!(app.tabs.open.len(), 1);
+        ctrl(&mut app, 'w');
+        assert_eq!(app.tabs.open.len(), 1);
+        assert_eq!(app.flash().unwrap().1, Kind::Refused);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A click lands on whatever the last frame recorded under it, the most
+    /// specific thing first, and a second click on the same place opens.
+    #[test]
+    fn a_click_lands_on_what_was_drawn_and_a_double_click_opens() {
         let (dir, ekko) = board("click");
         ekko.create_task(&words(&["@a", "one"])).unwrap();
         ekko.create_task(&words(&["@a", "two"])).unwrap();
@@ -907,17 +1594,135 @@ mod tests {
             (Rect::new(2, 6, 50, 1), Target::BoardRow(2)),
             (Rect::new(99, 39, 1, 1), Target::Bell),
         ];
-        let click = |column, row| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        };
 
-        app.mouse(click(10, 6));
+        click(&mut app, 10, 6);
         assert_eq!((app.focus, app.board.selected), (Region::Editor, 2));
-        app.mouse(click(99, 39));
-        assert_eq!((app.tab, app.unseen, app.focus), (Tab::Output, 0, Region::Panel));
+        assert_eq!(app.tabs.open.len(), 1, "a single click opened a tab");
+        click(&mut app, 10, 6);
+        assert_eq!(app.tabs.active(), &Doc::Item(board::key(&app.snapshot.all[&2])));
+
+        click(&mut app, 99, 39);
+        assert_eq!((app.panel, app.unseen, app.focus), (PanelTab::Output, 0, Region::Panel));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// In the explorer Space opens an item in passing and Enter on purpose.
+    #[test]
+    fn the_explorer_previews_with_space_and_opens_with_enter() {
+        let (dir, ekko) = board("explorer");
+        ekko.create_task(&words(&["@a", "one"])).unwrap();
+        ekko.create_task(&words(&["@a", "two"])).unwrap();
+        let mut app = open(&dir, &ekko);
+        app.focus = Region::Sidebar;
+        app.tree.toggle(&tree::Node::Board("@a".to_string()));
+        let rows = app.tree_rows();
+        let one = rows.iter().position(|row| row.label == "one").unwrap();
+        app.tree.select(one, &rows);
+
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.tabs.open[app.tabs.active].preview);
+        assert_eq!(app.focus, Region::Sidebar, "a preview took the focus");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        // As in VS Code, opening on purpose leaves the preview beside it; only
+        // another preview takes a preview's place.
+        assert_eq!(app.tabs.open.len(), 3);
+        assert!(app.tabs.open.iter().any(|tab| tab.preview), "the preview was closed");
+        assert!(!app.tabs.open[app.tabs.active].preview);
+        assert_eq!(app.focus, Region::Editor);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn search_finds_through_the_core_and_opens_what_it_finds() {
+        let (dir, ekko) = board("finding");
+        ekko.create_task(&words(&["@a", "wire the watcher"])).unwrap();
+        ekko.create_task(&words(&["@a", "draw the frame"])).unwrap();
+        ekko.check_tasks(&words(&["2"]), false).unwrap();
+        let mut app = open(&dir, &ekko);
+        app.show_view(View::Search);
+
+        for c in "is:done".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let lines = app.search_lines();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(app.found.selected, 1, "the first result is not selected");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tabs.active(), &Doc::Item(board::key(&app.snapshot.all[&2])));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Only a project that lives in its folder can be switched to.
+    #[test]
+    fn switching_is_asked_for_only_a_project_in_its_folder() {
+        let (dir, ekko) = board("projects");
+        let mut app = open(&dir, &ekko);
+        let summary = |name: &str, status: &'static str| ProjectSummary {
+            name: name.to_string(),
+            complete: 0,
+            tasks: 0,
+            notes: 0,
+            path: Some("/somewhere".to_string()),
+            status,
+        };
+        app.snapshot.projects = vec![summary("elsewhere", "here"), summary("gone", "missing"), summary("test", "here")];
+        app.show_view(View::Projects);
+
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.switch.is_none());
+        assert!(app.flash().unwrap().0.contains("no longer holds it"));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.flash().unwrap().0.contains("already open"));
+        press(&mut app, KeyCode::Home);
+        app.projects.selected = 0;
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.switch.as_deref(), Some("elsewhere"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn calendar_keys_move_through_days_and_months() {
+        let (dir, ekko) = board("calendar");
+        let mut app = open(&dir, &ekko);
+        app.tabs.open(Doc::Calendar, false);
+        app.focus = Region::Editor;
+        app.doc.month = (2026, 1);
+        app.doc.day = 31;
+
+        press(&mut app, KeyCode::Right);
+        assert_eq!((app.doc.month, app.doc.day), ((2026, 2), 1));
+        press(&mut app, KeyCode::Up);
+        assert_eq!((app.doc.month, app.doc.day), ((2026, 1), 25));
+        app.doc.day = 31;
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!((app.doc.month, app.doc.day), ((2026, 2), 28), "February kept a 31st");
+        press(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(app.doc.month, (2025, 12));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Enter opens a phase onto its items and opens an item from there.
+    #[test]
+    fn the_roadmap_opens_a_phase_onto_its_items() {
+        let (dir, ekko) = board("roadmap");
+        ekko.set_phases(&words(&["setup", "release"])).unwrap();
+        ekko.create_task_in(&words(&["@a", "wire it"]), Some("release")).unwrap();
+        let mut app = open(&dir, &ekko);
+        app.tabs.open(Doc::Roadmap, false);
+        app.focus = Region::Editor;
+        app.doc.open_phases.clear();
+
+        assert_eq!(app.roadmap_lines().len(), 2);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.roadmap_lines(), vec![RoadmapLine::Phase(0), RoadmapLine::Phase(1), RoadmapLine::Item(1)]);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tabs.active(), &Doc::Item(board::key(&app.snapshot.all[&1])));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

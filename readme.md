@@ -197,25 +197,25 @@ In order to display all items in a timeline view, based on their creation date, 
 
 ### Interactive Mode
 
-`ekko --ui` opens the board as a dashboard in the shape of VS Code's current look: every part is a box with rounded corners standing slightly apart from its neighbours, titles and tabs are pills, a command centre runs across the top and a status bar under everything. The colours were measured off VS Code's Dark Modern theme on a real screen rather than picked to resemble it.
+`ekko --ui` opens the board as a dashboard in the shape of VS Code's current look: every part is a box with rounded corners standing slightly apart from its neighbours, titles and tabs are pills, a command centre runs across the top, an activity bar down the right edge and a status bar under everything. The colours were measured off VS Code's Dark Modern theme on a real screen rather than picked to resemble it.
 
 ```
                                / wayland                                                    [ _ ]
 ╭──────────────────────────────╮╭───────────────────────────────────────────────╮╭─────────────────────────────────┬───╮
-│  Next                        ││  ▤ Board                                      ││ Explorer                     …  │ ≡ │
-│ 1 in progress · 1 ready      ││  wayland ▸ Board                              ││ ▾ wayland                  25%  │   │
-├──────────────────────────────┤│                                               ││   ▸ @wayland               1/3  │ / │
-│ … 2 Damage tracking          ││  @wayland  [1/3]                              ││   ▸ @docs                  0/1  │   │
-│ ☐ 4 Ship the package         ││    1. ✔ Vendor wlroots                        ││                                 │   │
-│                              ││    2. … Damage tracking                       ││                                 │   │
-│                              ││      3. ● Damage is in surface coordinate…    ││                                 │   │
-│                              ││    4. ☐ Ship the package             ◷ 09-30  ││                                 │   │
-│                              ││  @docs  [0/1]                                 ││ ──────────────────────────────  │   │
-│                              ││    5. ☐ Write the readme                 ⇠ 4  ││ ▾ Item                          │   │
-│                              ││                                               ││   ✔ done  #1                    │   │
-│                              ││                                               ││   Vendor wlroots                │   │
-│                              ││                                               ││   @wayland                      │   │
-│                              ││                                               ││   created Tue Sep 15 2026       │   │
+│  Next                        ││  ▤ Board •                              ◔ ◷ ☆ ││ Explorer                     …  │ ≡ │
+│ 1 in progress · 1 ready      ││  wayland ▸ Board                              ││ ▸ Open Editors               1  │   │
+├──────────────────────────────┤│                                               ││ ▾ wayland                  25%  │ / │
+│ … 2 Damage tracking          ││  @wayland  [1/3]                              ││   ▸ @wayland               1/3  │   │
+│ ☐ 4 Ship the package         ││    1. ✔ Vendor wlroots                        ││   ▸ @docs                  0/1  │ ▦ │
+│                              ││    2. … Damage tracking                       ││ ▸ Stash                      0  │   │
+│                              ││      3. ● Damage is in surface coordinate…    ││ ▸ Trash                      0  │ ↺ │
+│                              ││    4. ☐ Ship the package             ◷ 09-30  ││ ▸ Archive                    0  │   │
+│                              ││  @docs  [0/1]                                 ││ ▸ Outline                       │   │
+│                              ││    5. ☐ Write the readme                 ⇠ 4  ││                                 │   │
+│                              ││                                               ││                                 │   │
+│                              ││                                               ││                                 │   │
+│                              ││                                               ││                                 │   │
+│                              ││                                               ││                                 │   │
 ╰──────────────────────────────╯╰───────────────────────────────────────────────╯╰─────────────────────────────────┤   │
 ╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│   │
 │  Problems 1   Output   Agent                                                                                  × ││   │
@@ -229,19 +229,21 @@ In order to display all items in a timeline view, based on their creation date, 
 That is a terminal without a Nerd Font (`EKKO_ICONS=plain`). With one, the icons are VS Code's own codicons, and the pills and the active icon get their rounded ends.
 
 - **Next**, on the left: what to take up next, best first, in the order `--next` gives an agent.
-- **The board**, in the editor: items grouped by board, one line each. A board's `[1/3]` counts the whole board and does not move when you filter -- otherwise the same board would report different totals depending on what you had typed.
-- **The explorer**, on the right: the project, its boards, and the selected item in full. A long note takes one line on the board and is read whole here, so it stays long without becoming a wall; [folding](#folded-notes) has to cut it to fit, and this does not.
+- **The editor**, in the middle, keeps tabs the way VS Code does. The board is the tab that never closes: grouped by board, one line per item, and a board's `[1/3]` counts the whole board and does not move when you filter -- otherwise the same board would report different totals depending on what you had typed. An item opens in a tab of its own, with its state, its facts, its text whole, and its relations -- what blocks it, what it blocks, the task it is attached to, the notes attached to it -- each a link to that item's tab. A long note takes one line on the board and is read whole there, so it stays long without becoming a wall; [folding](#folded-notes) has to cut it to fit, and this does not. A tab opened in passing is a preview, its title in italics, and the next thing opened in passing takes its place; opened on purpose, it stays. The **Roadmap** tab draws `--roadmap`'s chain, each phase's progress and the items in it; the **Calendar** tab lays the month out with what is due on each day; the **Welcome** page has where to start, the projects on this machine, and how far the board has come.
+- **The sidebar**, on the right, shows the view picked in the activity bar. *Explorer* is a tree: the project with its boards and their items, each note under the task it is attached to; the phases; the stash, the trash with the days each thing has left, and the archive; the open tabs; and an outline of the active item's relations. *Search* takes words, `#id`, `@board` and `is:` filters offered as chips -- `--list`'s own filters, applied by the same function, so a search and `--list` never disagree. *Projects* lists the projects on this machine and switches to one; *Changes* lists what was written since the session began, by anyone.
 - **The panel**, underneath: *Problems* lists what `--prime` finds wrong with the board -- blocked work, missed dates, work completed over an open blocker, dependencies that run against the phase order -- *Output* keeps what this session did and what changed elsewhere, and *Agent* shows the text an agent starts from.
 - **The status bar**: the branch, whether the board just changed, the blocked and warning counts, the next item, the folder, and a bell for changes made elsewhere.
 
-The keys are VS Code's. `Ctrl+P` filters by words, `#id` or `@board`; `Ctrl+B` opens and closes the explorer, `Ctrl+Alt+B` the Next box and `Ctrl+J` the panel; `Tab` or `F6` moves between boxes; `Esc` clears the filter; `Ctrl+Q` leaves. On the board, `Enter` completes a task, `Space` starts or pauses it, `Ctrl+S` stashes it, and typing anything else starts a filter. The mouse selects, switches tabs and scrolls whatever it points at, and the three toggles beside the command centre open and close the boxes. As the terminal narrows, boxes give way in the order VS Code drops them, and below 60×16 it says what it needs instead of drawing a broken frame.
+The keys are VS Code's. `Ctrl+P` filters the board by words, `#id` or `@board`; `Ctrl+B` opens and closes the sidebar, `Ctrl+Alt+B` the Next box and `Ctrl+J` the panel; `Tab` or `F6` moves between boxes; `Ctrl+W` closes a tab and `Ctrl+PageUp` and `Ctrl+PageDown` move between tabs; `Ctrl+Q` leaves. Chords begin with `Ctrl+K`, as VS Code's do: then `B` for the board, `R` the roadmap, `C` the calendar, `W` the Welcome page, `E` the explorer, `F` search, `P` the projects and `H` the changes.
+
+On the board, `Enter` completes a task, `Space` starts or pauses it, `Ctrl+S` stashes it, and typing anything else starts a filter. `Alt+Enter` opens the selected item in a tab, and so does a double click. `Ctrl+Enter` does too, but only in a terminal that tells it apart from `Enter`: most send it as a plain `Enter`, which completes the task, so ekko asks for the kitty keyboard protocol where the terminal has it and never guesses where it does not. In the tree the arrows move, `Right` and `Left` open and close, `Space` opens an item in passing and `Enter` on purpose; in an item's tab the arrows move between its relations and `Enter` follows one; in the calendar the arrows move by day and by week, `Page Up` and `Page Down` by month, and `Home` comes back to today. The mouse selects, opens, switches tabs and views, and scrolls whatever it points at. As the terminal narrows, boxes give way in the order VS Code drops them, and below 60×16 it says what it needs instead of drawing a broken frame.
 
 `Enter` and `Space` refuse to touch a task that is **done or cancelled**. Those are terminal, and setting `progress` clears `isComplete` by definition -- so a stray keypress used to destroy the fact that something was finished, which is exactly what happened to two items the hour the first version of this mode shipped. Changing one is `--set`, deliberately. `Enter` also refuses a task that is still blocked, and says by what: completing one anyway takes `--force`, typed in the CLI, never a keypress.
 
 Four things about how it behaves, each of them a consequence of the board being shared:
 
 - **It never holds the lock while idle.** A write takes the lock and releases it immediately, the same as any other command. A UI parked on the `flock` would block your other terminal and every agent -- the exact failure the lock exists to prevent, caused by the thing meant to help.
-- **It is live.** It watches the board's files and redraws when another terminal or an agent writes, keeping the same item selected, and Output and the bell say it happened. Nothing on screen goes stale while you look at it.
+- **It is live.** It watches the board's files and redraws when another terminal or an agent writes, with the same item still selected and the tree still open where it was, and Output and the bell say it happened. Nothing on screen goes stale while you look at it.
 - **A write names its item by uid**, so a board renumbered elsewhere since the last frame cannot turn a keypress into a write to some other item.
 - **It changes nothing about the CLI.** Interactive mode is a separate frontend on the same core and never goes through the renderer the golden tests pin, so the byte-for-byte guarantee is untouched by construction rather than by care.
 

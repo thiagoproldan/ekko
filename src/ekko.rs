@@ -719,7 +719,7 @@ impl Ekko {
     /// `all` is the whole of storage, stashed and trashed included, and is
     /// only consulted to resolve blockers -- see `unmet_blockers` for why a
     /// blocker has to be judged against everything rather than the view.
-    fn filter_by_attributes(&self, attributes: &[String], mut data: ItemMap, all: &ItemMap) -> ItemMap {
+    pub(crate) fn filter_by_attributes(attributes: &[String], mut data: ItemMap, all: &ItemMap) -> ItemMap {
         if data.is_empty() {
             return data;
         }
@@ -1766,7 +1766,7 @@ impl Ekko {
         let attributes = remove_duplicates(attributes);
 
         let all = self.storage.get()?;
-        let filtered = self.filter_by_attributes(&attributes, data, &all);
+        let filtered = Self::filter_by_attributes(&attributes, data, &all);
         Ok(Outcome::List(self.group_by_board(&filtered, &boards)))
     }
 }
@@ -1978,7 +1978,7 @@ fn change_for(state: &str) -> Option<Change> {
 /// `Ekko::filter_by_attributes`, which is the code that acts on them --
 /// the two must agree, or `list_by_attributes` would reject a term the
 /// filter would happily have handled.
-fn is_known_attribute(term: &str) -> bool {
+pub(crate) fn is_known_attribute(term: &str) -> bool {
     matches!(
         term,
         "star"

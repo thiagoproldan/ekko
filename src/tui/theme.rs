@@ -72,22 +72,35 @@ impl Glyphs {
 
 /// One glyph per thing the frame draws, each one cell wide.
 pub struct Icons {
+    // The activity bar.
     pub explorer: &'static str,
     pub search: &'static str,
+    pub projects: &'static str,
+    pub changes: &'static str,
+    // The toggles beside the command centre.
     pub left_on: &'static str,
     pub left_off: &'static str,
     pub panel_on: &'static str,
     pub panel_off: &'static str,
     pub right_on: &'static str,
     pub right_off: &'static str,
+    // Tabs and the pages they show.
     pub board: &'static str,
+    pub welcome: &'static str,
+    pub roadmap: &'static str,
+    pub calendar: &'static str,
+    pub pinned: &'static str,
     pub close: &'static str,
     pub ellipsis: &'static str,
+    // Trees, lists and the calendar's arrows.
     pub collapsed: &'static str,
     pub expanded: &'static str,
+    pub back: &'static str,
+    // Marks after an item.
     pub star: &'static str,
     pub due: &'static str,
     pub waits: &'static str,
+    // Problems and the status bar.
     pub blocked: &'static str,
     pub warning: &'static str,
     pub branch: &'static str,
@@ -96,20 +109,28 @@ pub struct Icons {
     pub folder: &'static str,
     pub bell: &'static str,
     pub bell_dot: &'static str,
+    // An item's state.
     pub done: &'static str,
     pub progress: &'static str,
     pub paused: &'static str,
     pub pending: &'static str,
     pub cancelled: &'static str,
     pub note: &'static str,
+    // The roadmap's nodes, as `--roadmap` draws them.
+    pub behind: &'static str,
+    pub here: &'static str,
+    pub ahead: &'static str,
 }
 
 /// Codepoints from the Nerd Fonts glyph table (`nf-cod-*`). Pending keeps a
 /// plain circle, which every Nerd Font has and codicons have no outline for;
-/// a blocker keeps the arrow the board view already draws.
+/// a blocker keeps the arrow the board view already draws, and the roadmap
+/// keeps the board view's own nodes.
 const NERD: Icons = Icons {
     explorer: "\u{eaf0}",
     search: "\u{ea6d}",
+    projects: "\u{eb30}",
+    changes: "\u{ea82}",
     left_on: "\u{ebf3}",
     left_off: "\u{ec02}",
     panel_on: "\u{ebf2}",
@@ -117,10 +138,15 @@ const NERD: Icons = Icons {
     right_on: "\u{ebf4}",
     right_off: "\u{ec00}",
     board: "\u{eab3}",
+    welcome: "\u{eb06}",
+    roadmap: "\u{eb20}",
+    calendar: "\u{eab0}",
+    pinned: "\u{eba0}",
     close: "\u{ea76}",
     ellipsis: "\u{ea7c}",
     collapsed: "\u{eab6}",
     expanded: "\u{eab4}",
+    back: "\u{eab5}",
     star: "\u{eb59}",
     due: "\u{eab0}",
     waits: "\u{21e0}",
@@ -138,6 +164,9 @@ const NERD: Icons = Icons {
     pending: "\u{25cb}",
     cancelled: "\u{eabd}",
     note: "\u{eb26}",
+    behind: "\u{25cf}",
+    here: "\u{25c9}",
+    ahead: "\u{25cb}",
 };
 
 /// The board view's own glyphs where it has one, so a task reads the same in
@@ -145,6 +174,8 @@ const NERD: Icons = Icons {
 const PLAIN: Icons = Icons {
     explorer: "≡",
     search: "/",
+    projects: "▦",
+    changes: "↺",
     left_on: "[",
     left_off: "[",
     panel_on: "_",
@@ -152,10 +183,15 @@ const PLAIN: Icons = Icons {
     right_on: "]",
     right_off: "]",
     board: "▤",
+    welcome: "☆",
+    roadmap: "◔",
+    calendar: "◷",
+    pinned: "•",
     close: "×",
     ellipsis: "…",
     collapsed: "▸",
     expanded: "▾",
+    back: "◂",
     star: "★",
     due: "◷",
     waits: "⇠",
@@ -173,6 +209,9 @@ const PLAIN: Icons = Icons {
     pending: "☐",
     cancelled: "⊘",
     note: "●",
+    behind: "●",
+    here: "◉",
+    ahead: "○",
 };
 
 /// A pill: text on the pill colour, with rounded ends drawn as half circles
@@ -191,9 +230,14 @@ pub fn pill(glyphs: Glyphs, text: String, fg: Color, bg: Color, under: Color) ->
 
 /// The glyph and the style an item is drawn with, from its one state.
 pub fn item_look(glyphs: Glyphs, item: &Item) -> (&'static str, Style) {
+    state_look(glyphs, State::of(item))
+}
+
+/// The glyph and the style of a state, or of a note for `None`.
+pub fn state_look(glyphs: Glyphs, state: Option<State>) -> (&'static str, Style) {
     let icons = glyphs.icons();
     let base = Style::new().fg(palette::TEXT);
-    match State::of(item) {
+    match state {
         None => (icons.note, base.fg(palette::LINK)),
         Some(State::Pending) => (icons.pending, base.fg(palette::MUTED)),
         Some(State::Progress) => (icons.progress, base.fg(palette::ACCENT)),
@@ -217,22 +261,35 @@ pub fn description_style(item: &Item) -> Style {
 mod tests {
     use super::*;
 
+    fn all(icons: &Icons) -> Vec<&'static str> {
+        vec![
+            icons.explorer, icons.search, icons.projects, icons.changes, icons.left_on, icons.left_off,
+            icons.panel_on, icons.panel_off, icons.right_on, icons.right_off, icons.board, icons.welcome,
+            icons.roadmap, icons.calendar, icons.pinned, icons.close, icons.ellipsis, icons.collapsed,
+            icons.expanded, icons.back, icons.star, icons.due, icons.waits, icons.blocked, icons.warning,
+            icons.branch, icons.sync, icons.rocket, icons.folder, icons.bell, icons.bell_dot, icons.done,
+            icons.progress, icons.paused, icons.pending, icons.cancelled, icons.note, icons.behind, icons.here,
+            icons.ahead,
+        ]
+    }
+
     /// Every glyph is one cell wide by the measure ratatui lays out with -- a
     /// wider one would push the rest of its line over by a cell.
     #[test]
     fn every_glyph_is_one_cell_wide() {
         use unicode_width::UnicodeWidthStr;
         for icons in [&NERD, &PLAIN] {
-            for glyph in [
-                icons.explorer, icons.search, icons.left_on, icons.left_off, icons.panel_on,
-                icons.panel_off, icons.right_on, icons.right_off, icons.board, icons.close, icons.ellipsis,
-                icons.collapsed, icons.expanded, icons.star, icons.due, icons.waits, icons.blocked,
-                icons.warning, icons.branch, icons.sync, icons.rocket, icons.folder, icons.bell,
-                icons.bell_dot, icons.done, icons.progress, icons.paused, icons.pending, icons.cancelled,
-                icons.note,
-            ] {
+            for glyph in all(icons) {
                 assert_eq!(glyph.width(), 1, "{glyph:?} is {} cells", glyph.width());
             }
+        }
+    }
+
+    /// Without a Nerd Font nothing from the private use area is drawn.
+    #[test]
+    fn the_plain_set_has_nothing_from_the_private_use_area() {
+        for glyph in all(&PLAIN) {
+            assert!(!glyph.chars().any(|c| ('\u{e000}'..='\u{f8ff}').contains(&c)), "{glyph:?}");
         }
     }
 

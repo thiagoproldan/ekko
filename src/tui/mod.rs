@@ -14,18 +14,26 @@ mod board;
 mod draw;
 mod git;
 mod layout;
+mod list;
+mod search;
+mod tabs;
 mod theme;
+mod tree;
 mod watch;
 
 use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 
 use crate::directory::Location;
 use crate::ekko::{Ekko, EkkoError};
+use crate::project;
 
 /// How long to wait for input before looking at the board's files again.
 const TICK: Duration = Duration::from_millis(200);
@@ -35,25 +43,39 @@ const TICK: Duration = Duration::from_millis(200);
 /// shell with no echo, on the alternate screen, typing out every mouse move.
 struct Session {
     terminal: ratatui::DefaultTerminal,
+    enhanced: bool,
 }
 
 impl Session {
     fn start() -> io::Result<Self> {
         let terminal = ratatui::try_init()?;
         execute!(io::stdout(), EnableMouseCapture)?;
-        // ratatui's own hook puts the screen back; this one releases the
-        // mouse, which it does not know was captured.
+        // Where the terminal speaks the kitty keyboard protocol, it is asked to
+        // tell Ctrl+Enter from Enter; anywhere else nothing is pushed, and
+        // nothing has to be popped.
+        let enhanced = matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
+        if enhanced {
+            execute!(io::stdout(), PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
+        }
+        // ratatui's own hook puts the screen back; this one gives back what it
+        // does not know was taken.
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            if enhanced {
+                let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+            }
             let _ = execute!(io::stdout(), DisableMouseCapture);
             previous(info);
         }));
-        Ok(Session { terminal })
+        Ok(Session { terminal, enhanced })
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if self.enhanced {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
         let _ = execute!(io::stdout(), DisableMouseCapture);
         ratatui::restore();
     }
@@ -66,16 +88,14 @@ fn io_error(error: io::Error) -> EkkoError {
 /// Takes the terminal and shows the board at `location` until the person
 /// leaves. `label` is how the board is named, as the CLI names it.
 pub fn run(ekko: &Ekko, location: &Location, label: &str, home: &Path, cwd: &Path) -> Result<(), EkkoError> {
+    let since = chrono::Local::now().timestamp_millis();
     let root = location.project.as_ref().and_then(|project| project.root.clone()).unwrap_or_else(|| location.dir.clone());
-    let workspace = app::Workspace {
-        label: label.to_string(),
-        name: location.project.as_ref().map_or_else(|| "default board".to_string(), |project| project.name.clone()),
-        folder: shorten(&root, home),
-        cwd: cwd.to_path_buf(),
-        branch: git::branch(cwd),
-    };
-    let mut app = app::App::new(workspace, board::Snapshot::load(ekko, label)?);
+    let name = location.project.as_ref().map_or_else(|| "default board".to_string(), |project| project.name.clone());
+    let mut app = open(ekko, label.to_string(), name, &root, home, cwd, since)?;
     let mut watch = watch::Watch::new(&location.dir);
+    // A project switched to from the Projects view; the board main opened
+    // until then.
+    let mut switched: Option<Ekko> = None;
     let glyphs = theme::Glyphs::from_env();
 
     let mut session = Session::start().map_err(io_error)?;
@@ -83,10 +103,11 @@ pub fn run(ekko: &Ekko, location: &Location, label: &str, home: &Path, cwd: &Pat
         session.terminal.draw(|frame| draw::frame(frame, &mut app, glyphs)).map_err(io_error)?;
 
         if event::poll(TICK).map_err(io_error)? {
+            let current = switched.as_ref().unwrap_or(ekko);
             match event::read().map_err(io_error)? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if let Some(action) = app.key(key) {
-                        if app.act(ekko, action)? {
+                        if app.act(current, action)? {
                             watch.settle();
                         }
                     }
@@ -98,11 +119,40 @@ pub fn run(ekko: &Ekko, location: &Location, label: &str, home: &Path, cwd: &Pat
         if app.quit {
             return Ok(());
         }
+        if let Some(name) = app.switch.take() {
+            let opened = project::resolve_named(home, &name)
+                .map_err(EkkoError::from)
+                .and_then(|project| Ok((Ekko::at(&project.dir)?, project)));
+            match opened {
+                Ok((next, project)) => {
+                    let root = project.root.clone().unwrap_or_else(|| project.dir.clone());
+                    app = open(&next, format!("project {}", project.name), project.name.clone(), &root, home, &root, since)?;
+                    watch = watch::Watch::new(&project.dir);
+                    switched = Some(next);
+                    continue;
+                }
+                Err(error) => app.say(error.to_string(), app::Kind::Refused),
+            }
+        }
         if watch.changed() {
-            app.outside_change(ekko)?;
+            app.outside_change(switched.as_ref().unwrap_or(ekko))?;
         }
         app.workspace.branch = git::branch(&app.workspace.cwd);
     }
+}
+
+/// The interactive mode's state for a board: read, and named.
+fn open(ekko: &Ekko, label: String, name: String, root: &Path, home: &Path, cwd: &Path, since: i64) -> Result<app::App, EkkoError> {
+    let workspace = app::Workspace {
+        label,
+        name,
+        folder: shorten(root, home),
+        cwd: cwd.to_path_buf(),
+        home: home.to_path_buf(),
+        branch: git::branch(cwd),
+    };
+    let snapshot = board::Snapshot::load(ekko, &board::Reading { label: &workspace.label, home, since })?;
+    Ok(app::App::new(workspace, snapshot, since))
 }
 
 /// `path` with the home directory written as `~`.
