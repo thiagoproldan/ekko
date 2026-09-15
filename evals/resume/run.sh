@@ -80,9 +80,14 @@ for target in "${targets[@]}"; do
       continue
     fi
     bytes=$(printf '%s' "$out" | wc -c)
+    # Coverage is read with colour codes stripped, sizes with them left in: an
+    # id behind an escape sequence is still delivered, and the escape sequence
+    # is still paid for. Without the strip, an environment that forces colour
+    # scores every coloured view at zero.
+    plain="$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')"
     # Two characters per token: the median measured from the usage the API
     # reported for real ekko outputs in agent sessions. An estimate, labelled.
     printf '   %-12s %9s %9s %8s %8s %8s\n' "$strategy" "$bytes" "$((bytes / 2))" \
-      "$(covered "$out" "$doing")" "$(covered "$out" "$ready")" "$(covered "$out" "$why")"
+      "$(covered "$plain" "$doing")" "$(covered "$plain" "$ready")" "$(covered "$plain" "$why")"
   done
 done

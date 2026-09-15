@@ -104,6 +104,7 @@ $ ekko --help
       --calendar          Show the current month
       --check, -c         Check/uncheck task
       --clear             Delete all checked items
+      --context <ID>      Show one item with its dependencies and notes
       --copy, -y          Copy item description
       --create            Create the project named by --project
       --delete, -d        Delete item
@@ -115,9 +116,11 @@ $ ekko --help
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes
       --move, -m          Move item between boards
+      --next [N]          List what to take up next, best first
       --note, -n          Create note
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
+      --prime             Summarise the board for picking work back up
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
@@ -145,6 +148,7 @@ $ ekko --help
       $ ekko --check 1 2
       $ ekko --check 2 --force
       $ ekko --clear
+      $ ekko --context 12
       $ ekko --copy 1 2 3
       $ ekko --delete 4
       $ ekko --edit @3 Merge PR #42
@@ -153,7 +157,9 @@ $ ekko --help
       $ ekko --json --task @coding Review PR #42
       $ ekko --list pending coding
       $ ekko --move @1 cooking
+      $ ekko --next 5
       $ ekko --note @coding Mergesort worse-case O(nlogn)
+      $ ekko --prime
       $ ekko --priority @3 2
       $ ekko --restore 4
       $ ekko --project demo --roadmap

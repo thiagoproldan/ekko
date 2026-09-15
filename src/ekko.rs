@@ -344,6 +344,11 @@ pub enum Outcome {
     Trash(Vec<Item>),
     Roadmap { steps: Vec<RoadmapStep>, rootless: u32, inversions: Vec<Inversion> },
     Stats(Stats),
+    /// The agent views -- see `agent`. Boxed because they are much larger
+    /// than every other outcome and would otherwise size the whole enum.
+    Prime(Box<crate::agent::Prime>),
+    Next(Vec<crate::agent::Entry>),
+    Context(Box<crate::agent::Context>),
 }
 
 
@@ -382,6 +387,9 @@ impl Outcome {
             Outcome::Trash(_) => "trash",
             Outcome::Roadmap { .. } => "roadmap",
             Outcome::Stats(_) => "stats",
+            Outcome::Prime(_) => "prime",
+            Outcome::Next(_) => "next",
+            Outcome::Context(_) => "context",
         }
     }
 
@@ -457,12 +465,15 @@ impl Outcome {
                 out.display_inversions(inversions);
             }
             Outcome::Stats(stats) => out.display_stats(stats),
+            Outcome::Prime(prime) => out.raw(&prime.text()),
+            Outcome::Next(entries) => out.raw(&crate::agent::next_text(entries)),
+            Outcome::Context(context) => out.raw(&context.text()),
         }
     }
 }
 
 pub struct Ekko {
-    storage: Storage,
+    pub(crate) storage: Storage,
 }
 
 impl Ekko {
@@ -521,7 +532,7 @@ impl Ekko {
     /// display id and anything else is looked up as a uid. Both miss the
     /// same way, as `INVALID_ID`, because a caller branching on the code
     /// should not have to care which spelling it used.
-    fn validate_ids(&self, raw_ids: &[String], existing: &ItemMap) -> Result<Vec<u32>, EkkoError> {
+    pub(crate) fn validate_ids(&self, raw_ids: &[String], existing: &ItemMap) -> Result<Vec<u32>, EkkoError> {
         if raw_ids.is_empty() {
             return Err(EkkoError::MissingId);
         }
@@ -667,7 +678,7 @@ impl Ekko {
     ///
     /// The item keeps its real state underneath, so unstashing puts it
     /// back where it belongs. Only the counting hides it.
-    fn compute_stats(&self, data: &ItemMap) -> Stats {
+    pub(crate) fn compute_stats(&self, data: &ItemMap) -> Stats {
         let (mut complete, mut in_progress, mut paused, mut cancelled, mut pending, mut notes) =
             (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
         let (mut stashed, mut trashed) = (0u32, 0u32);
@@ -1790,7 +1801,7 @@ fn completed(item: &Item) -> bool {
 /// Whether `item` holds up what it blocks: an open task, not in the trash.
 /// Done and cancelled are closed, and a note has no state to finish. A
 /// stashed task still holds -- stashing hides an item without finishing it.
-fn holds(item: &Item) -> bool {
+pub(crate) fn holds(item: &Item) -> bool {
     item.trashed.is_none() && State::of(item).is_some_and(State::is_open)
 }
 
@@ -1800,7 +1811,7 @@ fn holds(item: &Item) -> bool {
 /// Empty unless `--force` overrode the rule or a recovery brought back
 /// something that breaks it; every other write refuses to. Display ids are
 /// safe to compare across one command, which never renumbers.
-fn broken_dependencies(data: &ItemMap) -> BTreeSet<(u32, u32)> {
+pub(crate) fn broken_dependencies(data: &ItemMap) -> BTreeSet<(u32, u32)> {
     let index = uid_index(data);
     let mut broken = BTreeSet::new();
     for (id, item) in data.iter().filter(|(_, item)| completed(item)) {
@@ -1815,12 +1826,12 @@ fn broken_dependencies(data: &ItemMap) -> BTreeSet<(u32, u32)> {
 }
 
 /// Every uid on a board, resolved to its display id in one pass.
-fn uid_index(items: &ItemMap) -> HashMap<&str, u32> {
+pub(crate) fn uid_index(items: &ItemMap) -> HashMap<&str, u32> {
     items.iter().filter_map(|(id, item)| Some((item.uid.as_deref()?, *id))).collect()
 }
 
 /// Each declared phase with its position in the sequence.
-fn phase_order(phases: &[String]) -> HashMap<&str, usize> {
+pub(crate) fn phase_order(phases: &[String]) -> HashMap<&str, usize> {
     phases.iter().enumerate().map(|(at, name)| (name.as_str(), at)).collect()
 }
 

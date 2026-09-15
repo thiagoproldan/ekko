@@ -124,6 +124,16 @@ pub fn retrieve_project_directory(
     Ok(dir.join(EKKO_DIR_NAME))
 }
 
+/// The project named after the repository `cwd` sits in -- the nearest
+/// ancestor holding a `.git`, or `cwd` itself outside one -- when a project
+/// of that name exists. Never creates one: a directory with no board of its
+/// own simply has no match.
+pub fn project_named_after(home_dir: &Path, cwd: &Path) -> Option<String> {
+    let root = cwd.ancestors().find(|dir| dir.join(".git").exists()).unwrap_or(cwd);
+    let name = root.file_name()?.to_str()?;
+    list_projects(home_dir).into_iter().any(|project| project.name == name).then(|| name.to_string())
+}
+
 /// Every project that exists, in name order.
 pub fn list_projects(home_dir: &Path) -> Vec<ProjectSummary> {
     let root = home_dir.join(EKKO_DIR_NAME).join(PROJECTS_DIR_NAME);

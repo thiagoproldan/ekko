@@ -1,3 +1,4 @@
+mod agent;
 mod cli;
 mod config;
 mod directory;
@@ -31,6 +32,7 @@ const HELP: &str = r#"
       --calendar          Show the current month
       --check, -c         Check/uncheck task
       --clear             Delete all checked items
+      --context <ID>      Show one item with its dependencies and notes
       --copy, -y          Copy item description
       --create            Create the project named by --project
       --delete, -d        Delete item
@@ -42,9 +44,11 @@ const HELP: &str = r#"
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes
       --move, -m          Move item between boards
+      --next [N]          List what to take up next, best first
       --note, -n          Create note
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
+      --prime             Summarise the board for picking work back up
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
@@ -72,6 +76,7 @@ const HELP: &str = r#"
       $ ekko --check 1 2
       $ ekko --check 2 --force
       $ ekko --clear
+      $ ekko --context 12
       $ ekko --copy 1 2 3
       $ ekko --delete 4
       $ ekko --edit @3 Merge PR #42
@@ -80,7 +85,9 @@ const HELP: &str = r#"
       $ ekko --json --task @coding Review PR #42
       $ ekko --list pending coding
       $ ekko --move @1 cooking
+      $ ekko --next 5
       $ ekko --note @coding Mergesort worse-case O(nlogn)
+      $ ekko --prime
       $ ekko --priority @3 2
       $ ekko --restore 4
       $ ekko --project demo --roadmap
@@ -148,7 +155,27 @@ fn main() -> ExitCode {
     // without a persistent "current project" file, which would change what
     // `ekko` shows from invisible state.
     let project_env = std::env::var("EKKO_PROJECT").ok();
-    let project = cli.project.as_deref().or(project_env.as_deref());
+    // `--prime` with nothing else choosing a board looks for a project named
+    // after the repository it runs in, because it is what a session start
+    // runs: an agent opening /projects/minium wants the minium board, not the
+    // default one. Only `--prime`, never the plain board -- and its first
+    // line says which board it read and why, so the choice is never silent.
+    let matched = if cli.prime
+        && cli.project.is_none()
+        && project_env.is_none()
+        && cli.ekko_dir.is_none()
+        && ekko_dir_env.is_none()
+    {
+        directory::project_named_after(&home_dir, &cwd)
+    } else {
+        None
+    };
+    let project = cli.project.as_deref().or(project_env.as_deref()).or(matched.as_deref());
+    let board_label = match (project, matched.is_some()) {
+        (Some(name), true) => format!("project {name}, named after this directory"),
+        (Some(name), false) => format!("project {name}"),
+        (None, _) => "default board".to_string(),
+    };
 
     // Before opening anything: an old flag name gets the same answer
     // whatever board it was aimed at, and a caller should learn what the
@@ -186,7 +213,7 @@ fn main() -> ExitCode {
         };
     }
 
-    match dispatch(&cli, &ekko, project, &home_dir) {
+    match dispatch(&cli, &ekko, project, &home_dir, &board_label) {
         Ok(outcomes) => {
             if json_mode {
                 for outcome in &outcomes {
@@ -204,7 +231,7 @@ fn main() -> ExitCode {
                     // just removed -- a header above that would announce a
                     // board nobody can open any more.
                     if let Some(name) = project {
-                        if !cli.projects && !cli.destroy {
+                        if !cli.projects && !cli.destroy && !cli.prime {
                             r.display_project(name);
                         }
                     }
@@ -245,6 +272,7 @@ fn dispatch(
     ekko: &Ekko,
     project: Option<&str>,
     home_dir: &Path,
+    board_label: &str,
 ) -> Result<Vec<Outcome>, EkkoError> {
     if let Some(args) = cli.attached_to.as_deref() {
         return Ok(vec![ekko.set_attached_to(args)?]);
@@ -257,6 +285,15 @@ fn dispatch(
     }
     if cli.roadmap {
         return Ok(vec![ekko.display_roadmap()?]);
+    }
+    if cli.prime {
+        return Ok(vec![Outcome::Prime(Box::new(agent::prime(ekko, board_label)?))]);
+    }
+    if let Some(limit) = cli.next {
+        return Ok(vec![Outcome::Next(agent::next(ekko, limit)?)]);
+    }
+    if let Some(target) = cli.context.as_deref() {
+        return Ok(vec![Outcome::Context(Box::new(agent::context(ekko, target)?))]);
     }
     if let Some(args) = cli.stash.as_deref() {
         return Ok(vec![if args.is_empty() {

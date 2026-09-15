@@ -621,6 +621,13 @@ impl<'a> Renderer<'a> {
     /// what you see, which is the failure mode this whole file keeps trying
     /// to avoid. Printed only when a project is active, so the default board
     /// is untouched.
+    /// Text already laid out elsewhere, written as it is. The agent views
+    /// are plain on purpose -- their reader pays for escape codes by the
+    /// byte and gets nothing from them.
+    pub fn raw(&mut self, text: &str) {
+        let _ = write!(self.out, "{text}");
+    }
+
     pub fn display_project(&mut self, name: &str) {
         let line = format!("{} {}", self.painter.grey("project:"), self.painter.underline(name));
         self.emit("\n ", None, &line, "");

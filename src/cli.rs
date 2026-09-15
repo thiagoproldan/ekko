@@ -99,6 +99,21 @@ pub struct Cli {
     /// where work currently sits.
     #[arg(long)]
     pub roadmap: bool,
+
+    /// The resume view: what is in progress, what is ready in the order to
+    /// take it up, what is blocked, and the notes that explain them. Built
+    /// for an agent picking a board back up; see `agent`.
+    #[arg(long)]
+    pub prime: bool,
+
+    /// What to take up next, best first, optionally only the first N.
+    #[arg(long, num_args = 0..=1, value_name = "N")]
+    pub next: Option<Option<usize>>,
+
+    /// One item with everything around it: what blocks it, what it blocks,
+    /// the task it explains or the notes explaining it.
+    #[arg(long, value_name = "ID")]
+    pub context: Option<String>,
     /// Work against a named project instead of the default board. Sugar over
     /// `--ekko-dir`: the project lives at `~/.ekko/projects/<name>`, so the
     /// filesystem is the registry and there is no list to keep in sync.

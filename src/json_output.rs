@@ -89,6 +89,9 @@ fn success_value(outcome: &Outcome) -> Value {
             value
         }
         Outcome::Stats(stats) => json!({"ok": true, "command": command, "stats": stats}),
+        Outcome::Prime(prime) => json!({"ok": true, "command": command, "prime": prime}),
+        Outcome::Next(entries) => json!({"ok": true, "command": command, "items": entries}),
+        Outcome::Context(context) => json!({"ok": true, "command": command, "context": context}),
     }
 }
 
