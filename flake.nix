@@ -44,15 +44,24 @@
           };
         };
 
-        # The `/ekko` Claude Code skill, exposed so a consumer can install it
-        # without needing to know the layout of this repo. It ships from here
-        # rather than living loose in a skills directory so it moves with the
-        # code it documents -- it has already gone stale once, still
-        # recommending the toggles after `--set` existed.
-        packages.skill = pkgs.runCommandLocal "ekko-skill" { } ''
-          mkdir -p "$out/ekko"
-          cp ${./skill/SKILL.md} "$out/ekko/SKILL.md"
-        '';
+        # The Claude Code plugin: the MCP server, and the SessionStart hook that
+        # puts the board's resume view in context. Generated from plugin/ with
+        # the binary pinned by store path, so the plugin can never drive a
+        # different revision of ekko than the one it was built with -- the
+        # skill it replaces went stale exactly that way, once.
+        packages.plugin =
+          let
+            ekko = self.packages.${system}.default;
+            manifest = builtins.fromJSON (builtins.readFile ./plugin/.claude-plugin/plugin.json);
+            pinned = manifest // {
+              inherit (cargoToml.package) version;
+              mcpServers.ekko = manifest.mcpServers.ekko // { command = "${ekko}/bin/ekko"; };
+              hooks.SessionStart = [
+                { hooks = [ { type = "command"; command = "${ekko}/bin/ekko --prime"; } ]; }
+              ];
+            };
+          in
+          pkgs.writeTextDir ".claude-plugin/plugin.json" (builtins.toJSON pinned);
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [

@@ -74,7 +74,7 @@ $ nix run github:thiagoproldan/ekko -- --help
 $ nix profile install github:thiagoproldan/ekko
 ```
 
-The flake also exposes the `/ekko` Claude Code skill as `packages.skill`, so a home-manager config can install the tool and the skill it documents together, pinned to the same revision -- see [`skill/readme.md`](skill/readme.md).
+The flake also exposes the Claude Code plugin as `packages.plugin` -- the MCP server (`ekko --mcp`) and a SessionStart hook running `ekko --prime` -- with the binary pinned by store path, so the plugin can never drive a different revision of ekko than the one it was built with. Outside Nix, `claude --plugin-dir plugin` loads the same plugin from this repository against the `ekko` on your PATH.
 
 With cargo, from a clone:
 
@@ -115,6 +115,7 @@ $ ekko --help
       --help, -h          Display help message
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes
+      --mcp               Serve the board to an agent over MCP (stdio)
       --move, -m          Move item between boards
       --next [N]          List what to take up next, best first
       --note, -n          Create note

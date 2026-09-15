@@ -46,6 +46,11 @@ pub struct Cli {
     #[arg(long)]
     pub ui: bool,
 
+    /// Serve the board to an agent over MCP on stdin and stdout, until stdin
+    /// closes. The agent's frontend, as `--ui` is a person's.
+    #[arg(long)]
+    pub mcp: bool,
+
     #[arg(long, short = 'a')]
     pub archive: bool,
     #[arg(long, short = 'b')]

@@ -1,0 +1,24 @@
+{
+  "name": "ekko",
+  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes, and the board's resume view added to context when a session starts.",
+  "homepage": "https://github.com/thiagoproldan/ekko",
+  "license": "MIT",
+  "mcpServers": {
+    "ekko": {
+      "command": "ekko",
+      "args": ["--mcp"]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ekko --prime"
+          }
+        ]
+      }
+    ]
+  }
+}

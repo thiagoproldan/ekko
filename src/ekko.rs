@@ -44,6 +44,13 @@ pub enum EkkoError {
     /// Completed tasks a --blocked-by would have left waiting on open work,
     /// each with those open blockers.
     AlreadyDone(Vec<(u32, Vec<u32>)>),
+    /// A structured request that could not be made sense of -- a missing
+    /// field, a value out of range -- said in the message.
+    InvalidInput(String),
+    /// An edit made against a version of the item that is no longer current.
+    Stale { id: u32, current: i64 },
+    /// A replacement whose text did not occur exactly once in the item.
+    EditMatch { id: u32, found: usize },
     PhaseOrder(Inversion),
     AttachNotANote(u32),
     AttachTargetNotATask(u32),
@@ -79,6 +86,9 @@ impl EkkoError {
             EkkoError::ForceWithoutCompleting => "FORCE_WITHOUT_COMPLETING",
             EkkoError::CompletedDependents(_) => "COMPLETED_DEPENDENTS",
             EkkoError::AlreadyDone(_) => "ALREADY_DONE",
+            EkkoError::InvalidInput(_) => "INVALID_INPUT",
+            EkkoError::Stale { .. } => "STALE",
+            EkkoError::EditMatch { .. } => "EDIT_MATCH",
             EkkoError::PhaseOrder(_) => "PHASE_ORDER",
             EkkoError::AttachNotANote(_) => "ATTACH_NOT_A_NOTE",
             EkkoError::AttachTargetNotATask(_) => "ATTACH_TARGET_NOT_A_TASK",
@@ -117,6 +127,9 @@ impl EkkoError {
             | EkkoError::ForceWithoutCompleting
             | EkkoError::CompletedDependents(_)
             | EkkoError::AlreadyDone(_)
+            | EkkoError::InvalidInput(_)
+            | EkkoError::Stale { .. }
+            | EkkoError::EditMatch { .. }
             | EkkoError::PhaseOrder(_)
             | EkkoError::AttachNotANote(_)
             | EkkoError::AttachTargetNotATask(_)
@@ -212,6 +225,19 @@ impl std::fmt::Display for EkkoError {
                         .join("; "),
                 ),
             },
+            EkkoError::InvalidInput(message) => write!(f, "{message}"),
+            EkkoError::Stale { id, current } => write!(
+                f,
+                "Item {id} changed since it was read (its updatedAt is now {current}), so the edit was not made. Read it again and redo the edit against what it says now"
+            ),
+            EkkoError::EditMatch { id, found: 0 } => write!(
+                f,
+                "Item {id} does not contain that text, so nothing was replaced. Read it again and quote the text exactly"
+            ),
+            EkkoError::EditMatch { id, found } => write!(
+                f,
+                "That text occurs {found} times in item {id}, so which one to replace is ambiguous and nothing was replaced. Quote enough of the surrounding text to make it unique"
+            ),
             EkkoError::PhaseOrder(inversion) => write!(
                 f,
                 "Task {} is in phase {} and cannot be blocked by {} in {}, which comes after it: a phase cannot wait on a later one. Reorder the phases with --phases if the order is what is wrong",
@@ -466,7 +492,7 @@ impl Outcome {
             }
             Outcome::Stats(stats) => out.display_stats(stats),
             Outcome::Prime(prime) => out.raw(&prime.text()),
-            Outcome::Next(entries) => out.raw(&crate::agent::next_text(entries)),
+            Outcome::Next(entries) => out.raw(&crate::agent::list_text(entries, "Nothing is in progress or ready.")),
             Outcome::Context(context) => out.raw(&context.text()),
         }
     }
@@ -514,7 +540,7 @@ impl Ekko {
 
     // ---- id / option parsing -------------------------------------------
 
-    fn generate_id(&self, data: &ItemMap) -> u32 {
+    pub(crate) fn generate_id(&self, data: &ItemMap) -> u32 {
         data.keys().max().copied().unwrap_or(0) + 1
     }
 
@@ -810,7 +836,7 @@ impl Ekko {
     /// to stamp. Comparing catches every field, including ones added later.
     ///
     /// Re-reading here is safe because every caller already holds the lock.
-    fn save_touching(&self, data: &mut ItemMap) -> Result<(), EkkoError> {
+    pub(crate) fn save_touching(&self, data: &mut ItemMap) -> Result<(), EkkoError> {
         let before = self.storage.get()?;
         let now = chrono::Local::now().timestamp_millis();
 
@@ -1329,20 +1355,11 @@ impl Ekko {
         }
 
         let raw: Vec<String> = rest.into_iter().cloned().collect();
-        let target = match raw.is_empty() {
-            true => None,
-            false => {
-                if raw.len() > 1 {
-                    return Err(EkkoError::InvalidIdsNumber);
-                }
-                let target_id = self.validate_ids(&raw, &data)?[0];
-                let target = data.get(&target_id).expect("id just validated against data");
-                if !target.is_task {
-                    return Err(EkkoError::AttachTargetNotATask(target_id));
-                }
-                Some((target_id, target.uid.clone().ok_or(EkkoError::AttachTargetHasNoUid(target_id))?))
-            }
-        };
+        if raw.len() > 1 {
+            return Err(EkkoError::InvalidIdsNumber);
+        }
+        let target_id = if raw.is_empty() { None } else { Some(self.validate_ids(&raw, &data)?[0]) };
+        let target = Self::attach_target(&data, id, target_id)?;
 
         let item = data.get_mut(&id).expect("id just validated against data");
         item.attached_to = target.as_ref().map(|(_, uid)| uid.clone());
@@ -1350,6 +1367,26 @@ impl Ekko {
 
         self.save_touching(&mut data)?;
         Ok(Outcome::Attached { item: updated, target: target.map(|(id, _)| id) })
+    }
+
+    /// The task a note is to be attached to, with the uid to store, or `None`
+    /// to detach: refuses anything but a note, attached to anything but a
+    /// task that has a uid. Shared by --attached-to and the structured writes.
+    pub(crate) fn attach_target(
+        data: &ItemMap,
+        note: u32,
+        target: Option<u32>,
+    ) -> Result<Option<(u32, String)>, EkkoError> {
+        if data.get(&note).is_some_and(|item| item.is_task) {
+            return Err(EkkoError::AttachNotANote(note));
+        }
+        let Some(target_id) = target else { return Ok(None) };
+        let task = data.get(&target_id).ok_or_else(|| EkkoError::InvalidId(target_id.to_string()))?;
+        if !task.is_task {
+            return Err(EkkoError::AttachTargetNotATask(target_id));
+        }
+        let uid = task.uid.clone().ok_or(EkkoError::AttachTargetHasNoUid(target_id))?;
+        Ok(Some((target_id, uid)))
     }
 
     /// Moves a whole project to the trash, reporting what went with it.
@@ -1486,28 +1523,8 @@ impl Ekko {
         let blocker_ids =
             if raw.is_empty() { Vec::new() } else { self.validate_ids(&raw, &data)? };
 
-        for blocker in &blocker_ids {
-            if *blocker == id {
-                return Err(EkkoError::BlockingCycle(id, *blocker));
-            }
-            if self.reaches(&data, *blocker, id) {
-                return Err(EkkoError::BlockingCycle(id, *blocker));
-            }
-        }
-
-        // Refused where the dependency is made rather than discovered later:
-        // a phase cannot wait on one that comes after it. Reordering phases
-        // afterwards is not refused -- the roadmap names what it leaves behind.
         let phases = self.storage.get_phases()?;
-        let order = phase_order(&phases);
-        for blocker in &blocker_ids {
-            if let Some(inversion) = phase_inversion(&order, &data[&id], &data[blocker]) {
-                return Err(EkkoError::PhaseOrder(inversion));
-            }
-        }
-
-        let uids: Vec<String> =
-            blocker_ids.iter().filter_map(|b| data.get(b)?.uid.clone()).collect();
+        let uids = self.blocker_uids(&data, &phases, id, &blocker_ids)?;
 
         let before = data.clone();
         let item = data.get_mut(&id).expect("id just validated against data");
@@ -1518,6 +1535,36 @@ impl Ekko {
 
         self.save_touching(&mut data)?;
         Ok(Outcome::Blocked { item: updated, blockers: blocker_ids })
+    }
+
+    /// The uids `id` may be recorded as blocked by: refuses a cycle, and a
+    /// dependency against the declared phase order. Shared by --blocked-by
+    /// and the structured writes, so a dependency is judged the same way
+    /// however it is made.
+    pub(crate) fn blocker_uids(
+        &self,
+        data: &ItemMap,
+        phases: &[String],
+        id: u32,
+        blocker_ids: &[u32],
+    ) -> Result<Vec<String>, EkkoError> {
+        for blocker in blocker_ids {
+            if *blocker == id || self.reaches(data, *blocker, id) {
+                return Err(EkkoError::BlockingCycle(id, *blocker));
+            }
+        }
+
+        // Refused where the dependency is made rather than discovered later:
+        // a phase cannot wait on one that comes after it. Reordering phases
+        // afterwards is not refused -- the roadmap names what it leaves behind.
+        let order = phase_order(phases);
+        for blocker in blocker_ids {
+            if let Some(inversion) = phase_inversion(&order, &data[&id], &data[blocker]) {
+                return Err(EkkoError::PhaseOrder(inversion));
+            }
+        }
+
+        Ok(blocker_ids.iter().filter_map(|b| data.get(b)?.uid.clone()).collect())
     }
 
     /// Whether `from` is already blocked, directly or through others, by `target`.
@@ -1607,7 +1654,7 @@ impl Ekko {
     /// Recovering items -- `--restore`, `--untrash` -- brings them back as
     /// they were, and is not checked: refusing to give back what was removed
     /// would be the worse surprise.
-    fn refuse_broken_dependencies(
+    pub(crate) fn refuse_broken_dependencies(
         before: &ItemMap,
         after: &ItemMap,
         force: bool,
@@ -1790,7 +1837,7 @@ fn find_by_uid(items: &ItemMap, uid: &str) -> Option<u32> {
 
 /// Ids, each with the ids on the other side of a dependency: what blocks it,
 /// or what it blocks, as the name holding it says.
-type Linked = Vec<(u32, Vec<u32>)>;
+pub(crate) type Linked = Vec<(u32, Vec<u32>)>;
 
 /// Whether `item` is completed work as dependencies see it: a done task, not
 /// in the trash.
@@ -1841,7 +1888,7 @@ pub(crate) fn phase_order(phases: &[String]) -> HashMap<&str, usize> {
 ///
 /// The one definition, shared by the refusal in --blocked-by and the report
 /// in --roadmap, so the two cannot disagree about what counts.
-fn phase_inversion(order: &HashMap<&str, usize>, blocked: &Item, blocker: &Item) -> Option<Inversion> {
+pub(crate) fn phase_inversion(order: &HashMap<&str, usize>, blocked: &Item, blocker: &Item) -> Option<Inversion> {
     let blocked_phase = blocked.phase.as_deref()?;
     let blocker_phase = blocker.phase.as_deref()?;
     (order.get(blocker_phase)? > order.get(blocked_phase)?).then(|| Inversion {
@@ -1874,7 +1921,7 @@ fn is_due_opt(token: &str) -> bool {
     token.starts_with("d:")
 }
 
-fn parse_due_date(token: &str) -> Option<String> {
+pub(crate) fn parse_due_date(token: &str) -> Option<String> {
     let value = token.strip_prefix("d:")?;
     let parsed = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
     // Round-tripped through chrono so the stored form is always canonical:
@@ -1892,7 +1939,7 @@ fn join_ids(ids: &[u32]) -> String {
     ids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
 }
 
-fn remove_duplicates(items: Vec<String>) -> Vec<String> {
+pub(crate) fn remove_duplicates(items: Vec<String>) -> Vec<String> {
     let mut seen = Vec::new();
     for item in items {
         if !seen.contains(&item) {
@@ -1904,7 +1951,7 @@ fn remove_duplicates(items: Vec<String>) -> Vec<String> {
 /// The state vocabulary `--set` accepts, mapped to its canonical spelling.
 /// Deliberately the same words `--list` filters on, so there is one set of
 /// names to learn rather than two.
-fn canonical_state(term: &str) -> Option<&'static str> {
+pub(crate) fn canonical_state(term: &str) -> Option<&'static str> {
     match term {
         "done" | "checked" | "complete" => Some("done"),
         "undone" | "unchecked" | "incomplete" | "pending" => Some("undone"),
@@ -1924,7 +1971,7 @@ fn canonical_state(term: &str) -> Option<&'static str> {
 /// `State::write`, so the result is always one of the five encodings; notes
 /// have no state and skip them, matching how `--check` and `--begin` ignore
 /// notes. Starring is the one that applies to both.
-fn apply_state(item: &mut Item, state: &str) {
+pub(crate) fn apply_state(item: &mut Item, state: &str) {
     match state {
         "starred" => item.is_starred = true,
         "unstarred" => item.is_starred = false,

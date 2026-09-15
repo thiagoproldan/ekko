@@ -57,10 +57,9 @@ impl Painter {
         Painter { enabled: !no_color && (force_color || std::io::stdout().is_terminal()) }
     }
 
-    /// Colour on/off regardless of TTY or environment. Only the tests
-    /// need this -- production always goes through `auto`, which is what
-    /// decides colour from `NO_COLOR`/`FORCE_COLOR`/isatty.
-    #[cfg(test)]
+    /// Colour on/off regardless of TTY or environment. The tests need it,
+    /// and so does the MCP server: agent shells export `FORCE_COLOR`, and an
+    /// agent pays for every escape code by the byte and reads nothing in it.
     pub fn forced(enabled: bool) -> Self {
         Painter { enabled }
     }

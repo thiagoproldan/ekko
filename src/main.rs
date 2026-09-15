@@ -6,6 +6,8 @@ mod ekko;
 mod item;
 mod json;
 mod json_output;
+mod mcp;
+mod ops;
 mod paths;
 mod render;
 mod storage;
@@ -43,6 +45,7 @@ const HELP: &str = r#"
       --help, -h          Display help message
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes
+      --mcp               Serve the board to an agent over MCP (stdio)
       --move, -m          Move item between boards
       --next [N]          List what to take up next, best first
       --note, -n          Create note
@@ -155,6 +158,12 @@ fn main() -> ExitCode {
     // without a persistent "current project" file, which would change what
     // `ekko` shows from invisible state.
     let project_env = std::env::var("EKKO_PROJECT").ok();
+    // Before any board is opened: the server opens one per call, because each
+    // call may name a different project.
+    if cli.mcp {
+        return mcp::run(home_dir, cwd, ekko_dir_env, project_env);
+    }
+
     // `--prime` with nothing else choosing a board looks for a project named
     // after the repository it runs in, because it is what a session start
     // runs: an agent opening /projects/minium wants the minium board, not the

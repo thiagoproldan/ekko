@@ -105,6 +105,8 @@ fn error_value(error: &EkkoError) -> Value {
         EkkoError::Blocked(blocked) => Some(("blocked", pairs_value(blocked, "blockers"))),
         EkkoError::CompletedDependents(found) => Some(("dependents", pairs_value(found, "dependents"))),
         EkkoError::AlreadyDone(found) => Some(("blocked", pairs_value(found, "blockers"))),
+        EkkoError::Stale { current, .. } => Some(("current", json!(current))),
+        EkkoError::EditMatch { found, .. } => Some(("found", json!(found))),
         EkkoError::PhaseOrder(inversion) => Some(("inversion", json!(inversion))),
         _ => None,
     };

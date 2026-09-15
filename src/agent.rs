@@ -97,6 +97,9 @@ pub struct Entry {
     pub id: u32,
     pub uid: Option<String>,
     pub state: &'static str,
+    /// `stashed` or `trashed` for an item put away; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub away: Option<&'static str>,
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<u8>,
@@ -168,6 +171,13 @@ impl<'a> Reader<'a> {
             id: item.id,
             uid: item.uid.clone(),
             state: state_word(item),
+            away: if item.trashed.is_some() {
+                Some("trashed")
+            } else if item.stashed.is_some() {
+                Some("stashed")
+            } else {
+                None
+            },
             description: item.description.clone(),
             priority: item.priority.filter(|_| item.is_task),
             due: item.due_date.clone(),
@@ -400,6 +410,69 @@ pub fn context(ekko: &Ekko, target: &str) -> Result<Context, EkkoError> {
     })
 }
 
+/// Visible items matching every filter `--list` knows and, when given, a
+/// text, case-insensitively. Each item once, in id order, however many
+/// boards it is on.
+pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String]) -> Result<Vec<Entry>, EkkoError> {
+    let groups = match ekko.list_by_attributes(filters)? {
+        Outcome::List(groups) => groups,
+        _ => Vec::new(),
+    };
+    let all = ekko.storage.get()?;
+    let phases = ekko.storage.get_phases()?;
+    let reader = Reader::new(&all, &phases);
+    let needle = text.map(str::to_lowercase);
+
+    let mut seen = HashSet::new();
+    let mut entries: Vec<Entry> = groups
+        .iter()
+        .flat_map(|(_, items)| items)
+        .filter(|item| needle.as_deref().is_none_or(|n| item.description.to_lowercase().contains(n)))
+        .filter(|item| seen.insert(item.id))
+        .filter_map(|item| all.get(&item.id))
+        .map(|item| reader.entry(item))
+        .collect();
+    entries.sort_by_key(|entry| entry.id);
+    Ok(entries)
+}
+
+/// What moved since a cursor from an earlier read.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Changes {
+    pub since: i64,
+    /// The cursor to pass next time.
+    pub cursor: i64,
+    pub items: Vec<Entry>,
+}
+
+/// Every item written at or after `since`, put away or not, oldest change
+/// first. A trashed item still shows, as `trashed`: the trash keeps what it
+/// takes. What leaves storage outright -- archived by `--clear`, or expired
+/// from the trash -- leaves nothing to list, which the text says.
+pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
+    let all = ekko.storage.get()?;
+    let phases = ekko.storage.get_phases()?;
+    let reader = Reader::new(&all, &phases);
+    let mut items: Vec<Entry> =
+        all.values().filter(|item| updated(item) >= since).map(|item| reader.entry(item)).collect();
+    items.sort_by_key(|entry| (entry.updated_at, entry.id));
+    let cursor = all.values().map(updated).max().unwrap_or(since).max(since);
+    Ok(Changes { since, cursor, items })
+}
+
+impl Changes {
+    pub fn text(&self) -> String {
+        let mut out = format!("cursor {} \u{b7} {} changed since {}\n", self.cursor, self.items.len(), self.since);
+        for entry in &self.items {
+            let away = entry.away.map(|away| format!(", {away}")).unwrap_or_default();
+            let _ = writeln!(out, "{:>4}. [{}{away}] {}", entry.id, entry.state, clip(&entry.description, TASK_CLIP));
+        }
+        out.push_str("Items archived by --clear or expired from the trash leave nothing to list; prime again for the whole board.\n");
+        out
+    }
+}
+
 // ---- text -------------------------------------------------------------
 
 /// One listing line: the id first, so a reader can find the item by its
@@ -541,10 +614,11 @@ impl Prime {
     }
 }
 
-pub fn next_text(entries: &[Entry]) -> String {
+/// Entries one per line, or `empty` when there are none.
+pub fn list_text(entries: &[Entry], empty: &str) -> String {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     if entries.is_empty() {
-        return "Nothing is in progress or ready.\n".to_string();
+        return format!("{empty}\n");
     }
     let mut out = String::new();
     for entry in entries {
@@ -794,5 +868,26 @@ mod tests {
         assert_eq!(crate::directory::project_named_after(&home, &elsewhere), None);
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Everything written at or after the cursor, put away or not, and
+    /// nothing written before it.
+    #[test]
+    fn changes_lists_what_moved_since_a_cursor_including_what_was_put_away() {
+        let (ekko, dir) = board("changes");
+        ekko.create_task(&words(&["untouched"])).unwrap();
+        ekko.create_task(&words(&["will be done"])).unwrap();
+        ekko.create_task(&words(&["will be deleted"])).unwrap();
+        let cursor = prime(&ekko, "default board").unwrap().cursor;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
+        ekko.delete_items(&words(&["3"])).unwrap();
+
+        let seen = changes(&ekko, cursor + 1).unwrap();
+        assert_eq!(ids(&seen.items), vec![2, 3]);
+        assert_eq!(seen.items[1].away, Some("trashed"));
+        assert!(seen.cursor > cursor);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
