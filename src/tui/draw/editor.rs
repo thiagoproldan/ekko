@@ -64,6 +64,7 @@ pub(super) fn follow(app: &mut App, glyphs: Glyphs, rect: Rect) {
             app.doc.roadmap.follow(roadmap_list(app, body).height as usize);
         }
         Doc::Welcome => app.doc.welcome.clamp(app.welcome_links().len()),
+        Doc::Graph => super::graph::follow_global(app, body),
         Doc::Calendar => {}
     }
 }
@@ -81,6 +82,7 @@ pub(super) fn draw(buf: &mut Buffer, app: &App, glyphs: Glyphs, rect: Rect, hits
         Doc::Roadmap => roadmap_doc(buf, app, glyphs, body, hits),
         Doc::Calendar => calendar_doc(buf, app, glyphs, body, hits),
         Doc::Welcome => welcome_doc(buf, app, glyphs, body, hits),
+        Doc::Graph => super::graph::graph_doc(buf, app, glyphs, body, hits),
     }
 }
 
@@ -89,7 +91,7 @@ pub(super) fn draw(buf: &mut Buffer, app: &App, glyphs: Glyphs, rect: Rect, hits
 fn tab_strip(buf: &mut Buffer, app: &App, glyphs: Glyphs, inner: Rect, hits: &mut Hits) {
     let icons = glyphs.icons();
     let y = inner.y;
-    let actions = [(icons.roadmap, Page::Roadmap), (icons.calendar, Page::Calendar), (icons.welcome, Page::Welcome)];
+    let actions = [(icons.graph, Page::Graph), (icons.roadmap, Page::Roadmap), (icons.calendar, Page::Calendar), (icons.welcome, Page::Welcome)];
     let mut x = inner.right().saturating_sub(2);
     for (icon, page) in actions.iter().rev() {
         buf.set_string(x, y, *icon, muted());
@@ -195,6 +197,7 @@ fn breadcrumbs(buf: &mut Buffer, app: &App, glyphs: Glyphs, inner: Rect) {
             }
         }
         Doc::Calendar => crumb("Calendar".to_string()),
+        Doc::Graph => crumb("Graph".to_string()),
     }
     let y = inner.y + 1;
     let end = put(buf, inner.x + 2, y, inner.width.saturating_sub(4), crumbs);
@@ -661,6 +664,7 @@ fn welcome_doc(buf: &mut Buffer, app: &App, glyphs: Glyphs, body: Rect, hits: &m
     for (at, link) in links.iter().enumerate() {
         let (icon, said) = match link {
             Welcome::Page(Page::Board) => (icons.board, "Open the board"),
+            Welcome::Page(Page::Graph) => (icons.graph, "Open the graph"),
             Welcome::Page(Page::Roadmap) => (icons.roadmap, "Open the roadmap"),
             Welcome::Page(Page::Calendar) => (icons.calendar, "Open the calendar"),
             Welcome::Page(Page::Welcome) => (icons.welcome, "Welcome"),

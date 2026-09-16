@@ -3,7 +3,10 @@
 //! The filters are `--list`'s own, applied by the same function, so a search
 //! here and `--list` in a terminal cannot disagree about what `ready` or
 //! `overdue` means -- the rigor audit found three surfaces deciding that each
-//! by itself, and this is not going to be a fourth.
+//! by itself, and this is not going to be a fourth. The graph view's search
+//! filter and its groups read queries through here too.
+
+use std::collections::HashSet;
 
 use super::board::Snapshot;
 use crate::ekko::{is_known_attribute, Ekko};
@@ -49,6 +52,28 @@ pub fn parse(text: &str) -> Query {
     query
 }
 
+/// The visible items `query` finds, by id: every visible item for an empty
+/// query, and otherwise those the core's filters keep that carry every word,
+/// one of the ids when any are given, and one of the boards when any are.
+pub fn matching(snapshot: &Snapshot, query: &Query) -> HashSet<u32> {
+    let visible: ItemMap = snapshot
+        .all
+        .iter()
+        .filter(|(_, item)| item.stashed.is_none() && item.trashed.is_none())
+        .map(|(id, item)| (*id, item.clone()))
+        .collect();
+    let kept = Ekko::filter_by_attributes(&query.attributes, visible, &snapshot.all);
+    kept.values()
+        .filter(|item| {
+            let description = item.description.to_lowercase();
+            (query.ids.is_empty() || query.ids.contains(&item.id))
+                && (query.boards.is_empty() || item.boards.iter().any(|board| query.boards.contains(&board.to_lowercase())))
+                && query.words.iter().all(|word| description.contains(word))
+        })
+        .map(|item| item.id)
+        .collect()
+}
+
 /// A board and its matching items, by index into `Snapshot::items`.
 #[derive(Debug, PartialEq)]
 pub struct Hit {
@@ -62,30 +87,13 @@ pub fn results(snapshot: &Snapshot, query: &Query) -> Vec<Hit> {
     if query.is_empty() {
         return Vec::new();
     }
-    let visible: ItemMap = snapshot
-        .all
-        .iter()
-        .filter(|(_, item)| item.stashed.is_none() && item.trashed.is_none())
-        .map(|(id, item)| (*id, item.clone()))
-        .collect();
-    let kept = Ekko::filter_by_attributes(&query.attributes, visible, &snapshot.all);
-
+    let found = matching(snapshot, query);
     let mut hits = Vec::new();
     for (at, group) in snapshot.groups.iter().enumerate() {
         if !query.boards.is_empty() && !query.boards.contains(&group.name.to_lowercase()) {
             continue;
         }
-        let items: Vec<usize> = group
-            .items
-            .clone()
-            .filter(|&index| {
-                let item = &snapshot.items[index];
-                let description = item.description.to_lowercase();
-                kept.contains_key(&item.id)
-                    && (query.ids.is_empty() || query.ids.contains(&item.id))
-                    && query.words.iter().all(|word| description.contains(word))
-            })
-            .collect();
+        let items: Vec<usize> = group.items.clone().filter(|&index| found.contains(&snapshot.items[index].id)).collect();
         if !items.is_empty() {
             hits.push(Hit { group: at, items });
         }
@@ -144,6 +152,7 @@ mod tests {
         assert_eq!(found("@b wire"), vec![3]);
         assert_eq!(found("#2"), vec![2]);
         assert!(found("").is_empty());
+        assert_eq!(matching(&snapshot, &parse("")).len(), 3, "an empty query does not match everything visible");
         std::fs::remove_dir_all(&dir).ok();
     }
 

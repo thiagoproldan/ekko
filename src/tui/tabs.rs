@@ -13,6 +13,7 @@ pub enum Doc {
     Welcome,
     Roadmap,
     Calendar,
+    Graph,
     /// An item, by its uid, or `#id` for one written before uids existed.
     Item(String),
 }
@@ -24,6 +25,7 @@ pub enum Page {
     Welcome,
     Roadmap,
     Calendar,
+    Graph,
 }
 
 impl Page {
@@ -33,6 +35,7 @@ impl Page {
             Page::Welcome => Doc::Welcome,
             Page::Roadmap => Doc::Roadmap,
             Page::Calendar => Doc::Calendar,
+            Page::Graph => Doc::Graph,
         }
     }
 }

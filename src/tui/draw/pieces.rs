@@ -147,6 +147,7 @@ pub(super) fn doc_icon(app: &App, glyphs: Glyphs, doc: &Doc) -> (&'static str, S
         Doc::Welcome => (icons.welcome, Style::new().fg(palette::ACCENT)),
         Doc::Roadmap => (icons.roadmap, Style::new().fg(palette::GREEN)),
         Doc::Calendar => (icons.calendar, Style::new().fg(palette::YELLOW)),
+        Doc::Graph => (icons.graph, Style::new().fg(palette::ACCENT)),
         Doc::Item(key) => match app.snapshot.find(key) {
             Some((item, _)) => theme::item_look(glyphs, item),
             None => (icons.close, muted()),

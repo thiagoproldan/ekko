@@ -41,6 +41,20 @@ pub mod palette {
     /// Not on the measured screen: VS Code's error and warning foregrounds.
     pub const RED: Color = Color::Rgb(0xF1, 0x4C, 0x4C);
     pub const YELLOW: Color = Color::Rgb(0xCC, 0xA7, 0x00);
+    /// Not on the measured screen: VS Code's purple and orange, for tags and
+    /// for groups.
+    pub const PURPLE: Color = Color::Rgb(0xB1, 0x80, 0xD7);
+    pub const ORANGE: Color = Color::Rgb(0xD1, 0x86, 0x16);
+
+    /// The graph's own greys, stepped between the surfaces and the text the
+    /// way Obsidian's graph steps its links and nodes against its background.
+    pub const NODE: Color = Color::Rgb(0xA6, 0xA6, 0xA6);
+    pub const EDGE: Color = Color::Rgb(0x4E, 0x4F, 0x50);
+    pub const FADED: Color = Color::Rgb(0x36, 0x37, 0x38);
+    pub const UNRESOLVED: Color = Color::Rgb(0x60, 0x61, 0x62);
+
+    /// The colours a group can be drawn in, by the index its settings keep.
+    pub const GROUPS: [Color; 7] = [GREEN, ACCENT, YELLOW, LINK, RED, PURPLE, ORANGE];
 }
 
 /// Which glyph set the terminal can draw.
@@ -75,6 +89,7 @@ pub struct Icons {
     // The activity bar.
     pub explorer: &'static str,
     pub search: &'static str,
+    pub graph: &'static str,
     pub projects: &'static str,
     pub changes: &'static str,
     // The toggles beside the command centre.
@@ -120,6 +135,14 @@ pub struct Icons {
     pub behind: &'static str,
     pub here: &'static str,
     pub ahead: &'static str,
+    // The graph's buttons.
+    pub settings: &'static str,
+    pub zoom_in: &'static str,
+    pub zoom_out: &'static str,
+    pub fit: &'static str,
+    pub add: &'static str,
+    pub discard: &'static str,
+    pub play: &'static str,
 }
 
 /// Codepoints from the Nerd Fonts glyph table (`nf-cod-*`). Pending keeps a
@@ -129,6 +152,7 @@ pub struct Icons {
 const NERD: Icons = Icons {
     explorer: "\u{eaf0}",
     search: "\u{ea6d}",
+    graph: "\u{eb03}",
     projects: "\u{eb30}",
     changes: "\u{ea82}",
     left_on: "\u{ebf3}",
@@ -167,6 +191,13 @@ const NERD: Icons = Icons {
     behind: "\u{25cf}",
     here: "\u{25c9}",
     ahead: "\u{25cb}",
+    settings: "\u{eb51}",
+    zoom_in: "\u{eb81}",
+    zoom_out: "\u{eb82}",
+    fit: "\u{eb4c}",
+    add: "\u{ea60}",
+    discard: "\u{eae2}",
+    play: "\u{eb2c}",
 };
 
 /// The board view's own glyphs where it has one, so a task reads the same in
@@ -174,6 +205,7 @@ const NERD: Icons = Icons {
 const PLAIN: Icons = Icons {
     explorer: "≡",
     search: "/",
+    graph: "◈",
     projects: "▦",
     changes: "↺",
     left_on: "[",
@@ -212,6 +244,13 @@ const PLAIN: Icons = Icons {
     behind: "●",
     here: "◉",
     ahead: "○",
+    settings: "⚙",
+    zoom_in: "+",
+    zoom_out: "−",
+    fit: "□",
+    add: "+",
+    discard: "↶",
+    play: "▶",
 };
 
 /// A pill: text on the pill colour, with rounded ends drawn as half circles
@@ -263,13 +302,14 @@ mod tests {
 
     fn all(icons: &Icons) -> Vec<&'static str> {
         vec![
-            icons.explorer, icons.search, icons.projects, icons.changes, icons.left_on, icons.left_off,
-            icons.panel_on, icons.panel_off, icons.right_on, icons.right_off, icons.board, icons.welcome,
-            icons.roadmap, icons.calendar, icons.pinned, icons.close, icons.ellipsis, icons.collapsed,
-            icons.expanded, icons.back, icons.star, icons.due, icons.waits, icons.blocked, icons.warning,
-            icons.branch, icons.sync, icons.rocket, icons.folder, icons.bell, icons.bell_dot, icons.done,
-            icons.progress, icons.paused, icons.pending, icons.cancelled, icons.note, icons.behind, icons.here,
-            icons.ahead,
+            icons.explorer, icons.search, icons.graph, icons.projects, icons.changes, icons.left_on,
+            icons.left_off, icons.panel_on, icons.panel_off, icons.right_on, icons.right_off, icons.board,
+            icons.welcome, icons.roadmap, icons.calendar, icons.pinned, icons.close, icons.ellipsis,
+            icons.collapsed, icons.expanded, icons.back, icons.star, icons.due, icons.waits, icons.blocked,
+            icons.warning, icons.branch, icons.sync, icons.rocket, icons.folder, icons.bell, icons.bell_dot,
+            icons.done, icons.progress, icons.paused, icons.pending, icons.cancelled, icons.note, icons.behind,
+            icons.here, icons.ahead, icons.settings, icons.zoom_in, icons.zoom_out, icons.fit, icons.add,
+            icons.discard, icons.play,
         ]
     }
 

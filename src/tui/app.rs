@@ -4,7 +4,9 @@
 //! moves, which one writes, what a refusal says -- is tested without one.
 //! Moving and writing are kept apart by type: a key or a click changes what is
 //! selected, shown, opened or focused, and only an `Action` handed back by
-//! `key` writes, through `act`.
+//! `key` writes, through `act`. What happens in a graph is in `graph`.
+
+mod graph;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -15,6 +17,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 
 use super::board::{self, Reading, Row, Snapshot};
+use super::graph::settings::{controls, Settings};
+use super::graph::{GraphView, Panel, Pane, Tool};
 use super::layout::{Region, Visibility};
 use super::list::Cursor;
 use super::search;
@@ -44,6 +48,8 @@ pub struct Workspace {
     pub folder: String,
     pub cwd: PathBuf,
     pub home: PathBuf,
+    /// The board's `.ekko/` directory, where the graph's settings are kept.
+    pub dir: PathBuf,
     pub branch: Option<String>,
 }
 
@@ -72,6 +78,8 @@ impl PanelTab {
 pub enum View {
     Explorer,
     Search,
+    /// The local graph: the neighbourhood of the active item.
+    Graph,
     Projects,
     Changes,
 }
@@ -81,6 +89,7 @@ impl View {
         match self {
             View::Explorer => "Explorer",
             View::Search => "Search",
+            View::Graph => "Graph",
             View::Projects => "Projects",
             View::Changes => "Changes",
         }
@@ -123,6 +132,13 @@ pub enum Target {
     /// The calendar's month arrows, and 0 for today.
     Month(i32),
     Welcome(usize),
+    /// A graph's canvas.
+    Canvas(Pane),
+    Tool(Pane, Tool),
+    /// A row of the graph's settings panel.
+    Control(usize),
+    /// A slider's track in the settings panel, by row.
+    Track(usize),
 }
 
 /// The writes a key can ask for.
@@ -210,6 +226,17 @@ pub struct App {
     pub found: Cursor,
     pub projects: Cursor,
     pub changes: Cursor,
+    /// The graph view's settings, and its panel.
+    pub settings: Settings,
+    pub graph_panel: Panel,
+    /// The whole board's graph, in its tab, and the local one in the sidebar.
+    pub graph: GraphView,
+    pub local: GraphView,
+    /// Counts the times the board was read, so a graph knows when to rebuild.
+    pub generation: u64,
+    /// The graph a press began in, and whether it was a double click, until
+    /// the button is let go.
+    dragging: Option<(Pane, bool)>,
     /// Lines scrolled past in Output or Agent.
     pub scroll: usize,
     pub log: Vec<Logged>,
@@ -251,6 +278,7 @@ impl App {
         let today = chrono::Local::now().date_naive();
         let open_phases = snapshot.roadmap.iter().filter(|step| step.current).map(|step| step.name.clone()).collect();
         let first_run = snapshot.all.is_empty();
+        let settings = Settings::load(&workspace.dir);
         let mut app = App {
             workspace,
             snapshot,
@@ -282,6 +310,12 @@ impl App {
             found: Cursor::default(),
             projects: Cursor::default(),
             changes: Cursor::default(),
+            settings,
+            graph_panel: Panel::default(),
+            graph: GraphView::default(),
+            local: GraphView::default(),
+            generation: 0,
+            dragging: None,
             scroll: 0,
             log: Vec::new(),
             flash: None,
@@ -312,8 +346,8 @@ impl App {
         }
     }
 
-    /// The item the outline and the item tabs are about: the open item tab's,
-    /// or else the one selected on the board.
+    /// The item the outline, the item tabs and the local graph are about: the
+    /// open item tab's, or else the one selected on the board.
     pub fn active_item(&self) -> Option<u32> {
         match self.tabs.active() {
             Doc::Item(key) => self.snapshot.find(key).filter(|(_, archived)| !archived).map(|(item, _)| item.id),
@@ -366,6 +400,7 @@ impl App {
     pub fn welcome_links(&self) -> Vec<Welcome> {
         let mut links = vec![
             Welcome::Page(Page::Board),
+            Welcome::Page(Page::Graph),
             Welcome::Page(Page::Roadmap),
             Welcome::Page(Page::Calendar),
             Welcome::View(View::Search),
@@ -390,6 +425,7 @@ impl App {
         let kept = self.kept();
         let reading = Reading { label: &self.workspace.label, home: &self.workspace.home, since: self.since };
         self.snapshot = Snapshot::load(ekko, &reading)?;
+        self.generation += 1;
         self.restore(kept, false);
         Ok(())
     }
@@ -688,15 +724,13 @@ impl App {
             KeyCode::F(6) => self.cycle(if key.modifiers.contains(KeyModifiers::SHIFT) { -1 } else { 1 }),
             KeyCode::Tab => self.cycle(1),
             KeyCode::BackTab => self.cycle(-1),
-            _ => {
-                match self.focus {
-                    Region::Command => self.command_key(key),
-                    Region::Next => self.next_key(key),
-                    Region::Sidebar => self.sidebar_key(key),
-                    Region::Panel => self.panel_key(key),
-                    Region::Editor => return self.editor_key(key),
-                }
-            }
+            _ => match self.focus {
+                Region::Command => self.command_key(key),
+                Region::Next => self.next_key(key),
+                Region::Sidebar => self.sidebar_key(key),
+                Region::Panel => self.panel_key(key),
+                Region::Editor => return self.editor_key(key),
+            },
         }
         None
     }
@@ -712,13 +746,19 @@ impl App {
         };
         match c.to_ascii_lowercase() {
             'b' => self.open_page(Page::Board),
+            'g' => self.open_page(Page::Graph),
             'w' => self.open_page(Page::Welcome),
             'r' => self.open_page(Page::Roadmap),
             'c' => self.open_page(Page::Calendar),
             'e' => self.show_view(View::Explorer),
             'f' => self.show_view(View::Search),
+            'l' => self.show_view(View::Graph),
             'p' => self.show_view(View::Projects),
             'h' => self.show_view(View::Changes),
+            ',' => {
+                self.open_page(Page::Graph);
+                self.graph_panel.open = true;
+            }
             other => self.say(
                 format!("The key combination (Ctrl+K, {}) is not a command", other.to_ascii_uppercase()),
                 Kind::Refused,
@@ -764,6 +804,7 @@ impl App {
             Doc::Roadmap => self.roadmap_key(key),
             Doc::Calendar => self.calendar_key(key),
             Doc::Welcome => self.welcome_key(key),
+            Doc::Graph => self.graph_key(key),
         }
         None
     }
@@ -916,6 +957,7 @@ impl App {
         match self.view {
             View::Explorer => self.tree_key(key),
             View::Search => self.search_key(key),
+            View::Graph => self.local_key(key),
             View::Projects => match key.code {
                 KeyCode::Up => self.projects.step(-1, self.snapshot.projects.len()),
                 KeyCode::Down => self.projects.step(1, self.snapshot.projects.len()),
@@ -1041,7 +1083,28 @@ impl App {
     // ---- the mouse ---------------------------------------------------------
 
     pub fn mouse(&mut self, mouse: MouseEvent) {
-        let target = self
+        let cell = (mouse.column, mouse.row);
+        // A press that began in a graph belongs to that graph until the button
+        // is let go, wherever the pointer wanders meanwhile.
+        if let Some((pane, double)) = self.dragging {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.with_view(pane, |view, _| view.drag_to(cell));
+                    return;
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.dragging = None;
+                    if let Some(index) = self.with_view(pane, |view, _| view.release()) {
+                        self.with_view(pane, |view, _| view.selected = Some(index));
+                        self.open_node(pane, index, !double);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        let hit = self
             .hits
             .iter()
             .rev()
@@ -1051,26 +1114,42 @@ impl App {
                     && mouse.row >= rect.y
                     && mouse.row < rect.y + rect.height
             })
-            .map(|(_, target)| *target);
+            .copied();
+        let target = hit.map(|(_, target)| target);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let double = self.last_click.is_some_and(|(at, column, row)| {
                     at.elapsed() < DOUBLE_CLICK && column == mouse.column && row == mouse.row
                 });
                 self.last_click = if double { None } else { Some((Instant::now(), mouse.column, mouse.row)) };
-                if let Some(target) = target {
-                    self.click(target, double);
+                if let Some((rect, target)) = hit {
+                    self.click(target, double, rect, cell);
                 }
             }
-            MouseEventKind::ScrollDown => self.wheel(target, 1),
-            MouseEventKind::ScrollUp => self.wheel(target, -1),
+            // The pointer lights the node under it in a graph, and nothing
+            // stays lit once it leaves.
+            MouseEventKind::Moved => {
+                let over = match target {
+                    Some(Target::Canvas(pane)) => Some(pane),
+                    _ => None,
+                };
+                for pane in [Pane::Global, Pane::Local] {
+                    if over == Some(pane) {
+                        self.with_view(pane, |view, settings| view.hover_at(cell, settings));
+                    } else {
+                        self.with_view(pane, |view, _| view.hover = None);
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown => self.wheel(target, 1, cell),
+            MouseEventKind::ScrollUp => self.wheel(target, -1, cell),
             _ => {}
         }
     }
 
     /// A click, and what a second click on the same place makes of it: things
     /// a single click opens in passing, a double click opens on purpose.
-    fn click(&mut self, target: Target, double: bool) {
+    fn click(&mut self, target: Target, double: bool, rect: Rect, cell: (u16, u16)) {
         match target {
             Target::Region(region) => self.focus = region,
             Target::Command => {
@@ -1191,16 +1270,45 @@ impl App {
                     self.welcome(link);
                 }
             }
+            Target::Canvas(pane) => {
+                self.focus = if pane == Pane::Global { Region::Editor } else { Region::Sidebar };
+                self.with_view(pane, |view, settings| view.press(cell, settings));
+                self.dragging = Some((pane, double));
+            }
+            Target::Tool(pane, tool) => self.tool(pane, tool),
+            Target::Control(row) => {
+                self.focus = Region::Editor;
+                self.graph_panel.cursor.selected = row;
+                let rows = controls(&self.settings, &self.graph_panel.sections, false);
+                if let Some(control) = rows.get(row).copied() {
+                    self.use_control(control);
+                }
+            }
+            Target::Track(row) => {
+                self.focus = Region::Editor;
+                self.slide(row, rect, cell.0);
+            }
         }
     }
 
-    /// The wheel scrolls whatever is under the pointer, focused or not.
-    fn wheel(&mut self, target: Option<Target>, by: isize) {
+    /// The wheel scrolls whatever is under the pointer, focused or not, and
+    /// zooms a graph around the pointer.
+    fn wheel(&mut self, target: Option<Target>, by: isize, cell: (u16, u16)) {
         let region = match target {
-            Some(Target::Region(region)) => region,
-            Some(Target::BoardRow(_) | Target::Key(_) | Target::RoadmapRow(_) | Target::Day(_) | Target::Welcome(_)) => {
-                Region::Editor
+            Some(Target::Canvas(pane)) => {
+                self.with_view(pane, |view, _| view.wheel(cell, by));
+                return;
             }
+            Some(Target::Region(region)) => region,
+            Some(
+                Target::BoardRow(_)
+                | Target::Key(_)
+                | Target::RoadmapRow(_)
+                | Target::Day(_)
+                | Target::Welcome(_)
+                | Target::Control(_)
+                | Target::Track(_),
+            ) => Region::Editor,
             Some(Target::NextRow(_)) => Region::Next,
             Some(Target::TreeRow(_) | Target::SearchRow(_) | Target::ProjectRow(_) | Target::ChangeRow(_) | Target::Chip(_)) => {
                 Region::Sidebar
@@ -1215,6 +1323,10 @@ impl App {
                 Doc::Roadmap => self.doc.roadmap.step(by, self.roadmap_lines().len()),
                 Doc::Calendar => self.move_day(by as i64 * 7),
                 Doc::Welcome => self.doc.welcome.step(by, self.welcome_links().len()),
+                Doc::Graph => {
+                    let rows = controls(&self.settings, &self.graph_panel.sections, false).len();
+                    self.graph_panel.cursor.step(by, rows);
+                }
             },
             Region::Next => self.next.step(by, self.snapshot.next().len()),
             Region::Sidebar => match self.view {
@@ -1230,6 +1342,7 @@ impl App {
                         self.found.selected = line;
                     }
                 }
+                View::Graph => {}
                 View::Projects => self.projects.step(by, self.snapshot.projects.len()),
                 View::Changes => self.changes.step(by, self.snapshot.changes.len()),
             },
@@ -1328,6 +1441,7 @@ mod tests {
             folder: "~/test".into(),
             cwd: dir.to_path_buf(),
             home: dir.to_path_buf(),
+            dir: dir.to_path_buf(),
             branch: None,
         };
         App::new(workspace, snapshot(dir, ekko), 0)
@@ -1353,13 +1467,12 @@ mod tests {
         &app.snapshot.items[app.selected().expect("nothing is selected")].description
     }
 
+    fn pointer(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+        app.mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE });
+    }
+
     fn click(app: &mut App, column: u16, row: u16) {
-        app.mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        });
+        pointer(app, MouseEventKind::Down(MouseButton::Left), column, row);
     }
 
     /// Enter completes the selected task, and no key undoes a finished one.
@@ -1452,6 +1565,7 @@ mod tests {
 
         assert_eq!(selected_description(&app), "three");
         assert_eq!(app.unseen, 1);
+        assert_eq!(app.generation, 1, "a reload did not count");
         assert!(app.pulsing());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1676,7 +1790,6 @@ mod tests {
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
         assert!(app.flash().unwrap().0.contains("already open"));
-        press(&mut app, KeyCode::Home);
         app.projects.selected = 0;
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.switch.as_deref(), Some("elsewhere"));
@@ -1723,6 +1836,73 @@ mod tests {
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.tabs.active(), &Doc::Item(board::key(&app.snapshot.all[&1])));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The graph opens from its chord and its settings from `Ctrl+K ,`; a
+    /// toggle flipped in the panel is saved beside the board, and Escape
+    /// closes the panel.
+    #[test]
+    fn the_graph_panel_changes_settings_and_saves_them() {
+        let (dir, ekko) = board("panel");
+        ekko.create_task(&words(&["@a", "one"])).unwrap();
+        let mut app = open(&dir, &ekko);
+
+        ctrl(&mut app, 'k');
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.tabs.active(), &Doc::Graph);
+        ctrl(&mut app, 'k');
+        press(&mut app, KeyCode::Char(','));
+        assert!(app.graph_panel.open);
+
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.settings.tags, "Enter on Tags did not flip it");
+        assert!(Settings::load(&dir).tags, "the change was not saved");
+
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Enter);
+        for c in "one".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.settings.search, "one");
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.graph_panel.open);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A click on a node opens its item, and the local graph's depth keys stay
+    /// inside Obsidian's range.
+    #[test]
+    fn a_click_on_a_node_opens_its_item_and_depth_stays_in_range() {
+        let (dir, ekko) = board("node");
+        ekko.create_task(&words(&["@a", "only"])).unwrap();
+        let mut app = open(&dir, &ekko);
+        app.tabs.open(Doc::Graph, false);
+        let area = Rect::new(0, 0, 60, 20);
+        app.graph.area = area;
+        app.graph.refresh(&app.snapshot, &app.settings, app.generation, None);
+        app.graph.frame();
+        app.hits = vec![(area, Target::Canvas(Pane::Global))];
+        let (x, y) = app.graph.point(0);
+        let (column, row) = ((x / 2.0) as u16, (y / 4.0) as u16);
+
+        click(&mut app, column, row);
+        pointer(&mut app, MouseEventKind::Up(MouseButton::Left), column, row);
+        assert_eq!(app.tabs.active(), &Doc::Item(board::key(&app.snapshot.all[&1])));
+
+        app.show_view(View::Graph);
+        for _ in 0..9 {
+            press(&mut app, KeyCode::Char(']'));
+        }
+        assert_eq!(app.settings.depth, 5);
+        for _ in 0..9 {
+            press(&mut app, KeyCode::Char('['));
+        }
+        assert_eq!(app.settings.depth, 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

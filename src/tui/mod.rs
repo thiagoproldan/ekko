@@ -13,6 +13,7 @@ mod app;
 mod board;
 mod draw;
 mod git;
+mod graph;
 mod layout;
 mod list;
 mod search;
@@ -22,7 +23,7 @@ mod tree;
 mod watch;
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{
@@ -37,6 +38,11 @@ use crate::project;
 
 /// How long to wait for input before looking at the board's files again.
 const TICK: Duration = Duration::from_millis(200);
+/// How often a frame is drawn while a graph is moving.
+const FRAME: Duration = Duration::from_millis(33);
+/// Events handled before the next frame: the pointer reports every cell it
+/// crosses, and a frame per report would fall behind the pointer.
+const BURST: usize = 64;
 
 /// Restores the terminal however the interactive mode ends: returning, an
 /// error, or a panic. A raw-mode program that dies without this leaves the
@@ -85,13 +91,27 @@ fn io_error(error: io::Error) -> EkkoError {
     EkkoError::Storage(crate::storage::StorageError::Io(error))
 }
 
+/// A board to open: what it is called, and where it and its folder are.
+struct Place {
+    label: String,
+    name: String,
+    root: PathBuf,
+    dir: PathBuf,
+    cwd: PathBuf,
+}
+
 /// Takes the terminal and shows the board at `location` until the person
 /// leaves. `label` is how the board is named, as the CLI names it.
 pub fn run(ekko: &Ekko, location: &Location, label: &str, home: &Path, cwd: &Path) -> Result<(), EkkoError> {
     let since = chrono::Local::now().timestamp_millis();
-    let root = location.project.as_ref().and_then(|project| project.root.clone()).unwrap_or_else(|| location.dir.clone());
-    let name = location.project.as_ref().map_or_else(|| "default board".to_string(), |project| project.name.clone());
-    let mut app = open(ekko, label.to_string(), name, &root, home, cwd, since)?;
+    let place = Place {
+        label: label.to_string(),
+        name: location.project.as_ref().map_or_else(|| "default board".to_string(), |project| project.name.clone()),
+        root: location.project.as_ref().and_then(|project| project.root.clone()).unwrap_or_else(|| location.dir.clone()),
+        dir: location.dir.clone(),
+        cwd: cwd.to_path_buf(),
+    };
+    let mut app = open(ekko, place, home, since)?;
     let mut watch = watch::Watch::new(&location.dir);
     // A project switched to from the Projects view; the board main opened
     // until then.
@@ -100,9 +120,13 @@ pub fn run(ekko: &Ekko, location: &Location, label: &str, home: &Path, cwd: &Pat
 
     let mut session = Session::start().map_err(io_error)?;
     loop {
+        app.animate();
         session.terminal.draw(|frame| draw::frame(frame, &mut app, glyphs)).map_err(io_error)?;
 
-        if event::poll(TICK).map_err(io_error)? {
+        let wait = if app.animating() { FRAME } else { TICK };
+        let mut ready = event::poll(wait).map_err(io_error)?;
+        let mut handled = 0;
+        while ready && handled < BURST {
             let current = switched.as_ref().unwrap_or(ekko);
             match event::read().map_err(io_error)? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -115,6 +139,11 @@ pub fn run(ekko: &Ekko, location: &Location, label: &str, home: &Path, cwd: &Pat
                 Event::Mouse(mouse) => app.mouse(mouse),
                 _ => {}
             }
+            handled += 1;
+            if app.quit || app.switch.is_some() {
+                break;
+            }
+            ready = event::poll(Duration::ZERO).map_err(io_error)?;
         }
         if app.quit {
             return Ok(());
@@ -126,7 +155,14 @@ pub fn run(ekko: &Ekko, location: &Location, label: &str, home: &Path, cwd: &Pat
             match opened {
                 Ok((next, project)) => {
                     let root = project.root.clone().unwrap_or_else(|| project.dir.clone());
-                    app = open(&next, format!("project {}", project.name), project.name.clone(), &root, home, &root, since)?;
+                    let place = Place {
+                        label: format!("project {}", project.name),
+                        name: project.name.clone(),
+                        root: root.clone(),
+                        dir: project.dir.clone(),
+                        cwd: root,
+                    };
+                    app = open(&next, place, home, since)?;
                     watch = watch::Watch::new(&project.dir);
                     switched = Some(next);
                     continue;
@@ -142,14 +178,15 @@ pub fn run(ekko: &Ekko, location: &Location, label: &str, home: &Path, cwd: &Pat
 }
 
 /// The interactive mode's state for a board: read, and named.
-fn open(ekko: &Ekko, label: String, name: String, root: &Path, home: &Path, cwd: &Path, since: i64) -> Result<app::App, EkkoError> {
+fn open(ekko: &Ekko, place: Place, home: &Path, since: i64) -> Result<app::App, EkkoError> {
     let workspace = app::Workspace {
-        label,
-        name,
-        folder: shorten(root, home),
-        cwd: cwd.to_path_buf(),
+        label: place.label,
+        name: place.name,
+        folder: shorten(&place.root, home),
+        branch: git::branch(&place.cwd),
+        cwd: place.cwd,
         home: home.to_path_buf(),
-        branch: git::branch(cwd),
+        dir: place.dir,
     };
     let snapshot = board::Snapshot::load(ekko, &board::Reading { label: &workspace.label, home, since })?;
     Ok(app::App::new(workspace, snapshot, since))

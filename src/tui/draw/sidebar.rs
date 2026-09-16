@@ -67,6 +67,7 @@ pub(super) fn follow(app: &mut App, rect: Rect) {
         }
         View::Projects => app.projects.follow(body.height as usize),
         View::Changes => app.changes.follow(body.height.saturating_sub(1) as usize),
+        View::Graph => super::graph::follow_local(app, super::graph::local_canvas(body)),
     }
 }
 
@@ -94,6 +95,10 @@ pub(super) fn draw(buf: &mut Buffer, app: &App, glyphs: Glyphs, rect: Rect, hits
         }
         View::Changes => {
             changes(buf, app, glyphs, body, focused, hits);
+            None
+        }
+        View::Graph => {
+            super::graph::local_view(buf, app, glyphs, body, hits);
             None
         }
     }

@@ -237,6 +237,7 @@ impl Snapshot {
             Doc::Welcome => "Welcome".to_string(),
             Doc::Roadmap => "Roadmap".to_string(),
             Doc::Calendar => "Calendar".to_string(),
+            Doc::Graph => "Graph".to_string(),
             Doc::Item(key) => match self.find(key) {
                 Some((item, _)) => format!("{} {}", item.id, one_line(&item.description)),
                 None => "Deleted item".to_string(),

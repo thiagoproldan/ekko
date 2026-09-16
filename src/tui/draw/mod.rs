@@ -5,6 +5,7 @@
 //! geometry can drift from the first.
 
 mod editor;
+mod graph;
 mod pieces;
 mod sidebar;
 
@@ -209,6 +210,7 @@ fn activity(buf: &mut Buffer, app: &App, glyphs: Glyphs, rect: Rect, sidebar: Op
     let views = [
         (View::Explorer, icons.explorer),
         (View::Search, icons.search),
+        (View::Graph, icons.graph),
         (View::Projects, icons.projects),
         (View::Changes, icons.changes),
     ];
@@ -446,6 +448,7 @@ mod tests {
             folder: "~/Projects/demo".into(),
             cwd: dir.clone(),
             home: dir.clone(),
+            dir: dir.clone(),
             branch: Some("main".into()),
         };
         let app = App::new(workspace, snapshot(&dir, &ekko), 0);
@@ -516,6 +519,7 @@ mod tests {
             (Doc::Roadmap, View::Search, vec!["setup", "release", "Words, #id"]),
             (Doc::Calendar, View::Projects, vec!["Su", "No projects yet"]),
             (Doc::Welcome, View::Changes, vec!["Start", "Open the roadmap", "Since"]),
+            (Doc::Graph, View::Graph, vec!["nodes", "links", "depth 1"]),
         ];
         for (doc, view, expected) in pages {
             app.tabs.open(doc.clone(), false);
