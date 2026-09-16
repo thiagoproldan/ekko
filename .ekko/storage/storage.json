@@ -1,0 +1,2394 @@
+{
+    "2": {
+        "_id": 2,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600478522,
+        "description": "Store dueDate on Item, absent for items without one",
+        "isStarred": false,
+        "boards": [
+            "@due"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "updatedAt": 1787962059570,
+        "stashed": 1787962059570,
+        "priority": 1
+    },
+    "3": {
+        "_id": 3,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600478525,
+        "description": "Render overdue items in red, due-today in yellow",
+        "isStarred": true,
+        "boards": [
+            "@due"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "updatedAt": 1787962059570,
+        "stashed": 1787962059570,
+        "priority": 1
+    },
+    "4": {
+        "_id": 4,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600478527,
+        "description": "Filter by due date via --list due/overdue, not a separate --due flag",
+        "isStarred": false,
+        "boards": [
+            "@due"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "updatedAt": 1787962059570,
+        "stashed": 1787962059570,
+        "priority": 1
+    },
+    "5": {
+        "_id": 5,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600478529,
+        "description": "Include dueDate in --json output",
+        "isStarred": false,
+        "boards": [
+            "@due"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "updatedAt": 1787962059570,
+        "stashed": 1787962059570,
+        "priority": 1
+    },
+    "6": {
+        "_id": 6,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600478531,
+        "description": "Fill in repository/homepage once a remote exists",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577,
+        "priority": 1
+    },
+    "7": {
+        "_id": 7,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600478534,
+        "description": "Push v0.5.0 tag",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577,
+        "priority": 1
+    },
+    "9": {
+        "_id": 9,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600486742,
+        "description": "Chose Option<String> over a date type: storage.json must stay byte-compatible with taskbook",
+        "isStarred": false,
+        "boards": [
+            "@due"
+        ],
+        "_isTask": false,
+        "updatedAt": 1787962059570,
+        "stashed": 1787962059570
+    },
+    "14": {
+        "_id": 14,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600818831,
+        "description": "Found while dogfooding in round 1/3: board prints @release, but --list @release silently returns everything",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false
+    },
+    "15": {
+        "_id": 15,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600900509,
+        "description": "False lead: --move is not affected -- it marks the id with @, is documented that way, and errors loudly when misused",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false
+    },
+    "16": {
+        "_id": 16,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787601595383,
+        "description": "MSRV was 1.88, forced by home 0.5.12 (edition 2024) -- not by our code; verified by rustc 1.86 refusing to build it at all. Dropping that dependency for std::env::home_dir brought it down to 1.87, which is where it sits now: set by home_dir being un-deprecated in that release, and enforced by a CI job that reads rust-version straight out of Cargo.toml.",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": false,
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577
+    },
+    "17": {
+        "_id": 17,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787601595385,
+        "description": "Drop the home crate for std::env::home_dir, un-deprecated and one less dep",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577,
+        "priority": 2
+    },
+    "18": {
+        "_id": 18,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787601713341,
+        "description": "Nothing enforces rust-version: add an MSRV job to CI or it will drift silently",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577,
+        "priority": 1
+    },
+    "19": {
+        "_id": 19,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600478536,
+        "description": "Decide MSRV and add rust-version to Cargo.toml",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577,
+        "priority": 1
+    },
+    "20": {
+        "_id": 20,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787601838948,
+        "description": "Archive renumbers ids: --restore N takes the ARCHIVE id and the item returns with a fresh storage id. Pretty output reports only the archive id (JS-faithful); --json gives both, so agents must use it",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false
+    },
+    "21": {
+        "_id": 21,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787605347679,
+        "description": "Idempotent state setting so a retried command cannot undo itself",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "priority": 3
+    },
+    "22": {
+        "_id": 22,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787605347681,
+        "description": "Stable uid in --json, so ids being recycled cannot mislead a caller",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "priority": 3
+    },
+    "23": {
+        "_id": 23,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787605347682,
+        "description": "Cheap incremental read: --since, to sync without pulling the whole board",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "updatedAt": 1787606193092,
+        "priority": 2
+    },
+    "24": {
+        "_id": 24,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787605347684,
+        "description": "These three came from comparing ekko against TodoWrite: it wins on features, loses on agent safety. Toggles are not retry-safe, ids get recycled, and the only read is the whole board",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false
+    },
+    "25": {
+        "_id": 25,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787605832033,
+        "description": "Piping into head panics with a broken pipe instead of exiting quietly",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18ceda0878c37347-1efd3",
+        "updatedAt": 1787606781501,
+        "priority": 2
+    },
+    "26": {
+        "_id": 26,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787607913827,
+        "description": "Volta fria custa o TAMANHO da sessão, não o tempo fora: TTL do cache de prompt e 1h. Medido em 90f9ae74 (winwayland): ocioso de 69 min gerou 849.837 tokens de cache_write com input_tokens=1. Dois turnos ociosos em 1133 = 40% de todo o cache escrito da sessão",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cedbed2d63904d-21492",
+        "updatedAt": 1787607913827
+    },
+    "27": {
+        "_id": 27,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787607913829,
+        "description": "Piso de partida a frio medido em 10 sessões: mediana 37.446 tokens (system prompt + ferramentas + CLAUDE.md + índice de memória). Logo: sessão nova + ler o board ~38k contra ~850k para retomar a sessão gorda. Trocar de sessão é 22x mais barato -- decidir sem re-medir",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cedbed2d7e5d86-21493",
+        "updatedAt": 1787607913829
+    },
+    "28": {
+        "_id": 28,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787615444869,
+        "description": "Timeline idea, with the constraints that survived scrutiny. (1) A node is a closed PHASE, never a task -- a timeline of tasks is just the archive with dashes. (2) Notes must not collapse with the ticks: they are 65% of the payload and the only part a new session needs, so collapse the check marks and promote the notes, perhaps carrying a count (@due 4/4 - 1 note). (3) \"Closed\" must be declared, never inferred from 100% -- a board at 4/4 today can take a fifth item tomorrow, and auto-collapsing live work is the same defect the feature is meant to cure. (4) ATUAL needs a cursor: the timeline can only point at where you are if something is in progress, so --timeline and the --set progress habit are one feature. Build the cursor first -- it works without the timeline, the timeline does not work without it. (5) Notes go stale and nothing on the board shows their age -- note 16 still reads \"MSRV is 1.88\", true when written and false since the home dependency was dropped. Promoting notes to the headline makes a wrong note worse than thirteen ignored ticks, so the design has to answer for age: show it, flag it, or accept it as a deliberate trade.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cee2c6a278c579-24dcb",
+        "updatedAt": 1787616120314
+    },
+    "29": {
+        "_id": 29,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787615444873,
+        "description": "Measured before building: collapsing 13 done tasks saves ~600 bytes (~170 tokens) against a ~37k cold-start floor. Real and irrelevant. The value is signal, not bytes -- 13 lines of tick drown the one line that matters, which is exactly how this board came to read \"100% complete\" while the actual state was unclear. Also note --clear + --archive already cover most of the collapsing; part of the pain is an unused feature, not a missing one.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cee2c6a2b34491-24dcc",
+        "updatedAt": 1787615444873
+    },
+    "30": {
+        "_id": 30,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787615458531,
+        "description": "Add a real paused state: third symbol, repoint the unstarted alias, warn when more than one task is in progress. Design settled in note 39",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cee2c9d0bee40e-24dd4",
+        "updatedAt": 1787624946765,
+        "priority": 3
+    },
+    "31": {
+        "_id": 31,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787615458532,
+        "description": "Decide how a phase is declared closed -- explicitly, never inferred from 100%",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cee2c9d0d69530-24dd5",
+        "updatedAt": 1787783602912,
+        "blockedBy": [
+            "18cf7bb46cad9b0f-b3e66"
+        ],
+        "priority": 2
+    },
+    "32": {
+        "_id": 32,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787615458534,
+        "description": "Implement --timeline: collapse closed phases to nodes, promote notes, show position",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cee2c9d0ee4ae6-24dd6",
+        "updatedAt": 1787645874233,
+        "blockedBy": [
+            "18cee2c9d0d69530-24dd5"
+        ],
+        "priority": 2
+    },
+    "33": {
+        "_id": 33,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787615458535,
+        "description": "Dogfood --timeline against this very board and check it beats --archive on the question \"how did I get here\"",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cee2c9d10839d9-24dd7",
+        "updatedAt": 1787645874237,
+        "blockedBy": [
+            "18cee2c9d0ee4ae6-24dd6"
+        ],
+        "priority": 1
+    },
+    "34": {
+        "_id": 34,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787615458537,
+        "description": "ekko is on no PATH the shell reads. Flake package now exists, so this is down to choosing how to install it declaratively",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cee2c9d1200747-24dd8",
+        "updatedAt": 1787631526710,
+        "priority": 2
+    },
+    "35": {
+        "_id": 35,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787615458538,
+        "description": "Skill lives loose in ~/.claude/skills; decide whether it should be version-controlled",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cee2c9d134796d-24dd9",
+        "updatedAt": 1787631526710,
+        "priority": 1
+    },
+    "36": {
+        "_id": 36,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787616787315,
+        "description": "Note 16 is stale: it says MSRV is 1.88, true when written and false since the home dependency was dropped (it is 1.87)",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cee3ff327cbb25-25db4",
+        "updatedAt": 1787625012140,
+        "priority": 2
+    },
+    "37": {
+        "_id": 37,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787616787317,
+        "description": "Two safety branches still local: backup-pre-reroot and pre-v0.4.1. Delete once the rewritten history is trusted",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cee3ff32977c0e-25db5",
+        "updatedAt": 1787899859064,
+        "priority": 1
+    },
+    "38": {
+        "_id": 38,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787616787319,
+        "description": "CI warns on every run: actions/checkout@v4 targets Node 20, which GitHub deprecated and now forces onto Node 24",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cee3ff32aee586-25db6",
+        "updatedAt": 1787899859064,
+        "priority": 1
+    },
+    "39": {
+        "_id": 39,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787624390897,
+        "description": "Cursor decision, settled. The root cause is that in_progress is a per-item boolean with nothing constraining how many are true, so the mark drifts from \"where I am\" to \"things I once started\". Worse, pausing and never-starting collapse into the same empty box: taskbook names the concept (--begin is documented \"Start/pause task\") but models it as absence. So: add a real third state. (a) Symbols become never-started, in-progress, paused, done -- a paused item is a situation taskbook could not produce, so nothing byte-identical is at risk. (b) The invariant is AT MOST one in progress, never exactly one -- zero is honest when you are between things, and forcing a cursor would invent one. (c) The alias unstarted currently maps to paused and must be repointed, since with a real paused state the two become opposites; unstarted clears both flags back to the empty box, which also undoes a mistyped --set progress. (d) Neither --set progress nor --begin auto-pauses the others. That was the tempting design and it is wrong: --begin documents multiple ids on purpose, so making one command enforce and the other not leaves two commands for the same action with different rules -- a trap worse than the problem. Duplication is solved by visibility (warn when more than one is in progress) plus expressibility (somewhere to record \"set aside\"), not by enforcement. (e) The timeline does not need the guarantee anyway: with updatedAt it can point at the most recently touched in-progress item and degrade gracefully. (f) The stats line shows paused only when the count is above zero, so boards that never pause anything render exactly as before -- same trick that kept due dates from disturbing the goldens.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18ceeae98b43e8be-28e41",
+        "updatedAt": 1787624390897
+    },
+    "40": {
+        "_id": 40,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787626518165,
+        "description": "Timeline shelved, and note folding chosen instead. Two things came out of printing the board and actually looking at it. First, a name clash nobody had noticed: --timeline is already taken by the date-grouped view, so the proposed feature could never have used that name. Second, and decisive: the noise was measured on the wrong side. Of 94 rendered lines, notes took 56 and every task -- open and closed -- took 28. Collapsing done tasks attacks the smaller half. Folding long notes to one line with a hidden-line count takes the board from 94 lines to 49, with no phase state, no closing rule, no new symbols. It also avoids the worst risk in note 28: folding shows less and says how much it hid, whereas promoting notes would have amplified a stale one. The users own timeline idea is a separate future view for a different model, not this, and is parked deliberately rather than rejected.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18ceecd8d653069a-2af57",
+        "updatedAt": 1787626518165
+    },
+    "41": {
+        "_id": 41,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787626518175,
+        "description": "Fold long note descriptions in the rendered views, with a hidden-line count",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18ceecd8d6e826f8-2af59",
+        "updatedAt": 1787626848020,
+        "priority": 2
+    },
+    "42": {
+        "_id": 42,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787626528443,
+        "description": "Parked, not rejected. These three described collapsing done tasks into phase nodes, which the measurement in note 40 showed attacks the smaller half of the noise. The users own timeline is a separate future view and will need a name other than --timeline, which the date-grouped view already owns.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18ceecdb3af425ae-2af6b",
+        "updatedAt": 1787626528443
+    },
+    "43": {
+        "_id": 43,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787631526714,
+        "description": "PATH and skill both closed by the same change: the flake gained packages.default and packages.skill, and a home-manager module installs them together. The skill now ships pinned to the same revision as the binary, so an older input cannot describe commands that Ekko does not have. Two gotchas worth keeping: an untracked file is invisible to a git+file flake (the first build failed with \"option does not exist\" until git add), and home-manager aborts activation when a backup file already exists, so manual scaffolding has to be cleared before switching.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cef166fb1e2c88-41f7a",
+        "updatedAt": 1787631526714
+    },
+    "44": {
+        "_id": 44,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787632817202,
+        "description": "Safety branches deleted after verifying the premise rather than trusting it: backup-pre-reroot pointed at ae6d39f, whose tree is byte-identical to the rewritten 0d1383d, so the rewrite changed metadata and nothing else. The JS history stays reachable through the v0.1.0-v0.4.0 tags, which tests/golden/README.md depends on. Orphaned SHAs, still in the reflog for a while: ae6d39f4313fdaf9cbfae5fbb160e51cd1b5f7c4 and 81f31e566f3e01e611a30f0253f1733f4c6b99a2.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cef2937234d941-43629",
+        "updatedAt": 1787632817202
+    },
+    "45": {
+        "_id": 45,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787632993455,
+        "description": "Rename master to main: local, remote, GitHub default branch and the CI trigger",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cef2bc7ba94d64-436ec",
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577,
+        "priority": 3
+    },
+    "46": {
+        "_id": 46,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787632993458,
+        "description": "Cut a GitHub release -- became v0.6.0, since the v0.5.0 tag predated six features",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cef2bc7be11b4d-436ed",
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577,
+        "priority": 2
+    },
+    "47": {
+        "_id": 47,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787632993460,
+        "description": "Recapture the screenshots to show the paused state and due dates",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cef2bc7c00b6b6-436ee",
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577,
+        "priority": 2
+    },
+    "48": {
+        "_id": 48,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787632993462,
+        "description": "Readme pass: the new features are documented piecemeal, the top of the file still describes the old Ekko",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cef2bc7c1c6f95-436ef",
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577,
+        "priority": 2
+    },
+    "49": {
+        "_id": 49,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787633642384,
+        "description": "Release cut as v0.6.0, not v0.5.0 as first asked: the v0.5.0 tag was sixteen commits behind main and contained none of due dates, --set, uid, --since, the paused state or note folding. Releasing it would have shipped notes describing a version the docs no longer matched. Minor bump because every addition is invisible on a board that does not use it, and the golden tests still assert taskbook-identical output byte for byte.",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": false,
+        "uid": "18cef35392db1602-45ba7",
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577
+    },
+    "50": {
+        "_id": 50,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787634757596,
+        "description": "Cancelled state: struck through, kept as context rather than deleted",
+        "isStarred": false,
+        "boards": [
+            "@ideas"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cef4573aa8bc6c-461cc",
+        "updatedAt": 1787962059584,
+        "stashed": 1787962059584,
+        "priority": 3
+    },
+    "51": {
+        "_id": 51,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787634757598,
+        "description": "Scan code comments for TODO/FIXME as a read-only view, never imported -- scan root from the git toplevel, no in-tree anchor",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cef4573ac9216b-461cd",
+        "updatedAt": 1787683213363,
+        "priority": 2
+    },
+    "52": {
+        "_id": 52,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787634757600,
+        "description": "Projects: --project as sugar over --ekko-dir, plus a registry to list and switch",
+        "isStarred": false,
+        "boards": [
+            "@ideas"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cef4573ae452f4-461ce",
+        "updatedAt": 1787962059584,
+        "stashed": 1787962059584,
+        "priority": 2
+    },
+    "53": {
+        "_id": 53,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787634757601,
+        "description": "GitHub issues AND pull requests as a pass-through view via gh, never a local mirror -- repo resolved from the git remote, no anchor needed",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cef4573b00d705-461cf",
+        "updatedAt": 1787683162048,
+        "priority": 1
+    },
+    "54": {
+        "_id": 54,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787634757603,
+        "description": "Roadmap: start with textual blocked-by, before attempting an ASCII graph",
+        "isStarred": false,
+        "boards": [
+            "@ideas"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cef4573b1a9d9b-461d0",
+        "updatedAt": 1787962059584,
+        "stashed": 1787962059584,
+        "priority": 1
+    },
+    "55": {
+        "_id": 55,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787634757605,
+        "description": "Path view: project > phase > area, phases persisted and ordered, --path renders the journey",
+        "isStarred": false,
+        "boards": [
+            "@ideas"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cef4573b352e0e-461d1",
+        "updatedAt": 1787962059584,
+        "stashed": 1787962059584,
+        "priority": 1
+    },
+    "56": {
+        "_id": 56,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787634757607,
+        "description": "Ordered by cost, cheapest first. Cancelled is the third run of a pattern already done twice, so it is nearly free. TODO scanning and GitHub issues are both cheap as VIEWS and expensive as sync: importing either creates two owners of one fact, and the upstream changes without telling the board -- worse than the stale note we just fixed, because an issue changes by someone else. Projects are half-built already: --ekko-dir and EKKO_DIR give the isolation, what is missing is a registry so nobody types paths. The roadmap graph is the only genuinely hard one, and the hard part is drawing it, not storing it: ASCII graph layout is a real algorithm, and the \"needs to go back\" case means cycles, which break layering. Textual blocked-by first would show whether the picture is still wanted.",
+        "isStarred": false,
+        "boards": [
+            "@ideas"
+        ],
+        "_isTask": false,
+        "uid": "18cef4573b4fcc85-461d2",
+        "updatedAt": 1787962059584,
+        "stashed": 1787962059584
+    },
+    "57": {
+        "_id": 57,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787635621837,
+        "description": "Pull requests belong with the issues view but are not just more of the same. They carry state issues do not -- draft, review decision, CI conclusion, mergeable -- and \"which PRs are waiting on me\" is the question an agent actually asks. Worth knowing: on GitHub a PR IS an issue, so they share one number space and #42 can be either; a view that mixes them has to say which is which. The pass-through argument holds either way, and gets stronger: PR state changes faster than issue state, so a local mirror would be wrong sooner.",
+        "isStarred": false,
+        "boards": [
+            "@ideas"
+        ],
+        "_isTask": false,
+        "uid": "18cef520737271d7-495d4",
+        "updatedAt": 1787962059584,
+        "stashed": 1787962059584
+    },
+    "58": {
+        "_id": 58,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787643042139,
+        "description": "Path design, settled. Two worlds: the default board is untouched -- areas, no phases, quick capture. Inside a project the hierarchy is project > phase > area, and each phase is its own world, so the same area name in two phases means two distinct areas. Phases are the first thing in Ekko that cannot be derived from data: \"setup comes before build\" is knowledge, not a timestamp, so it has to be declared. Declared as a whole ordered list (--phases a b c) rather than appended one at a time, because appending cannot express \"insert testing between compositor and packaging\" without growing three more commands to fix it; replacing makes reordering and inserting the same operation. That contract already exists in the tool -- --move replaces an item board list rather than adding to it. Singular scopes, plural manages: --phase/--phases mirrors --project/--projects.",
+        "isStarred": false,
+        "boards": [
+            "@ideas"
+        ],
+        "_isTask": false,
+        "uid": "18cefbe01ff05704-50869",
+        "updatedAt": 1787962059584,
+        "stashed": 1787962059584
+    },
+    "59": {
+        "_id": 59,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787643042141,
+        "description": "Two path decisions that follow from the model. A task created inside a project with phases but without --phase goes to the project ROOT, outside the path, and never to a guessed current phase: placing work somewhere nobody chose is the plausible-wrong-answer failure this codebase keeps circling. The path shows the count of those at its foot, so the exception is visible rather than a hole. And --path is invoked, never automatic: it serves both directions, travelling back through closed phases and forward through speculative ones that hold tasks nobody has started.",
+        "isStarred": false,
+        "boards": [
+            "@ideas"
+        ],
+        "_isTask": false,
+        "uid": "18cefbe0200ec5c6-5086a",
+        "updatedAt": 1787962059584,
+        "stashed": 1787962059584
+    },
+    "60": {
+        "_id": 60,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787645984913,
+        "description": "Stopping point, 2026-08-25. Five of six ideas are shipped and on main at 9f066ce, released as v0.6.0 plus everything after it: cancelled state, projects, phases with --path, and dependencies with --list ready. Next up is 51, TODO scanning, the cheapest of the six -- and the design already agreed is a read-only VIEW that scans and renders, never an import, because a TODO belongs to the code and an item belongs to the board, and importing makes two owners of one fact. 53 (GitHub issues and PRs) is the same shape: a pass-through via gh, never a local mirror, since PR state changes by other people in minutes. What is NOT built, on purpose: the ASCII graph for the roadmap. The dependency data exists and a picture would need exactly that, so the decision was deferred until --list ready has been lived with -- the same call that turned out right when the timeline was measured rather than assumed.",
+        "isStarred": false,
+        "boards": [
+            "@ideas"
+        ],
+        "_isTask": false,
+        "uid": "18cefe8d4aee88f0-55946",
+        "updatedAt": 1787962059584,
+        "stashed": 1787962059584
+    },
+    "61": {
+        "_id": 61,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787645984916,
+        "description": "The three items here now carry their real dependencies (32 waits on 31, 33 on 32), declared once --blocked-by existed. They stay parked: they describe collapsing done tasks into phase nodes, which the measurement in note 40 showed attacks the smaller half of the noise. Note also that --path now exists and covers most of what they wanted, so if they are ever revived it should be to answer what --path does not.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cefe8d4b12c363-55947",
+        "updatedAt": 1787645984916
+    },
+    "62": {
+        "_id": 62,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787679161121,
+        "description": "51 moved here, and grew. Planning it surfaced a question the task never asked: where does the code live? A view that scans needs a root, and passing a path every time makes it a grep with nicer colours. This note first answered that with a .ekko/ INSIDE the source tree -- superseded the same day by notes 64 and 66, which found git already answers it and that an in-tree binding fails between people. Read 64, 65 and 66 for what replaced it. What stands unchanged is why 51 left @ideas: small as written, structural as understood, and worth designing whole rather than growing sideways out of a grep.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf1cb9bb0b9217-6acb3",
+        "updatedAt": 1787683658266
+    },
+    "63": {
+        "_id": 63,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787679171969,
+        "description": "What the 51 planning already settled, so it is not re-derived. (1) Never import, and that survives the wider scope untouched: a TODO belongs to the code, an item to the board, and importing makes two owners of one fact -- worse than the stale note 16, because the TODO vanishes when someone fixes the code and nothing tells the board. (2) Identity is arquivo:linha, never an id. Printing numbers in the id column invites --set @3 done, which would hit the real board item 3: two unrelated number spaces rendered identically. Show the line as L155 and the only correct action -- open the file -- is the only one offered. (3) No percentage: a TODO is never done, it stops existing. (4) Measured on ~/NixOS, 212 files: bare TODO|FIXME matching gives 8 hits, 5 of them markdown prose. Requiring a comment leader (# // /* -- ;) gives 3 of 3 correct, 0 false. Keeping * as a leader breaks that, because **TODO** in markdown matches -- allow * only at line start, the block-continuation shape. (5) ekko itself has ZERO TODOs, so dogfooding this on ekko renders an empty view. That is the board doing its job, not a bug.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf1cbc41a2d3d3-6acb9",
+        "updatedAt": 1787679171970
+    },
+    "64": {
+        "_id": 64,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787683170076,
+        "description": "The .git anchor exercise, which reshapes 51 AND 53. Measured from a subdirectory of this repo: rev-parse --show-toplevel gives the scan root, remote get-url gives the GitHub repo, and gh already resolves the repo from that remote by itself. So in the common case -- you are inside the repo -- neither feature needs an anchor at all: they work with zero configuration. That is the real finding. The .ekko/ idea was answering \"where does the code live\", and git already answers it. Failure modes measured, with exit codes: not a repo, show-toplevel exits 128 and an explicit path argument is the fallback; local repo with no remote, toplevel works and gh correctly refuses with \"no git remotes found\"; repo with no commits, root-commit lookup exits 128 but that repo has no code to scan anyway.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf205f2363c137-6ce0e",
+        "updatedAt": 1787683170077
+    },
+    "65": {
+        "_id": 65,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787683178636,
+        "description": "Identity, decided by a test rather than by reasoning. If a binding is ever wanted (see project X from anywhere), the key must survive a worktree. Measured: in a worktree the toplevel PATH differs from the main checkout, so path-as-key would treat a worktree as a separate project -- wrong. The remote is shared, and the ROOT COMMIT is identical; in a fresh clone it came back identical too (e196ea4f for this repo). So the root commit is the identity: survives worktree, clone, move, rename and a changed remote, and works in a local repo with no remote at all. It only fails in a repo with zero commits. That would live in ~/.ekko/repos.json, beside projects/, keyed by root commit -- NOTHING written into the users source tree. Two layers, and the second is optional: layer 0 is git answering everything from inside the repo, layer 1 is the binding that makes it work from outside. Layer 0 is the feature; layer 1 is convenience and should only be built when something actually asks for it.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf206121994f1a-6ce23",
+        "updatedAt": 1787683178637
+    },
+    "66": {
+        "_id": 66,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787683186203,
+        "description": "Why an in-tree .ekko/ lost, recorded so it is not re-proposed without answering these. It buys two things: non-git folders, and config that travels with a clone. But committed, two people cloning both point at the same board NAME on different machines with different contents -- two owners of one fact again, now between people rather than between code and board. Uncommitted, it needs a .gitignore entry in every repo, so ekko would require editing the users project before it works at all. A local repos.json has neither problem: the machine owns the binding and the repo never learns ekko exists. What is genuinely lost: plain folders that are not repos, which fall back to an explicit path argument.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf2062e493af17-6ce26",
+        "updatedAt": 1787683186203
+    },
+    "67": {
+        "_id": 67,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787683198486,
+        "description": "What 53 planning already measured against real repos, so it is not re-derived. The core is unchanged: pass-through via gh, never a mirror -- and the argument is STRONGER than for TODOs, because an issue changes while you sleep, by someone else, and PR state (review, mergeable, CI) changes in minutes. MAPPINGS, measured on role-organizado-workspace: labels are boards -- 69 of 82 issues labelled, distribution bug 30 / spec 22 / enhancement 11 / security 4, and 13 unlabelled forming the default group, which is exactly the shape display_by_board already draws. stateReason NOT_PLANNED is the cancelled state: 39 of 60 closed issues are NOT_PLANNED against 21 COMPLETED, so without the U+2298 that shipped in item 50 a view would render 65% of closed history as a lie. Draft PR maps to paused. Merged is done, closed-unmerged is cancelled. COSTS, measured: gh takes 0.5-0.7s per call, two orders of magnitude slower than every other ekko command, so offline must fail cleanly rather than hang; and statusCheckRollup costs 27x -- 8KB becomes 222KB for 30 PRs -- so CI state must be summarised in the jq at fetch time, never passed through raw. NOT WORTH BUILDING YET, all clean mappings with no data to show: GitHub natively has blockedBy/blocking, which is 1:1 with our --blocked-by and would give --list ready over issues for free, but measured zero usage in these repos; sub-issues map to the [2/4] group counter, also unused; milestones map to phases and would give --path over a repo roadmap, but neither cli/cli nor role-organizado has a single milestone, so that one is speculation, not measurement.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf2065c0b7db39-6ce2f",
+        "updatedAt": 1787683198486
+    },
+    "68": {
+        "_id": 68,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787683339355,
+        "description": "In-tree .ekko/ at a project root, for what belongs to the CODE and is the same for everyone who clones it -- never a pointer to a local board",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cf20868d2a2289-6cee3",
+        "updatedAt": 1787783591946,
+        "blockedBy": [
+            "18cf3e821a7303e2-94f1a"
+        ],
+        "priority": 1
+    },
+    "69": {
+        "_id": 69,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787683348249,
+        "description": "Item 68 exists because note 66 killed the wrong thing. What lost was putting a BINDING in the tree -- \"this repo is project X\" -- since committed it names a local board that means something different on every machine, which is two owners of one fact between people. That argument does not touch config, and config is most of what the folder was ever for. The split is the whole design: in-tree is for what is identical for everyone who clones the repo, ~/.ekko/repos.json is for what differs per machine. Candidates for in-tree, none of them a pointer to local state: which markers to scan and which paths to exclude for THIS codebase (the same shape as .editorconfig or .gitattributes -- config that belongs to the code, not the editor); phases agreed by a team, since \"setup comes before build\" is a property of the project and note 58 already established phases cannot be derived from data; and a roadmap committed alongside the code, which is a different object from a personal board. Also the one thing git genuinely cannot cover, from note 64: a plain folder that is not a repo.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf20889f4d0725-6cf3e",
+        "updatedAt": 1787683348249
+    },
+    "70": {
+        "_id": 70,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787683355349,
+        "description": "Sequencing for 68, deliberately NOT declared as a blocker. Half of it depends on 51 and 53: scan markers and path exclusions are config for features that do not exist, and designing a config format with nothing to configure is how you get a format you regret. The other half -- team phases, a committed roadmap, non-git folders -- depends on nothing and could come first. A hard --blocked-by would be wrong for that half, so this is a judgement recorded as prose rather than a mechanism pretending to be certain. Whoever picks 68 up should ask which half they are building.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf208a46840a90-6cf4b",
+        "updatedAt": 1787683355350
+    },
+    "71": {
+        "_id": 71,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787684049674,
+        "description": "The timeline view never draws the blocked-by marker: display_item_by_date does not call get_blocked, while display_item_by_board does",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cf212bef799597-6d907",
+        "updatedAt": 1787685141215,
+        "priority": 1
+    },
+    "72": {
+        "_id": 72,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787684049678,
+        "description": "Path node glyphs render uncoloured: display_path paints the phase NAME but appends the dot outside the painted span, so done/here/ahead all look alike",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cf212befbdecfa-6d908",
+        "updatedAt": 1787685141215,
+        "priority": 1
+    },
+    "73": {
+        "_id": 73,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787685141220,
+        "description": "A third bug fell out of fixing 72, in the same lines. display_path padded the already-COLOURED head with {head:width$}, and Rust counts escape sequences as width, so whenever a phase name was shorter than its own tally the node row got no padding at all and the two rows drifted -- ten columns in the ci / 0/12 HERE case. Widths now come from the plain text with the padding appended outside the colour, which the comment two lines below had always prescribed for the tally. How it hid is the part worth keeping: with colour OFF the padding worked, so it was correct in a pipe and wrong in a terminal. Every habit of checking output by piping it somewhere would have confirmed it as fine. The test forces colour on, and compares COLUMNS rather than byte offsets -- the first version of it reported drift where the rows lined up perfectly, because U+2500 and U+25C9 are three bytes each.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cf222a14b72a24-6faf8",
+        "updatedAt": 1787685141221
+    },
+    "74": {
+        "_id": 74,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787685224274,
+        "description": "The recurring failure in this codebase has a shape, and today it appeared four times. A change lands on one surface and not on its siblings. --set learned cancelled and unstarted in apply_state but not in the match that renders the confirmation, so both wrote correctly and printed nothing. Dependencies landed in display_item_by_board and not display_item_by_date. Six features shipped and the skill that documents them was not touched. And the readme still described the pid-file liveness check that flock replaced -- documentation that was FALSE rather than merely stale, which is the worse kind, because the mechanism it named had been deliberately removed. Removal-driven rot beats addition-driven rot every time: adding a feature leaves docs incomplete, removing one leaves them lying. No mechanism catches this. The match arms cannot be made exhaustive (they are on &str), the two item renderers are separate functions by design, and nothing links a flag to its prose. So it is a habit: when a change lands, ask what ELSE renders, documents or asserts the thing just changed.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cf223d6b206299-6fb4b",
+        "updatedAt": 1787685224275
+    },
+    "75": {
+        "_id": 75,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787685233457,
+        "description": "Stopping point, 2026-08-25 evening. main at b0a9dea, pushed, three commits past the morning: the --set cancelled/unstarted mute, the skill brought up to the six features it had missed, the docs and screenshot pass, and the timeline/path render fixes. Suite at 117, clippy clean, goldens untouched throughout. The screenshot pipeline is now committed at media/capture/ rather than rebuilt from memory -- last time it was done by hand and discarded, so the font findings had to be rediscovered. Verified by regenerating header-boards.png from the committed script: byte-identical. Board state: everything pending sits in @icebox on purpose. 31/32/33 are the parked timeline chain, 51 and 53 were replanned today and parked with the git-anchor design in notes 64-67, and 68 is the in-tree .ekko/ that survived note 66 with config rather than bindings in it.",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": false,
+        "uid": "18cf223f8e76f19b-6fb50",
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577
+    },
+    "76": {
+        "_id": 76,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787686231711,
+        "description": "Tab completion, the half that does not move: flags derived live from --help, plus states, --list terms and board names",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cf2327fb0cde36-706b2",
+        "updatedAt": 1787895789004,
+        "priority": 1
+    },
+    "77": {
+        "_id": 77,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787686243084,
+        "description": "Item 76 research, measured 2026-08-25 so it is not re-derived. THE SETUP, checked rather than assumed: the users shell is bash, declared in ~/NixOS/modules/usr/shell.nix, and zsh, fish, starship and fzf are NOT installed; bash-completion is not enabled either. oh-my-zsh and starship were named as a STYLE reference, not as the environment. This matters because the look described -- a description beside each candidate, a navigable menu -- is not native to bash. Bash 5.3 prints a flat column and inserts the selected candidate verbatim, so a candidate reading \"3 -- Write release notes\" would put that whole string on the command line. THE GRAMMAR, which rules out the obvious crate: clap_complete now does dynamic completion through CompleteEnv and covers bash, zsh, fish, elvish and powershell from one implementation, but ekkos cli.rs is taskbook heritage -- boolean flags plus one untyped bag, input: Vec<String>. Ids, @boards, descriptions and p:2 all land in there, so clap cannot know that the token after --move is an id and the rest are boards. ValueCompleter::complete receives only the current word; complete_at adds the index within an argument, never which flag preceded it. Reading argv from inside the process during completion would work and is a hack on top of a crate to do what a script does directly. Recommendation is to skip the crate, consistent with dropping the home crate and hand-rolling the ANSI and the terminal width.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf232aa0eea3f6-706cf",
+        "updatedAt": 1787686243085
+    },
+    "78": {
+        "_id": 78,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787686254955,
+        "description": "Item 76 design, revised 2026-08-28 -- the 2026-08-25 version was partly overtaken. WHAT STILL STANDS. Three layers: a candidate endpoint in Rust emitting value TAB description, a thin script per shell holding the grammar, and the nix wiring including programs.bash.enableCompletion which is still off. Latency is not a problem, measured under 10ms against the real 39KB board. And note 77 still rules out clap_complete, for a reason that has not changed: the arguments all land in one untyped bag. WHAT CHANGED, AND WHY. (1) The safety argument weakened. This note used to lead with completing an id WITH its description, as a defence against the recycled-id hazard. That hazard was agent-facing and item 101 solved it differently -- uid now works in every mutation. For a human the hazard was always smaller, because the board is on screen. What is left of 76 is convenience, which is what was asked for, but it was being sold on a stronger argument than it now deserves. (2) The target moves. Completing project and phase names aims at a surface note 92 is about to change and item 96 will decide, so it is deferred to 107 behind the base. (3) A new idea that removes the churn: derive the flag list from `--help` at completion time rather than hardcoding it. It costs nothing, since --help prints before storage is touched, and it cannot drift -- verified by running it against a stale release binary, which correctly omitted --anchor until it was rebuilt. Flags went 29 to 31 in three days with four more planned, so this is the volatile part and it becomes maintenance-free. (4) The open (a)/(b)/(c) choice mostly dissolves. What (b) fzf and (c) zsh-fish bought was a description beside each candidate, and the only place that matters is ids -- now deferred. Flags, states, list terms and board names all complete well in plain bash with no description needed.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf232d6479a389-70715",
+        "updatedAt": 1787895802835
+    },
+    "79": {
+        "_id": 79,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787687363008,
+        "description": "Item 76 HAD a plan as project ekko-completion -- five phases (grammar > endpoint > bash > nix > dogfood), 15 tasks, dependency chain declared -- deleted on 2026-08-25 to test what deleting a project is like. The plan is gone; what it decided is not, and is still in notes 77 and 78. Two things it established are worth carrying: the board item stays the owner of WHETHER to build and a project owns only HOW, with no status mirrored between them; and building on option (a) is safe because the Rust endpoint is shell-agnostic, so fzf or zsh/fish would add a consumer rather than invalidate anything. The deletion itself is what opened items 80 and 81.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf242f6190de6d-7120b",
+        "updatedAt": 1787708029537
+    },
+    "80": {
+        "_id": 80,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787708035274,
+        "description": "No way to delete a project: --create has no inverse, so removal is rm -rf on the directory -- no archive, no restore, and nothing reporting what went with it",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cf36fc84abc332-80f21",
+        "updatedAt": 1787709250871,
+        "priority": 1
+    },
+    "81": {
+        "_id": 81,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787708035279,
+        "description": "cli.rs promises --projects lists projects \"with their item counts\" and display_projects prints only names -- the affordance that would show what a project holds before you remove it",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cf36fc84ef833b-80f22",
+        "updatedAt": 1787708665181,
+        "priority": 1
+    },
+    "82": {
+        "_id": 82,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787708044691,
+        "description": "What deleting a project actually showed, 2026-08-25. The half that works, works well: the filesystem being the registry means --projects reflects reality the instant after rm -rf, with no index to fall out of step, and asking for the gone project errors correctly (exit 1, DIRECTORY_ERROR, message carrying the fix). The half that does not: an item deleted goes to the archive and comes back with --restore, a project deleted exists nowhere -- the asymmetry is not just a missing command, it is a missing recoverability. Nineteen items and five phases went with no count, no confirmation and no way back. And rm -rf takes no lock, so whatever flock protects, it does not protect a project from being removed underneath a writer, because whoever deletes never goes through ekko. Note 81 is the smaller half of the fix and stands on its own: showing counts in --projects is what tells you the size before you act, and cli.rs already claims it does.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cf36feb5f7ab66-80f2e",
+        "updatedAt": 1787708044692
+    },
+    "83": {
+        "_id": 83,
+        "_date": "Tue Aug 25 2026",
+        "_timestamp": 1787709250876,
+        "description": "Both halves of the project-deletion gap closed. --projects now says what each project holds, and --project X --destroy moves it to ~/.ekko/.trash/<name>-<millis>. Design points worth not re-litigating: the word is destroy and not delete because --delete already means \"remove items\" and --project old --delete 3 removes item 3 INSIDE old -- one word with two meanings would make a command that lost its ids destroy the whole board while looking like it worked. The trash sits BESIDE projects/ rather than inside, because inside would put every destroyed project in list_projects way until a filter hid it, and that filter would reserve .trash as a name nobody could give a project. It renames rather than copies: atomic on one filesystem, so a project is either listed or trashed and never half of both. It takes the projects own lock first, which is the actual fix for what this note first reported -- flock protected writers from each other and never protected anything from the directory vanishing, because rm -rf never went through ekko. And it does not prompt, because nothing here does and one command that did would break every script driving it; the count in the reply is the confirmation. One race left on purpose: a process already blocked on the lock acquires it after the move and writes into the trashed copy. Nothing lost, it just lands somewhere unlisted.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cf38178c2c656f-83625",
+        "updatedAt": 1787709250876
+    },
+    "84": {
+        "_id": 84,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787716305599,
+        "description": "Decide what ~/.ekko/projects/<name>/ is for: today it holds exactly one child, a nested .ekko/, and the name means two different things at two levels of the same path",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cf3e821a7303e2-94f1a",
+        "updatedAt": 1787783591941,
+        "priority": 2
+    },
+    "85": {
+        "_id": 85,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787716317819,
+        "description": "Item 84, the facts, measured on 0.7.0. Layout today: ~/.ekko/ holds storage, archive, .temp, .lock and projects/, and a project is ~/.ekko/projects/<name>/.ekko/ with the same five things inside it. So .ekko appears TWICE in one path meaning different things, and the directory ~/.ekko/projects/<name>/ has exactly one child. Why it is that way, and it is not an accident: retrieve_project_directory returns dir.join(\".ekko\"), which reuses the rule that an ekko dir IS <parent>/.ekko, so Storage::new works unchanged and --project is genuine sugar over --ekko-dir rather than a parallel mechanism. The readme claims exactly that, and collapsing the level would break it. THE DECISION: either that middle directory is dead weight and project storage should be projects/<name>/storage/ directly, or the empty space beside .ekko/ is deliberate and something is meant to live there -- in which case say what, because \"room to grow\" that nothing grows into is just an extra path segment. Constraints on either answer: collapsing needs migration for existing projects and costs the --ekko-dir equivalence; keeping it needs a reason that is not inertia. Note also that --destroy moves the OUTER directory, so whatever is decided, the trash preserves the nesting.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf3e84f2cd153a-94f64",
+        "updatedAt": 1787716317819
+    },
+    "86": {
+        "_id": 86,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787716330665,
+        "description": "Why 68 now waits on 84. The in-tree idea would put a .ekko/ inside a source tree, which would be the THIRD thing wearing that name: ~/.ekko is the ekko dir, ~/.ekko/projects/<name>/.ekko is a project board, and a repo .ekko/ would be per-repo config. Deciding what the second one is for has to come first, because the answer sets whether .ekko means \"a board lives here\" or \"ekko has something here\" -- and 68 cannot pick a meaning that contradicts a rule 84 has not made yet. This is a real blocker, not the judgement-recorded-as-prose case of notes 70 and 18.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf3e87f076a7dd-94f75",
+        "updatedAt": 1787716330665
+    },
+    "87": {
+        "_id": 87,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787729556164,
+        "description": "Actors as an attribute via with:NAME -- absence is the board owner, so you never mark your own; the agent is just a name",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cf4a8f3da4fc68-9eadd",
+        "updatedAt": 1787729556164,
+        "priority": 2
+    },
+    "88": {
+        "_id": 88,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787729556169,
+        "description": "A waiting state, for a task that cannot proceed because of something outside the board -- --list ready reports those as startable today, which is a wrong answer",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cf4a8f3df4c543-9eade",
+        "updatedAt": 1787729556169,
+        "priority": 1
+    },
+    "89": {
+        "_id": 89,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787729573729,
+        "description": "Item 87 design, settled. SHAPE: an attribute, not a state. Delegated-and-blocked and delegated-but-not-blocked are both real, so collapsing who into a state loses the second -- Maria is writing the migration and I am free to do other things. The waiting state (88) composes with it rather than containing it. SYNTAX: with:NAME, a fourth k:v marker beside p:2 and d:YYYY-MM-DD, stripped from the description the same way. Not @name, which is the universal convention everywhere else and which taskbook already spent on boards -- changing that would break byte parity, so this fights muscle memory and there is no way out. Rejected: assignee:/owner: carry team and permission baggage ekko does not have, by: reads as authorship which is a different axis, for: inverts the direction. VALUES ARE NAMES, NOT ROLE WORDS. \"delegated\" or \"someone else\" would name the category and hide the fact, which is exactly what the empty checkbox was doing before the paused state existed -- you cannot chase \"someone else\". ABSENCE IS THE BOARD OWNER, so you never mark your own work: marking it would give --list mine two spellings that do not match each other, and it keeps every existing board byte-identical. NO REGISTRY, like boards rather than like projects; a typo is caught on READ by the rule that already errors on --list zzznope, so detection costs nothing new. NOT ONLY PEOPLE: with:ci, with:legal, with:vendor -- required, not a concession, because waiting on CI needs the same slot and CI is not a person.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cf4a9354966158-9eae9",
+        "updatedAt": 1787729573729
+    },
+    "90": {
+        "_id": 90,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787729588364,
+        "description": "Why 87 matters more than \"assignment\" makes it sound, in the users own words: mark what is mine and what is the agents, wire a roadmap between them, then say \"I demarcated your tasks and linked a roadmap, just go\". That makes --list with:agent ready the agents ENTIRE work queue -- what is his, not blocked, in the order the dependency chain allows. It is the composition of three things that already shipped (dependencies, --list ready, and the live evaluation that means finishing one unblocks the next with nothing to run) plus this fourth. Both directions work: the human demarcates for the agent, and the agent marks which items it is claiming so the human can see what is covered. FILTER TERMS that fall out: --list mine (nothing set), --list delegated (anything set), --list with:NAME. Note that \"mine\" is first-person and there are two firsts -- it must mean \"no actor set\", so the agent never asks for mine, it asks for with:agent. The skill has to say that or an agent will read the humans queue as its own.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cf4a96bce75699-9eafc",
+        "updatedAt": 1787729588364
+    },
+    "91": {
+        "_id": 91,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787729609215,
+        "description": "Two things 87 must get right at birth, both learned the hard way here. (1) IT MUST BE CLEARABLE. --blocked-by shipped with no way to unset: passing it with no ids errors, and the `if uids.is_empty() { None }` branch in set_blocked_by is dead code that can never be reached. A task can be blocked forever with no way back except delete and recreate. Whatever --with looks like, clearing has to be designed in and tested on day one, not discovered later. (2) TWO ENTRY POINTS, like priority: with:NAME at creation, and a command taking the id to change it afterwards, marked with @ the way --priority and --move already do. ORDERING against 88: the actor is the missing half of waiting -- \"waiting\" alone does not say when to check back, and \"waiting on the vendor\" does. So 87 first. Recorded as prose and NOT as --blocked-by, because 88 alone still fixes the concrete defect (--list ready calling an unstartable task ready), which makes this judgement rather than mechanism -- same call as notes 70 and 18.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cf4a9b97bbbe3d-9eb0c",
+        "updatedAt": 1787729609215
+    },
+    "92": {
+        "_id": 92,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787783553243,
+        "description": "THE DECISION, 2026-08-26. Two containers, and the analogy is deliberate: one container is a project, the other is a board, same shape, different scope. A PROJECT lives ONLY at <repo>/.ekko/ -- tied to a real repository, full stop, and it is the useful thing for a programmer, an agent or a user working on specific code. A BOARD lives at ~/.ekko/ and is the day-to-day default: bare `ekko` in a terminal returns it. The default board is a container of the same kind as a project, just not attached to one. What this resolves, and it is a lot. ~/.ekko/projects/ GOES AWAY, which answers 84 by deletion rather than by decision: the middle directory that held exactly one child stops existing because projects stop living under home at all. 68 stops being \"should config live in the tree\" and becomes \"the tree IS the project\" -- what survives of it is the one question that decides everything else, whether <repo>/.ekko/ is committed. And --destroy, shipped yesterday, loses its reason: a repo-bound project needs no removal command because deleting the checkout takes the board with it, which is exactly the lifetime argument that had no evidence behind it an hour ago. THE IRONY THE USER NAMED, and the way out: board and project would otherwise be the same object under two names, differing in a couple of features. The split is by SCOPE, not by feature -- one is bound to a repo, one is bound to a home, and neither needs capabilities the other lacks.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf7bab6a579326-b3e0d",
+        "updatedAt": 1787783553243
+    },
+    "93": {
+        "_id": 93,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787783562671,
+        "description": "THE BASE: split ~/.ekko/ (board) from <repo>/.ekko/ (project) -- everything else waits on this",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cf7bad9c4e91bf-b3e21",
+        "updatedAt": 1789450034027,
+        "blockedBy": [
+            "18cf7bad9c949a73-b3e22",
+            "18cf7bad9cd708dd-b3e23",
+            "18cf7bad9d1c155f-b3e24"
+        ],
+        "priority": 3
+    },
+    "94": {
+        "_id": 94,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787783562675,
+        "description": "Decide whether <repo>/.ekko/ is committed or gitignored -- the question the whole split turns on",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cf7bad9c949a73-b3e22",
+        "updatedAt": 1789450034027,
+        "priority": 3
+    },
+    "95": {
+        "_id": 95,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787783562680,
+        "description": "Discovery: walk up from cwd for .ekko/ the way git walks up for .git/, with a rule that stops home being treated as a project",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cf7bad9cd708dd-b3e23",
+        "updatedAt": 1789450034027,
+        "blockedBy": [
+            "18cf7bad9c949a73-b3e22"
+        ],
+        "priority": 2
+    },
+    "96": {
+        "_id": 96,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787783562684,
+        "description": "Retire ~/.ekko/projects/ and decide what --project, --projects, --create and --destroy become",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cf7bad9d1c155f-b3e24",
+        "updatedAt": 1789450034027,
+        "blockedBy": [
+            "18cf7bad9c949a73-b3e22"
+        ],
+        "priority": 2
+    },
+    "97": {
+        "_id": 97,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787783591936,
+        "description": "Declare a board CLOSED, so items created there later are born hidden -- the half stash does not do, and the half item 31 wants for phases",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cf7bb46cad9b0f-b3e66",
+        "updatedAt": 1787960779892,
+        "priority": 2
+    },
+    "98": {
+        "_id": 98,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787783602917,
+        "description": "84 and 68 close because the decision in note 92 answered them, not because anything was built. 84 asked what ~/.ekko/projects/<name>/ was for and the answer is that it stops existing -- the directory that held exactly one child goes away with the whole tree it sat in. 68 asked whether an in-tree .ekko/ should hold code-owned config, and under the decision the in-tree .ekko/ IS the project, so the only part of it that survives is whether it gets committed, which is now item 94 and which everything else waits on. Item 31 -- how a phase is declared closed -- now waits on 97, because box is that primitive: a group declared closed, gone from the default view and the percentage, still addressable, and never inferred from 100%. The constraint 31 already carried transfers to box unchanged. 32 and 33 keep waiting on 31, so the old timeline chain now hangs off box, which is where it always belonged.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf7bb6fb2910c3-b3e70",
+        "updatedAt": 1787783602917
+    },
+    "99": {
+        "_id": 99,
+        "_date": "Wed Aug 26 2026",
+        "_timestamp": 1787783616642,
+        "description": "Three doubts inside the base, recorded as content rather than as blockers on the decision. (1) 94 is the one that decides everything: committed, the board is shared with whoever clones and storage.json becomes a SEMANTIC merge conflict -- two people create item 7 and both are right, and git cannot tell. Gitignored, ekko starts requiring an edit inside the users project before it works at all. This is note 66 come back as a requirement instead of an objection. (2) Discovery walks up from cwd for .ekko/ the way git walks up for .git/, but ~/.ekko exists, so the walk needs a rule or a users home gets treated as a project by anything run from there. (3) --destroy, shipped 2026-08-26, loses its reason under this model: a repo-bound project needs no removal command because deleting the checkout takes the board with it. That is the lifetime argument that had zero evidence behind it yesterday and that the decision now satisfies for free. Whether the command is retired or repointed is part of 96. NOT DECLARED AS BLOCKERS: 87 (actors) and 88 (waiting state) can ship before the base, because neither depends on where the data lives. The user asked for the base first and that is sequencing, which notes 70, 18 and 91 all established belongs in prose rather than in a --blocked-by pretending to be certain.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cf7bba2d43c97a-b3e73",
+        "updatedAt": 1787783616643
+    },
+    "100": {
+        "_id": 100,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787893541034,
+        "description": "Clear a dependency: --blocked-by has no way to unset, and the empty-uids branch in set_blocked_by is unreachable dead code",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cfdfb3f19313df-104410",
+        "updatedAt": 1787894135771,
+        "priority": 3
+    },
+    "101": {
+        "_id": 101,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787893541037,
+        "description": "Let mutations accept a uid where they accept an id -- the skill tells agents to carry uid across turns and no command accepts one",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cfdfb3f1bd4e6e-104411",
+        "updatedAt": 1787894135771,
+        "priority": 3
+    },
+    "102": {
+        "_id": 102,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787893541039,
+        "description": "Anchor a note to an item by uid, so the reason renders under the work it explains instead of as a sibling",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cfdfb3f1e05309-104412",
+        "updatedAt": 1787895109074,
+        "priority": 2
+    },
+    "103": {
+        "_id": 103,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787893552855,
+        "description": "First external evidence of ekko under load: an agent ran a whole winwayland session on it -- ~100 tasks and 103 notes -- and was asked for criticism. What it praised: notes were the biggest win and NOT the declared goal, because the board became where the REASON lives and that outvalues task tracking; live-evaluated dependencies, with --list ready as its most used command; idempotent --set, which saved it from real error because it repeated commands; cancelled outside the denominator, letting a board close at 100% without lying. What it hit, verified here before recording. (1) NO WAY TO CLEAR A DEPENDENCY -- its single biggest ask. It blocked an item wrongly, could not undo it, and had to write \"this dependency is wrong and ekko will not let me clear it\" INSIDE the task description, which it called a structural lie only a human will undo. Note 91 found this a day earlier and it never became a task. (2) uid IS UNACTIONABLE: verified, --set and --edit both reject one with \"Unable to find item with id\". The skill instructs agents to carry uid across turns and no command accepts it, so the advice we wrote is impossible to follow and the agent paid an extra read every time instead. (3) The [x/y] counter excludes notes correctly but nothing on screen says so -- verified, a board with 2 tasks and 1 note prints [0/2] over three lines. (4) Description is the only field, so \"what was measured\" and \"what is left\" became four-line descriptions or split task+note pairs.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cfdfb6b22a3572-10441d",
+        "updatedAt": 1787893552855
+    },
+    "104": {
+        "_id": 104,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787893563167,
+        "description": "Where I read the report differently, which is item 102. It asked for a new FIELD for progress detail. The real gap is that notes have no ANCHOR: a note lives on a board, not on an item, so \"the reason for task 12\" is a loose note nearby and nothing connects them. That is why it got the two bad options it described -- a four-line description or a split pair. The mechanism already exists, since --blocked-by references items by uid and a note could do the same. Anchoring fixes THREE of its complaints at once: the anchored note IS the detail field it wanted; it renders nested under its task rather than as a sibling, which removes the wall of text the human sees; and the [x/y] counter stops reading as ambiguous because notes stop competing for sibling lines. WHAT I WOULD NOT TAKE: a mandatory short summary on every note -- folding already produces the one-line view automatically, and a required field nobody fills well is exactly what the readme rejects for cancellation reasons. And --path being useless to an agent is not a defect, it is the design: two audiences, different views, which is why --list ready exists and why that is the one it reached for. ITS BEST OBSERVATION, which is not a feature request: the board made it disagree with itself. Rereading a task before working it, it saw the premise had died and rewrote instead of executing. Without a durable place for the task to sit still, it would simply have done what the task said.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cfdfb918ca7f3f-10442a",
+        "updatedAt": 1787893563167
+    },
+    "105": {
+        "_id": 105,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787894135774,
+        "description": "Both shipped in 686a963. Clearing: --blocked-by with no blockers now unsets, which made TWO layers of dead code reachable at once -- the None branch in set_blocked_by and the \"Item N waits on nothing\" message that render.rs had been carrying unused. Nobody wrote either as dead code; they were both written correctly for an input path that refused to deliver. Uids: resolved inside validate_ids, so all twelve callers gained it in one change, --restore included -- which is where the risk was highest, since the archive renumbers and a uid survives it. reaches() had been doing the same lookup by hand and both now share find_by_uid. THE PART WORTH REMEMBERING: neither was a discovery. Note 91 recorded the clearing gap a day early and it never became a task, and the uid advice was in a skill I wrote without ever checking the binary honoured it. Note 74 named this pattern as a change reaching one surface and not its siblings; both of these went further, reaching the documentation and never the code. What caught them was somebody else using the thing under load.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cfe03e6ad412c8-105999",
+        "updatedAt": 1787894135774
+    },
+    "106": {
+        "_id": 106,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787895109077,
+        "description": "Anchoring shipped in 29e093a. --anchor @<note> <task> renders the note indented under its task; --anchor @<note> with no target clears, designed in rather than found missing, which is the whole lesson of the --blocked-by fix two commits earlier. FOUR RULES, each narrowing it on purpose: only a note can be anchored, because a task under a task is a subtask and answering \"whose total does it count toward\" by accident is worse than not having the feature; only to a task, because a note under a note allows chains and so cycles, refused by SHAPE rather than by a check somebody has to remember; stored by uid, since a reason pointing at a recycled number would end up explaining different work; and a note whose task is on another board stays where it was filed rather than jumping boards, because surprising placement beats an un-nested reason. Unanchored notes render exactly as before, so the goldens never moved -- the same invisible-until-used shape as due dates, paused and cancelled. WORTH KEEPING: the reorder and the indent needed SEPARATE tests. Removing the indent left all 133 other tests green, and it is the visible half of the feature. The reorder is what the data does and the indent is what the reader sees, and only one of them had anything asserting it.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cfe121083b9797-1077c7",
+        "updatedAt": 1787895109077
+    },
+    "107": {
+        "_id": 107,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787895789007,
+        "description": "Tab completion for ids, projects and phases -- deferred until the base settles what those even are",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cfe1bf573074bb-1086bf",
+        "updatedAt": 1787895802832,
+        "blockedBy": [
+            "18cf7bad9c4e91bf-b3e21"
+        ],
+        "priority": 1
+    },
+    "108": {
+        "_id": 108,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787896138838,
+        "description": "Interactive desktop mode: a TUI in the terminal with mouse, human-only, a third frontend on the Ekko core that changes nothing about the CLI",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": true,
+        "uid": "18cfe210cac4b1a0-108811",
+        "updatedAt": 1787898029594,
+        "priority": 1
+    },
+    "109": {
+        "_id": 109,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787896153093,
+        "description": "Item 108, what is already known before anyone plans it. THE SEAM EXISTS: everything today is the Ekko core with two frontends hanging off it, render.rs for a person and json_output.rs for a caller. A UI is a THIRD frontend on that same core, not a third renderer -- it sits on Ekko::display_by_board and Ekko::set_state directly, because it is an event loop holding state rather than something consuming one Outcome at a time. main.rs branches, and render.rs is never touched, which is why \"changes nothing about what exists\" is realistic here: the goldens are safe BY CONSTRUCTION rather than by care. THE HARD PART NOBODY HAS HIT YET: this is the first LONG-LIVED reader ekko will ever have. Every command today is one-shot -- read, render, exit -- so nothing has ever been able to show stale state. A UI caches the board and sits there while the user works in another terminal and an agent writes from a third. It is the same two-owners-of-one-fact problem this project keeps circling, arriving from a new direction. updatedAt and --since exist and are the material for solving it; watching the storage file mtime is the cheaper half. THE LOCK RULE: acquire per write and release immediately, never hold while idle. A UI sitting on the flock would block the users other terminal and every agent, which is the exact failure the lock exists to prevent, caused by the thing meant to help. THE ONE DECISION WORTH MAKING CONSCIOUSLY: mouse tracking, resize, alternate screen and an event loop are a lot to hand-roll, and this codebase has a habit of hand-rolling -- the ANSI, the terminal width, dropping the home crate. This is probably the first place where taking a dependency is right, and going against the habit deserves to be a decision rather than a drift.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cfe2141c6bbae6-10881c",
+        "updatedAt": 1787896153093
+    },
+    "110": {
+        "_id": 110,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787898029597,
+        "description": "First cut of 108 shipped in 550b21e as --ui. WHAT IS IN: the picker layout from the reference -- Results, Preview, Prompt -- with live filtering by typing, arrows and Ctrl-n/p, mouse click and scroll, Enter to complete and Tab to start or pause. crossterm rather than ratatui, and the reason is not weight: cargo already REFUSES ratatui 0.30.2 against rust-version 1.87, so taking it would let a fast-moving UI crate dictate an MSRV that exists for one small reason. crossterm gives the parts dangerous to get wrong and leaves the drawing here, where this codebase is comfortable. Level is now public with Level::of, so the icon and the precedence between cancelled, complete, in-progress and paused stay decided in ONE place -- the alternative was ui.rs re-deriving them, which is the drift note 74 named. VERIFIED under tmux, because a TUI cannot be tested by piping: Esc, Ctrl-C and a deliberate injected panic all return with icanon and echo restored and the panic message readable. That is the hazard the CLI never had. A too-small terminal now says so rather than drawing overlapping garbage -- found because the first harness handed it a 0x0 pty, which is a real thing that happens under script(1). WHAT IS NOT IN, on purpose: creating and editing items, and noticing the board changed underneath while it sits idle. The second is the hard part note 109 named -- the first long-lived reader ekko has ever had -- and it deserves to be solved alone rather than bundled.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cfe3c904c30b21-10af7b",
+        "updatedAt": 1787898029597
+    },
+    "111": {
+        "_id": 111,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787898469074,
+        "description": "Stopping point, 2026-08-28. main at 550b21e, pushed, 134 tests, clippy clean, goldens untouched throughout. v0.7.0 was cut today and is ALREADY three commits behind: --anchor, --ui and the uid/clear-dependency fix all landed after the tag, and the installed binary still answers 0.7.0. That is the exact drift the v0.7.0 release commit was written about yesterday, recurring within a day -- which suggests the answer is not \"remember to bump\" but something that makes the gap visible, since noticing it has now cost time twice. WHAT SHIPPED TODAY: v0.7.0 itself; --projects reporting what each project holds; --destroy moving a project to the trash; the timeline and path render fixes plus the padding bug that was correct in a pipe and wrong in a terminal; clearing a dependency and accepting a uid wherever an id works, both from the winwayland report; note anchoring; and the first cut of --ui. Four of those seven came from somebody else using the tool under load and being asked for criticism.",
+        "isStarred": false,
+        "boards": [
+            "@release"
+        ],
+        "_isTask": false,
+        "uid": "18cfe42f57a81156-10b024",
+        "updatedAt": 1787962059578,
+        "stashed": 1787962059577
+    },
+    "112": {
+        "_id": 112,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787898480921,
+        "description": "Where the board stands after 2026-08-28, and what each pending thing is actually waiting for. THE BASE CHAIN is the only real ordering: 94 decides whether <repo>/.ekko/ is committed -- answered today as gitignored initially, to be revisited when user features arrive -- and 95, 96, 93, 97 hang off it, with 31, 32 and 33 finally behind box where they always belonged. FREE TO START, waiting on nothing: 51 (TODO scanning), 53 (GitHub pass-through), 76 (the completion half that does not move), 87 (actors), 88 (the waiting state). Those five are not blocked, they are unstarted, which is a different thing and worth not confusing when reading --list ready. 108 is in progress with a first cut shipped; what remains on it is creating and editing items in the UI, and the hard part -- noticing the board changed underneath a long-lived reader. STILL UNTOUCHED, and it is the users own measurement: 37 done and 52 notes against 14 pending, so most of the board is history. --clear sits unused and would take 37 lines off today, and stash is the design for the other half. Neither has been done and neither is blocked.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cfe43219c3a3ca-10b03a",
+        "updatedAt": 1787898480921
+    },
+    "113": {
+        "_id": 113,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787900322106,
+        "description": "The UI lets a navigation key destroy a terminal state: Tab on a done task clears isComplete and marks it in progress, silently",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cfe5dec8f156a8-10c1ad",
+        "updatedAt": 1787900322106,
+        "priority": 3
+    },
+    "114": {
+        "_id": 114,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787900322109,
+        "description": "The UI reloads in silence after a write, so a mistyped key changes real data with no trace on screen",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cfe5dec91e9394-10c1ae",
+        "updatedAt": 1787900322109,
+        "priority": 2
+    },
+    "115": {
+        "_id": 115,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787900334167,
+        "description": "Found by the user testing --ui within an hour of it shipping: two stray Tab presses while scrolling turned items 37 and 38 from done back into in-progress, two seconds apart. Restored with --set @37 @38 done. WHAT ACTUALLY WENT WRONG is worse than a wrong state -- setting \"progress\" clears isComplete by definition, so a navigation key DESTROYED a terminal state rather than cycling within the active ones. I wrote Tab thinking only about a pending task and never asked what it does to a finished one. THE FIX for 113: Tab and Enter leave done and cancelled alone. Those are terminal by design -- the whole argument for the cancelled state was that a decision to stop should survive -- and resurrecting one by keystroke is the opposite. THE FIX for 114 is separate but the same root: the UI reloads in silence, so the only evidence a write happened is the screen redrawing. The prompt line has room to say what just changed for a moment. WORTH NOTING ABOUT THE SHAPE: the CLI has never had this problem because every mutation there is a command you typed on purpose. A picker turns navigation and mutation into neighbouring keys on the same hand, which is a class of hazard the CLI half of this tool simply does not have, and the first cut shipped without anyone asking that question.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cfe5e197db57ae-10c1b6",
+        "updatedAt": 1787900334167
+    },
+    "116": {
+        "_id": 116,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787900969089,
+        "description": "A board name silently shadows a --list attribute of the same name, and makes it unreachable: with a board @due, neither `due` nor `@due` can reach the due-date filter",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cfe6756c2aaf27-10c4d8",
+        "updatedAt": 1787900969089,
+        "priority": 3
+    },
+    "117": {
+        "_id": 117,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787900969092,
+        "description": "Calendar: connect it to the board and add the UI panel -- the drawing and --calendar shipped, what a day MEANS is the open half",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cfe6756c557f9a-10c4d9",
+        "updatedAt": 1787901439191,
+        "priority": 1
+    },
+    "118": {
+        "_id": 118,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787900981869,
+        "description": "Item 117, what is known before anyone plans it. WHAT A CALENDAR IS MADE OF, in this data: dueDate is the only field that points FORWARD. _date and updatedAt point backwards and are already served by --timeline and --archive. So a calendar is the first forward-looking view ekko would have -- everything today answers \"what happened\" or \"what now\", and this answers \"what is coming\". Worth saying out loud so it does not get built as a third backward view. MEASURED FIRST, the way note 40 taught: ZERO items on the real board carry a due date. The calendar would render empty and there is nothing to dogfood against, which is the same shape of evidence that killed the timeline. That is not an argument against building it -- a calendar might be what makes due dates worth setting -- but it IS an argument against assuming the demand. NAMING HAZARD: --timeline already groups by date and looks like a calendar in the terminal. Two date views that render similarly and answer different questions is how a person reaches for the wrong one. --timeline is when things were MADE, --calendar is when they are DUE, and the docs have to say that in a sentence. WHAT TRANSFERS FOR FREE: due dates already colour by urgency -- overdue red, today yellow, ahead grey -- so the vocabulary exists. And overdue matters more than anything ahead, so a forward-only grid would hide the most urgent thing on the board; --list overdue exists and the calendar has to account for the past somehow.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cfe67865e427ac-10c522",
+        "updatedAt": 1787900981869
+    },
+    "119": {
+        "_id": 119,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787900994206,
+        "description": "Item 116, found while trying to measure due dates for the calendar and getting a wrong answer from ekko itself. `ekko --list due` returned five items and NONE of them had a due date -- because the board is named @due, and list_by_attributes checks stored_boards BEFORE is_known_attribute. Verified on a scratch board: with a board called @due present, `--list due` and `--list @due` both return the board, and there is NO spelling that reaches the attribute. It is not shadowing, it is unreachable. AFFECTED NAMES, any of which as a board kills its filter: due, overdue, done, pending, progress, ready, blocked, star, task, note, cancelled. THE SHAPE OF THE FAILURE is the one this codebase keeps rejecting by name: a plausible wrong answer instead of an error. --list already errors on a term it does not recognise, precisely so a typo cannot silently return everything; a term it recognises as TWO things and silently picks one of is the same defect wearing a different hat. FIXES WORTH WEIGHING: error on the ambiguity and make the caller disambiguate; or reserve attribute names so a board cannot take one, which breaks existing boards including this one; or give boards a spelling attributes cannot have. Note that the current code already treats bare and @-prefixed as identical, so the @ cannot be the disambiguator without changing what --list @board means today.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cfe67b4539a6d4-10c52b",
+        "updatedAt": 1787900994206
+    },
+    "120": {
+        "_id": 120,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787901439194,
+        "description": "The drawing half of 117 shipped in b326386 as --calendar: the current month, today picked out, and NOTHING from the board on it. What is left is the half that needs a decision, and it is one decision with three parts. (1) DOES A DAY LOOK FORWARD OR BACK -- due dates or creation dates? Forward makes it the only prospective view ekko has and it would render empty today, since zero items carry a due date. Backward makes it a visual --timeline and puts two similar-looking date views in the tool answering different questions, which is how someone reaches for the wrong one. (2) WHAT A DAY CELL SHOWS once it means something: a dot, a count, a colour by urgency. Due dates already colour by urgency -- overdue red, today yellow, ahead grey -- so that vocabulary transfers rather than needing inventing. (3) IN THE UI, does clicking a day FILTER the Results list or open a view of that day? Filtering composes with what is already there; a separate view does not. NOT FORGOTTEN, from the same conversation: overdue matters more than anything ahead, so a purely forward grid would hide the most urgent thing on the board. Whatever a day means, the past has to be accounted for.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18cfe6e2e09a2a0a-10cd6b",
+        "updatedAt": 1787901439194
+    },
+    "121": {
+        "_id": 121,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787902139674,
+        "description": "Long text goes through argv, so apostrophes get dropped to avoid shell quoting -- read a description from stdin instead",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cfe785f877655c-10d825",
+        "updatedAt": 1787902139674,
+        "priority": 3
+    },
+    "122": {
+        "_id": 122,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787902139677,
+        "description": "No way to read one item: seeing item 91 costs 83KB of whole board, or --find with a substring you must already know",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cfe785f8a447e8-10d826",
+        "updatedAt": 1789434583214,
+        "priority": 3
+    },
+    "123": {
+        "_id": 123,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787902139680,
+        "description": "No batch: closing a task and writing the note explaining it are two calls, not atomic, and interrupted between them the board lies",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cfe785f8cb3376-10d827",
+        "updatedAt": 1789434583214,
+        "priority": 2
+    },
+    "124": {
+        "_id": 124,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787902139682,
+        "description": "Editing resends the whole description -- fixing one word in a 900-character note costs the note again",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18cfe785f8f22d58-10d828",
+        "updatedAt": 1789434583214,
+        "priority": 2
+    },
+    "125": {
+        "_id": 125,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787902139685,
+        "description": "Authorship, the axis with:NAME deliberately did not cover: who WROTE an item, as opposed to who it is with",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18cfe785f91874ce-10d829",
+        "updatedAt": 1787902139685,
+        "priority": 1
+    },
+    "126": {
+        "_id": 126,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787902151936,
+        "description": "What an agent lacks, from a full session of first-hand use rather than speculation. Ranked by evidence, and the first one is not inconvenience, it is DAMAGE. (121) MEASURED: this board holds 120 items, roughly 55 of them notes I wrote in English, and it contains ZERO apostrophes. The proof is in the text -- \"users own\" appears four times, plus \"users project\", \"users shell\", \"ekkos cli\", \"its own\". I dropped every apostrophe deliberately to avoid fighting shell quoting, so the interface degraded the content. Reading a description from stdin fixes it and costs nothing. (122) MEASURED: looking at one item costs 83KB of whole board, or 1.2KB via --find using a substring you must already know, which is circular. The skill now tells agents to carry a uid across turns; there is no cheap way to look at what one points to. (123) Closing a task and writing the note that explains it are two processes and two calls. Not atomic: interrupted between them, the board carries a closed task with no reason, which is the one thing this tool exists to prevent. (124) --edit takes the whole new description, so fixing one word in a 900-character note costs the note again -- and it compounds with 121, since that long text also goes through argv. (125) is the axis with:NAME deliberately left out: who WROTE an item versus who it is with. Worth having when a human and an agent share a board and one comes back to it; noted during the 87 design as a separate question and then not registered, which is the pattern note 74 keeps naming.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18cfe788d34f9a9e-10d82c",
+        "updatedAt": 1787902151936
+    },
+    "127": {
+        "_id": 127,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787960794292,
+        "description": "Glossary, settled with the user on 2026-08-27 and never written down until now -- which is exactly why task 97 spent a day saying \"box\" for the concept that became \"stash\". An ITEM is a line, and is either a TASK (work, has state, counts in the percentage) or a NOTE (not work, no state, outside the percentage). A BOARD is the @something grouping; an item can be on several. A PROJECT is a container bound to a repo; a BOX is the free-standing equivalent -- same shape, different binding, and that split is what note 92 decided. STASH is putting something away without changing it; TRASH is removal with an expiry; ARCHIVE is the permanent record of what got done. The one that keeps getting inverted is task versus board: \"task\" is the line, not the @thing. Both of us had it backwards at different points, and the user said so in as many words.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18d01cde901bc06c-11efe9",
+        "updatedAt": 1787960794292
+    },
+    "128": {
+        "_id": 128,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787960794295,
+        "description": "Stash shipped in 98d2e3c and took half of 97 with it. What shipped: hiding without changing, counted separately in the stats line, grouped by the board things came from, and --stash @board taking what is on that board NOW. What did NOT ship, and is what 97 is now: declaring a board CLOSED so items created there later are born hidden. Those are genuinely different -- one tidies what exists, the other changes what happens next -- and 31 wants the second for phases, which is why it still waits on 97. 97 no longer waits on 93: declaring a board closed has nothing to do with where the data lives, and that blocker was set when this task was still about containers. Clearing it was the first real use of the --blocked-by fix from this morning, which needed the repo binary because the installed one is 0.7.0 and predates it -- the version lag from note 111, biting for the third time in two days.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18d01cde9049a916-11efea",
+        "updatedAt": 1787960794295
+    },
+    "129": {
+        "_id": 129,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787961809456,
+        "description": "Recapturar as imagens do readme",
+        "isStarred": false,
+        "boards": [
+            "@demo"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18d01dcaeca41a19-130497",
+        "updatedAt": 1787961818522,
+        "stashed": 1787961818521,
+        "priority": 1
+    },
+    "130": {
+        "_id": 130,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787961809462,
+        "description": "Escrever o changelog da v0.8.0",
+        "isStarred": false,
+        "boards": [
+            "@demo"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18d01dcaecff8633-130498",
+        "updatedAt": 1787961818522,
+        "stashed": 1787961818521,
+        "priority": 1
+    },
+    "131": {
+        "_id": 131,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787961809469,
+        "description": "Ideia que a gente descartou",
+        "isStarred": false,
+        "boards": [
+            "@demo"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18d01dcaed5fedbf-130499",
+        "updatedAt": 1787961809493,
+        "cancelled": true,
+        "priority": 1
+    },
+    "132": {
+        "_id": 132,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787961809474,
+        "description": "Escolhemos tag em vez de branch no pin do nix: branch quebra o hash no calendario do upstream, nao no seu",
+        "isStarred": false,
+        "boards": [
+            "@demo"
+        ],
+        "_isTask": false,
+        "uid": "18d01dcaedb1b8b5-13049a",
+        "updatedAt": 1787961818522,
+        "stashed": 1787961818521
+    },
+    "133": {
+        "_id": 133,
+        "_date": "Fri Aug 28 2026",
+        "_timestamp": 1787961809480,
+        "description": "Isso aqui foi criado por engano",
+        "isStarred": false,
+        "boards": [
+            "@demo"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18d01dcaee096502-13049b",
+        "updatedAt": 1787961818528,
+        "trashed": 1787961818528,
+        "priority": 1
+    },
+    "134": {
+        "_id": 134,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789416902839,
+        "description": "Stopping point, 2026-09-14, written the day the user said ekko is about to take a new direction. Everything still pending on this board is PARKED from here on: it comes back later or gets re-evaluated against that direction, so --list ready listing it as startable no longer describes a work queue. The direction itself had not been described when this was written. REPO: main at c472d3c, clean and equal to origin, six commits past the v0.7.0 tag with no release cut since: clearing dependencies and accepting a uid everywhere, anchoring, --ui, --calendar, stash and trash, and the usable UI. ~/NixOS pins the flake input to c472d3c, so the installed binary is HEAD and the version lag from notes 111 and 128 is closed for now. WHAT IS PARKED, each already reasoned about in its own notes: the container base, 93 to 97, with its open questions in the note under 93; agent ergonomics, 121 to 125 (a description from stdin, reading one item, batching, partial edits, authorship), 87 and 88 (with:NAME and a waiting state) and 116 (a board named like a filter makes that filter unreachable); and the human side, 108 (creating and editing in the UI, and noticing changes made from outside), 117 (what a calendar day means, notes 118 and 120), 76 (completion, notes 77 and 78), 51 and 53 (code TODOs, GitHub issues and pull requests). LOOSE ENDS: 113 and 114 are fixed in code and still open here, see the note under 113; the stash and trash demo left 131 on @demo and 133 in the trash, which expires by itself; and ~/.local/bin/ekko is a 0.6.0 build with none of --ui, --stash, --anchor or --calendar, which is exactly what the skill preflight falls back to when ekko is not on PATH. WHERE CLAUDE'S CONTEXT LIVES: the memories for this project are in ~/.claude-luccas/projects/-projects/memory/, because those sessions were started from /projects, so a session opened in /projects/ekko, or under another Claude profile, loads none of them.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18d5493140d2550b-1a195",
+        "updatedAt": 1789416902839
+    },
+    "135": {
+        "_id": 135,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789416902845,
+        "description": "Where the container base stood on 2026-09-14, when it was parked with the rest of the board ahead of the new direction. Whoever reopens it should start from these open questions, not from note 92 alone. 94 WAS ANSWERED AND LEFT OPEN ON PURPOSE: the user's answer on 2026-08-26 was gitignored at first, revisited once user features arrive, but closing it now would unblock 95 and 96 as if the base were still the plan, and the whole base is up for re-evaluation. 95 HAS A PROPOSAL, NOT A DECISION: find the git toplevel and look for .ekko/ there and only there, instead of walking up directory by directory. That makes a project outside a repository impossible by mechanism rather than by convention, and resolves nested repos and submodules by the rule git already uses. Two edges remain: a home directory that is itself a git repo (dotfiles) must never count as a project, and a worktree has a different toplevel from its main checkout, so whether --git-common-dir makes them one project is undecided. EKKO_DIR already is the direnv-style model the user asked about, and it composes with discovery: an explicit EKKO_DIR beats discovery the same way --ekko-dir beats everything. 96 IS OPEN, and now has a model to follow: the user's view on 2026-08-26 was that removing anything goes to a trash that expires after a grace period. Items work that way since stash and trash shipped, 30 days, while a destroyed project still lands in ~/.ekko/.trash with no expiry and comes back only by mv. TWO QUESTIONS THE USER SAVED FOR LATER: if bare ekko lists boxes, where does a quick --task land, in a default box or behind a forced choice that would kill quick capture; and the name box itself, still marked as under discussion. NOTE 92 IS STALE BY ONE WORD: it calls the free-standing container a board, which predates the glossary in note 127 giving that word to the @grouping and naming the container box. 97 needs none of this and waits on nothing.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18d549314136fa6d-1a196",
+        "updatedAt": 1789416985680,
+        "attachedTo": "18cf7bad9c4e91bf-b3e21"
+    },
+    "136": {
+        "_id": 136,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789416902851,
+        "description": "113 and 114 are fixed in c472d3c and still open only because nobody confirmed it: the session that shipped the fix asked the user whether to close them or to test first, and ended without an answer. What to look for when testing. Enter and Tab refuse a done or cancelled task with \"21 is finished -- use --set to change it\", so a stray key can no longer undo a terminal state. And every write made from the UI says what it did, in place of the status line for a moment, as \"21 → done\" or \"21 stashed\". Once tried, closing both is one --set.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18d54931418aef7f-1a197",
+        "updatedAt": 1789416985687,
+        "attachedTo": "18cfe5dec8f156a8-10c1ad"
+    },
+    "137": {
+        "_id": 137,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789421787187,
+        "description": "Roadmap by phase: each node holds its own board of that stage's tasks, explicitly separated, and HERE moves on when a phase completes -- and decide what HERE means when travelling the roadmap",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18d54da27aa558c2-1db6d",
+        "updatedAt": 1789421787187,
+        "priority": 1
+    },
+    "138": {
+        "_id": 138,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789421787196,
+        "description": "The roadmap feature the user described on 2026-09-14, recorded as a feature of its own and parked on purpose while the vocabulary was fixed first. WHAT THE USER MEANT FROM THE START: each node of the roadmap is like a board, holding only the tasks of that stage, explicitly separated. Today --roadmap (until then --path) only counts tasks per phase from their phase field, and every view still shows the project's items together, so nothing on screen says whether the idea was applied -- which is exactly how the user described getting lost. WHEN A PHASE COMPLETES, HERE should leave it and move to the next. AND A SECOND MEANING TO SETTLE: travelling the roadmap, where HERE would sit on a node because you navigated there rather than because work sits there. Those are two cursors -- where the work is, and where you are looking -- and they must not share one marker. MEASURED 2026-09-14, how HERE behaves today: it marks every phase holding a task in progress. winwayland shows two at once (#117 in progress in preparar-1, #133 in fase-1a); minium shows none, with nine phases done and pixel-perfect at 0/3 plainly being where it is. One alternative was raised and not decided: derive HERE from the declared order, as the first phase that still has an open task. Not built, by the user's call: its own feature, for later.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18d54da27b33a28e-1db70",
+        "updatedAt": 1789421787203,
+        "attachedTo": "18d54da27aa558c2-1db6d"
+    },
+    "139": {
+        "_id": 139,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789421787209,
+        "description": "Vocabulary settled on 2026-09-14, replacing the parts of note 127 it touches. ROADMAP is the project's timeline: its declared phases in order, what is behind, where work sits, what is ahead. The command is --roadmap, which was --path. BLOCKED BY is the dependency, said the way the industry says it: task A is blocked by task B. --blocked-by @A B records it, --list ready and --list blocked read it, and a blocked task cannot be completed while a blocker is open; --force overrides that, and only on a person's word. ATTACHED TO is a note placed under the task it explains: --attached-to @note task, which was --anchor. ANCHOR IS NO LONGER A WORD IN EKKO. It had meant binding a board to a repo (notes 62 to 66), then a note under a task, and was about to mean a dependency as well; the old flag now answers with RENAMED_FLAG. --timeline stays what taskbook made it, the view grouped by creation date, and has nothing to do with the roadmap. ITEM, TASK, NOTE, BOARD, STASH, TRASH and ARCHIVE keep their meanings from note 127. PROJECT and BOX, the containers, are parked with the rest of the backlog (note 134).",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18d54da27bf1d9f5-1db75",
+        "updatedAt": 1789421787209
+    },
+    "140": {
+        "_id": 140,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789421887408,
+        "description": "Fix the crossed vocabulary before the new direction: --path became --roadmap, --anchor became --attached-to, and --blocked-by now prevents completion, with --force to override",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18d54db9d049851a-1dc50",
+        "updatedAt": 1789421887427,
+        "priority": 1
+    },
+    "141": {
+        "_id": 141,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789421887415,
+        "description": "Shipped 2026-09-14 in three commits, pushed, CI green including the MSRV build. a9e883a: a deleted blocker went on blocking on the board while --list ready called its task ready, because the marker read all of storage and the filters read the view; a trashed blocker now stops holding everywhere, a stashed one still holds, and the test meant to pin this had been passing by inspecting the wrong item. 1719faf: --path is --roadmap and --anchor is --attached-to; the old names answer RENAMED_FLAG with renamedTo, and the stored key moved from anchor to attachedTo with anchor still read -- checked on a copy of the winwayland board, 19 attachments read back and, after one write, 19 attachedTo and zero anchor on disk. 65fff6e: a blocked task cannot be completed; --check and --set done refuse with BLOCKED unless --force, which says on the same line what it overrode and keeps the dependency as a visible trace. Measured before deciding: 19 tasks carried blockers on the real boards and none had been closed over an open one. Every new test was shown to fail with its half of the change taken out. LEFT FOR THE USER: the installed binary is still c472d3c. It predates attachedTo and drops that key whenever it writes a board, so move the nix pin before pointing a repo build at the real boards.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18d54db9d0b326a9-1dc53",
+        "updatedAt": 1789421887421,
+        "attachedTo": "18d54db9d049851a-1dc50"
+    },
+    "142": {
+        "_id": 142,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390699,
+        "description": "State is four independent flags, not one of five states: cancelled then --check is done and cancelled at once, and the board, the stats and --list disagree",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18d54f17d370c80a-200a0",
+        "updatedAt": 1789429063321,
+        "priority": 3
+    },
+    "143": {
+        "_id": 143,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390708,
+        "description": "Measured 2026-09-14 on a scratch board, at 65fff6e. A task's state is stored as isComplete, inProgress, paused and cancelled: sixteen combinations for five meaningful states, and the commands do not keep an item inside the five. Cancelled then --check leaves isComplete and cancelled both true; the board draws it cancelled and the stats count it cancelled, while --list done lists it as done. Done then --set paused leaves isComplete and paused both true; the command confirms the pause and the task stays done on screen. The cause is structural: Level::of, compute_stats and filter_by_attributes each project the four flags with their own precedence, so three surfaces can give two answers about one item. What the audit points at: a state type with exactly five values, one total transition function covering every command, and every view derived from that state instead of re-deciding it. Small enough to test exhaustively -- five states times roughly ten commands -- rather than by sampling.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d54f17d3f57f62-200a3",
+        "updatedAt": 1789423390715,
+        "attachedTo": "18d54f17d370c80a-200a0"
+    },
+    "144": {
+        "_id": 144,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390721,
+        "description": "Two definitions of a task total: the board counter and --projects count cancelled tasks, the percentage and the roadmap do not",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18d54f17d4c23688-200a7",
+        "updatedAt": 1789429063321,
+        "priority": 2
+    },
+    "145": {
+        "_id": 145,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390729,
+        "description": "Measured 2026-09-14. One done task and one cancelled task on a board print [1/2] in the title and 100% on the line below it. On the real boards, --projects shows winwayland as [46/54], which is 85%, while inside the project the percentage is 88%; minium shows [76/83], 91%, against 96% inside. In the code, render.rs item_stats and directory.rs count_items count every task, while compute_stats and the roadmap subtract the cancelled ones. Which definition is right is a decision rather than a bug hunt -- the percentage's reasoning, that cancelled work is not work so a board that drops something can still reach 100%, was argued and kept -- but one definition has to hold everywhere a total is shown.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d54f17d53715cc-200aa",
+        "updatedAt": 1789423390736,
+        "attachedTo": "18d54f17d4c23688-200a7"
+    },
+    "146": {
+        "_id": 146,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390743,
+        "description": "The blocked-by rule only holds at the moment of completion: reopening a blocker leaves its completed dependents done while blocked",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18d54f17d60705ad-200ae",
+        "updatedAt": 1789429063321,
+        "priority": 2
+    },
+    "147": {
+        "_id": 147,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390750,
+        "description": "Measured 2026-09-14. Task 2 blocked by 1: complete 1, complete 2, reopen 1, and the board shows 2 done with the marker naming 1 -- no --force involved anywhere. Stated as order: completion should be closed downward along the dependency graph, meaning a completed task implies everything blocking it is completed, and 65fff6e enforces that only at the moment a task is completed, never when one of its blockers is reopened. Options, none chosen yet: reopen the completed dependents as well; refuse to reopen a blocker that has completed dependents unless --force; or keep the weaker invariant and make the board say so. Live evaluation already re-blocks open dependents; the gap is only the completed ones.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d54f17d67825e5-200b1",
+        "updatedAt": 1789423390757,
+        "attachedTo": "18d54f17d60705ad-200ae"
+    },
+    "148": {
+        "_id": 148,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390763,
+        "description": "Phase order and dependency order are never checked against each other: a task in an earlier phase can be blocked by one in a later phase",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18d54f17d74076d0-200b5",
+        "updatedAt": 1789429063321,
+        "priority": 1
+    },
+    "149": {
+        "_id": 149,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390770,
+        "description": "Measured 2026-09-14: with phases early then late, a task in early blocked by a task in late is accepted without a word, and the roadmap shows nothing wrong. Phases are a total order, dependencies a partial order, and nothing requires the phase of a blocker to come no later than the phase of what it blocks. Relevant to #137, the roadmap by phase: a roadmap whose phases contradict its dependencies cannot be walked in order.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d54f17d7abbb34-200b8",
+        "updatedAt": 1789423390777,
+        "attachedTo": "18d54f17d74076d0-200b5"
+    },
+    "150": {
+        "_id": 150,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390784,
+        "description": "paused is a state --set accepts and --list rejects: --list paused answers UNKNOWN_LIST_TERM",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18d54f17d8775386-200bc",
+        "updatedAt": 1789429063321,
+        "priority": 1
+    },
+    "151": {
+        "_id": 151,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390791,
+        "description": "The doc comment on canonical_state says --set uses the same words --list filters on, so there is one vocabulary to learn. paused is the one real state missing from is_known_attribute. undone and unstarted are commands rather than states, so their absence from --list is fine.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d54f17d8e64d0d-200bf",
+        "updatedAt": 1789423390798,
+        "attachedTo": "18d54f17d8775386-200bc"
+    },
+    "152": {
+        "_id": 152,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423390804,
+        "description": "Rigor audit of the core model, 2026-09-14 -- the first step of the applied-mathematics direction, where the human side becomes the UI and TUI and the agent side gets an improved mathematical backend. Six findings, all reproduced on scratch boards the same day: the state space, the two totals, the dependency invariant after a reopen, phase order against dependency order, paused missing from --list, and HERE marking every phase with work in progress rather than one point -- that last one already lives in #137, with its measurements in #138 (two HEREs on winwayland, none on minium). The state, totals and paused findings share one cause: each surface decides by itself what the data means. The direction the audit recommends is to define the model once -- state as a type with five values, one transition function, one definition of a total -- and derive every view from it: the CLI, --json, the UI, and the graph view the UI is going to get.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d54f17d9ae25e6-200c3",
+        "updatedAt": 1789423390805
+    },
+    "153": {
+        "_id": 153,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423720001,
+        "description": "The cycle check walks every path instead of every item: adding one dependency to a chain of 26 diamonds, 80 tasks, takes 12.5 s and doubles with each diamond",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18d54f647f56e889-2053b",
+        "updatedAt": 1789429063321,
+        "priority": 2
+    },
+    "154": {
+        "_id": 154,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789423720009,
+        "description": "Measured 2026-09-14 with the installed release binary. reaches() recurses through blockers with no record of what it has already visited, so it enumerates paths rather than items. A chain of L diamonds has 2^L paths from bottom to top, and an added dependency that is not a cycle has to exhaust every one of them before it is accepted. Times for a single --blocked-by: L=20 (62 tasks) 217 ms, L=22 792 ms, L=24 3.2 s, L=26 (80 tasks) 12.5 s. Every step inside it is also a linear scan to find an item by uid. The real boards are nowhere near this -- the longest chain on any of them is 5, on winwayland -- so nobody has felt it, but a mathematical backend cannot keep an exponential step: a visited set makes the same check linear in items plus edges, and an index from uid to item removes the scans. Tarjan or Pearce-Kelly are not needed at this scale; they matter for large graphs taking many insertions.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d54f647fd0821e-2053e",
+        "updatedAt": 1789423720016,
+        "attachedTo": "18d54f647f56e889-2053b"
+    },
+    "155": {
+        "_id": 155,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789429068567,
+        "description": "Rigor pass landed 2026-09-14. 56855fe: a task is exactly one of five states (State enum, one canonical write, a total transition function, exhaustive tests); one total everywhere, leaving cancelled out (board counter, roadmap, --projects, which also stops counting stashed and trashed items); --list paused. 342cbd4: one dependency rule, completed work never waits on open work, checked on the board a command would leave against the board before it, refusing only the pairs the command breaks: BLOCKED when completing, COMPLETED_DEPENDENTS when reopening (reviving a cancelled blocker included; --force overrides and says so), ALREADY_DONE when --blocked-by gives done work an open blocker (never forced). A blocker and its dependents can be completed or reopened together in one command, and pairs left by an earlier --force do not fail later commands. --restore and --untrash are recovery and deliberately unchecked, so the coming prime view should surface any broken pair they bring back. Property test: 500 random commands, rule holds after each; disabling the check fails it and 9 others. PHASE_ORDER is refused at --blocked-by, and --roadmap lists the inversions a later --phases reordering leaves (reordering is never refused). The cycle check is a visited-set walk over a uid index: a 40-diamond chain answers at once (it was 12.5 s at 26, doubling per diamond). Not done: refusing notes as blockers or as blocked items at write time, harmless today because notes never hold.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d55441ceb522b9-24410",
+        "updatedAt": 1789429068567
+    },
+    "156": {
+        "_id": 156,
+        "_date": "Mon Sep 14 2026",
+        "_timestamp": 1789434583222,
+        "description": "Agent frontend landed 2026-09-14, the second step of the new direction: ekko stopped being a skill and became an MCP server. 7cfbfa8 added --prime (the resume view: in progress, ready in next order, blocked, reasons attached under their work, recent notes, what needs attention, a cursor), --next (a lexicographic order: in progress, phase, priority, due, open work waiting downstream, age) and --context (one item, one hop along every relation); prime reads the project named after the repository it runs in. The resume eval gave prime full coverage of doing, ready and attached reasons in 2 to 6 KB on all three real boards, against 77 to 99 KB for the board view. 35e36e5 added structured writes (create with every field apart from the text, edit by one exact replacement or an append with an updatedAt precondition, update, link, batch with $N references written once and all or nothing, changes since a cursor), ekko --mcp (dual-era: 2026-07-28 per-request _meta and server/discover, legacy initialize back to 2024-11-05; 16 tools, no clear or destroy, refusals as CODE: message) and plugin/ (the MCP server plus a SessionStart hook running ekko --prime; the flake output packages.plugin pins the binary). The skill was removed. 122, 123 and 124 are answered by context, batch and edit; 121 only for agents, whose arguments never pass through a shell. The first real session found refusals over MCP naming CLI flags and ids that existed only in a draft; c53e376 words them for agents, naming tools instead of flags and the items a refused batch would have created by operation. NixOS: modules/usr/ekko.nix now links packages.plugin into the four profiles as a skills-directory plugin; it takes effect after nix flake update ekko and a rebuild, and /mcp should then list ekko.",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": false,
+        "uid": "18d55945c9c2b357-2a0ec",
+        "updatedAt": 1789435954084
+    },
+    "157": {
+        "_id": 157,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789450034022,
+        "description": "Projects by folder landed 2026-09-15 in 7bf8191, closing the container base (93-96), which the user reopened as the last step before the UI/TUI. Decided with the user: a project is any folder, not only a repository (widening note 92). `ekko init [folder] [--name NAME]` makes one, named after the folder unless --name says otherwise, the name unique among projects that still exist. Inside a git repository the project goes to its top, and a linked worktree resolves to its main checkout. Bare `ekko` and a quick --task inside the folder use the project, found the way git finds a repository and stopping at the top of the repository it is in, with the project named above the board -- the answer to where a quick task lands, the question note 135 saved. 94: .ekko/ is kept out of git through .git/info/exclude, touching no tracked file (the 2026-08-26 answer, ignored at first). 95: discovery walks up for .ekko/project.json, which home's .ekko/ never has, and init refuses home itself. 96: ~/.ekko/projects/ is retired; legacy projects keep working through --project and are adopted by `ekko init` in the folder of the same name (copied under their own lock, the old copy parked in ~/.ekko/.trash/, refused when both sides hold a board). A registry at ~/.ekko/projects.json serves --project and --projects from anywhere; only init and --destroy write it, and a moved project is reported as moved until init runs in its new folder. --create answers RENAMED_FLAG with `ekko init`. Still open: the word box from note 127. Still to do: `ekko init` in /projects/minium and /projects/winwayland, only after the flake update and rebuild, because the installed binary still reads ~/.ekko/projects/.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18d5675335410bbf-2c5ab",
+        "updatedAt": 1789450034027,
+        "attachedTo": "18cf7bad9c4e91bf-b3e21"
+    },
+    "158": {
+        "_id": 158,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789451237155,
+        "description": "UI/TUI direction settled with the user on 2026-09-15, before any layout work. SHAPE: interactive dashboards of panels rather than a single picker, based on a format the user will provide as images -- wait for them before designing the layout. The reference images in imgs_base_ui/ are Telescope pickers and were the base of the first --ui cut, not of the dashboard. SCOPE: full parity with the CLI -- everything the CLI can do, the TUI can do too: create and edit text, every state, dependencies and attached notes, boards, priority and due dates, stash and trash. TECHNOLOGY: ratatui and crossterm together, each in its own place -- ratatui for layout and widgets, crossterm as the terminal backend and event source -- which moves the MSRV from 1.87 to 1.88, the version ratatui 0.30.1 requires. Carried over from notes 109, 110 and 115: never hold the lock while idle, reload when the board changes underneath (the TUI is the first long-lived reader ekko has), never force the dependency rule from a keypress, and keep navigation and mutation from sharing careless keys. Data moves the same day: winwayland was adopted into /projects/winwayland; minium is dead (the user deleted its folder, and its legacy board is left in ~/.ekko/projects/minium); and this board, which ran ekko development from the default board, moved into the ekko project at /projects/ekko/.ekko -- 151 items and the archive, copied under both locks and verified identical, the originals parked in ~/.ekko/.trash/default-board-1789451177577. The default board is empty now, for day-to-day use.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18d5686b558e7aa6-40d2c",
+        "updatedAt": 1789451237164,
+        "attachedTo": "18cfe210cac4b1a0-108811"
+    },
+    "159": {
+        "_id": 159,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789455359017,
+        "description": "TUI phase 1 landed 2026-09-15 in 5956589: --ui is now the dashboard in VS Code's current shape, built from the user's screenshot. src/tui/: theme measured off their VS Code (window 1F2021, editor 191A1B, border 2E2F30, pill 303132), rounded boxes edge to edge with the explorer joined to the activity bar, pills, codicons with EKKO_ICONS=plain as the fallback. On screen: command centre with the filter and box toggles, Next, the board, explorer with the selected item in full, a Problems/Output/Agent panel, status bar (branch, live pulse, blocked and warning counts, next item, folder, bell). Keys are VS Code's: Ctrl+P, Ctrl+B, Ctrl+Alt+B, Ctrl+J, Tab/F6, Ctrl+Q; on the board Enter done, Space start/pause (Tab moves focus now), Ctrl+S stash, with the picker's guards (finished is terminal, blocked is refused and never forced). Live: polls the three board files, keeps the selection by uid, writes by uid, lock held only per write. Next phases: 2 views (explorer tree, item tabs, Roadmap, Calendar, more activity views), 3 CLI parity (command palette, terminal tab, inline editors, pickers, confirmations), 4 help overlay, tmux visual tests, docs.",
+        "isStarred": false,
+        "boards": [
+            "@icebox"
+        ],
+        "_isTask": false,
+        "uid": "18d56c2b07ac4916-4687c",
+        "updatedAt": 1789455359055,
+        "attachedTo": "18cfe210cac4b1a0-108811"
+    },
+    "160": {
+        "_id": 160,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789458008564,
+        "description": "Context handoff: before /clear, the agent writes a compact state note on the task it is working (where it stopped, decisions and why, files touched, next step), and the next session resumes from prime plus that note -- the piece that makes clearing a long session at ~250k tokens safe",
+        "isStarred": true,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18d56e93ecfcef71-50640",
+        "updatedAt": 1789458008565,
+        "priority": 3
+    },
+    "161": {
+        "_id": 161,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789458008564,
+        "description": "Why this sits above everything in the rigor plan. Measured 2026-09-15 on the Claude Code transcripts of every profile, week 2026-09-08..09-15, with Opus 5 billing weights (1h cache write 2x, cache read 0.1x, output 5x).\n\nWhere the cost is: cache reads are 70% of it, because the whole context is re-sent on every call. Median context per call is 444k tokens (p90 892k), and 3 sessions made 82% of the week. Against that, ekko's own footprint since it became an MCP server is small: the hook's prime is 0.15-0.24% of cost (9 injections in 7 sessions, avg 3,960 chars, ~35 later calls each) and tool results 0.25-0.40% (search is the heaviest, avg 3.8k chars). The rigor plan's 57% cut on what the agent reads is therefore worth about 0.2-0.4%.\n\nThe lever: a simulated policy that clears the session when context passes a cap and resumes from the system floor plus prime plus re-reads, paying a full cache write and 2 re-orientation calls per reset. Cap 250k with a 40k resume saves 49% (one reset per ~88 calls); even a heavy 80k resume at cap 400k saves 37%. The model reproduces 90% of the billed cost. The saving only holds if what the conversation knew survives the clear -- that is this task.\n\nShape to decide: (1) where it lives -- a note attached to the in-progress task, marked as a handoff so prime shows only the latest one per task; (2) who writes it -- an MCP prompt, the same surface as the plan's 4.2 resume/plan prompts, plus server instructions telling the agent to hand off before /clear or once context is large; (3) what it holds, under a budget -- where it stopped, decisions and their reasons, files and lines touched, open questions, the next concrete step; (4) prime on startup and clear shows it under the in-progress task, inside the plan's 0.2 budget: real primes are already 5,934 chars (ekko) and 6,147 (winwayland) of the hook's 10,000 cap, and a truncated prime breaks exactly this resume.\n\nAcceptance: in a fresh session after /clear, the agent continues the task from prime plus the handoff without re-reading more than the files the handoff names; measured on the transcripts before and after (context per call, cost, resets).\n\nPairs with rigor plan items 0.2 (prime budget) and 0.7 (hook that knows how the session started), neither on the board yet. Plan: artifact 'Plano de rigor do ekko'.",
+        "isStarred": false,
+        "boards": [
+            "My Board"
+        ],
+        "_isTask": false,
+        "uid": "18d56e93ecfd31f0-50640",
+        "updatedAt": 1789458008565,
+        "attachedTo": "18d56e93ecfcef71-50640"
+    },
+    "162": {
+        "_id": 162,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789458793993,
+        "description": "Study 2026-09-15: token proxies and compressors (rtk, headroom, caveman) against a critique (Rakuen, 'Token compression tools measure the wrong thing', rev. 2026-08-02), done with our own tools: the three READMEs (26-34 KB) went through shunt-bulk-read on Gemini and every cited line was checked on disk; graphify did not apply (prose, not code), which is its correct-scenario boundary.\n\nVerdict: they can lower or raise the bill, and none publishes the number that decides it, cost per successful task with cache writes, reads and extra turns. Paired evidence that exists: rtk 0.43.0 on Claude Code (JetBrains, 80 pairs) +7.6% median cost at low effort (turns +13.8%, cache reads +14.3%), +0.1% at high effort, quality tied; caveman skill only (JetBrains, 86 tasks) -8.5% output tokens, ~-10% cost, quality flat. Vendor-only: caveman proxy -33.2% provider input tokens on a 54-run haystack suite (not public, input tokens not cost; HTML case +9.9%; reports headroom at 6.7% saved and 3/18 checks failed -- competitor claim); headroom 21-57% offline compress() on payloads, no end-to-end cost.\n\nApplied to our week (2026-09-08..15, Opus 5 weights): tool results are 10.2% of cost (Bash 8.63%, Read 0.97%). Ceilings: rtk 7.8% but ~0 at the high/xhigh effort we run; any proxy on all tool results 3.4-5.8%, wiped by 3.6 extra turns per 100 calls (one extra turn at the 471k average context costs ~54k input-equivalent tokens); caveman skill +0.75% net but makes answers terse, which the user does not want. Concrete cost-raising mechanism: headroom's effort routing changes effort per turn, and per Anthropic's caching docs a top-level effort change invalidates the messages cache -- about 0.33% of the week's cost per toggle at our context size, unless it uses the Opus 5 mid-conversation system-message hatch, which its README does not mention. Also: caveman and headroom send telemetry by default; caveman's proxy is BSL-1.1; both would sit on the subscription's traffic.\n\nWhy this points back here: the critique's own model is T(n) = nb + d n(n+1)/2 -- the quadratic term, turns in a growing context, dominates. Compressors trim d; the handoff resets n. Simulated saving 37-57% versus compressors' 0-6% ceiling. Not adding any of them now. Gap this exposed in our own rigor: shunt and graphify also have no paired cost-per-successful-task test yet (shunt-report section 3 measures sessions, not tasks); a SHUNT_DISABLE=1 paired run on the same tasks would close it.",
+        "isStarred": false,
+        "boards": [
+            "My Board"
+        ],
+        "_isTask": false,
+        "uid": "18d56f4acc33c231-50640",
+        "updatedAt": 1789458793994,
+        "attachedTo": "18d56e93ecfcef71-50640"
+    },
+    "163": {
+        "_id": 163,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789459417105,
+        "description": "Second pass on the model behind this task, 2026-09-15 -- it corrects the framing, not the direction.\n\nMeasured parameters (week 2026-09-08..15, all profiles): context growth d = 2.28k tokens per call (mean; median 1.12k), output o = 1,439 per call, system floor b = 37k, orientation to first edit in fresh sessions R = 60k tokens over 10 calls (median, only n = 6, p75 70k). Auto-compaction fires at 989k (median) and leaves 53k, so today sessions are segmented every ~410 calls. 82% of cost comes after call 100 of a session, 70% after call 200. 10.1% of cost is full-prefix cache rewrites, and 56% of those follow a gap under 60 minutes -- invalidations, not TTL expiry; causes not identified.\n\nPer-call cost with segment length L and reset overhead W on base B: c(L) = 2d + 5o + 0.1B + 0.05dL + W/L. Optimum L* = sqrt(20W/d), c* = 2d + 5o + 0.1B + 2 sqrt(0.05dW). Status quo modelled at 64.5k units per call against 66k observed with rewrites (+8%). 2d + 5o is 18% and no policy touches it.\n\nResults. Handoff with B = b + R: R = 60k gives -52% (x = 0 extra calls per reset), -47% (x = 10), -33% (x = 50), break-even at 230 extra calls; R = 120k gives -39/-33/-17%; R = 200k gives -22/-16/-2%. By logical session length it loses below ~150 calls (never reset short work), +17% at 186 calls, +38% at 300, and flattens near 52% from ~410 on, because auto-compaction already bounds the monolithic case.\n\nThe finding that changes this task: compacting earlier with no ekko at all gives the same math -- -57% at a 200k cap, -51% at 300k -- and Claude Code exposes an auto-compact window setting (--autocompact <auto|tokens>, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE). The potential belongs to segmentation, not to ekko. The handoff earns its place only if, at the same cap, it beats compaction on R (what the resume has to re-read), x (turns lost to missing nuance) and task quality; none is measured. Anthropic's context engineering post supports the direction (context rot; compaction risks 'loss of subtle but critical context'; structured note-taking) but gives no coding numbers.\n\nSo acceptance needs a paired test on the same tasks: (A) status quo, (B) a smaller auto-compact window, (C) handoff plus /clear at the same cap -- cost per completed task, extra calls, quality. The rigor plan items that shrink R now carry the real weight: 0.2 prime budget, 2.2 concise context, 2.3 several items per call.",
+        "isStarred": false,
+        "boards": [
+            "My Board"
+        ],
+        "_isTask": false,
+        "uid": "18d56fdbe08a9833-50640",
+        "updatedAt": 1789459417105,
+        "attachedTo": "18d56e93ecfcef71-50640"
+    },
+    "164": {
+        "_id": 164,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789460844018,
+        "description": "Third pass, 2026-09-15: why the handoff beats compaction in the user's actual workflow, and the Claude Code surface to automate it (all verified).\n\nWorkflow: Opus 5 at max effort only; low-level and data-heavy projects (winwayland, nakaya shell, nixdk, role-organizado). The user's two biggest costs: resuming with a cold cache after the 5-hour usage limit, and auto-compaction at ~1M tokens.\n\nMeasured (week 2026-09-08..15): 16 cold resumes (gap over 60 min, full prefix rewrite). The resume call alone cost 332k to 1.86M input-equivalent units, a median 10.5% of everything spent in the following 5 hours (3 cases above 50%). A cold resume costs 2*C_stop; resuming from an ekko base costs 2*(b+R), which with b = 37k and R = 60k is 10-20% of the cold resume for any C_stop above 500k. Compaction cannot help here: it fires on window size (989k median), not on the stop. And at max effort 62% of context growth is the model's own previous output, reasoning included; tool results are only 15-25%. The window fills with reasoning whose conclusions a handoff carries in a few thousand tokens. The second pass's finding (compacting earlier gives the same math) holds only for uninterrupted steady state.\n\nVerified surface (Claude Code 2.1.272 docs): the status line JSON carries context_window.total_input_tokens and used_percentage, rate_limits.five_hour.used_percentage and resets_at (Pro/Max), and prompt_cache.warm, expires_at and recache_tokens_if_cold (v2.1.251+). Hooks: PreCompact (manual|auto) can block compaction with exit 2 but cannot shape the summary; SessionStart sources are startup|resume|clear|compact|fork; Stop can refuse to end the turn with exit 2; StopFailure has a rate_limit matcher, side effects only, and whether a subscription usage limit reports as rate_limit is not verified.\n\nDesign this implies: (1) a handoff note under a budget (~2-3k tokens: where it stopped, decisions and why, files:lines, next step, open questions), shown by prime under the in-progress task; (2) triggers before the expensive events -- context above ~200-250k (L* for d = 2.3k), five_hour above ~85-90%, or before a planned pause -- surfaced in the status line and enforced by a Stop hook; (3) PreCompact as a tripwire: if auto-compaction fires, a handoff was missed, so log it; (4) resume on startup or clear from prime plus handoff, never --resume of a huge cold transcript.\n\nAcceptance numbers: resume cost at most 2*(b+R) with R under 40k to the first productive action (today 60k in fresh sessions; compaction leaves 53k), zero auto-compactions, and the cold-resume share of the next 5-hour window from a 10.5% median to under ~2%. Measured with the transcript scripts before and after.",
+        "isStarred": false,
+        "boards": [
+            "My Board"
+        ],
+        "_isTask": false,
+        "uid": "18d571281b329861-50640",
+        "updatedAt": 1789460844018,
+        "attachedTo": "18d56e93ecfcef71-50640"
+    },
+    "165": {
+        "_id": 165,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789461484562,
+        "description": "Review of the rigor plan artifact ('Plano de rigor do ekko', validated 2026-09-15) before any code, by the session that measured token economics on the transcripts (notes 161-164). Verdict: approve with the fixes below.\n\nVERIFIED. SessionStart hook output limit, tested with claude -p and a throwaway plugin: 9,900 characters arrive whole; 10,100 become '<persisted-output> Output too large ... Preview (first 2KB)'; 9,000 accented characters (17,981 bytes) arrive whole, so the limit counts characters, not bytes. The hooks docs state no limit, but the behaviour is real: 0.2's 9,500 hard cap and 0.7's premise hold, and the installed plugin's SessionStart hook still has no matcher. MCP docs confirm the 10,000-token warning and the 25,000 default (MAX_MCP_OUTPUT_TOKENS), with over-limit results saved to a file; a tool can declare its own limit with anthropic/maxResultSizeChars, which 0.3 should use. NOT in the docs: the 2 KB truncation of server instructions and tool descriptions, the @server:proto://path resource syntax and /server:prompt commands -- test them empirically before 0.8, 4.1 and 4.2 depend on them.\n\nMUST FIX BEFORE CODE. (1) Re-baseline at HEAD 5956589: the plan measured c53e376, and 7bf8191 (projects by folder) plus the UI commit changed agent.rs, ekko.rs, main.rs, mcp.rs, render.rs and storage.rs, so line references are stale -- locate by symbol, and measure with the HEAD binary, not the installed one (note 157). (2) Move mcpclient.py and s1-s4 from /tmp/claude-1000/-projects-ekko/7f421024-ecaa-4628-8474-01a364f04a1c/scratchpad/ into evals/ first: /tmp does not survive a reboot and they are the only way to check the acceptance table. evals/resume/run.sh still globs ~/.ekko/projects/*, the layout 7bf8191 retired. (3) 3.4 no longer waits on 94: 94 decided .ekko/ stays out of git, so a never-recycled counter is enough and hash ids are not needed.\n\nREPRIORITISE WITH THE CALL TERM. The plan values tokens entering context at 2 + 0.1T + 2R each, but every avoided tool call is also an avoided request that re-reads the whole context: 0.1*C + 5*o, about 54k input-equivalent units at the measured 471k average context. In the plan's model session the 7 saved calls are worth ~380k units against ~53k for the 5.9k saved tokens, about 7x. Items that remove calls -- 1.3 nowReady in write responses, 1.6 roots in one call, 2.1 first-hit search, 2.3 several items per call, 3.3 conditional reads, 4.1 resources -- carry more than the table shows; add calls per question to the Metas.\n\nOTHER. Skip the provisional 0.6 cursor and do 3.1 (rev) early, so 0.7 builds on rev rather than on a format that gets replaced. Keep server instructions and tool descriptions byte-stable within a session: in the transcripts a full cache rewrite followed an mcp_instructions_delta attachment, so nothing dynamic (counts, dates) goes in them. Defer pure-performance items (1.1 CSR cache, 1.4 for speed, 2.4 knapsack, 2.5 RRF) until an eval on real boards shows need -- today ~52 tasks answer in 1-4 ms -- and keep 1.2 (single parse, fsync) as correctness. The plan lacks the largest lever, task 160 (handoff), which builds on 0.2, 0.7, 2.2, 2.3 and 4.2; see notes 161, 163 and 164. Another session is working on the UI in the same repo: use separate worktrees, and coordinate the storage changes (1.2, 3.1, 3.2), since the UI writes the same storage and the 1.1 cache key assumes every writer renames.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d571bd3e90569a-50640",
+        "updatedAt": 1789461484562
+    },
+    "166": {
+        "_id": 166,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789463234618,
+        "description": "Rigor plan re-baseline at HEAD 5956589, 2026-09-15, measured with the checkout's own release build (target/release/ekko), as note 165 asked. The measurement scripts moved out of /tmp into evals/agent/ (ekko_mcp.py, semantics.py, retrieval.py, scale.py, prototype.py, run.sh; python3 added to the dev shell), and evals/resume/run.sh now finds boards through ~/.ekko/projects.json and reads the default board with --ekko-dir, so a project found from the current folder cannot stand in for it. Work happens in the worktree .claude/worktrees/rigor on branch rigor, apart from the UI session; nothing committed yet.\n\nSEMANTICS (evals/agent/semantics.py): 3 of 26 checks hold -- server instructions byte-identical across writes, instructions 1,541 bytes, every tool description at most 230 bytes, all under the 2 KB cut. The other 23 are open exactly as the plan measured them.\n\nREAL BOARDS: the ekko prime is now 7,341 characters, 73% of the hook's 10,000 cap (5,775 when the plan was written); winwayland 5,951. The largest context response is task 160 at 10,359 bytes, its four attached notes printed in full. On a copy of the ekko board: learning why 33 cannot start takes 4 context calls and 1,868 bytes to reach root 97, which the prototype finds in one pass; 'dependency cycle' and 'check cycle' return nothing while 3 and 4 items match every word; 'cycle' returns 8 hits, 4 of them only inside other words such as recycled; search() with no arguments returns 21,870 bytes. The session model comes to 16 calls and 26,787 bytes. Priced with note 165's call term (C = 471k, o = 1,439), its calls cost about 869k input-equivalent tokens against about 96k for the tokens it adds -- 9x, so the items that remove calls lead the order.\n\nSCALE is unchanged from the plan within noise: prime 12.1 s and next(10) 3.2 s with 2,000 roots over a chain of 8,000, prime 2.2 s on a chain of 5,000, 4.8 s on ten layers. The Python prototype does every count and the propagation, parse included, in 72-242 ms on the same boards, and orders the priority inversion 1, 5, 3, 4.\n\nDOCS, against note 165: the current Claude Code docs do state the limits 165 lists as undocumented. hooks.md line 941 caps hook output at 10,000 characters; mcp.md line 1401 truncates tool descriptions and server instructions at 2KB each; mcp.md line 1354 gives @server:protocol://resource/path, and the same page lists MCP prompts as /servername:promptname. Downloaded 2026-09-14 and again 2026-09-15, byte-identical. They are tested empirically anyway before 0.8, 4.1 and 4.2 depend on them.\n\nSTALE SERVERS: a Claude Code session keeps the ekko MCP server it started with. This session's server still runs the binary from before 7bf8191, so it answers 'No projects yet' and cannot see item 165; only sessions started after the rebuild see projects by folder.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d57354b60be7e9-5a469",
+        "updatedAt": 1789463234619
+    },
+    "167": {
+        "_id": 167,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789493357431,
+        "description": "Empirical checks of the Claude Code behaviour the rigor plan depends on, 2026-09-15, Claude Code 2.1.272 in print mode (claude -p, --strict-mcp-config) against a throwaway stdio MCP server whose request log shows what the client actually called. At initialize the client asks for protocol 2025-11-25 and lists tools, prompts and resources before the first prompt.\n\n(1) 0.8 HOLDS, WITH A NUMBER: server instructions and tool descriptions are both cut at exactly 2,048 characters and end in '… [truncated]'. A marker at character 1,881 arrived and one at 2,131 did not, in the instructions and in a description loaded through ToolSearch, and the model quoted text ending at character 2,048 of 2,589 (ASCII, so characters and bytes coincide here). ekko's instructions are 1,669 bytes after item 1.3.\n\n(2) 4.2 HOLDS IN ONE FORM: an MCP prompt runs as /mcp__<server>__<prompt> -- the client called prompts/get and the model answered with the prompt's text. The /<server>:<prompt> form answered 'Unknown command' in print mode even though prompts/list had run; the docs describe that form as the label the interactive menu shows. For the plugin's server the runnable name would be /mcp__plugin_ekko_ekko__<prompt>, not checked yet.\n\n(3) 4.1 IS NOT CONFIRMED: a prompt carrying @probe:item://93 attached nothing in print mode. With the resource list and read tools disallowed the model answered NONE, and the client never called resources/read. Interactive @ mentions stay untested, so 4.1 must not count on resources removing a call until an interactive session shows it.\n\nThe hook cap on SessionStart output (10,000 characters, a 2 KB preview past it) was verified in note 165 and is documented in hooks.md line 941.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d58eba39a250f3-93219",
+        "updatedAt": 1789493357432
+    },
+    "168": {
+        "_id": 168,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789495237587,
+        "description": "Rigor plan progress, 2026-09-15, on branch rigor in the worktree .claude/worktrees/rigor, nothing committed yet. Order as approved: items that remove calls first, 0.6 skipped for 3.1. All passing: cargo test (221 unit, 16 integration), clippy -D warnings, and evals/agent/semantics.py at 19 of 27 checks, up from 3 at the re-baseline (note 166).\n\nDONE. 1.3: write replies name the tasks they set free or left waiting (nowReady, nowBlocked). 1.6: context names the open roots above an item and how much open work stands between. 2.3: context reads up to 20 items per call. 2.1, with 0.3 and 0.4: search folds accents, matches word starts in any order (every word, else some with a notice), ranks by BM25 and shows the stretch that matched -- new src/lexical.rs, no new dependency -- with a limit of 20 and a total, counts when nothing is asked, the state on every line, unblocks only on open tasks, and limit 0 refused. 3.1: a board revision in storage/counters.json, stamped as rev on the items a write changed, so changes(cursor) never repeats an item or ties in a millisecond; clock cursors from older primes are still answered. 3.4: the same file keeps the highest id storage has held, so a cleared item's number is never handed out again (no longer waiting on 94, per note 165). 3.3: prime and next take if_rev and answer 'unchanged since cursor N' in 25 bytes. 0.2: prime stays within 6,000 characters, each cut section saying how much it left out. 0.7: ekko --prime --hook reads the SessionStart event -- startup, clear and compact get the prime; resume and fork get one line, or what moved since the cursor served to that session, kept under ~/.local/state/ekko/sessions, outside the board. plugin.json and flake.nix now run --prime --hook.\n\nMEASURED on a copy of this board (evals/agent/retrieval.py): the model session went from 16 calls and 26,787 bytes to 10 calls and 10,622 bytes, and its call term (note 165) from about 869k to 543k input-equivalent tokens. A resume with nothing written costs 90 bytes instead of 7,431. Why 33 cannot start: 1 call and 591 bytes, was 4 calls and 1,868. 'dependency cycle' finds its 4 items, was nothing. The real primes are 5,715 characters (ekko, was 7,341) and 5,647 (winwayland). The price: notes attached to ready tasks show only under the first three, so this board's prime carries 3 of its 8 reasons (evals/resume) -- the rest are one context call away.\n\nNEXT: 2.2 concise detail, 3.2 journal, 0.5 and 0.8, 1.5 urgency, 1.2 single parse and fsync, then 4.2 prompts -- runnable as /mcp__<server>__<prompt> per note 167 -- toward task 160. The UI session confirmed it is not touching storage.rs, save_touching, item.rs or ops.rs.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d5906ffba28739-971ed",
+        "updatedAt": 1789495237587
+    },
+    "169": {
+        "_id": 169,
+        "_date": "Tue Sep 15 2026",
+        "_timestamp": 1789496433555,
+        "description": "Rigor plan, second milestone, 2026-09-15, still uncommitted on branch rigor (.claude/worktrees/rigor). evals/agent/semantics.py passes 27 of 27 checks, up from 3 at the re-baseline (note 166); cargo test (228 unit, 16 integration) and clippy -D warnings are clean.\n\nSINCE NOTE 168. 2.2: context clips attached notes to 300 characters unless detail is full; the largest context response on this board went from 10,359 to 3,530 bytes. 3.2: storage/journal.jsonl records what a write did that no item's fields show -- trimmed past about 256 KB, with a from marker so an older cursor is told so -- and changes now lists work set free as ready now, work left waiting as blocked now, and items removed from storage with their text. 0.5: over MCP a note is refused as a blocker and a task state on a note is refused; prime names work that is ready only because what it waited on was cancelled. 0.8: roadmap and projects over MCP state facts and name no CLI command. 1.5: next ranks by Taskwarrior's urgency on what a task inherits from the open work waiting on it -- the highest priority, the latest day it can finish, whether anything waits -- in one Kahn pass, and a line says inherits p3 or finish by. 0.1: unblocks is worked out only for the first 50 listed entries and the 20 blocked tasks a prime shows. next over MCP lists 20 with a total. 1.2: a structured write parses the board once, and storage, phases and counters are synced before and after the rename.\n\nSCALE (evals/agent/scale.py --full, before 1.2): with 2,000 roots over a chain of 8,000, prime went from 12,126 to 141 ms, next(10) from 3,159 to 28 ms and the SessionStart hook from 12,250 to 145 ms; on ten layers prime went from 4,778 to 147 ms; on a chain of 5,000 from 2,234 to 52 ms. Every prime is now 5.7-5.9 KB where it reached 836 KB, and search() with no arguments 0.1 KB where it reached 3.1 MB. Then 1.2 took a create on 20,000 items from 171 to 117 ms and a 50-operation batch from 320 to 211 ms, while a create on 150 items rose from 1.7 to about 15 ms, the price of the fsync.\n\nREAL BOARDS: the ekko prime is 5,716 characters and carries 3 of its 8 attached reasons (notes show only under the first three ready tasks); winwayland's is 5,647 and carries all 8. Calibration to watch: under Taskwarrior's weights, holding up open work (8) outweighs the gap between p3 and p2 (2.1), so on this board next now reads 108, 97, 113, 116, 121, 160, 51, 87 -- 97 above the p3 bugs.\n\nOPEN, needing the user's decisions before code: task 160 (what marks a note as the handoff, and what triggers one), 4.2 prompts to write it (/mcp__<server>__<prompt> ran in print mode per note 167; the plugin server's runnable name is unverified), 4.1 resources (never tested interactively), and how the branch gets committed.",
+        "isStarred": false,
+        "boards": [
+            "@rigor"
+        ],
+        "_isTask": false,
+        "uid": "18d5918670ecb714-99d2f",
+        "updatedAt": 1789496433556
+    }
+}

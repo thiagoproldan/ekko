@@ -1,0 +1,72 @@
+{
+    "1": {
+        "_id": 1,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600478519,
+        "description": "Parse d:YYYY-MM-DD inline, like p:1 is parsed today",
+        "isStarred": false,
+        "boards": [
+            "@due"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "priority": 1
+    },
+    "3": {
+        "_id": 3,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600818822,
+        "description": "Accept @board as well as board in --list; the board view prints the @ form",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "priority": 3
+    },
+    "4": {
+        "_id": 4,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600818824,
+        "description": "Unknown --list attributes are silently ignored and return everything",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "priority": 2
+    },
+    "5": {
+        "_id": 5,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600818826,
+        "description": "Regression test: --list with an @-prefixed board name",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "priority": 1
+    },
+    "6": {
+        "_id": 6,
+        "_date": "Mon Aug 24 2026",
+        "_timestamp": 1787600818828,
+        "description": "Readme: document the deliberate divergence from taskbook",
+        "isStarred": false,
+        "boards": [
+            "@agent"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "priority": 1
+    }
+}
