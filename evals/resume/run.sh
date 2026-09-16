@@ -4,8 +4,15 @@
 #
 #   evals/resume/run.sh [ekko-binary]
 #
-# Reads the real boards on this machine -- the default board and every project
-# -- and never writes to them.
+# Pass target/release/ekko to measure this checkout. The default is whatever
+# `ekko` is on PATH -- the installed build, which may be an older revision.
+#
+# Reads the real boards on this machine and never writes to them, found where
+# ekko keeps them since 7bf8191: the default board in $EKKO_HOME, read with
+# --ekko-dir so that a project found from the current folder cannot stand in
+# for it; every project `ekko init` registered in $EKKO_HOME/projects.json, in
+# its own folder; and any legacy $EKKO_HOME/projects/<name>/ not adopted yet,
+# which --project still reads.
 #
 # The ground truth is computed here, with jq, straight from storage.json and
 # independently of ekko's own code. An eval that asked ekko what the right
@@ -24,10 +31,27 @@ set -euo pipefail
 EKKO="${1:-ekko}"
 EKKO_HOME="${EKKO_HOME:-$HOME/.ekko}"
 
-targets=("default:$EKKO_HOME/storage/storage.json")
+# Three parallel lists: what to call the board, how to point ekko at it, and
+# the storage the ground truth is read from.
+labels=("default board")
+scopes=(ekko-dir)
+files=("$EKKO_HOME/storage/storage.json")
+
+if [ -f "$EKKO_HOME/projects.json" ]; then
+  while IFS=$'\t' read -r name path; do
+    labels+=("$name")
+    scopes+=(project)
+    files+=("$path/.ekko/storage/storage.json")
+  done < <(jq -r '.projects[] | [.name, .path] | @tsv' "$EKKO_HOME/projects.json")
+fi
+
 for dir in "$EKKO_HOME"/projects/*/; do
   [ -d "$dir" ] || continue
-  targets+=("$(basename "$dir"):${dir}.ekko/storage/storage.json")
+  name="$(basename "$dir")"
+  if printf '%s\n' "${labels[@]}" | grep -qxF -- "$name"; then continue; fi
+  labels+=("$name")
+  scopes+=(project)
+  files+=("${dir}.ekko/storage/storage.json")
 done
 
 truth() {
@@ -55,18 +79,18 @@ covered() {
   echo "$hit/$n"
 }
 
-for target in "${targets[@]}"; do
-  name="${target%%:*}"
-  file="${target#*:}"
+for i in "${!labels[@]}"; do
+  label="${labels[$i]}"
+  file="${files[$i]}"
   [ -f "$file" ] || continue
-  if [ "$name" = default ]; then scope=(); else scope=(--project "$name"); fi
+  if [ "${scopes[$i]}" = ekko-dir ]; then scope=(--ekko-dir "$EKKO_HOME"); else scope=(--project "$label"); fi
 
   mapfile -t sets < <(truth "$file")
   doing="${sets[0]}" ready="${sets[1]}" why="${sets[2]}"
 
   echo
-  echo "== $name: $(wc -w <<<"$doing") in progress, $(wc -w <<<"$ready") ready, $(wc -w <<<"$why") attached reasons"
-  printf '   %-12s %9s %9s %8s %8s %8s\n' strategy bytes '~tokens' doing ready why
+  echo "== $label: $(wc -w <<<"$doing") in progress, $(wc -w <<<"$ready") ready, $(wc -w <<<"$why") attached reasons"
+  printf '   %-12s %9s %9s %9s %8s %8s %8s\n' strategy bytes chars '~tokens' doing ready why
 
   for strategy in board board-head60 list-ready prime; do
     case "$strategy" in
@@ -80,6 +104,9 @@ for target in "${targets[@]}"; do
       continue
     fi
     bytes=$(printf '%s' "$out" | wc -c)
+    # Characters as well as bytes: Claude Code cuts hook output at 10,000
+    # characters, and a prime past that arrives as a short preview instead.
+    chars=$(printf '%s' "$out" | LC_ALL=C.UTF-8 wc -m)
     # Coverage is read with colour codes stripped, sizes with them left in: an
     # id behind an escape sequence is still delivered, and the escape sequence
     # is still paid for. Without the strip, an environment that forces colour
@@ -87,7 +114,7 @@ for target in "${targets[@]}"; do
     plain="$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')"
     # Two characters per token: the median measured from the usage the API
     # reported for real ekko outputs in agent sessions. An estimate, labelled.
-    printf '   %-12s %9s %9s %8s %8s %8s\n' "$strategy" "$bytes" "$((bytes / 2))" \
+    printf '   %-12s %9s %9s %9s %8s %8s %8s\n' "$strategy" "$bytes" "$chars" "$((bytes / 2))" \
       "$(covered "$plain" "$doing")" "$(covered "$plain" "$ready")" "$(covered "$plain" "$why")"
   done
 done

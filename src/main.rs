@@ -6,6 +6,7 @@ mod ekko;
 mod item;
 mod json;
 mod json_output;
+mod lexical;
 mod mcp;
 mod ops;
 mod project;
@@ -53,6 +54,7 @@ const HELP: &str = r#"
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
       --prime             Summarise the board for picking work back up
+      --hook              With --prime: answer a SessionStart hook's event on stdin
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
@@ -299,6 +301,18 @@ fn run_init(args: &[String], json_first: bool) -> ExitCode {
     }
 }
 
+/// What a hook was handed on stdin, or nothing when stdin is a terminal: a
+/// person typing `--prime --hook` gets the prime, not a prompt waiting on
+/// input that never comes.
+fn read_hook_input() -> String {
+    use std::io::{IsTerminal, Read as _};
+    let mut input = String::new();
+    if !std::io::stdin().is_terminal() {
+        let _ = std::io::stdin().lock().take(64 * 1024).read_to_string(&mut input);
+    }
+    input
+}
+
 /// Priority order copied from index.js's chain of `if (flags.x)` checks --
 /// when more than one command flag is somehow set at once, the first
 /// match in this exact order wins, the rest are silently ignored, same as
@@ -325,6 +339,11 @@ fn dispatch(
         return Ok(vec![ekko.display_roadmap()?]);
     }
     if cli.prime {
+        if cli.hook {
+            let event = agent::SessionEvent::from_hook_input(&read_hook_input());
+            let text = agent::session_start(ekko, board_label, &event, &agent::session_state_dir(home_dir))?;
+            return Ok(vec![Outcome::Hook(text)]);
+        }
         return Ok(vec![Outcome::Prime(Box::new(agent::prime(ekko, board_label)?))]);
     }
     if let Some(limit) = cli.next {

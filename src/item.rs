@@ -44,10 +44,10 @@ pub struct Item {
     #[serde(rename = "dueDate", default, skip_serializing_if = "Option::is_none")]
     pub due_date: Option<String>,
     /// Stable across everything the display id is not: it survives
-    /// `--restore` (which hands the item a fresh `_id`), and it is never
-    /// recycled, whereas ids are `max + 1` and so get reused as soon as the
-    /// highest-numbered item is deleted. Callers that hold a reference
-    /// across time should hold this.
+    /// `--restore`, which hands the item a fresh `_id`. Display ids are no
+    /// longer recycled once an item leaves storage (see `Counters`), but a
+    /// restore still renumbers, so callers that hold a reference across time
+    /// should hold this.
     ///
     /// `Option` because items written before this existed -- and any
     /// written by taskbook -- do not have one, and backfilling would
@@ -64,6 +64,16 @@ pub struct Item {
     /// lying about when they changed.
     #[serde(rename = "updatedAt", default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<i64>,
+    /// The board revision of the write that last changed this item: a counter
+    /// every write raises by one, kept in counters.json beside storage.json.
+    /// It is what `changes` compares a cursor against, because a clock makes a
+    /// poor cursor -- two writes in one millisecond tie, and a cursor equal to
+    /// the newest `updatedAt` hands that item back on every call.
+    ///
+    /// `Option` like `updatedAt`: an item no write has touched since this
+    /// existed has none, and backfilling would rewrite untouched files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<u64>,
     /// Set aside after having been started, as opposed to never started at
     /// all -- two situations taskbook collapsed into the same empty box,
     /// because it modelled "paused" as the absence of in-progress rather
@@ -163,6 +173,7 @@ impl Item {
             due_date: None,
             uid: Some(new_uid()),
             updated_at: Some(timestamp),
+            rev: None,
             paused: None,
             cancelled: None,
             phase: None,
@@ -190,6 +201,7 @@ impl Item {
             due_date: None,
             uid: Some(new_uid()),
             updated_at: Some(timestamp),
+            rev: None,
             paused: None,
             cancelled: None,
             phase: None,

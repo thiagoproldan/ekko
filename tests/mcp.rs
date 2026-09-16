@@ -131,6 +131,94 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// A write's reply names the work it set free, so an agent that completes a
+/// blocker learns what moved without reading the board again -- and a retry,
+/// which frees nothing, says nothing.
+#[test]
+fn a_write_names_the_work_it_set_free() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            call(1, "batch", json!({"ops": [
+                {"op": "create", "text": "blocker"},
+                {"op": "create", "text": "waits on the blocker", "blocked_by": ["$1"]}
+            ]})),
+            call(2, "set_state", json!({"items": [1], "state": "done"})),
+            call(3, "set_state", json!({"items": [1], "state": "done"})),
+            call(4, "batch", json!({"ops": [{"op": "set_state", "items": [1], "state": "undone"}]})),
+        ],
+    );
+
+    let done: Value = serde_json::from_str(text(&replies["2"])).unwrap();
+    assert_eq!(done["nowReady"][0]["id"], 2, "{done}");
+    assert_eq!(done["nowReady"][0]["text"], "waits on the blocker");
+    assert!(done["nowReady"][0]["uid"].is_string(), "{done}");
+    assert!(done.get("nowBlocked").is_none(), "{done}");
+
+    let again: Value = serde_json::from_str(text(&replies["3"])).unwrap();
+    assert!(again.get("nowReady").is_none(), "a retry set something free: {again}");
+
+    let reopened: Value = serde_json::from_str(text(&replies["4"])).unwrap();
+    assert_eq!(reopened["nowBlocked"][0]["id"], 2, "{reopened}");
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// A read that names the cursor it holds is answered in one line while the
+/// board has not moved, and in full once a write has moved it.
+#[test]
+fn a_read_conditioned_on_the_cursor_answers_in_one_line_when_nothing_moved() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            call(1, "create", json!({"text": "one"})),
+            call(2, "prime", json!({"if_rev": 1})),
+            call(3, "next", json!({"if_rev": 1})),
+            call(4, "create", json!({"text": "two"})),
+            call(5, "prime", json!({"if_rev": 1})),
+            call(6, "changes", json!({"since": 1})),
+        ],
+    );
+
+    assert_eq!(text(&replies["2"]), "unchanged since cursor 1\n");
+    assert_eq!(text(&replies["3"]), "unchanged since cursor 1\n");
+    assert!(text(&replies["5"]).starts_with("ekko \u{b7} default board \u{b7} cursor 2\n"), "{}", text(&replies["5"]));
+    assert!(text(&replies["6"]).starts_with("cursor 2 \u{b7} 1 changed since 1\n   2. [pending] two\n"), "{}", text(&replies["6"]));
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// Several items in one call, in the order asked; item and items together,
+/// or more than one call reads, are refused rather than half-answered.
+#[test]
+fn context_reads_several_items_in_one_call() {
+    let home = temp_home();
+    let many: Vec<u32> = (1..=21).collect();
+    let replies = session(
+        &home,
+        &[
+            call(1, "batch", json!({"ops": [{"op": "create", "text": "first"}, {"op": "create", "text": "second"}]})),
+            call(2, "context", json!({"items": [2, 1]})),
+            call(3, "context", json!({"item": 1, "items": [2]})),
+            call(4, "context", json!({"items": many})),
+        ],
+    );
+
+    let both = text(&replies["2"]);
+    let second = both.find("   2. second").unwrap_or_else(|| panic!("{both}"));
+    let first = both.find("   1. first").unwrap_or_else(|| panic!("{both}"));
+    assert!(second < first, "not in the order asked:\n{both}");
+
+    for id in ["3", "4"] {
+        assert_eq!(replies[id]["result"]["isError"], true, "{}", replies[id]);
+        assert!(text(&replies[id]).starts_with("INVALID_INPUT"), "{}", text(&replies[id]));
+    }
+
+    fs::remove_dir_all(&home).ok();
+}
+
 #[test]
 fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share() {
     let home = temp_home();

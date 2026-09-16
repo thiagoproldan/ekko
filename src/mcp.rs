@@ -27,8 +27,9 @@ use crate::agent;
 use crate::config;
 use crate::directory;
 use crate::ekko::{Ekko, EkkoError, Outcome};
-use crate::ops::{self, Draft, Op};
+use crate::ops::{self, Committed, Draft, Op};
 use crate::render::{Painter, Renderer};
+use crate::storage::ItemMap;
 
 const MODERN: &[&str] = &["2026-07-28"];
 /// Newest first: an `initialize` asking for a version not listed here is
@@ -43,12 +44,13 @@ const TOOLS: &[&str] = &[
 const INSTRUCTIONS: &str = "\
 Ekko is a task board shared with the user: they read and change the same board from their own terminal, between your calls. Do not treat it as yours.
 
-Each session starts with the board's prime already in context -- in progress, ready in order, blocked, and the notes that explain them. Call prime again after a long pause or when the user may have changed things; changes with the cursor from your last read is the cheap way to hear what moved.
+Each session starts with the board's prime already in context -- in progress, ready in order, blocked, and the notes that explain them. Call prime again after a long pause or when the user may have changed things -- with if_rev set to the cursor you hold, it answers in one line when nothing moved -- and changes with that cursor lists what did.
 
-- next is the order to take work up. context gives one item in full: its blockers, what it blocks, its notes.
-- Hold the uid a write returns. A display id can point at a different item after deletions.
+- next is the order to take work up. context gives items, several per call: blockers and the roots free to start, what they block, notes clipped unless detail is full.
+- Display ids are never reused, but a restore from the archive renumbers an item: hold the uid a write returns to follow it.
 - set_state is idempotent. A task blocked by open work cannot be completed (BLOCKED), and a task that completed work depends on cannot be reopened (COMPLETED_DEPENDENTS): finish the other side, or clear a wrong dependency with link. force_state overrides the rule and is only for when the user has said so.
 - Leave reasoning on the board: create a note with attached_to set to the task it explains. Change text with edit's replace or append instead of resending it, with if_updated_at from your last read when the user may have edited it.
+- A write's reply names the tasks it set free (nowReady) or left waiting (nowBlocked): no next or prime is needed to find them.
 - batch applies several operations in one write, all or nothing; $1, $2 name the items created by the batch's first and second operations.
 - trash is recoverable for 30 days and still needs the user's consent. For work decided against, set_state cancelled keeps the record.
 - Refusals come back as CODE: message. Branch on the code; nothing was written.";
@@ -222,7 +224,7 @@ impl Server {
     fn tool(&self, name: &str, args: &mut Map<String, Value>) -> Result<String, ToolError> {
         if name == "projects" {
             finish(args)?;
-            return Ok(render(&self.home, &Outcome::Projects(crate::project::list(&self.home))));
+            return Ok(agent::projects_text(&crate::project::list(&self.home)));
         }
         let project = match args.remove("project") {
             None | Some(Value::Null) => None,
@@ -233,26 +235,53 @@ impl Server {
 
         match name {
             "prime" => {
+                let if_rev = take(args, "if_rev", Value::as_i64, "an integer")?;
                 finish(args)?;
+                if let Some(line) = unchanged(&ekko, if_rev)? {
+                    return Ok(line);
+                }
                 Ok(agent::prime(&ekko, &Self::label(&location))?.text())
             }
             "next" => {
-                let limit = take(args, "limit", Value::as_u64, "a positive integer")?;
+                let limit = positive(take(args, "limit", Value::as_u64, "a positive integer")?)?;
+                let if_rev = take(args, "if_rev", Value::as_i64, "an integer")?;
                 finish(args)?;
-                let entries = agent::next(&ekko, limit.map(|n| n as usize))?;
-                Ok(agent::list_text(&entries, "Nothing is in progress or ready."))
+                if let Some(line) = unchanged(&ekko, if_rev)? {
+                    return Ok(line);
+                }
+                let (entries, total) = agent::next_listed(&ekko, Some(limit.unwrap_or(agent::SEARCH_LIMIT)))?;
+                let mut text = agent::list_text(&entries, "Nothing is in progress or ready.");
+                if total > entries.len() {
+                    text.push_str(&format!("{} of {total} shown: raise limit for more.\n", entries.len()));
+                }
+                Ok(text)
             }
             "context" => {
-                let item = take_item(args, "item")?.ok_or_else(|| invalid("context needs an item"))?;
+                let item = take_item(args, "item")?;
+                let items = take_item_list(args, "items")?;
+                let detail = match take(args, "detail", |v| v.as_str().map(str::to_string), "concise or full")?.as_deref() {
+                    None | Some("concise") => agent::Detail::Concise,
+                    Some("full") => agent::Detail::Full,
+                    Some(other) => return Err(invalid(format!("detail must be concise or full, got {other}"))),
+                };
                 finish(args)?;
-                Ok(agent::context(&ekko, &item)?.text())
+                let targets = match (item, items) {
+                    (Some(item), None) => vec![item],
+                    (None, Some(items)) if items.len() <= CONTEXTS_AT_ONCE => items,
+                    (None, Some(_)) => {
+                        return Err(invalid(format!("context reads at most {CONTEXTS_AT_ONCE} items at once")))
+                    }
+                    _ => return Err(invalid("context takes exactly one of item or items")),
+                };
+                let read = agent::contexts(&ekko, &targets)?;
+                Ok(read.iter().map(|context| context.text_with(detail)).collect::<Vec<_>>().join("\n"))
             }
             "search" => {
                 let text = take(args, "text", |v| v.as_str().map(str::to_string), "a string")?;
                 let filters = take_strings(args, "filters")?;
+                let limit = positive(take(args, "limit", Value::as_u64, "a positive integer")?)?;
                 finish(args)?;
-                let entries = agent::search(&ekko, text.as_deref(), &filters)?;
-                Ok(agent::list_text(&entries, "Nothing matches."))
+                Ok(agent::search(&ekko, text.as_deref(), &filters, limit.unwrap_or(agent::SEARCH_LIMIT))?.text())
             }
             "changes" => {
                 let since = take(args, "since", Value::as_i64, "an integer")?.ok_or_else(|| invalid("changes needs since"))?;
@@ -261,7 +290,7 @@ impl Server {
             }
             "roadmap" => {
                 finish(args)?;
-                Ok(render(&self.home, &ekko.display_roadmap()?))
+                Ok(agent::roadmap_text(&ekko.display_roadmap()?))
             }
             "create" => {
                 let spec: ops::Create = parse(args)?;
@@ -345,7 +374,37 @@ fn batch(ekko: &Ekko, ops: Value) -> Result<String, ToolError> {
         .iter()
         .map(|ids| Value::Array(ids.iter().map(|id| ops::written(&committed.data, *id)).collect()))
         .collect();
-    Ok(json!({"ok": true, "results": results}).to_string())
+    let mut reply = json!({"ok": true, "results": results});
+    name_readiness(&mut reply, &committed);
+    Ok(reply.to_string())
+}
+
+/// How much of a released or blocked task's text a write reply quotes.
+const READINESS_CLIP: usize = 80;
+
+/// How many items one context call reads.
+const CONTEXTS_AT_ONCE: usize = 20;
+
+/// Puts the tasks a commit set free or left waiting on its reply, when it
+/// changed any, each named well enough to act on without reading the board
+/// again: the id, the uid to hold, and the start of the text.
+fn name_readiness(reply: &mut Value, committed: &Committed) {
+    let named = |data: &ItemMap, ids: &[u32]| {
+        Value::Array(
+            ids.iter()
+                .filter_map(|id| data.get(id))
+                .map(|item| {
+                    json!({"id": item.id, "uid": item.uid, "text": agent::clip(&item.description, READINESS_CLIP)})
+                })
+                .collect(),
+        )
+    };
+    if !committed.released.is_empty() {
+        reply["nowReady"] = named(&committed.data, &committed.released);
+    }
+    if !committed.blocked.is_empty() {
+        reply["nowBlocked"] = named(&committed.data, &committed.blocked);
+    }
 }
 
 fn write(
@@ -371,6 +430,7 @@ fn write(
     if !committed.reopened.is_empty() {
         reply["reopenedOver"] = pairs(&committed.reopened, "dependents");
     }
+    name_readiness(&mut reply, &committed);
     Ok(reply.to_string())
 }
 
@@ -492,18 +552,41 @@ fn item_text(value: &Value) -> Option<String> {
 }
 
 fn take_items(args: &mut Map<String, Value>) -> Result<Vec<String>, ToolError> {
-    let items = take(args, "items", |v| v.as_array().cloned(), "an array of ids or uids")?
-        .ok_or_else(|| invalid("items is required"))?;
-    let items: Option<Vec<String>> = items.iter().map(item_text).collect();
-    match items {
-        Some(items) if !items.is_empty() => Ok(items),
-        _ => Err(invalid("items must be a non-empty array of ids or uids")),
+    take_item_list(args, "items")?.ok_or_else(|| invalid("items is required"))
+}
+
+/// A non-empty array of ids or uids under `key`, or `None` when it is absent.
+fn take_item_list(args: &mut Map<String, Value>, key: &str) -> Result<Option<Vec<String>>, ToolError> {
+    let Some(values) = take(args, key, |v| v.as_array().cloned(), "an array of ids or uids")? else {
+        return Ok(None);
+    };
+    match values.iter().map(item_text).collect::<Option<Vec<String>>>() {
+        Some(items) if !items.is_empty() => Ok(Some(items)),
+        _ => Err(invalid(format!("{key} must be a non-empty array of ids or uids"))),
     }
 }
 
 fn take_strings(args: &mut Map<String, Value>, key: &str) -> Result<Vec<String>, ToolError> {
     let values = take(args, key, |v| v.as_array().cloned(), "an array of strings")?.unwrap_or_default();
     values.iter().map(|v| v.as_str().map(str::to_string)).collect::<Option<_>>().ok_or_else(|| invalid(format!("{key} must be an array of strings")))
+}
+
+/// A read conditioned on the cursor a caller already holds: one line saying
+/// nothing moved, when nothing did, in place of the whole answer again -- the
+/// way an HTTP 304 answers a request that names the version it has.
+fn unchanged(ekko: &Ekko, if_rev: Option<i64>) -> Result<Option<String>, ToolError> {
+    let Some(held) = if_rev else { return Ok(None) };
+    let revision = ekko.storage.get_counters().map_err(EkkoError::from)?.revision as i64;
+    Ok((held == revision).then(|| format!("unchanged since cursor {revision}\n")))
+}
+
+/// A limit, refused at zero: asking for no items would otherwise be answered
+/// as if the board held none.
+fn positive(limit: Option<u64>) -> Result<Option<usize>, ToolError> {
+    match limit {
+        Some(0) => Err(invalid("limit must be a positive integer")),
+        limit => Ok(limit.map(|n| n as usize)),
+    }
 }
 
 /// Refuses whatever arguments are left: a misspelled one would otherwise do
@@ -551,6 +634,7 @@ fn error_reply(id: Value, error: RpcError) -> Value {
 
 fn tool_definitions() -> Value {
     let project = json!({"type": "string", "description": "Work on this project instead of the session's board, which prime names on its first line."});
+    let if_rev = json!({"type": "integer", "description": "The cursor from an earlier read: if the board has not moved since, the answer is one line saying so."});
     let item = json!({"type": ["integer", "string"], "description": "A display id, or a uid -- which never changes."});
     let items = json!({"type": "array", "items": item, "minItems": 1});
     let state = json!({"type": "string", "enum": ["done", "undone", "progress", "paused", "cancelled", "unstarted", "starred", "unstarred"]});
@@ -564,30 +648,30 @@ fn tool_definitions() -> Value {
         {
             "name": "prime",
             "description": "The resume view of the board: in progress, ready in the order to take it up, blocked, recent notes, what needs attention, and a cursor for changes. Already in context at session start.",
-            "inputSchema": object(json!({"project": project}), &[]),
+            "inputSchema": object(json!({"project": project, "if_rev": if_rev}), &[]),
             "annotations": read,
         },
         {
             "name": "next",
             "description": "What to take up next, best first: work in progress, earlier phase, higher priority, nearer deadline, more work waiting on it, older.",
-            "inputSchema": object(json!({"project": project, "limit": {"type": "integer", "minimum": 1}}), &[]),
+            "inputSchema": object(json!({"project": project, "limit": {"type": "integer", "minimum": 1}, "if_rev": if_rev}), &[]),
             "annotations": read,
         },
         {
             "name": "context",
-            "description": "One item in full: its state and fields, what blocks it, what it blocks, how much open work waits on it, and the notes attached to it (or the task a note explains).",
-            "inputSchema": object(json!({"project": project, "item": item}), &["item"]),
+            "description": "Items, one with item or up to 20 with items: text, state and fields, what blocks it and the roots free to start, what it blocks, how much open work waits on it, and its notes -- clipped to 300 characters each unless detail is full -- or the task a note explains.",
+            "inputSchema": object(json!({"project": project, "item": item, "items": {"type": "array", "items": item, "minItems": 1, "maxItems": 20}, "detail": {"type": "string", "enum": ["concise", "full"], "default": "concise"}}), &[]),
             "annotations": read,
         },
         {
             "name": "search",
-            "description": "Items matching a text and/or filters. Filters: pending, progress, paused, done, cancelled, ready, blocked, due, overdue, star, task, note, or a board name.",
-            "inputSchema": object(json!({"project": project, "text": {"type": "string"}, "filters": {"type": "array", "items": {"type": "string"}}}), &[]),
+            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, done, cancelled, ready, blocked, due, overdue, star, task, note, or a board name. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
+            "inputSchema": object(json!({"project": project, "text": {"type": "string"}, "filters": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1}}), &[]),
             "annotations": read,
         },
         {
             "name": "changes",
-            "description": "Items written at or after a cursor (from prime or an earlier changes), including ones stashed or trashed since. Returns the next cursor.",
+            "description": "What moved after a cursor -- the board revision from prime or an earlier changes, so nothing repeats or ties: items written, stashed or trashed, items removed from storage, and work set free (ready now) or left waiting (blocked now). Returns the next cursor.",
             "inputSchema": object(json!({"project": project, "since": {"type": "integer"}}), &["since"]),
             "annotations": read,
         },

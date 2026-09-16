@@ -374,6 +374,8 @@ pub enum Outcome {
     /// The agent views -- see `agent`. Boxed because they are much larger
     /// than every other outcome and would otherwise size the whole enum.
     Prime(Box<crate::agent::Prime>),
+    /// What the SessionStart hook puts in context, already worded.
+    Hook(String),
     Next(Vec<crate::agent::Entry>),
     Context(Box<crate::agent::Context>),
 }
@@ -415,7 +417,7 @@ impl Outcome {
             Outcome::Trash(_) => "trash",
             Outcome::Roadmap { .. } => "roadmap",
             Outcome::Stats(_) => "stats",
-            Outcome::Prime(_) => "prime",
+            Outcome::Prime(_) | Outcome::Hook(_) => "prime",
             Outcome::Next(_) => "next",
             Outcome::Context(_) => "context",
         }
@@ -495,6 +497,7 @@ impl Outcome {
             }
             Outcome::Stats(stats) => out.display_stats(stats),
             Outcome::Prime(prime) => out.raw(&prime.text()),
+            Outcome::Hook(text) => out.raw(text),
             Outcome::Next(entries) => out.raw(&crate::agent::list_text(entries, "Nothing is in progress or ready.")),
             Outcome::Context(context) => out.raw(&context.text()),
         }
@@ -518,15 +521,19 @@ impl Ekko {
 
     // ---- id / option parsing -------------------------------------------
 
+    /// The next display id in storage: past every id `data` holds and every id
+    /// storage has ever held, so a number someone kept never comes to name a
+    /// different item once its own has left for the archive or out of the trash.
     pub(crate) fn generate_id(&self, data: &ItemMap) -> u32 {
-        data.keys().max().copied().unwrap_or(0) + 1
+        let highest = self.storage.get_counters().map(|counters| counters.highest_id).unwrap_or(0);
+        data.keys().max().copied().unwrap_or(0).max(highest) + 1
     }
 
     /// Resolves what a caller typed into display ids, accepting either.
     ///
-    /// A display id is recycled -- `max + 1` means deleting the highest and
-    /// creating another hands the number back out -- so anything holding a
-    /// reference across time is told to hold the `uid` instead. That advice
+    /// A display id used to be recycled -- `max + 1` handed a deleted item's
+    /// number back out -- and a restore still renumbers, so anything holding
+    /// a reference across time is told to hold the `uid` instead. That advice
     /// was unfollowable until this accepted one: every mutation took display
     /// ids only, so an agent could carry a uid and then had nothing to do
     /// with it but re-read the board to translate.
@@ -789,7 +796,8 @@ impl Ekko {
     // ---- archive/restore plumbing ---------------------------------------
 
     fn move_to_archive(&self, mut item: Item, archive: &mut ItemMap) -> u32 {
-        let archive_id = self.generate_id(archive);
+        // The archive numbers its own items; storage's high-water mark is not its.
+        let archive_id = archive.keys().max().copied().unwrap_or(0) + 1;
         item.id = archive_id;
         archive.insert(archive_id, item);
         archive_id
@@ -804,8 +812,9 @@ impl Ekko {
 
     // ---- public: mutating commands ---------------------------------------
 
-    /// Writes `data` back, stamping `updated_at` on whatever actually
-    /// changed.
+    /// Writes `data` back, stamping `updated_at` and the next board revision
+    /// on whatever actually changed, and keeping the board's counters and
+    /// journal. Returns the tasks the write set free and those it left waiting.
     ///
     /// Works by diffing against what is currently on disk rather than
     /// asking each command to remember which ids it touched. That is
@@ -814,8 +823,15 @@ impl Ekko {
     /// to stamp. Comparing catches every field, including ones added later.
     ///
     /// Re-reading here is safe because every caller already holds the lock.
-    pub(crate) fn save_touching(&self, data: &mut ItemMap) -> Result<(), EkkoError> {
+    pub(crate) fn save_touching(&self, data: &mut ItemMap) -> Result<(Vec<u32>, Vec<u32>), EkkoError> {
         let before = self.storage.get()?;
+        self.save_against(&before, data)
+    }
+
+    /// `save_touching` against the board as the caller read it, under the
+    /// lock it still holds: a structured write already has that copy, and
+    /// reading storage.json a second time only parses the whole board again.
+    pub(crate) fn save_against(&self, before: &ItemMap, data: &mut ItemMap) -> Result<(Vec<u32>, Vec<u32>), EkkoError> {
         let now = chrono::Local::now().timestamp_millis();
 
         // The trash empties here, on the way past, and only here.
@@ -831,14 +847,54 @@ impl Ekko {
             None => true,
         });
 
-        for (id, item) in data.iter_mut() {
-            if before.get(id) != Some(&*item) {
+        let changed: Vec<u32> = data.iter().filter(|(id, item)| before.get(*id) != Some(*item)).map(|(id, _)| *id).collect();
+        let gone: Vec<&Item> = before.iter().filter(|(id, _)| !data.contains_key(*id)).map(|(_, item)| item).collect();
+
+        let kept = self.storage.get_counters()?;
+        let mut counters = kept;
+        counters.highest_id = counters.highest_id.max(before.keys().chain(data.keys()).max().copied().unwrap_or(0));
+        // A write that changes nothing leaves the revision where it was, so a
+        // retried command does not tell every reader that the board moved.
+        if !changed.is_empty() || !gone.is_empty() {
+            counters.revision += 1;
+        }
+        for id in &changed {
+            if let Some(item) = data.get_mut(id) {
                 item.updated_at = Some(now);
+                item.rev = Some(counters.revision);
             }
         }
 
+        // Counters first. A crash between the two files leaves a revision no
+        // item carries, which no cursor can miss; the other order would leave
+        // items stamped with a revision the next write hands out again.
+        if counters != kept {
+            self.storage.set_counters(counters)?;
+        }
         self.storage.set(data)?;
-        Ok(())
+
+        // What the write did that the items it left cannot show: work it set
+        // free or left waiting, and what it took out of storage. Journaled
+        // after storage, so a crash in between loses a line about a write that
+        // landed rather than recording one about a write that did not.
+        let (released, blocked) = Self::readiness_changes(before, data);
+        if !released.is_empty() || !blocked.is_empty() || !gone.is_empty() {
+            let named = |ids: &[u32]| -> Vec<serde_json::Value> {
+                ids.iter().filter_map(|id| data.get(id)).map(|item| serde_json::json!({"id": item.id, "uid": item.uid})).collect()
+            };
+            let removed: Vec<serde_json::Value> = gone
+                .iter()
+                .map(|item| serde_json::json!({"id": item.id, "uid": item.uid, "text": crate::agent::clip(&item.description, 80)}))
+                .collect();
+            self.storage.append_journal(&serde_json::json!({
+                "rev": counters.revision,
+                "at": now,
+                "released": named(&released),
+                "blocked": named(&blocked),
+                "removed": removed,
+            }))?;
+        }
+        Ok((released, blocked))
     }
 
     /// `phase` is the scope the CLI was invoked with. Items created without
@@ -1526,6 +1582,13 @@ impl Ekko {
         id: u32,
         blocker_ids: &[u32],
     ) -> Result<Vec<String>, EkkoError> {
+        // A note has no state to finish, so a dependency on one would block
+        // nothing while the board showed it as a dependency.
+        if let Some(note) = blocker_ids.iter().find(|blocker| data.get(blocker).is_some_and(|item| !item.is_task)) {
+            return Err(EkkoError::InvalidInput(format!(
+                "{note} is a note, and only a task can block: a note has no state to finish, so it would block nothing"
+            )));
+        }
         for blocker in blocker_ids {
             if *blocker == id || self.reaches(data, *blocker, id) {
                 return Err(EkkoError::BlockingCycle(id, *blocker));
@@ -1670,12 +1733,50 @@ impl Ekko {
         Ok((completed_over, reopened_under))
     }
 
+    /// The tasks a write set free, and the ones it left waiting: open and
+    /// listed on both sides of the write, waiting on open work on one side
+    /// and not on the other, as display ids in order.
+    ///
+    /// This is what a reply names so that its caller does not read the board
+    /// again to learn what its write moved -- the call an agent otherwise
+    /// makes after every completion. Only tasks that existed before count: a
+    /// task the write created, or reopened, is the caller's own doing, not
+    /// news about the board. A stashed task is not listed, so it is not news
+    /// either.
+    pub(crate) fn readiness_changes(before: &ItemMap, after: &ItemMap) -> (Vec<u32>, Vec<u32>) {
+        let (before_index, after_index) = (uid_index(before), uid_index(after));
+        let listed = |item: &Item| holds(item) && item.stashed.is_none();
+        let mut released = Vec::new();
+        let mut blocked = Vec::new();
+        for (id, item) in after {
+            let Some(was) = before.get(id) else { continue };
+            if !listed(was) || !listed(item) {
+                continue;
+            }
+            let waited = !Self::unmet_blockers_indexed(&before_index, before, was).is_empty();
+            let waits = !Self::unmet_blockers_indexed(&after_index, after, item).is_empty();
+            match (waited, waits) {
+                (true, false) => released.push(*id),
+                (false, true) => blocked.push(*id),
+                _ => {}
+            }
+        }
+        (released, blocked)
+    }
+
     /// Replaces the project's phase sequence.
     pub fn set_phases(&self, names: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let cleaned = remove_duplicates(
             names.iter().map(|n| n.trim_start_matches('@').to_string()).collect(),
         );
+        if self.storage.get_phases()? != cleaned {
+            // The order work is taken up in moved though no item did: the
+            // revision says so, and `changes` tells its reader to prime again.
+            let mut counters = self.storage.get_counters()?;
+            counters.revision += 1;
+            self.storage.set_counters(counters)?;
+        }
         self.storage.set_phases(&cleaned)?;
         Ok(Outcome::Phases(cleaned))
     }
@@ -2152,13 +2253,13 @@ mod tests {
         cleanup(&dir);
     }
 
-    /// Ids are still `max + 1`, so one freed by leaving storage comes
-    /// back. What changed is which commands free one: `--clear` archives
-    /// and so does, `--delete` now trashes and so does NOT -- a trashed
-    /// item is still there, and it has to keep its id or `--untrash 5`
-    /// could not mean anything.
+    /// An id is never handed out twice, even once its item has left storage.
+    /// `--clear` archiving the highest-numbered item used to give its number
+    /// to the next task, and an agent still holding that number then acted on
+    /// the wrong item with no error (evals/agent/semantics.py, item 3.4).
+    /// Storage keeps the highest id it has held in counters.json instead.
     #[test]
-    fn an_id_is_reused_once_the_item_actually_leaves_storage() {
+    fn an_id_is_never_handed_out_again_once_its_item_leaves_storage() {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["a"])).unwrap();
         ekko.create_task(&words(&["b"])).unwrap(); // id 2
@@ -2167,7 +2268,7 @@ mod tests {
 
         let Outcome::Task(item) = ekko.create_task(&words(&["c"])).unwrap() else { panic!() };
 
-        assert_eq!(item.id, 2, "id 2 should be reused now that the max id is 1 again");
+        assert_eq!(item.id, 3, "id 2 was handed out again after its item was archived");
 
         cleanup(&dir);
     }
@@ -2654,12 +2755,13 @@ mod tests {
     }
 
     #[test]
-    fn uid_distinguishes_items_that_share_a_recycled_id() {
-        // Ids are `max + 1`, so an item leaving storage and another being
-        // created hands the new one the same id. This is exactly the case
-        // a caller holding an id across time gets wrong. `--clear` rather
-        // than `--delete` because deleting now trashes, and a trashed item
-        // keeps its number.
+    fn a_new_item_never_takes_the_id_of_one_that_left_storage() {
+        // Ids used to be `max + 1`, so an item leaving storage and another
+        // being created handed the new one the same id -- exactly the case a
+        // caller holding an id across time got wrong. Storage now remembers
+        // the highest id it has held, and the uid still tells two items apart
+        // wherever they meet. `--clear` rather than `--delete`, because
+        // deleting trashes, and a trashed item keeps its number anyway.
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["first"])).unwrap();
         ekko.create_task(&words(&["second"])).unwrap();
@@ -2667,12 +2769,13 @@ mod tests {
 
         ekko.set_state(&words(&["@2", "done"]), false).unwrap();
         ekko.clear().unwrap();
-        ekko.create_task(&words(&["reuses id 2"])).unwrap();
+        ekko.create_task(&words(&["created after the clear"])).unwrap();
 
         let data = ekko.storage.get().unwrap();
-        assert_eq!(data[&2].description, "reuses id 2", "the id really was recycled");
+        assert!(!data.contains_key(&2), "the cleared item's id came back");
+        assert_eq!(data[&3].description, "created after the clear");
         assert!(old_uid.is_some());
-        assert_ne!(data[&2].uid, old_uid, "same id, different item, different uid");
+        assert_ne!(data[&3].uid, old_uid, "a different item, a different uid");
 
         cleanup(&dir);
     }

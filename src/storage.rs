@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 use crate::item::Item;
 use crate::json;
 
@@ -261,12 +263,110 @@ impl Storage {
     /// and rename dance as everything else, so a reader never sees half a
     /// list.
     pub fn set_phases(&self, phases: &[String]) -> Result<(), StorageError> {
-        let content = serde_json::to_string_pretty(phases)?;
-        let path = self.phases_file();
-        let temp_file = temp_file_path(&path, &self.temp_dir);
-        fs::write(&temp_file, content)?;
-        fs::rename(&temp_file, &path)?;
-        Ok(())
+        replace_durably(&self.phases_file(), &self.temp_dir, serde_json::to_string_pretty(phases)?.as_bytes())
+    }
+}
+
+/// The board's counters, kept in `counters.json` beside `storage.json` for
+/// the reason `phases.json` is: storage is a flat map of numeric item ids that
+/// taskbook iterates, with no room for board-level fields.
+///
+/// - `revision` rises by one on every write that changes the board, and that
+///   write stamps it on the items it changed: a cursor that cannot tie, repeat
+///   an item, or depend on a clock.
+/// - `highest_id` is the largest display id storage has held, so a number is
+///   never handed out again once its item has left.
+///
+/// A board with no file yet reads as both at zero, and its next write sets
+/// them right.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Counters {
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub highest_id: u32,
+}
+
+impl Storage {
+    fn counters_file(&self) -> PathBuf {
+        self.storage_file.with_file_name("counters.json")
+    }
+
+    pub fn get_counters(&self) -> Result<Counters, StorageError> {
+        let path = self.counters_file();
+        if !path.exists() {
+            return Ok(Counters::default());
+        }
+        Ok(serde_json::from_str(&fs::read_to_string(&path)?)?)
+    }
+
+    /// Written through the same temp-file and rename dance as everything else.
+    pub fn set_counters(&self, counters: Counters) -> Result<(), StorageError> {
+        replace_durably(&self.counters_file(), &self.temp_dir, serde_json::to_string_pretty(&counters)?.as_bytes())
+    }
+}
+
+/// How much journal a board keeps: past twice this, the oldest entries go.
+const JOURNAL_BYTES: u64 = 256 * 1024;
+
+/// What a write did that the items it leaves cannot show, one JSON object per
+/// line in `journal.jsonl` beside `storage.json`: the tasks it set free or left
+/// waiting, whose own fields did not change, and the items it took out of
+/// storage, which are gone. `changes` reads it to tell a cursor about both.
+///
+/// When the journal is trimmed its first line becomes `{"from": rev}`, the
+/// oldest revision still described, so a cursor older than that is told the
+/// journal no longer reaches it instead of being given a partial answer.
+impl Storage {
+    fn journal_file(&self) -> PathBuf {
+        self.storage_file.with_file_name("journal.jsonl")
+    }
+
+    /// Every entry, oldest first; a line that does not parse is skipped.
+    pub fn read_journal(&self) -> Result<Vec<serde_json::Value>, StorageError> {
+        let path = self.journal_file();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(fs::read_to_string(&path)?.lines().filter_map(|line| serde_json::from_str(line).ok()).collect())
+    }
+
+    /// Appends one entry. Callers hold the lock.
+    pub fn append_journal(&self, entry: &serde_json::Value) -> Result<(), StorageError> {
+        self.append_journal_within(entry, JOURNAL_BYTES)
+    }
+
+    fn append_journal_within(&self, entry: &serde_json::Value, bytes: u64) -> Result<(), StorageError> {
+        use std::io::Write as _;
+        let path = self.journal_file();
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        writeln!(file, "{entry}")?;
+        if file.metadata()?.len() <= bytes * 2 {
+            return Ok(());
+        }
+        drop(file);
+
+        let entries: Vec<serde_json::Value> =
+            self.read_journal()?.into_iter().filter(|entry| entry.get("from").is_none()).collect();
+        let mut kept: Vec<String> = Vec::new();
+        let mut size = 0;
+        for entry in entries.iter().rev() {
+            let line = entry.to_string();
+            size += line.len() as u64 + 1;
+            if size > bytes {
+                break;
+            }
+            kept.push(line);
+        }
+        kept.reverse();
+        let from = kept.first().and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok()?["rev"].as_i64());
+        let mut content = format!("{}\n", serde_json::json!({"from": from.unwrap_or(0)}));
+        for line in kept {
+            content.push_str(&line);
+            content.push('\n');
+        }
+        replace_durably(&path, &self.temp_dir, content.as_bytes())
     }
 }
 
@@ -280,10 +380,28 @@ fn read_map(path: &Path) -> Result<ItemMap, StorageError> {
 }
 
 fn write_atomic(path: &Path, temp_dir: &Path, data: &ItemMap) -> Result<(), StorageError> {
-    let content = json::to_pretty_string(data)?;
+    replace_durably(path, temp_dir, json::to_pretty_string(data)?.as_bytes())
+}
+
+/// Replaces `path` with `content` so that a reader sees the old file or the
+/// new one, never half of one, and so the new one survives a crash: the temp
+/// file is synced before the rename and its directory after. Without the
+/// first sync, a crash just after the rename can leave an empty file on a
+/// filesystem that allocates lazily, which for storage.json is the whole
+/// board.
+fn replace_durably(path: &Path, temp_dir: &Path, content: &[u8]) -> Result<(), StorageError> {
+    use std::io::Write as _;
     let temp_file = temp_file_path(path, temp_dir);
-    fs::write(&temp_file, content)?;
+    let mut file = File::create(&temp_file)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    drop(file);
     fs::rename(&temp_file, path)?;
+    // Best effort: some filesystems refuse to sync a directory, and the
+    // rename itself has already happened.
+    if let Some(dir) = path.parent().and_then(|parent| File::open(parent).ok()) {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 
@@ -350,6 +468,37 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
     }
+    #[test]
+    fn counters_read_as_zero_until_written_and_round_trip() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+
+        assert_eq!(storage.get_counters().unwrap(), Counters::default());
+        storage.set_counters(Counters { revision: 7, highest_id: 42 }).unwrap();
+        assert_eq!(storage.get_counters().unwrap(), Counters { revision: 7, highest_id: 42 });
+        assert!(dir.join("storage").join("counters.json").exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_journal_appends_in_order_and_trims_to_what_it_keeps() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        assert!(storage.read_journal().unwrap().is_empty());
+
+        for rev in 1..=40 {
+            storage.append_journal_within(&serde_json::json!({"rev": rev}), 100).unwrap();
+        }
+        let kept = storage.read_journal().unwrap();
+        let revs: Vec<i64> = kept.iter().filter_map(|entry| entry["rev"].as_i64()).collect();
+        assert!(revs.len() < 40 && revs.last() == Some(&40), "{revs:?}");
+        assert!(revs.windows(2).all(|pair| pair[1] == pair[0] + 1), "{revs:?}");
+        assert_eq!(kept[0]["from"].as_i64(), Some(revs[0]), "a trimmed journal says where it starts");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn the_lock_file_is_never_unlinked_and_the_lock_is_retakeable() {
         let dir = temp_ekko_dir();

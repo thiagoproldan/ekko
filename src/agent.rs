@@ -12,14 +12,18 @@
 //! already say: readiness, blockers, totals and the roadmap come from the
 //! same functions the board view and the dependency rule use.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use chrono::Datelike;
 use serde::Serialize;
 
 use crate::ekko::{broken_dependencies, holds, phase_order, uid_index, Ekko, EkkoError, Outcome};
 use crate::item::{Item, State};
-use crate::render::{Inversion, RoadmapStep, Stats};
+use crate::lexical::{self, Query};
+use crate::render::{Inversion, ProjectSummary, RoadmapStep, Stats};
 use crate::storage::ItemMap;
 
 /// How much of a reason `prime` quotes before pointing at `context`.
@@ -30,6 +34,47 @@ const TASK_CLIP: usize = 160;
 const RECENT_NOTES: usize = 5;
 /// Blocked tasks `prime` lists before counting the rest.
 const BLOCKED_SHOWN: usize = 20;
+/// Entries of a long listing whose downstream count is worked out. Counting
+/// walks the graph once per entry, which on a long chain is quadratic in the
+/// board -- 12 seconds for a prime over 10,000 tasks -- for lines no view
+/// shows: a prime fits fewer than this many.
+const COUNTED: usize = 50;
+
+// Taskwarrior's default urgency coefficients (taskwarrior.org/docs/urgency,
+// Task::urgency_due in src/Task.cpp), applied by `urgency`.
+const URGENCY_DUE: f64 = 12.0;
+const URGENCY_BLOCKING: f64 = 8.0;
+const URGENCY_AGE: f64 = 2.0;
+const URGENCY_AGE_DAYS: f64 = 365.0;
+/// The most a prime says, in characters. Claude Code puts at most 10,000
+/// characters of a hook's output into context and turns anything longer into
+/// a short preview and a file path (hooks.md; note 165 checked it at 9,900 and
+/// 10,100), which would cut the resume view off where it matters. Six
+/// thousand leaves room for what a handoff adds under the work in progress.
+const PRIME_BUDGET: usize = 6_000;
+/// Ready tasks whose attached notes a prime quotes; later ones show the task.
+const READY_WITH_NOTES: usize = 3;
+/// The longest a "+N more" line gets, reserved for each section a cut leaves short.
+const MORE_LINE: usize = 48;
+/// The most a resumed session is told about what moved before the whole
+/// prime is cheaper to read than the list.
+const RESUME_CHANGES: usize = 2_000;
+/// How long the hook remembers the cursor it served a session.
+const SESSION_KEPT: Duration = Duration::from_secs(30 * 86_400);
+/// Hits `search` shows unless asked for more.
+pub const SEARCH_LIMIT: usize = 20;
+
+/// How much of the notes around an item a context quotes. Concise clips each
+/// attached note to `NOTE_CLIP` characters with a count of the rest -- the way
+/// prime already quotes them -- and full prints them whole. The item's own
+/// text is whole either way: it is what was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    Concise,
+    Full,
+}
+/// How much of a hit's text `search` shows, around where it matched.
+const SNIPPET: usize = 160;
 
 /// Dependencies resolved once for a whole board, in both directions.
 struct Graph<'a> {
@@ -88,6 +133,121 @@ impl<'a> Graph<'a> {
         seen.remove(&id);
         seen.len()
     }
+
+    /// The open tasks `id` waits on, directly or through other open tasks,
+    /// and the roots among them: open blockers with no open blocker of their
+    /// own -- the work free to start that, finished, would move `id`. Each is
+    /// counted once however many paths lead to it.
+    fn upstream(&self, id: u32) -> (usize, Vec<u32>) {
+        let mut seen = HashSet::new();
+        let mut stack = vec![id];
+        let mut roots = Vec::new();
+        while let Some(at) = stack.pop() {
+            let open = self.open_blockers(at);
+            if open.is_empty() && at != id {
+                roots.push(at);
+            }
+            for blocker in open {
+                if blocker != id && seen.insert(blocker) {
+                    stack.push(blocker);
+                }
+            }
+        }
+        roots.sort_unstable();
+        (seen.len(), roots)
+    }
+
+    /// What every open task inherits from the open work waiting on it, in one
+    /// pass from the tasks nothing waits on back to their blockers -- Kahn's
+    /// order over open dependents, so each task is settled only after all it
+    /// holds up is. Exact on a diamond: a maximum and a minimum count nothing
+    /// twice. A task caught in a cycle, which only a hand-edited file can
+    /// hold, keeps its own values.
+    fn inherited(&self) -> HashMap<u32, Inherited> {
+        let open = |id: &u32| self.all.get(id).is_some_and(holds);
+        let mut waiting: HashMap<u32, usize> = self
+            .all
+            .values()
+            .filter(|item| holds(item))
+            .map(|item| (item.id, self.dependents.get(&item.id).into_iter().flatten().filter(|d| open(d)).count()))
+            .collect();
+        let mut settle: Vec<u32> = waiting.iter().filter(|(_, n)| **n == 0).map(|(id, _)| *id).collect();
+        let mut values: HashMap<u32, Inherited> = HashMap::new();
+        while let Some(id) = settle.pop() {
+            let item = &self.all[&id];
+            let mut value = Inherited { priority: item.priority.unwrap_or(1), finish_by: due_day(item), waited_on: false };
+            for dependent in self.dependents.get(&id).into_iter().flatten() {
+                let Some(above) = values.get(dependent) else { continue };
+                value.priority = value.priority.max(above.priority);
+                if let Some(day) = above.finish_by {
+                    value.finish_by = Some(value.finish_by.map_or(day - 1, |own| own.min(day - 1)));
+                }
+                value.waited_on = true;
+            }
+            values.insert(id, value);
+            for blocker in self.blockers.get(&id).into_iter().flatten() {
+                if let Some(n) = waiting.get_mut(blocker) {
+                    *n -= 1;
+                    if *n == 0 {
+                        settle.push(*blocker);
+                    }
+                }
+            }
+        }
+        values
+    }
+}
+
+/// What a task takes on from the open work waiting on it: the highest
+/// priority among that work, the latest day it can finish for that work to
+/// meet its due dates -- a day per task in between, the critical path method's
+/// backward pass -- and whether any open work waits on it at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Inherited {
+    priority: u8,
+    /// Days from the common era, as chrono counts them.
+    finish_by: Option<i32>,
+    waited_on: bool,
+}
+
+fn due_day(item: &Item) -> Option<i32> {
+    let due = item.due_date.as_deref()?;
+    chrono::NaiveDate::parse_from_str(due, "%Y-%m-%d").ok().map(|date| date.num_days_from_ce())
+}
+
+fn day_date(day: i32) -> Option<String> {
+    chrono::NaiveDate::from_num_days_from_ce_opt(day).map(|date| date.format("%Y-%m-%d").to_string())
+}
+
+/// Taskwarrior's urgency for a task, on what it inherits: 12 for a date on a
+/// 21-day ramp, 8 for holding up open work, 6 or 3.9 for priority 3 or 2, and
+/// up to 2 for age. The weights are Taskwarrior's defaults; see note 166 for
+/// where they place this board's own work.
+fn urgency(item: &Item, inherited: Option<Inherited>, today: i32, now: i64) -> f64 {
+    let inherited =
+        inherited.unwrap_or(Inherited { priority: item.priority.unwrap_or(1), finish_by: due_day(item), waited_on: false });
+    let due = inherited.finish_by.map_or(0.0, |day| URGENCY_DUE * due_ramp(today - day));
+    let blocking = if inherited.waited_on { URGENCY_BLOCKING } else { 0.0 };
+    let priority = match inherited.priority {
+        3 => 6.0,
+        2 => 3.9,
+        _ => 0.0,
+    };
+    let age = (now - item.timestamp).max(0) as f64 / 86_400_000.0;
+    due + blocking + priority + URGENCY_AGE * (age / URGENCY_AGE_DAYS).min(1.0)
+}
+
+/// Taskwarrior's `Task::urgency_due`: 21 days mapped onto 0.2 to 1.0, from two
+/// weeks ahead of the date to a week past it.
+fn due_ramp(overdue_days: i32) -> f64 {
+    let overdue = f64::from(overdue_days);
+    if overdue >= 7.0 {
+        1.0
+    } else if overdue >= -14.0 {
+        (overdue + 14.0) * 0.8 / 21.0 + 0.2
+    } else {
+        0.2
+    }
 }
 
 /// One item as the agent views list it.
@@ -116,6 +276,14 @@ pub struct Entry {
     /// Open tasks waiting on this one, directly or through others.
     #[serde(skip_serializing_if = "is_zero")]
     pub unblocks: usize,
+    /// The priority this inherits from open work waiting on it, when higher
+    /// than its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherits: Option<u8>,
+    /// The day this has to be done by for the work waiting on it to meet its
+    /// dates, when that is not its own due date.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_by: Option<String>,
     pub updated_at: i64,
     /// Notes attached to this task.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -159,6 +327,12 @@ impl<'a> Reader<'a> {
     }
 
     fn entry(&self, item: &Item) -> Entry {
+        self.entry_counting(item, true)
+    }
+
+    /// An entry, with how much open work waits on it worked out only when
+    /// `count` says so.
+    fn entry_counting(&self, item: &Item, count: bool) -> Entry {
         let notes = item
             .uid
             .as_deref()
@@ -185,9 +359,13 @@ impl<'a> Reader<'a> {
             phase: item.phase.clone(),
             starred: item.is_starred,
             blocked_by: self.graph.open_blockers(item.id),
-            unblocks: if item.is_task { self.graph.downstream(item.id) } else { 0 },
+            // Only open work holds anything up: a finished task already let
+            // go of what waited on it.
+            unblocks: if count && holds(item) { self.graph.downstream(item.id) } else { 0 },
             updated_at: updated(item),
             notes,
+            inherits: None,
+            finish_by: None,
         }
     }
 
@@ -196,30 +374,50 @@ impl<'a> Reader<'a> {
     }
 
     /// What to take up next, best first: work already in progress, then
-    /// earlier phases before later ones (the root after every phase), higher
-    /// priority, the nearer deadline (none last), more work waiting
-    /// downstream, and the older item. A lexicographic order, so each key
-    /// only breaks ties left by the ones before it.
-    fn next(&self, limit: Option<usize>) -> Vec<Entry> {
-        let mut candidates: Vec<&Item> = self
+    /// earlier phases before later ones (the root after every phase), then
+    /// urgency, then the older item. Returns the entries within `limit` and
+    /// how many tasks were candidates.
+    ///
+    /// Urgency is worked out on what a task inherits from the work waiting on
+    /// it, so a low-priority prerequisite of urgent work ranks as urgent. The
+    /// lexicographic order this replaces could not see through a dependency:
+    /// it put a p1 blocker of a p3 task due tomorrow below an unrelated p2,
+    /// and any due date, however far, above work others wait on.
+    fn next(&self, limit: Option<usize>) -> (Vec<Entry>, usize) {
+        let inherited = self.graph.inherited();
+        let now = chrono::Local::now();
+        let today = now.date_naive().num_days_from_ce();
+        let mut candidates: Vec<(f64, &Item)> = self
             .graph
             .all
             .values()
-            .filter(|item| {
-                visible(item) && (State::of(item) == Some(State::Progress) || self.ready(item))
-            })
+            .filter(|item| visible(item) && (State::of(item) == Some(State::Progress) || self.ready(item)))
+            .map(|item| (urgency(item, inherited.get(&item.id).copied(), today, now.timestamp_millis()), item))
             .collect();
-        candidates.sort_by_cached_key(|item| {
+        let rank = |item: &Item| {
             (
                 State::of(item) != Some(State::Progress),
                 item.phase.as_deref().and_then(|p| self.order.get(p)).copied().unwrap_or(usize::MAX),
-                std::cmp::Reverse(item.priority.unwrap_or(1)),
-                (item.due_date.is_none(), item.due_date.clone()),
-                std::cmp::Reverse(self.graph.downstream(item.id)),
-                item.id,
             )
+        };
+        candidates.sort_by(|(a_urgency, a), (b_urgency, b)| {
+            rank(a).cmp(&rank(b)).then(b_urgency.total_cmp(a_urgency)).then(a.id.cmp(&b.id))
         });
-        candidates.into_iter().take(limit.unwrap_or(usize::MAX)).map(|item| self.entry(item)).collect()
+        let total = candidates.len();
+        let entries = candidates
+            .into_iter()
+            .take(limit.unwrap_or(usize::MAX))
+            .enumerate()
+            .map(|(at, (_, item))| {
+                let mut entry = self.entry_counting(item, at < COUNTED);
+                if let Some(taken) = inherited.get(&item.id) {
+                    entry.inherits = (taken.priority > item.priority.unwrap_or(1)).then_some(taken.priority);
+                    entry.finish_by = taken.finish_by.filter(|day| due_day(item) != Some(*day)).and_then(day_date);
+                }
+                entry
+            })
+            .collect();
+        (entries, total)
     }
 }
 
@@ -243,7 +441,7 @@ fn state_word(item: &Item) -> &'static str {
 }
 
 /// `text` on one line, cut at `max` characters with a count of what was cut.
-fn clip(text: &str, max: usize) -> String {
+pub(crate) fn clip(text: &str, max: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let count = flat.chars().count();
     if count <= max {
@@ -258,8 +456,8 @@ fn clip(text: &str, max: usize) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct Prime {
     pub board: String,
-    /// The newest `updatedAt` on the board: pass it to `changes` later to
-    /// hear only what moved since this read.
+    /// The board revision this read saw: pass it to `changes` later to hear
+    /// only what moved since.
     pub cursor: i64,
     pub stats: Stats,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -268,7 +466,9 @@ pub struct Prime {
     pub rootless: u32,
     pub doing: Vec<Entry>,
     pub ready: Vec<Entry>,
+    /// The first blocked tasks, by priority; `blocked_total` counts them all.
     pub blocked: Vec<Entry>,
+    pub blocked_total: usize,
     pub recent_notes: Vec<NoteRef>,
     /// Done tasks still waiting on open work, as (task, blocker) pairs.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -277,6 +477,11 @@ pub struct Prime {
     pub inversions: Vec<Inversion>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub overdue: Vec<u32>,
+    /// Open work ready only because what it waited on was cancelled, as
+    /// (task, cancelled blocker) pairs: free to start, though the thing it
+    /// needed will never happen.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub freed_by_cancelling: Vec<(u32, u32)>,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -289,17 +494,20 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     let phases = ekko.storage.get_phases()?;
     let reader = Reader::new(&all, &phases);
 
-    let next = reader.next(None);
+    let (next, _) = reader.next(None);
     let (doing, ready): (Vec<Entry>, Vec<Entry>) =
         next.into_iter().partition(|entry| entry.state == "in progress");
 
-    let mut blocked: Vec<Entry> = all
+    let mut blocked: Vec<&Item> = all
         .values()
         .filter(|item| visible(item) && holds(item) && State::of(item) != Some(State::Progress))
         .filter(|item| !reader.graph.open_blockers(item.id).is_empty())
-        .map(|item| reader.entry(item))
         .collect();
-    blocked.sort_by_key(|entry| (std::cmp::Reverse(entry.priority.unwrap_or(1)), entry.id));
+    blocked.sort_by_key(|item| (std::cmp::Reverse(item.priority.unwrap_or(1)), item.id));
+    let blocked_total = blocked.len();
+    // Entries only for what a prime shows: working one out walks the graph,
+    // and a long chain holds thousands of blocked tasks nobody reads.
+    let blocked: Vec<Entry> = blocked.into_iter().take(BLOCKED_SHOWN).map(|item| reader.entry(item)).collect();
 
     let mut notes: Vec<&Item> =
         all.values().filter(|item| visible(item) && !item.is_task && item.attached_to.is_none()).collect();
@@ -322,24 +530,45 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         .map(|item| item.id)
         .collect();
 
+    let index = uid_index(&all);
+    let freed_by_cancelling = all
+        .values()
+        .filter(|item| visible(item) && holds(item) && reader.graph.open_blockers(item.id).is_empty())
+        .flat_map(|item| {
+            item.blocked_by
+                .iter()
+                .flatten()
+                .filter_map(|uid| index.get(uid.as_str()).copied())
+                .filter(|blocker| all.get(blocker).and_then(State::of) == Some(State::Cancelled))
+                .map(move |blocker| (item.id, blocker))
+        })
+        .collect();
+
     Ok(Prime {
         board: board.to_string(),
-        cursor: all.values().map(updated).max().unwrap_or(0),
+        cursor: ekko.storage.get_counters()?.revision as i64,
         stats: ekko.compute_stats(&all),
         roadmap,
         rootless,
         doing,
         ready,
         blocked,
+        blocked_total,
         recent_notes,
         broken: broken_dependencies(&all).into_iter().collect(),
         inversions,
         overdue,
+        freed_by_cancelling,
     })
 }
 
 /// What to take up next, best first; see `Reader::next` for the order.
 pub fn next(ekko: &Ekko, limit: Option<usize>) -> Result<Vec<Entry>, EkkoError> {
+    Ok(next_listed(ekko, limit)?.0)
+}
+
+/// `next`, with how many tasks were candidates in all.
+pub fn next_listed(ekko: &Ekko, limit: Option<usize>) -> Result<(Vec<Entry>, usize), EkkoError> {
     let all = ekko.storage.get()?;
     let phases = ekko.storage.get_phases()?;
     Ok(Reader::new(&all, &phases).next(limit))
@@ -359,6 +588,13 @@ pub struct Context {
     /// Every recorded blocker, open or not, so a closed one still explains
     /// why the dependency was there.
     pub blockers: Vec<Link>,
+    /// Open tasks this waits on, directly or through others.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub waits_on: usize,
+    /// The open work free to start that stands before this -- what an agent
+    /// otherwise finds by reading one blocker after another.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<Link>,
     pub dependents: Vec<Link>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<Link>,
@@ -374,10 +610,23 @@ pub struct Link {
 
 /// The neighbourhood of one item, given by display id or uid.
 pub fn context(ekko: &Ekko, target: &str) -> Result<Context, EkkoError> {
+    Ok(contexts(ekko, &[target.to_string()])?.remove(0))
+}
+
+/// The neighbourhoods of several items from one read of the board, in the
+/// order asked and each once -- what an agent reading a few search hits
+/// otherwise spends a call apiece on. An id that names nothing refuses them
+/// all, the way it does for every other command.
+pub fn contexts(ekko: &Ekko, targets: &[String]) -> Result<Vec<Context>, EkkoError> {
     let all = ekko.storage.get()?;
     let phases = ekko.storage.get_phases()?;
-    let id = ekko.validate_ids(&[target.trim_start_matches('@').to_string()], &all)?[0];
+    let raw: Vec<String> = targets.iter().map(|target| target.trim_start_matches('@').to_string()).collect();
+    let ids = ekko.validate_ids(&raw, &all)?;
     let reader = Reader::new(&all, &phases);
+    Ok(ids.into_iter().map(|id| neighbourhood(&all, &reader, id)).collect())
+}
+
+fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
     let item = &all[&id];
 
     let link = |id: &u32| {
@@ -396,44 +645,121 @@ pub fn context(ekko: &Ekko, target: &str) -> Result<Context, EkkoError> {
     let attached_to = item
         .attached_to
         .as_deref()
-        .and_then(|uid| uid_index(&all).get(uid).copied())
+        .and_then(|uid| uid_index(all).get(uid).copied())
         .and_then(|task| link(&task));
+    let (waits_on, root_ids) = reader.graph.upstream(id);
+    let roots = root_ids.iter().filter_map(link).collect();
 
-    Ok(Context {
+    Context {
         item: reader.entry(item),
         created: item.date.clone(),
         stashed: item.stashed.is_some(),
         trashed: item.trashed.is_some(),
         blockers,
+        waits_on,
+        roots,
         dependents,
         attached_to,
-    })
+    }
 }
 
-/// Visible items matching every filter `--list` knows and, when given, a
-/// text, case-insensitively. Each item once, in id order, however many
+/// What `search` found: the hits it shows, each with the text it shows, how
+/// many matched in all, and whether they match every word of the text or,
+/// none doing so, some. With neither text nor filters there are no hits, only
+/// a summary of what the board holds.
+#[derive(Debug, Default)]
+pub struct Found {
+    pub total: usize,
+    pub every_word: bool,
+    pub hits: Vec<(Entry, String)>,
+    pub summary: Option<String>,
+}
+
+/// Visible items passing every filter `--list` knows and, when given, holding
+/// the words of a text as `lexical` matches and ranks them: best first with
+/// the part of each text that matched, or in id order when there is no text.
+/// At most `limit` are shown, with the total. Each item once, however many
 /// boards it is on.
-pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String]) -> Result<Vec<Entry>, EkkoError> {
+pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String], limit: usize) -> Result<Found, EkkoError> {
+    let query = Query::new(text.unwrap_or_default());
+    let all = ekko.storage.get()?;
+    if query.is_empty() && filters.is_empty() {
+        return Ok(Found { summary: Some(summary(&all)), ..Found::default() });
+    }
     let groups = match ekko.list_by_attributes(filters)? {
         Outcome::List(groups) => groups,
         _ => Vec::new(),
     };
-    let all = ekko.storage.get()?;
     let phases = ekko.storage.get_phases()?;
     let reader = Reader::new(&all, &phases);
-    let needle = text.map(str::to_lowercase);
 
     let mut seen = HashSet::new();
-    let mut entries: Vec<Entry> = groups
+    let mut candidates: Vec<&Item> = groups
         .iter()
         .flat_map(|(_, items)| items)
-        .filter(|item| needle.as_deref().is_none_or(|n| item.description.to_lowercase().contains(n)))
         .filter(|item| seen.insert(item.id))
         .filter_map(|item| all.get(&item.id))
-        .map(|item| reader.entry(item))
         .collect();
-    entries.sort_by_key(|entry| entry.id);
-    Ok(entries)
+    candidates.sort_by_key(|item| item.id);
+
+    if query.is_empty() {
+        let hits =
+            candidates.iter().take(limit).map(|item| (reader.entry(item), clip(&item.description, TASK_CLIP))).collect();
+        return Ok(Found { total: candidates.len(), every_word: true, hits, summary: None });
+    }
+    let texts: Vec<&str> = candidates.iter().map(|item| item.description.as_str()).collect();
+    let ranked = lexical::rank(&query, &texts);
+    let hits = ranked
+        .hits
+        .iter()
+        .take(limit)
+        .map(|hit| {
+            let item = candidates[hit.index];
+            (reader.entry(item), lexical::snippet(&item.description, &query, SNIPPET))
+        })
+        .collect();
+    Ok(Found { total: ranked.hits.len(), every_word: ranked.every_word, hits, summary: None })
+}
+
+/// What a board holds, for a search that named nothing to look for: counts
+/// by state and by board, in a few lines, instead of every item.
+fn summary(all: &ItemMap) -> String {
+    let shown: Vec<&Item> = all.values().filter(|item| visible(item)).collect();
+    let tasks: Vec<&Item> = shown.iter().copied().filter(|item| item.is_task).collect();
+    let notes = shown.len() - tasks.len();
+    let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+
+    let states: Vec<String> = ["in progress", "paused", "pending", "done", "cancelled"]
+        .iter()
+        .filter_map(|word| {
+            let n = tasks.iter().filter(|item| state_word(item) == *word).count();
+            (n > 0).then(|| format!("{n} {word}"))
+        })
+        .collect();
+    let tasks_part = if states.is_empty() {
+        count(tasks.len(), "task", "tasks")
+    } else {
+        format!("{} ({})", count(tasks.len(), "task", "tasks"), states.join(", "))
+    };
+
+    let mut boards: Vec<(&str, usize)> = Vec::new();
+    for item in &shown {
+        for board in &item.boards {
+            match boards.iter_mut().find(|(name, _)| *name == board.as_str()) {
+                Some((_, n)) => *n += 1,
+                None => boards.push((board.as_str(), 1)),
+            }
+        }
+    }
+    boards.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let boards: Vec<String> = boards.iter().map(|(name, n)| format!("{name} {n}")).collect();
+
+    format!(
+        "{}: {tasks_part} and {}.\nBoards: {}.\nGive text or filters to list items.\n",
+        count(shown.len(), "item", "items"),
+        count(notes, "note", "notes"),
+        boards.join(" \u{b7} ")
+    )
 }
 
 /// What moved since a cursor from an earlier read.
@@ -444,31 +770,237 @@ pub struct Changes {
     /// The cursor to pass next time.
     pub cursor: i64,
     pub items: Vec<Entry>,
+    /// Listed tasks a write set free and that are still free to start.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub released: Vec<u32>,
+    /// Listed tasks a write left waiting and that still wait.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<u32>,
+    /// Items a write took out of storage: archived, or expired from the trash.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<Removed>,
+    /// Whether the journal still reaches back to `since`.
+    pub complete: bool,
 }
 
-/// Every item written at or after `since`, put away or not, oldest change
-/// first. A trashed item still shows, as `trashed`: the trash keeps what it
-/// takes. What leaves storage outright -- archived by `--clear`, or expired
-/// from the trash -- leaves nothing to list, which the text says.
+/// An item gone from storage, as the journal remembers it.
+#[derive(Debug, Serialize)]
+pub struct Removed {
+    pub id: u32,
+    pub uid: Option<String>,
+    pub text: String,
+}
+
+/// A cursor below this is a board revision; one at or above it is a
+/// millisecond clock reading, from a prime older than revisions.
+const CLOCK_CURSOR: i64 = 100_000_000_000;
+
+/// Every item a write changed after the revision `since`, put away or not,
+/// oldest change first. A trashed item still shows, as `trashed`: the trash
+/// keeps what it takes. What leaves storage outright -- archived by `--clear`,
+/// or expired from the trash -- leaves nothing to list; the revision still
+/// moves, and the text says to prime again.
+///
+/// A cursor from before revisions, a clock reading, is answered the old way,
+/// by `updatedAt`, and handed a revision to use from then on.
 pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
     let all = ekko.storage.get()?;
     let phases = ekko.storage.get_phases()?;
+    let cursor = ekko.storage.get_counters()?.revision as i64;
     let reader = Reader::new(&all, &phases);
-    let mut items: Vec<Entry> =
-        all.values().filter(|item| updated(item) >= since).map(|item| reader.entry(item)).collect();
-    items.sort_by_key(|entry| (entry.updated_at, entry.id));
-    let cursor = all.values().map(updated).max().unwrap_or(since).max(since);
-    Ok(Changes { since, cursor, items })
+    let moved = |item: &&Item| {
+        if since >= CLOCK_CURSOR {
+            updated(item) >= since
+        } else {
+            item.rev.unwrap_or(0) as i64 > since
+        }
+    };
+    let mut items: Vec<(u64, Entry)> =
+        all.values().filter(moved).map(|item| (item.rev.unwrap_or(0), reader.entry(item))).collect();
+    items.sort_by_key(|(rev, entry)| (*rev, entry.updated_at, entry.id));
+    let mut items: Vec<Entry> = items.into_iter().map(|(_, entry)| entry).collect();
+
+    // What the journal saw after the cursor: work set free or left waiting,
+    // named only while it still is, and items taken out of storage.
+    let journal = ekko.storage.read_journal()?;
+    let index = uid_index(&all);
+    let resolve = |named: &serde_json::Value| {
+        named["uid"]
+            .as_str()
+            .and_then(|uid| index.get(uid).copied())
+            .or_else(|| named["id"].as_u64().map(|id| id as u32).filter(|id| all.get(id).is_some_and(|item| item.uid.is_none())))
+    };
+    let after = |entry: &serde_json::Value| {
+        if since >= CLOCK_CURSOR {
+            entry["at"].as_i64().is_some_and(|at| at >= since)
+        } else {
+            entry["rev"].as_i64().is_some_and(|rev| rev > since)
+        }
+    };
+    let (mut released, mut blocked, mut removed) = (BTreeSet::new(), BTreeSet::new(), Vec::new());
+    for entry in journal.iter().filter(|entry| after(entry)) {
+        for id in entry["released"].as_array().into_iter().flatten().filter_map(&resolve) {
+            blocked.remove(&id);
+            released.insert(id);
+        }
+        for id in entry["blocked"].as_array().into_iter().flatten().filter_map(&resolve) {
+            released.remove(&id);
+            blocked.insert(id);
+        }
+        for gone in entry["removed"].as_array().into_iter().flatten() {
+            removed.push(Removed {
+                id: gone["id"].as_u64().unwrap_or_default() as u32,
+                uid: gone["uid"].as_str().map(str::to_string),
+                text: gone["text"].as_str().unwrap_or_default().to_string(),
+            });
+        }
+    }
+    released.retain(|id| all.get(id).is_some_and(|item| reader.ready(item)));
+    blocked.retain(|id| all.get(id).is_some_and(|item| visible(item) && holds(item)) && !reader.graph.open_blockers(*id).is_empty());
+    for id in released.iter().chain(&blocked) {
+        if !items.iter().any(|entry| entry.id == *id) {
+            items.push(reader.entry(&all[id]));
+        }
+    }
+    let from = journal.iter().find_map(|entry| entry["from"].as_i64());
+    let complete = from.is_none_or(|from| since < CLOCK_CURSOR && since + 1 >= from);
+
+    Ok(Changes {
+        since,
+        cursor,
+        items,
+        released: released.into_iter().collect(),
+        blocked: blocked.into_iter().collect(),
+        removed,
+        complete,
+    })
+}
+
+/// How a Claude Code session began, read off the SessionStart hook's input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionEvent {
+    pub source: String,
+    pub session_id: Option<String>,
+}
+
+impl SessionEvent {
+    /// Input that does not read as an event reads as a session starting: the
+    /// prime is always a safe answer, and one line saying nothing moved is not.
+    pub fn from_hook_input(input: &str) -> Self {
+        let event: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+        SessionEvent {
+            source: event["source"].as_str().unwrap_or("startup").to_string(),
+            session_id: event["session_id"].as_str().map(str::to_string),
+        }
+    }
+}
+
+/// Where the hook keeps the cursor it served each session: the XDG state
+/// directory, outside every board, so that reading a board still writes
+/// nothing to it.
+pub fn session_state_dir(home: &Path) -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local").join("state"))
+        .join("ekko")
+        .join("sessions")
+}
+
+/// What the SessionStart hook puts in context, by how the session began.
+///
+/// A session that starts, clears or compacts holds no board, and gets the
+/// prime. One that resumes or forks already holds a prime in its transcript,
+/// and a second one is paid for again on every later call: it gets one line
+/// when nothing moved since the cursor this hook last served it, what moved
+/// when little did, and the prime only when the list would be longer. A
+/// session this hook never served is pointed at the prime it already holds.
+pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Path) -> Result<String, EkkoError> {
+    let revision = ekko.storage.get_counters()?.revision as i64;
+    let served = event.session_id.as_deref().and_then(|session| served_cursor(state, session, board));
+    let text = match (event.source.as_str(), served) {
+        ("resume" | "fork", Some(cursor)) if cursor == revision => {
+            format!("ekko \u{b7} {board} \u{b7} cursor {revision} \u{b7} nothing moved since this session last read the board\n")
+        }
+        ("resume" | "fork", Some(cursor)) => {
+            let moved = changes(ekko, cursor)?.text();
+            if moved.chars().count() <= RESUME_CHANGES {
+                format!("ekko \u{b7} {board} \u{b7} what moved since this session last read the board\n{moved}")
+            } else {
+                prime(ekko, board)?.text()
+            }
+        }
+        ("resume" | "fork", None) => format!(
+            "ekko \u{b7} {board} \u{b7} cursor {revision} \u{b7} the prime earlier in this session still applies; changes with its cursor lists what moved\n"
+        ),
+        _ => prime(ekko, board)?.text(),
+    };
+    if let Some(session) = &event.session_id {
+        remember(state, session, board, revision);
+    }
+    Ok(text)
+}
+
+/// A session id as a file name: its letters, digits, dashes and underscores.
+fn session_file(state: &Path, session: &str) -> Option<PathBuf> {
+    let safe: String = session.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).take(128).collect();
+    (!safe.is_empty()).then(|| state.join(format!("{safe}.json")))
+}
+
+fn served_cursor(state: &Path, session: &str, board: &str) -> Option<i64> {
+    let served: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(session_file(state, session)?).ok()?).ok()?;
+    if served["board"].as_str()? != board {
+        return None;
+    }
+    served["cursor"].as_i64()
+}
+
+/// Records the cursor served to a session, and forgets sessions older than
+/// `SESSION_KEPT` on the way. Best effort: the hook answers even when the
+/// state directory cannot be written.
+fn remember(state: &Path, session: &str, board: &str, cursor: i64) {
+    let Some(file) = session_file(state, session) else { return };
+    if std::fs::create_dir_all(state).is_err() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(state) {
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > SESSION_KEPT);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let _ = std::fs::write(file, serde_json::json!({"board": board, "cursor": cursor}).to_string());
 }
 
 impl Changes {
     pub fn text(&self) -> String {
-        let mut out = format!("cursor {} \u{b7} {} changed since {}\n", self.cursor, self.items.len(), self.since);
+        let changed = self.items.len() + self.removed.len();
+        let mut out = format!("cursor {} \u{b7} {changed} changed since {}\n", self.cursor, self.since);
         for entry in &self.items {
             let away = entry.away.map(|away| format!(", {away}")).unwrap_or_default();
-            let _ = writeln!(out, "{:>4}. [{}{away}] {}", entry.id, entry.state, clip(&entry.description, TASK_CLIP));
+            let now = if self.released.contains(&entry.id) {
+                " \u{b7} ready now"
+            } else if self.blocked.contains(&entry.id) {
+                " \u{b7} blocked now"
+            } else {
+                ""
+            };
+            let _ = writeln!(out, "{:>4}. [{}{away}] {}{now}", entry.id, entry.state, clip(&entry.description, TASK_CLIP));
         }
-        out.push_str("Items archived by --clear or expired from the trash leave nothing to list; prime again for the whole board.\n");
+        for gone in &self.removed {
+            let _ = writeln!(out, "{:>4}. [removed] {}", gone.id, gone.text);
+        }
+        // Said only when it is so: the journal no longer reaches the cursor.
+        if !self.complete {
+            out.push_str("The journal no longer reaches this cursor, so some of what moved is not listed; prime again for the whole board.\n");
+        }
         out
     }
 }
@@ -478,13 +1010,25 @@ impl Changes {
 /// One listing line: the id first, so a reader can find the item by its
 /// number, then the description and whatever sets it apart.
 fn entry_line(entry: &Entry, today: &str) -> String {
-    let mut line = format!("{:>4}. {}", entry.id, clip(&entry.description, TASK_CLIP));
+    listed_line(entry, &clip(&entry.description, TASK_CLIP), false, today)
+}
+
+/// A listing line with `body` for its text, then whatever sets the item
+/// apart. `stated` says the body already carries the item's state.
+fn listed_line(entry: &Entry, body: &str, stated: bool, today: &str) -> String {
+    let mut line = format!("{:>4}. {}", entry.id, body);
     let mut meta = Vec::new();
-    if entry.state == "paused" {
-        meta.push("paused".to_string());
+    if !stated && matches!(entry.state, "paused" | "in progress") {
+        meta.push(entry.state.to_string());
     }
     if let Some(priority @ 2..) = entry.priority {
         meta.push(format!("p{priority}"));
+    }
+    if let Some(priority) = entry.inherits {
+        meta.push(format!("inherits p{priority}"));
+    }
+    if let Some(day) = &entry.finish_by {
+        meta.push(format!("finish by {day}"));
     }
     if let Some(due) = &entry.due {
         meta.push(if due.as_str() < today { format!("due {due}, overdue") } else { format!("due {due}") });
@@ -520,8 +1064,22 @@ fn join(ids: &[u32]) -> String {
     ids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
 }
 
+/// "1 open task", "3 open tasks".
+fn open_tasks(n: usize) -> String {
+    if n == 1 { "1 open task".to_string() } else { format!("{n} open tasks") }
+}
+
 impl Prime {
     pub fn text(&self) -> String {
+        self.text_within(PRIME_BUDGET)
+    }
+
+    /// The resume view in at most `budget` characters. The header, what needs
+    /// attention and the closing line always fit; the sections fill what is
+    /// left in the order an agent needs them -- work in progress, ready work
+    /// best first, blocked work, loose notes -- and a section cut short says
+    /// how much it left out and where the rest is.
+    pub fn text_within(&self, budget: usize) -> String {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut out = String::new();
         let _ = writeln!(out, "ekko \u{b7} {} \u{b7} cursor {}", self.board, self.cursor);
@@ -545,46 +1103,38 @@ impl Prime {
         let _ = writeln!(out, "{}", counts.join(" \u{b7} "));
 
         if !self.roadmap.is_empty() {
-            let steps: Vec<String> = self
-                .roadmap
-                .iter()
-                .map(|step| {
-                    let here = if step.current { " (in progress)" } else { "" };
-                    format!("{} {}/{}{here}", step.name, step.complete, step.total)
-                })
-                .collect();
-            let root = if self.rootless > 0 { format!(" \u{b7} {} at the root", self.rootless) } else { String::new() };
-            let _ = writeln!(out, "roadmap: {}{root}", steps.join(" \u{2192} "));
+            let _ = writeln!(out, "{}", roadmap_line(&self.roadmap, self.rootless));
         }
 
-        let section = |out: &mut String, title: String, entries: &[Entry], with_notes: bool| {
-            if entries.is_empty() {
-                return;
-            }
-            let _ = writeln!(out, "\n{title}");
-            for entry in entries {
-                let _ = writeln!(out, "{}", entry_line(entry, &today));
-                if with_notes {
-                    for note in &entry.notes {
-                        let _ = writeln!(out, "{}", note_line(note, NOTE_CLIP));
-                    }
-                }
-            }
-        };
-        section(&mut out, format!("In progress ({})", self.doing.len()), &self.doing, true);
-        section(&mut out, format!("Ready, best first ({})", self.ready.len()), &self.ready, true);
-        let shown = &self.blocked[..self.blocked.len().min(BLOCKED_SHOWN)];
-        section(&mut out, format!("Blocked ({})", self.blocked.len()), shown, false);
-        if self.blocked.len() > BLOCKED_SHOWN {
-            let _ = writeln!(out, "      +{} more blocked", self.blocked.len() - BLOCKED_SHOWN);
-        }
+        let attention = self.attention();
+        let close = "\nAn item in full, with its dependencies and notes: context <id>.\n";
+        let fixed = out.chars().count() + attention.chars().count() + close.chars().count() + 4 * MORE_LINE;
+        let mut room = Room(budget.saturating_sub(fixed));
 
-        if !self.recent_notes.is_empty() {
-            let _ = writeln!(out, "\nRecent notes, not attached to a task");
+        listed(&mut out, &mut room, "In progress", &self.doing, usize::MAX, self.doing.len(), "context <id> reads one", &today);
+        listed(&mut out, &mut room, "Ready, best first", &self.ready, READY_WITH_NOTES, self.ready.len(), "next lists them", &today);
+        listed(&mut out, &mut room, "Blocked", &self.blocked, 0, self.blocked_total, "search with the blocked filter", &today);
+
+        let heading = "\nRecent notes, not attached to a task";
+        if !self.recent_notes.is_empty() && room.take(heading) {
+            let _ = writeln!(out, "{heading}");
             for note in &self.recent_notes {
-                let _ = writeln!(out, "{}", note_line(note, NOTE_CLIP).trim_start_matches("    "));
+                let line = note_line(note, NOTE_CLIP).trim_start_matches("    ").to_string();
+                if !room.take(&line) {
+                    break;
+                }
+                let _ = writeln!(out, "{line}");
             }
         }
+
+        out.push_str(&attention);
+        out.push_str(close);
+        out
+    }
+
+    /// What the board holds against itself: a block the budget always keeps.
+    fn attention(&self) -> String {
+        let mut out = String::new();
 
         let mut attention = Vec::new();
         if !self.broken.is_empty() {
@@ -602,15 +1152,136 @@ impl Prime {
         if !self.overdue.is_empty() {
             attention.push(format!("overdue: {}", join(&self.overdue)));
         }
+        if !self.freed_by_cancelling.is_empty() {
+            let pairs: Vec<String> =
+                self.freed_by_cancelling.iter().map(|(task, blocker)| format!("{task} \u{21e0} {blocker}")).collect();
+            attention.push(format!("ready only because what it waited on was cancelled: {}", pairs.join("; ")));
+        }
         if !attention.is_empty() {
             let _ = writeln!(out, "\nNeeds attention");
             for line in attention {
                 let _ = writeln!(out, "  ! {line}");
             }
         }
-
-        let _ = writeln!(out, "\nAn item in full, with its dependencies and notes: context <id>.");
         out
+    }
+}
+
+/// The phases in order with how far each has got and where work sits, and
+/// how much lies outside every phase: the prime's roadmap line.
+fn roadmap_line(steps: &[RoadmapStep], rootless: u32) -> String {
+    let steps: Vec<String> = steps
+        .iter()
+        .map(|step| {
+            let here = if step.current { " (in progress)" } else { "" };
+            format!("{} {}/{}{here}", step.name, step.complete, step.total)
+        })
+        .collect();
+    let root = if rootless > 0 { format!(" \u{b7} {rootless} at the root") } else { String::new() };
+    format!("roadmap: {}{root}", steps.join(" \u{2192} "))
+}
+
+/// The roadmap as an agent reads it: the prime's line, and the dependencies
+/// that run against the phase order -- not the drawing made for a terminal,
+/// and no step that is the user's to take.
+pub fn roadmap_text(outcome: &Outcome) -> String {
+    let Outcome::Roadmap { steps, rootless, inversions } = outcome else { return String::new() };
+    if steps.is_empty() {
+        return "No phases are declared on this board; the phase order is the user's to set.\n".to_string();
+    }
+    let mut out = format!("{}\n", roadmap_line(steps, *rootless));
+    if !inversions.is_empty() {
+        let pairs: Vec<String> = inversions
+            .iter()
+            .map(|i| format!("{} ({}) \u{21e0} {} ({})", i.blocked, i.blocked_phase, i.blocker, i.blocker_phase))
+            .collect();
+        let _ = writeln!(out, "dependencies against the phase order: {}", pairs.join("; "));
+    }
+    out
+}
+
+/// The projects as an agent reads them, one per line. None is said as a fact:
+/// making a project is the user's step, in its folder.
+pub fn projects_text(projects: &[ProjectSummary]) -> String {
+    if projects.is_empty() {
+        return "No projects yet. A project is made by the user, in its folder.\n".to_string();
+    }
+    let mut out = String::new();
+    for project in projects {
+        let place = match (project.status, project.path.as_deref()) {
+            ("missing", Some(path)) => format!("{path}, folder missing"),
+            (_, Some(path)) => path.to_string(),
+            (status, None) => status.to_string(),
+        };
+        let _ = writeln!(
+            out,
+            "{} \u{b7} {}/{} tasks done \u{b7} {} \u{b7} {place}",
+            project.name,
+            project.complete,
+            project.tasks,
+            if project.notes == 1 { "1 note".to_string() } else { format!("{} notes", project.notes) }
+        );
+    }
+    out
+}
+
+/// The characters a budgeted view has left.
+struct Room(usize);
+
+impl Room {
+    /// Whether `line` and its newline still fit; if they do, they are spent.
+    fn take(&mut self, line: &str) -> bool {
+        let cost = line.chars().count() + 1;
+        let fits = cost <= self.0;
+        if fits {
+            self.0 -= cost;
+        }
+        fits
+    }
+}
+
+/// One prime section within the room left: its title with `total`, entries
+/// best first while they fit, the notes of the first `with_notes` of them
+/// while those fit too, and a line counting what was left out of `total` and
+/// saying where it is.
+#[allow(clippy::too_many_arguments)]
+fn listed(
+    out: &mut String,
+    room: &mut Room,
+    title: &str,
+    entries: &[Entry],
+    with_notes: usize,
+    total: usize,
+    rest: &str,
+    today: &str,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let heading = format!("\n{title} ({total})");
+    if !room.take(&heading) {
+        return;
+    }
+    let _ = writeln!(out, "{heading}");
+    let mut shown = 0;
+    for (at, entry) in entries.iter().enumerate() {
+        let line = entry_line(entry, today);
+        if !room.take(&line) {
+            break;
+        }
+        let _ = writeln!(out, "{line}");
+        shown += 1;
+        if at < with_notes {
+            for note in &entry.notes {
+                let line = note_line(note, NOTE_CLIP);
+                if room.take(&line) {
+                    let _ = writeln!(out, "{line}");
+                }
+            }
+        }
+    }
+    if shown < total {
+        let _ = writeln!(out, "      +{} more: {rest}", total - shown);
     }
 }
 
@@ -627,8 +1298,38 @@ pub fn list_text(entries: &[Entry], empty: &str) -> String {
     out
 }
 
-impl Context {
+impl Found {
+    /// Hits one per line, each with its state and the text that matched, then
+    /// a total when more matched than are shown -- or the summary.
     pub fn text(&self) -> String {
+        if let Some(summary) = &self.summary {
+            return summary.clone();
+        }
+        if self.hits.is_empty() {
+            return "Nothing matches.\n".to_string();
+        }
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let mut out = String::new();
+        if !self.every_word {
+            out.push_str("No item has every word; these have some.\n");
+        }
+        for (entry, body) in &self.hits {
+            let _ = writeln!(out, "{}", listed_line(entry, &format!("[{}] {body}", entry.state), true, &today));
+        }
+        if self.total > self.hits.len() {
+            let _ = writeln!(out, "{} of {} shown: narrow the text or filters, or raise limit.", self.hits.len(), self.total);
+        }
+        out
+    }
+}
+
+impl Context {
+    /// Notes in full: what a person reading one item at the terminal wants.
+    pub fn text(&self) -> String {
+        self.text_with(Detail::Full)
+    }
+
+    pub fn text_with(&self, detail: Detail) -> String {
         let item = &self.item;
         let mut out = String::new();
         let _ = writeln!(out, "{:>4}. {}", item.id, item.description);
@@ -675,14 +1376,32 @@ impl Context {
             links(&mut out, "Attached to", std::slice::from_ref(task));
         }
         links(&mut out, "Blocked by", &self.blockers);
+        if self.waits_on > 0 {
+            let _ = writeln!(out, "      waits on {}, directly or through others", open_tasks(self.waits_on));
+        }
+        if !self.roots.is_empty() {
+            let _ = writeln!(out, "\nRoots, free to start");
+            for root in &self.roots {
+                if self.blockers.iter().any(|blocker| blocker.id == root.id) {
+                    let _ = writeln!(out, "{:>4}. [{}] listed above", root.id, root.state);
+                } else {
+                    let _ = writeln!(out, "{:>4}. [{}] {}", root.id, root.state, root.description);
+                }
+            }
+        }
         links(&mut out, "Blocks", &self.dependents);
         if item.unblocks > 0 {
-            let _ = writeln!(out, "      {} open tasks wait on this, directly or through others", item.unblocks);
+            let verb = if item.unblocks == 1 { "waits" } else { "wait" };
+            let _ = writeln!(out, "      {} {verb} on this, directly or through others", open_tasks(item.unblocks));
         }
         if !item.notes.is_empty() {
             let _ = writeln!(out, "\nNotes attached");
             for note in &item.notes {
-                let _ = writeln!(out, "{:>4}. {}", note.id, note.description);
+                let body = match detail {
+                    Detail::Full => note.description.clone(),
+                    Detail::Concise => clip(&note.description, NOTE_CLIP),
+                };
+                let _ = writeln!(out, "{:>4}. {body}", note.id);
             }
         }
         out
@@ -721,11 +1440,11 @@ mod tests {
         text.lines().filter_map(|line| line.trim_start().split_once(". ")?.0.parse().ok()).collect()
     }
 
-    /// Each key only breaks the ties the keys before it leave: work under way,
-    /// then priority, then the nearer deadline, then how much waits on it,
-    /// then age. Blocked work is not a candidate at all.
+    /// Work under way first, then urgency: an overdue p3 (12 + 6), work that
+    /// others wait on (8), a p3 alone (6), then the rest. Blocked work is not
+    /// a candidate at all.
     #[test]
-    fn next_orders_by_progress_priority_deadline_what_waits_and_age() {
+    fn next_orders_by_progress_then_urgency() {
         let (ekko, dir) = board("next");
         ekko.create_task(&words(&["plain"])).unwrap();
         ekko.create_task(&words(&["urgent", "p:3"])).unwrap();
@@ -739,9 +1458,37 @@ mod tests {
         ekko.set_state(&words(&["@7", "progress"]), false).unwrap();
 
         let order = next(&ekko, None).unwrap();
-        assert_eq!(ids(&order), vec![7, 3, 2, 4, 1]);
-        assert_eq!(order[3].unblocks, 2, "4 lets 5 move, and 6 after it");
+        assert_eq!(ids(&order), vec![7, 3, 4, 2, 1]);
+        assert_eq!(order[2].unblocks, 2, "4 lets 5 move, and 6 after it");
         assert_eq!(ids(&next(&ekko, Some(2)).unwrap()), vec![7, 3]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A low-priority prerequisite of urgent work inherits that urgency, and a
+    /// date two years out does not outrank work others wait on -- the order
+    /// the lexicographic ranking got backwards (3, 4, 5, 1).
+    #[test]
+    fn next_ranks_a_prerequisite_by_the_urgency_it_inherits() {
+        let (ekko, dir) = board("inherits");
+        let tomorrow = (chrono::Local::now() + chrono::TimeDelta::days(1)).format("d:%Y-%m-%d").to_string();
+        ekko.create_task(&words(&["prerequisite of the urgent task"])).unwrap();
+        ekko.create_task(&words(&["urgent", "p:3", tomorrow.as_str()])).unwrap();
+        ekko.create_task(&words(&["unrelated", "p:2"])).unwrap();
+        ekko.create_task(&words(&["far off", "d:2028-12-31"])).unwrap();
+        ekko.create_task(&words(&["unblocks five"])).unwrap();
+        for k in 6..=10 {
+            let name = format!("waits {k}");
+            ekko.create_task(&words(&[name.as_str()])).unwrap();
+            let target = format!("@{k}");
+            ekko.set_blocked_by(&words(&[target.as_str(), "5"])).unwrap();
+        }
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+
+        let order = next(&ekko, None).unwrap();
+        assert_eq!(ids(&order), vec![1, 5, 3, 4]);
+        assert_eq!(order[0].inherits, Some(3));
+        assert!(order[0].finish_by.is_some(), "{:?}", order[0]);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -803,8 +1550,7 @@ mod tests {
         let reason = lines.iter().position(|line| line.trim_start().starts_with("2. ")).unwrap();
         assert!(lines[reason - 1].trim_start().starts_with("1. "), "the reason is not under its work:\n{text}");
 
-        let newest = ekko.storage.get().unwrap().values().map(updated).max().unwrap();
-        assert_eq!(view.cursor, newest);
+        assert_eq!(view.cursor, ekko.storage.get_counters().unwrap().revision as i64);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -851,8 +1597,222 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Everything written at or after the cursor, put away or not, and
-    /// nothing written before it.
+    /// What a write did that no item's fields show still reaches a cursor:
+    /// work a completion set free is named ready now, and an item cleared out
+    /// of storage is named removed, with the text it had.
+    #[test]
+    fn changes_names_work_set_free_and_items_taken_out() {
+        let (ekko, dir) = board("journal");
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.create_task(&words(&["waits"])).unwrap();
+        ekko.create_task(&words(&["done and cleared"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        ekko.set_state(&words(&["@3", "done"]), false).unwrap();
+        let cursor = prime(&ekko, "default board").unwrap().cursor;
+
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
+        ekko.clear().unwrap();
+
+        let seen = changes(&ekko, cursor).unwrap();
+        let text = seen.text();
+        assert!(text.contains("   2. [pending] waits \u{b7} ready now"), "{text}");
+        assert!(text.contains("   3. [removed] done and cleared"), "{text}");
+        assert!(seen.complete && !text.contains("journal"), "{text}");
+        assert!(changes(&ekko, seen.cursor).unwrap().text().starts_with(&format!("cursor {} \u{b7} 0 changed", seen.cursor)));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Work a cancelled blocker let go is named: it is ready, though what it
+    /// waited on will never happen.
+    #[test]
+    fn prime_names_work_a_cancelled_blocker_let_go() {
+        let (ekko, dir) = board("cancelled");
+        ekko.create_task(&words(&["prerequisite"])).unwrap();
+        ekko.create_task(&words(&["needed it"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        ekko.set_state(&words(&["@1", "cancelled"]), false).unwrap();
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.contains("ready only because what it waited on was cancelled: 2 \u{21e0} 1"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The agent's roadmap and project list state facts and name no command:
+    /// a step that is the user's to take is said as the user's.
+    #[test]
+    fn roadmap_and_projects_read_as_facts_not_commands() {
+        let none = roadmap_text(&Outcome::Roadmap { steps: vec![], rootless: 3, inversions: vec![] });
+        assert!(!none.contains("ekko") && none.contains("user"), "{none}");
+        let steps = vec![
+            RoadmapStep { name: "design".to_string(), complete: 1, total: 2, notes: 0, current: true },
+            RoadmapStep { name: "build".to_string(), complete: 0, total: 3, notes: 1, current: false },
+        ];
+        let line = roadmap_text(&Outcome::Roadmap { steps, rootless: 4, inversions: vec![] });
+        assert_eq!(line, "roadmap: design 1/2 (in progress) \u{2192} build 0/3 \u{b7} 4 at the root\n");
+        let empty = projects_text(&[]);
+        assert!(!empty.contains("ekko init") && empty.contains("user"), "{empty}");
+    }
+
+    /// A concise read clips the notes around an item the way prime quotes
+    /// them, and a full one prints them whole; the item's own text is whole
+    /// either way.
+    #[test]
+    fn context_clips_attached_notes_unless_asked_for_all_of_them() {
+        let (ekko, dir) = board("detail");
+        let long = "a note long enough to be worth clipping ".repeat(20);
+        ekko.create_task(&words(&["the task"])).unwrap();
+        ekko.create_note(&words(&[long.as_str()])).unwrap();
+        ekko.set_attached_to(&words(&["@2", "1"])).unwrap();
+
+        let read = context(&ekko, "1").unwrap();
+        let concise = read.text_with(Detail::Concise);
+        let full = read.text_with(Detail::Full);
+        assert!(concise.contains("\u{2026} (+") && concise.chars().count() < full.chars().count(), "{concise}");
+        assert!(full.contains(long.trim()), "{full}");
+        assert!(concise.starts_with("   1. the task\n"), "{concise}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// However much is ready, the prime fits the hook's cap: sections fill in
+    /// the order an agent needs them, and each cut says what it left out.
+    #[test]
+    fn prime_stays_within_its_budget_and_says_what_it_left_out() {
+        let (ekko, dir) = board("budget");
+        let reason = "a reason that runs long enough to matter ".repeat(7);
+        for k in 1..=80 {
+            let task = format!("ready task number {k}, described at the length real tasks on a board run to, so a listing fills");
+            ekko.create_task(&words(&[task.as_str()])).unwrap();
+        }
+        for k in 1..=80 {
+            ekko.create_note(&words(&[reason.as_str()])).unwrap();
+            ekko.set_attached_to(&words(&[format!("@{}", 80 + k).as_str(), k.to_string().as_str()])).unwrap();
+        }
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.chars().count() <= PRIME_BUDGET, "{} characters:\n{text}", text.chars().count());
+        assert!(text.contains("Ready, best first (80)") && text.contains("more: next lists them"), "{text}");
+        assert!(text.ends_with("context <id>.\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session that resumes already holds a prime: it hears one line while
+    /// nothing moved since the cursor this hook served it, only what moved
+    /// once something did, and a session that starts or clears gets the prime.
+    #[test]
+    fn session_start_gives_a_resumed_session_only_what_moved() {
+        let (ekko, dir) = board("session");
+        let state = dir.join("state");
+        ekko.create_task(&words(&["first"])).unwrap();
+        let event = |source: &str| SessionEvent { source: source.to_string(), session_id: Some("abc-123".to_string()) };
+
+        let started = session_start(&ekko, "default board", &event("startup"), &state).unwrap();
+        assert!(started.contains("Ready, best first (1)"), "{started}");
+
+        let resumed = session_start(&ekko, "default board", &event("resume"), &state).unwrap();
+        assert!(resumed.lines().count() == 1 && resumed.contains("nothing moved"), "{resumed}");
+
+        ekko.create_task(&words(&["second"])).unwrap();
+        let moved = session_start(&ekko, "default board", &event("resume"), &state).unwrap();
+        assert!(moved.contains("   2. [pending] second"), "{moved}");
+
+        let stranger = SessionEvent { source: "fork".to_string(), session_id: Some("never-served".to_string()) };
+        assert_eq!(session_start(&ekko, "default board", &stranger, &state).unwrap().lines().count(), 1);
+
+        let cleared = session_start(&ekko, "default board", &event("clear"), &state).unwrap();
+        assert!(cleared.contains("Ready, best first (2)"), "{cleared}");
+
+        assert_eq!(SessionEvent::from_hook_input("not json").source, "startup");
+        assert_eq!(
+            SessionEvent::from_hook_input(r#"{"source":"resume","session_id":"s1"}"#),
+            SessionEvent { source: "resume".to_string(), session_id: Some("s1".to_string()) }
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A search is ranked, bounded and says what it found: whole words in any
+    /// order and never inside another word, each hit's state on its line with
+    /// the part of its text that matched, a total when more matched than are
+    /// shown, and counts instead of the whole board when nothing is asked.
+    #[test]
+    fn search_ranks_bounds_and_shows_state_and_the_match() {
+        let (ekko, dir) = board("search");
+        ekko.create_task(&words(&["recycled ids break caches"])).unwrap();
+        ekko.create_task(&words(&["the cycle check walks every path"])).unwrap();
+        let padded = format!("{}the cycle keyword sits at the end", "padding ".repeat(40));
+        ekko.create_note(&words(&[padded.as_str()])).unwrap();
+        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
+
+        let found = search(&ekko, Some("CYCLE"), &[], SEARCH_LIMIT).unwrap();
+        assert_eq!((found.total, found.every_word), (2, true));
+        let text = found.text();
+        assert!(text.contains("   2. [done] the cycle check walks every path\n"), "{text}");
+        assert!(text.contains("   3. [note] \u{2026}") && text.contains("cycle keyword sits at the end"), "{text}");
+        assert!(!text.contains("recycled"), "{text}");
+
+        let bounded = search(&ekko, Some("cycle"), &[], 1).unwrap().text();
+        assert!(bounded.contains("1 of 2 shown"), "{bounded}");
+
+        let summary = search(&ekko, None, &[], SEARCH_LIMIT).unwrap().text();
+        assert!(summary.starts_with("3 items: 2 tasks (1 pending, 1 done) and 1 note.\n"), "{summary}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Several items come from one read, in the order asked and each once,
+    /// and one id that names nothing refuses the call rather than being
+    /// dropped from it.
+    #[test]
+    fn contexts_reads_several_items_at_once() {
+        let (ekko, dir) = board("contexts");
+        for name in ["first", "second", "third"] {
+            ekko.create_task(&words(&[name])).unwrap();
+        }
+        let read = contexts(&ekko, &words(&["3", "1", "@3"])).unwrap();
+        assert_eq!(read.iter().map(|context| context.item.id).collect::<Vec<_>>(), vec![3, 1]);
+        assert!(matches!(contexts(&ekko, &words(&["1", "9"])), Err(EkkoError::InvalidId(_))));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What stands before an item is answered in one call, not one call per
+    /// hop: how many open tasks, and the roots -- the open ones free to start.
+    /// A closed blocker ends a path, and a root already listed as a direct
+    /// blocker is not described a second time.
+    #[test]
+    fn context_names_the_roots_above_an_item() {
+        let (ekko, dir) = board("roots");
+        for name in ["left root", "right root", "middle", "tip", "closed"] {
+            ekko.create_task(&words(&[name])).unwrap();
+        }
+        ekko.set_blocked_by(&words(&["@3", "1", "2"])).unwrap();
+        ekko.set_blocked_by(&words(&["@4", "3", "5"])).unwrap();
+        ekko.set_state(&words(&["@5", "done"]), false).unwrap();
+
+        let tip = context(&ekko, "4").unwrap();
+        assert_eq!(tip.roots.iter().map(|root| root.id).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(tip.waits_on, 3);
+        let text = tip.text();
+        assert!(text.contains("\nRoots, free to start\n   1. [pending] left root\n"), "{text}");
+        assert!(text.contains("waits on 3 open tasks, directly or through others"), "{text}");
+
+        let middle = context(&ekko, "3").unwrap().text();
+        assert!(middle.contains("   1. [pending] listed above"), "{middle}");
+
+        let root = context(&ekko, "1").unwrap();
+        assert!(root.roots.is_empty() && root.waits_on == 0);
+        assert!(root.text().contains("2 open tasks wait on this"), "{}", root.text());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Everything a write changed after the cursor, put away or not, nothing
+    /// from before it and nothing twice: the cursor a read returns hears only
+    /// later writes, and a clock cursor from an older prime is still answered.
     #[test]
     fn changes_lists_what_moved_since_a_cursor_including_what_was_put_away() {
         let (ekko, dir) = board("changes");
@@ -860,14 +1820,20 @@ mod tests {
         ekko.create_task(&words(&["will be done"])).unwrap();
         ekko.create_task(&words(&["will be deleted"])).unwrap();
         let cursor = prime(&ekko, "default board").unwrap().cursor;
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(changes(&ekko, cursor).unwrap().items.is_empty(), "the cursor handed back what it had seen");
+
         ekko.set_state(&words(&["@2", "done"]), false).unwrap();
         ekko.delete_items(&words(&["3"])).unwrap();
 
-        let seen = changes(&ekko, cursor + 1).unwrap();
+        let seen = changes(&ekko, cursor).unwrap();
         assert_eq!(ids(&seen.items), vec![2, 3]);
         assert_eq!(seen.items[1].away, Some("trashed"));
-        assert!(seen.cursor > cursor);
+        assert_eq!(seen.cursor, cursor + 2);
+        assert!(changes(&ekko, seen.cursor).unwrap().items.is_empty());
+
+        let clock = changes(&ekko, 1_000_000_000_000).unwrap();
+        assert_eq!(ids(&clock.items), vec![1, 2, 3], "a clock cursor from an older prime went unanswered");
+        assert_eq!(clock.cursor, seen.cursor);
 
         std::fs::remove_dir_all(&dir).ok();
     }

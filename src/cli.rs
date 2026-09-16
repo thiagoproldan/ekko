@@ -126,6 +126,12 @@ pub struct Cli {
     #[arg(long)]
     pub prime: bool,
 
+    /// With --prime: answer Claude Code's SessionStart hook, whose event
+    /// arrives as JSON on stdin. A session that resumes or forks gets what
+    /// moved since this hook last served it, not a second prime.
+    #[arg(long, requires = "prime")]
+    pub hook: bool,
+
     /// What to take up next, best first, optionally only the first N.
     #[arg(long, num_args = 0..=1, value_name = "N")]
     pub next: Option<Option<usize>>,

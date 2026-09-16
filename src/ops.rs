@@ -197,11 +197,16 @@ pub struct Draft<'a> {
     created: Vec<Option<u32>>,
 }
 
-/// What a commit wrote, and what `force` pushed past to write it.
+/// What a commit wrote, what `force` pushed past to write it, and the tasks
+/// whose readiness it changed.
 pub struct Committed {
     pub data: ItemMap,
     pub overridden: Linked,
     pub reopened: Linked,
+    /// Tasks that waited on open work before the write and no longer do.
+    pub released: Vec<u32>,
+    /// Tasks that were free to start before the write and now wait.
+    pub blocked: Vec<u32>,
 }
 
 impl<'a> Draft<'a> {
@@ -331,6 +336,15 @@ impl<'a> Draft<'a> {
             return Err(EkkoError::MissingId);
         }
         let ids = self.resolve_all(items)?;
+        // The terminal skips task states on notes quietly, as taskbook did; a
+        // structured write that changed nothing would still answer ok.
+        if !matches!(canonical, "starred" | "unstarred") {
+            if let Some(note) = ids.iter().find(|id| !self.data[*id].is_task) {
+                return Err(invalid(format!(
+                    "{note} is a note, and a note has no state; of the states only starred and unstarred apply to it"
+                )));
+            }
+        }
         for id in &ids {
             apply_state(self.item(*id), canonical);
         }
@@ -463,8 +477,8 @@ impl<'a> Draft<'a> {
     /// rule -- or, with `force`, anyway, saying what it pushed past.
     pub fn commit(mut self, force: bool) -> Result<Committed, EkkoError> {
         let (overridden, reopened) = Ekko::refuse_broken_dependencies(&self.before, &self.data, force)?;
-        self.ekko.save_touching(&mut self.data)?;
-        Ok(Committed { data: self.data, overridden, reopened })
+        let (released, blocked) = self.ekko.save_against(&self.before, &mut self.data)?;
+        Ok(Committed { data: self.data, overridden, reopened, released, blocked })
     }
 }
 
@@ -598,6 +612,58 @@ mod tests {
         assert_eq!(names.name(2), "$1 (from operation 1)");
         assert_eq!(names.name(3), "the new item");
         drop(draft);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A commit names the tasks its write set free and the ones it left
+    /// waiting, from either side of a dependency -- and only tasks that
+    /// existed before it: work the write created is the caller's own doing.
+    #[test]
+    fn a_commit_names_what_it_released_and_what_it_blocked() {
+        let (ekko, dir) = board("readiness");
+        batch(
+            &ekko,
+            &[
+                json!({"op": "create", "text": "blocker"}),
+                json!({"op": "create", "text": "one", "blocked_by": ["$1"]}),
+                json!({"op": "create", "text": "two", "blocked_by": ["$1"]}),
+                json!({"op": "create", "text": "free"}),
+            ],
+        )
+        .unwrap();
+
+        let done = batch(&ekko, &[json!({"op": "set_state", "items": [1], "state": "done"})]).unwrap();
+        assert_eq!((done.released, done.blocked), (vec![2, 3], vec![]));
+
+        let again = batch(&ekko, &[json!({"op": "set_state", "items": [1], "state": "done"})]).unwrap();
+        assert!(again.released.is_empty() && again.blocked.is_empty(), "a retry released something new");
+
+        let reopened = batch(&ekko, &[json!({"op": "set_state", "items": [1], "state": "undone"})]).unwrap();
+        assert_eq!((reopened.released, reopened.blocked), (vec![], vec![2, 3]));
+
+        let linked = batch(&ekko, &[json!({"op": "link", "item": 4, "blocked_by": [1]})]).unwrap();
+        assert_eq!((linked.released, linked.blocked), (vec![], vec![4]));
+
+        let created = batch(&ekko, &[json!({"op": "create", "text": "new and waiting", "blocked_by": [1]})]).unwrap();
+        assert!(created.released.is_empty() && created.blocked.is_empty(), "a task the write created was reported");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A note is neither a blocker nor something with a state: blocking on one
+    /// would block nothing, and a task state set on one would change nothing
+    /// while the reply said ok. Both are refused; a star still applies.
+    #[test]
+    fn a_note_can_neither_block_nor_take_a_task_state() {
+        let (ekko, dir) = board("notes");
+        batch(&ekko, &[json!({"op": "create", "kind": "note", "text": "a note"})]).unwrap();
+
+        let blocked = batch(&ekko, &[json!({"op": "create", "text": "waits on a note", "blocked_by": [1]})]);
+        assert!(matches!(blocked, Err(EkkoError::InvalidInput(_))), "{:?}", blocked.err());
+        let stated = batch(&ekko, &[json!({"op": "set_state", "items": [1], "state": "done"})]);
+        assert!(matches!(stated, Err(EkkoError::InvalidInput(_))), "{:?}", stated.err());
+        assert!(batch(&ekko, &[json!({"op": "set_state", "items": [1], "state": "starred"})]).is_ok());
 
         std::fs::remove_dir_all(&dir).ok();
     }
