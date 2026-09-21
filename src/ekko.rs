@@ -56,6 +56,9 @@ pub enum EkkoError {
     AttachTargetNotATask(u32),
     AttachTargetHasNoUid(u32),
     RenamedFlag { old: &'static str, new: &'static str },
+    /// A flag that is gone with nothing under a new name, and what to do
+    /// instead.
+    RemovedFlag { old: &'static str, instead: &'static str },
     InvalidCustomAppDir(String),
     MissingEkkoDirFlagValue,
     LockTimeout(String),
@@ -94,6 +97,7 @@ impl EkkoError {
             EkkoError::AttachTargetNotATask(_) => "ATTACH_TARGET_NOT_A_TASK",
             EkkoError::AttachTargetHasNoUid(_) => "ATTACH_TARGET_HAS_NO_UID",
             EkkoError::RenamedFlag { .. } => "RENAMED_FLAG",
+            EkkoError::RemovedFlag { .. } => "REMOVED_FLAG",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
             EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
             EkkoError::LockTimeout(_) => "LOCK_TIMEOUT",
@@ -134,7 +138,8 @@ impl EkkoError {
             | EkkoError::AttachNotANote(_)
             | EkkoError::AttachTargetNotATask(_)
             | EkkoError::AttachTargetHasNoUid(_)
-            | EkkoError::RenamedFlag { .. } => out.generic_error(&self.to_string()),
+            | EkkoError::RenamedFlag { .. }
+            | EkkoError::RemovedFlag { .. } => out.generic_error(&self.to_string()),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
             EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
             EkkoError::LockTimeout(path) => out.lock_timeout(path),
@@ -256,6 +261,7 @@ impl std::fmt::Display for EkkoError {
                 "Item {id} predates uids, so nothing can point at it reliably. Recreate it to give it one"
             ),
             EkkoError::RenamedFlag { old, new } => write!(f, "{old} was renamed to {new}"),
+            EkkoError::RemovedFlag { old, instead } => write!(f, "{old} was removed. {instead}"),
             EkkoError::UnknownState(term) => {
                 write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, waiting, cancelled, unstarted, starred, unstarred")
             }

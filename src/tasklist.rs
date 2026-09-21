@@ -157,11 +157,11 @@ pub fn write(dir: &Path, tasks: &[Task]) -> Result<bool, Box<dyn Error>> {
 
 /// `--tasklist --hook`: draws the board into the task list of the session a
 /// hook event names. On SessionStart it also answers with the board's file,
-/// for Claude Code to watch: a change made anywhere else -- the terminal,
-/// `--ui`, another session -- then redraws the list through the FileChanged
-/// hook. A failing hook prints an error into the session, too much for a
-/// drawing, so this one never fails: what went wrong goes to stderr, which
-/// Claude Code keeps for its debug log.
+/// for Claude Code to watch: a change made anywhere else -- the terminal or
+/// another session -- then redraws the list through the FileChanged hook. A
+/// failing hook prints an error into the session, too much for a drawing, so
+/// this one never fails: what went wrong goes to stderr, which Claude Code
+/// keeps for its debug log.
 pub fn hook(ekko: &Ekko, input: &str, home: &Path) -> String {
     let config = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|dir| !dir.is_empty())

@@ -24,11 +24,3 @@ serde_json = { version = "1", features = ["preserve_order"] }
 chrono = "0.4"
 libc = "0.2"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
-crossterm = "0.29.0"
-# The interactive mode's layout and widgets, drawn over the crossterm already
-# here -- ratatui for the boxes, crossterm for the terminal and its events.
-# Only the backend in use: no termwiz, no termion, no calendar widget.
-ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
-# Already under ratatui; named here because a line clipped to a box has to be
-# measured in terminal cells, the same way ratatui lays it out.
-unicode-width = "0.2"

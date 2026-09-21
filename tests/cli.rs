@@ -114,6 +114,37 @@ fn an_old_flag_name_is_answered_with_the_new_one() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// `--ui` opened the interactive mode, which was removed. Someone who types
+/// it from habit is told so under a stable code, and where the board is,
+/// before anything beside it runs -- not clap's "unexpected argument", which
+/// reads as a typo.
+#[test]
+fn the_removed_ui_flag_says_it_was_removed() {
+    let dir = temp_ekko_dir();
+    let ekko = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(["--ekko-dir", dir.to_str().unwrap()])
+            .args(args)
+            .output()
+            .expect("failed to run ekko")
+    };
+
+    let output = ekko(&["--json", "--ui", "--task", "never written"]);
+    assert!(!output.status.success(), "--ui succeeded");
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).expect("a --json error reply");
+    assert_eq!(reply["code"], "REMOVED_FLAG", "{reply}");
+    assert!(reply["error"].as_str().unwrap_or("").contains("--ui was removed"), "{reply}");
+    let board = fs::read_to_string(dir.join(".ekko").join("storage").join("storage.json")).unwrap_or_default();
+    assert!(!board.contains("never written"), "the task beside --ui was created: {board}");
+
+    let output = ekko(&["--ui"]);
+    assert!(!output.status.success(), "--ui succeeded");
+    let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(said.contains("--ui was removed"), "{said}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// `ekko init` makes a folder a project, and from then on `ekko` anywhere
 /// inside that folder works on the project, while outside it works on the
 /// default board. The old way of making a project answers with the new one.

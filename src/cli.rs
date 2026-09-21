@@ -58,12 +58,14 @@ pub struct Cli {
     #[arg(long)]
     pub calendar: bool,
 
-    /// Interactive mode: a picker in the terminal, for a person.
-    #[arg(long)]
+    /// Removed along with the interactive mode it opened. Hidden, and kept
+    /// only so that a typed `--ui` is told it was removed, rather than clap's
+    /// bare "unexpected argument", which reads as a typo.
+    #[arg(long, hide = true)]
     pub ui: bool,
 
     /// Serve the board to an agent over MCP on stdin and stdout, until stdin
-    /// closes. The agent's frontend, as `--ui` is a person's.
+    /// closes. The agent's frontend, as the board view is a person's.
     #[arg(long)]
     pub mcp: bool,
 

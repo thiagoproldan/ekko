@@ -47,7 +47,6 @@ Added by Ekko, each of them invisible until you use it:
 - **Errors instead of silence** when a filter term matches nothing
 - **A `flock` lock and atomic writes**, so concurrent invocations queue rather than lose updates
 - **Stash and trash**: put finished work out of the way and keep it reachable, or remove it with 30 days to change your mind
-- **`--ui`**, the board as a dashboard in the shape of VS Code, live while other terminals and agents write to it
 - **An agent frontend**: `ekko --mcp`, a Model Context Protocol server with the resume view, the work order and structured writes, packaged as a Claude Code plugin that starts each session with the board in context
 - **A reproducible `nix develop` shell**, and a flake package you can `nix run` without cloning
 
@@ -146,7 +145,6 @@ $ ekko --help
       --ekko-dir          Define a custom ekko directory
       --task, -t          Create task
       --timeline, -i      Display timeline view
-      --ui                Interactive mode: the board as a dashboard
       --version, -v       Display installed version
 
     Examples
@@ -183,7 +181,6 @@ $ ekko --help
       $ ekko --task @coding Improve documentation
       $ ekko --task Make some buttercream
       $ ekko --timeline
-      $ ekko --ui
 ```
 
 ## Views
@@ -196,6 +193,8 @@ Invoking Ekko without any options will display all saved items grouped into thei
   <img alt="Boards" width="60%" src="media/header-boards.png"/>
 </div>
 
+`--ui`, an interactive mode, was removed. The flag still parses, but only to say so and point to this view (`REMOVED_FLAG`), so someone who types it from habit is told where the board is instead of guessing at a typo.
+
 ### Timeline View
 
 In order to display all items in a timeline view, based on their creation date, the `--timeline`/`-i` option can be used.
@@ -203,60 +202,6 @@ In order to display all items in a timeline view, based on their creation date, 
 <div align="center">
   <img alt="Timeline View" width="62%" src="media/timeline.png"/>
 </div>
-
-### Interactive Mode
-
-`ekko --ui` opens the board as a dashboard in the shape of VS Code's current look: every part is a box with rounded corners standing slightly apart from its neighbours, titles and tabs are pills, a command centre runs across the top, an activity bar down the right edge and a status bar under everything. The colours were measured off VS Code's Dark Modern theme on a real screen rather than picked to resemble it.
-
-```
-                               / wayland                                                    [ _ ]
-╭──────────────────────────────╮╭───────────────────────────────────────────────╮╭─────────────────────────────────┬───╮
-│  Next                        ││  ▤ Board •                              ◔ ◷ ☆ ││ Explorer                     …  │ ≡ │
-│ 1 in progress · 1 ready      ││  wayland ▸ Board                              ││ ▸ Open Editors               1  │   │
-├──────────────────────────────┤│                                               ││ ▾ wayland                  25%  │ / │
-│ … 2 Damage tracking          ││  @wayland  [1/3]                              ││   ▸ @wayland               1/3  │   │
-│ ☐ 4 Ship the package         ││    1. ✔ Vendor wlroots                        ││   ▸ @docs                  0/1  │ ▦ │
-│                              ││    2. … Damage tracking                       ││ ▸ Stash                      0  │   │
-│                              ││      3. ● Damage is in surface coordinate…    ││ ▸ Trash                      0  │ ↺ │
-│                              ││    4. ☐ Ship the package             ◷ 09-30  ││ ▸ Archive                    0  │   │
-│                              ││  @docs  [0/1]                                 ││ ▸ Outline                       │   │
-│                              ││    5. ☐ Write the readme                 ⇠ 4  ││                                 │   │
-│                              ││                                               ││                                 │   │
-│                              ││                                               ││                                 │   │
-│                              ││                                               ││                                 │   │
-│                              ││                                               ││                                 │   │
-╰──────────────────────────────╯╰───────────────────────────────────────────────╯╰─────────────────────────────────┤   │
-╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│   │
-│  Problems 1   Output   Agent                                                                                  × ││   │
-│                                                                                                                 ││   │
-│  ⊗ Write the readme  blocked by 4  #5                                                                           ││   │
-│                                                                                                                 ││   │
-╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯╰───╯
-  ⎇ main  ↻  ⊗ 1  ! 0  » 2 Damage tracking  ⌂ ~/Projects/wayland                                                     ○
-```
-
-That is a terminal without a Nerd Font (`EKKO_ICONS=plain`). With one, the icons are VS Code's own codicons, and the pills and the active icon get their rounded ends.
-
-- **Next**, on the left: what to take up next, best first, in the order `--next` gives an agent.
-- **The editor**, in the middle, keeps tabs the way VS Code does. The board is the tab that never closes: grouped by board, one line per item, and a board's `[1/3]` counts the whole board and does not move when you filter -- otherwise the same board would report different totals depending on what you had typed. An item opens in a tab of its own, with its state, its facts, its text whole, and its relations -- what blocks it, what it blocks, the task it is attached to, the notes attached to it -- each a link to that item's tab. A long note takes one line on the board and is read whole there, so it stays long without becoming a wall; [folding](#folded-notes) has to cut it to fit, and this does not. A tab opened in passing is a preview, its title in italics, and the next thing opened in passing takes its place; opened on purpose, it stays. The **Roadmap** tab draws `--roadmap`'s chain, each phase's progress and the items in it; the **Calendar** tab lays the month out with what is due on each day; the **Welcome** page has where to start, the projects on this machine, and how far the board has come.
-- **The sidebar**, on the right, shows the view picked in the activity bar. *Explorer* is a tree: the project with its boards and their items, each note under the task it is attached to; the phases; the stash, the trash with the days each thing has left, and the archive; the open tabs; and an outline of the active item's relations. *Search* takes words, `#id`, `@board` and `is:` filters offered as chips -- `--list`'s own filters, applied by the same function, so a search and `--list` never disagree. *Projects* lists the projects on this machine and switches to one; *Changes* lists what was written since the session began, by anyone.
-- **The panel**, underneath: *Problems* lists what `--prime` finds wrong with the board -- blocked work, missed dates, work completed over an open blocker, dependencies that run against the phase order -- *Output* keeps what this session did and what changed elsewhere, and *Agent* shows the text an agent starts from.
-- **The status bar**: the branch, whether the board just changed, the blocked and warning counts, the next item, the folder, and a bell for changes made elsewhere.
-
-**The graph** is Obsidian's graph view in the terminal, drawn in braille. Items are nodes and their relations are links -- a task waiting on another, a note attached to a task -- and the more links point at a node, the bigger it is. A force layout (d3-force's model) arranges it and keeps each node's place when the board changes. Hovering lights a node and its links, a click opens it, dragging moves a node or the view, and the wheel or `+` and `-` zoom. Its settings panel is Obsidian's: Filters (search, boards as tags, existing items only, orphans), Groups coloured by a search (made already for the states work can be in), Display (arrows, text fade, node and link size, a time-lapse by creation date) and Forces, saved beside the board in `.ekko/graph.json`. The Graph view in the sidebar is the local graph: the neighbourhood of the active item, as deep as you set it with `[` and `]`.
-
-The keys are VS Code's. `Ctrl+P` filters the board by words, `#id` or `@board`; `Ctrl+B` opens and closes the sidebar, `Ctrl+Alt+B` the Next box and `Ctrl+J` the panel; `Tab` or `F6` moves between boxes; `Ctrl+W` closes a tab and `Ctrl+PageUp` and `Ctrl+PageDown` move between tabs; `Ctrl+Q` leaves. Chords begin with `Ctrl+K`, as VS Code's do: then `B` for the board, `G` the graph, `,` its settings, `L` the local graph, `R` the roadmap, `C` the calendar, `W` the Welcome page, `E` the explorer, `F` search, `P` the projects and `H` the changes.
-
-On the board, `Enter` completes a task, `Space` starts or pauses it, `Ctrl+S` stashes it, and typing anything else starts a filter. `Alt+Enter` opens the selected item in a tab, and so does a double click. `Ctrl+Enter` does too, but only in a terminal that tells it apart from `Enter`: most send it as a plain `Enter`, which completes the task, so ekko asks for the kitty keyboard protocol where the terminal has it and never guesses where it does not. In the tree the arrows move, `Right` and `Left` open and close, `Space` opens an item in passing and `Enter` on purpose; in an item's tab the arrows move between its relations and `Enter` follows one; in the calendar the arrows move by day and by week, `Page Up` and `Page Down` by month, and `Home` comes back to today. The mouse selects, opens, switches tabs and views, and scrolls whatever it points at. As the terminal narrows, boxes give way in the order VS Code drops them, and below 60×16 it says what it needs instead of drawing a broken frame.
-
-`Enter` and `Space` refuse to touch a task that is **done or cancelled**. Those are terminal, and setting `progress` clears `isComplete` by definition -- so a stray keypress used to destroy the fact that something was finished, which is exactly what happened to two items the hour the first version of this mode shipped. Changing one is `--set`, deliberately. `Enter` also refuses a task that is still blocked, and says by what: completing one anyway takes `--force`, typed in the CLI, never a keypress.
-
-Four things about how it behaves, each of them a consequence of the board being shared:
-
-- **It never holds the lock while idle.** A write takes the lock and releases it immediately, the same as any other command. A UI parked on the `flock` would block your other terminal and every agent -- the exact failure the lock exists to prevent, caused by the thing meant to help.
-- **It is live.** It watches the board's files and redraws when another terminal or an agent writes, with the same item still selected and the tree still open where it was, and Output and the bell say it happened. Nothing on screen goes stale while you look at it.
-- **A write names its item by uid**, so a board renumbered elsewhere since the last frame cannot turn a keypress into a write to some other item.
-- **It changes nothing about the CLI.** Interactive mode is a separate frontend on the same core and never goes through the renderer the golden tests pin, so the byte-for-byte guarantee is untouched by construction rather than by care.
 
 ### Calendar
 
@@ -293,7 +238,7 @@ This was `--path` until it was renamed. The old name still parses, only to answe
 
 ## Agents
 
-Ekko has a frontend for each kind of reader: the board and `--ui` for a person, and for an agent, a server of its own.
+Ekko has a frontend for each kind of reader: the board for a person, and for an agent, a server of its own.
 
 ### The MCP server
 
@@ -335,7 +280,7 @@ Reads come back as plain text and writes as compact JSON, never coloured, whatev
 
 It replaced the `/ekko` skill, which sat in every conversation whether the board was used or not.
 
-**The task list.** Claude Code draws a task list under the spinner -- ✔ done, ◼ in progress, with the task's line as the spinner's, ◻ pending -- from the files its TaskCreate and TaskUpdate tools write. The plugin draws the board there instead: `ekko --tasklist --hook` writes the session's own list when the session starts, after each ekko write, and whenever the board's file changes, including from the terminal, `--ui` or another session. The list holds what the session finished, the work in progress, and the next five ready tasks, each under its id on the board. Three settings sit outside the plugin, because a plugin cannot set them:
+**The task list.** Claude Code draws a task list under the spinner -- ✔ done, ◼ in progress, with the task's line as the spinner's, ◻ pending -- from the files its TaskCreate and TaskUpdate tools write. The plugin draws the board there instead: `ekko --tasklist --hook` writes the session's own list when the session starts, after each ekko write, and whenever the board's file changes, including from the terminal or another session. The list holds what the session finished, the work in progress, and the next five ready tasks, each under its id on the board. Three settings sit outside the plugin, because a plugin cannot set them:
 
 - `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` in Claude Code's environment. Claude Code offers its task tools, and so draws the list, only on Claude 3.x, Opus 4.0-4.7, Sonnet 4.0-4.6 and Haiku 4.5; on any other model, Opus 5 included, it draws nothing without this.
 - `CLAUDE_CODE_TODO_REMINDER_MODE=off`, and the native task tools denied (`TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`), so the agent keeps its tasks on the board. The list is the board's, and each write replaces it whole: a task written there any other way would vanish at the next.
@@ -637,7 +582,7 @@ $ ekko --check 3 --force
  ✔  Checked task: 3 (blockers overridden: 1, 2)
 ```
 
-The dependency is left in place, so the task shows `✔` beside `⇠ 1, 2` for as long as those stay open: the override leaves a trace instead of erasing the reason it was needed. `--force` has no short form, since `-f` is `--find` and overriding a rule should take typing the word, and on any command other than `--check` and `--set` it is an error (`FORCE_WITHOUT_COMPLETING`) rather than a flag quietly accepted and ignored. `--ui` never forces: a frame full of keys is exactly where one gets pressed without deliberation.
+The dependency is left in place, so the task shows `✔` beside `⇠ 1, 2` for as long as those stay open: the override leaves a trace instead of erasing the reason it was needed. `--force` has no short form, since `-f` is `--find` and overriding a rule should take typing the word, and on any command other than `--check` and `--set` it is an error (`FORCE_WITHOUT_COMPLETING`) rather than a flag quietly accepted and ignored.
 
 **The same rule holds from the other side.** A task that completed work is blocked by cannot be reopened -- not by `--check`, `--begin`, or `--set undone`, `progress`, `paused`, `waiting` or `unstarted` -- because, open again, it would be holding up work that is already done. Reviving a cancelled blocker counts as reopening it; cancelling a done one does not, since it stays closed. The refusal names the completed dependents (`COMPLETED_DEPENDENTS`), and `--force` with `--check` or `--set` reopens anyway and says what it overrode. A blocker whose dependents are still open reopens freely: live evaluation simply blocks them again.
 
@@ -1017,7 +962,7 @@ $ ekko --json --task @coding Review PR #42
 {"ok":true,"command":"task","item":{"_id":7,"_date":"Mon Aug 24 2026","_timestamp":1787532527693,"description":"Review PR #42","isStarred":false,"boards":["@coding"],"_isTask":true,"isComplete":false,"inProgress":false,"priority":1}}
 ```
 
-On success, the object always has `ok: true` and a `command` field naming what ran, plus whatever data that command produces (a `create`d/`edit`ed/`move`d/`priority`-updated item's full record, id lists for `check`/`begin`/`star`, board- or date-grouped items for the view commands, etc). On failure it's `ok: false` with an `error` message and a stable `code` (`MISSING_ID`, `INVALID_ID`, `MISSING_DESC`, `INVALID_IDS_NUMBER`, `INVALID_PRIORITY`, `MISSING_BOARDS`, `UNKNOWN_LIST_TERM`, `INVALID_DUE_DATE`, `MISSING_STATE`, `UNKNOWN_STATE`, `BLOCKING_CYCLE`, `BLOCKED`, `COMPLETED_DEPENDENTS`, `ALREADY_DONE`, `PHASE_ORDER`, `FORCE_WITHOUT_COMPLETING`, `ATTACH_NOT_A_NOTE`, `ATTACH_TARGET_NOT_A_TASK`, `RENAMED_FLAG`, `INVALID_CUSTOM_APP_DIR`, `MISSING_EKKO_DIR_FLAG_VALUE`, `LOCK_TIMEOUT`) to branch on instead of matching on the message text -- the process also exits `1`, same as without `--json`.
+On success, the object always has `ok: true` and a `command` field naming what ran, plus whatever data that command produces (a `create`d/`edit`ed/`move`d/`priority`-updated item's full record, id lists for `check`/`begin`/`star`, board- or date-grouped items for the view commands, etc). On failure it's `ok: false` with an `error` message and a stable `code` (`MISSING_ID`, `INVALID_ID`, `MISSING_DESC`, `INVALID_IDS_NUMBER`, `INVALID_PRIORITY`, `MISSING_BOARDS`, `UNKNOWN_LIST_TERM`, `INVALID_DUE_DATE`, `MISSING_STATE`, `UNKNOWN_STATE`, `BLOCKING_CYCLE`, `BLOCKED`, `COMPLETED_DEPENDENTS`, `ALREADY_DONE`, `PHASE_ORDER`, `FORCE_WITHOUT_COMPLETING`, `ATTACH_NOT_A_NOTE`, `ATTACH_TARGET_NOT_A_TASK`, `RENAMED_FLAG`, `REMOVED_FLAG`, `INVALID_CUSTOM_APP_DIR`, `MISSING_EKKO_DIR_FLAG_VALUE`, `LOCK_TIMEOUT`) to branch on instead of matching on the message text -- the process also exits `1`, same as without `--json`.
 
 A couple of things worth knowing:
 

@@ -14,7 +14,6 @@ mod paths;
 mod render;
 mod storage;
 mod tasklist;
-mod tui;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -75,7 +74,6 @@ const HELP: &str = r#"
       --ekko-dir          Define a custom ekko directory
       --task, -t          Create task
       --timeline, -i      Display timeline view
-      --ui                Interactive mode: the board as a dashboard
       --version, -v       Display installed version
 
     Examples
@@ -112,7 +110,6 @@ const HELP: &str = r#"
       $ ekko --task @coding Improve documentation
       $ ekko --task Make some buttercream
       $ ekko --timeline
-      $ ekko --ui
 "#;
 
 /// Argument that re-invokes this same binary as a detached clipboard
@@ -183,10 +180,11 @@ fn main() -> ExitCode {
         return mcp::run(home_dir, cwd, ekko_dir_env, project_env, mode);
     }
 
-    // Before opening anything: an old flag name gets the same answer
-    // whatever board it was aimed at, and a caller should learn what the
-    // flag is called now before learning, say, that a project is missing.
-    if let Some(err) = renamed_flag(&cli) {
+    // Before opening anything: an old flag gets the same answer whatever
+    // board it was aimed at, and a caller should learn what the flag is
+    // called now, or that it is gone, before learning, say, that a project
+    // is missing.
+    if let Some(err) = retired_flag(&cli) {
         return finish_with_error(&err, json_mode, &home_dir);
     }
     // `--force` overrides one rule, from either side: completing a blocked
@@ -216,16 +214,6 @@ fn main() -> ExitCode {
         Ok(ekko) => ekko,
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
-
-    // Handled here rather than in `dispatch`: the interactive mode is a
-    // frontend, not a command. It produces no `Outcome` because it is not
-    // one answer to one question -- it takes the terminal and stays.
-    if cli.ui {
-        return match tui::run(&ekko, &location, &board_label, &home_dir, &cwd) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => finish_with_error(&err, json_mode, &home_dir),
-        };
-    }
 
     match dispatch(&cli, &ekko, location.project.as_ref(), &home_dir, &board_label) {
         Ok(outcomes) => {
@@ -262,12 +250,13 @@ fn main() -> ExitCode {
     }
 }
 
-/// The error for a flag used under a name it no longer has.
+/// The error for a flag used under a name it no longer has, or one that is
+/// gone.
 ///
 /// `--anchor` became `--attached-to` and `--path` became `--roadmap`, each
 /// renamed to the word for what it does. The old spellings still parse,
 /// only so they can be answered with the new one.
-fn renamed_flag(cli: &cli::Cli) -> Option<EkkoError> {
+fn retired_flag(cli: &cli::Cli) -> Option<EkkoError> {
     if cli.anchor.is_some() {
         return Some(EkkoError::RenamedFlag { old: "--anchor", new: "--attached-to" });
     }
@@ -279,6 +268,11 @@ fn renamed_flag(cli: &cli::Cli) -> Option<EkkoError> {
     // the caller needs is the same -- the command to use instead.
     if cli.create {
         return Some(EkkoError::RenamedFlag { old: "--create", new: "ekko init" });
+    }
+    // Gone with nothing under a new name: the interactive mode was removed.
+    // A person who types it from habit is told so, and where the board is.
+    if cli.ui {
+        return Some(EkkoError::RemovedFlag { old: "--ui", instead: "For the board, run ekko with no options" });
     }
     None
 }
