@@ -15,12 +15,13 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use chrono::Datelike;
 use serde::Serialize;
 
-use crate::ekko::{broken_dependencies, holds, phase_order, uid_index, Ekko, EkkoError, Outcome};
+use crate::ekko::{broken_dependencies, holds, phase_order, Ekko, EkkoError, Outcome};
 use crate::item::{Item, State};
 use crate::lexical::{self, Query};
 use crate::render::{Inversion, ProjectSummary, RoadmapStep, Stats};
@@ -76,34 +77,75 @@ pub enum Detail {
 /// How much of a hit's text `search` shows, around where it matched.
 const SNIPPET: usize = 160;
 
-/// Dependencies resolved once for a whole board, in both directions.
-struct Graph<'a> {
-    all: &'a ItemMap,
+/// A board's relations resolved to display ids: worked out once per version
+/// of the board and shared by every read of that version, so a warm server
+/// answers a `context` without walking twenty thousand items to find three.
+struct Links {
+    /// Display ids by uid.
+    uids: HashMap<String, u32>,
     /// Each item's recorded blockers, by display id.
     blockers: HashMap<u32, Vec<u32>>,
     /// Each item's dependents -- the items recording it as a blocker.
     dependents: HashMap<u32, Vec<u32>>,
+    /// Visible notes, in id order, by the uid of the task each is attached to.
+    attached: HashMap<String, Vec<u32>>,
 }
 
-impl<'a> Graph<'a> {
-    fn new(all: &'a ItemMap) -> Self {
-        let index = uid_index(all);
+impl Links {
+    fn build(all: &ItemMap) -> Self {
+        let uids: HashMap<String, u32> =
+            all.iter().filter_map(|(id, item)| Some((item.uid.clone()?, *id))).collect();
         let mut blockers: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut dependents: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut attached: HashMap<String, Vec<u32>> = HashMap::new();
         for (id, item) in all {
             for uid in item.blocked_by.iter().flatten() {
-                if let Some(&blocker) = index.get(uid.as_str()) {
+                if let Some(&blocker) = uids.get(uid.as_str()) {
                     blockers.entry(*id).or_default().push(blocker);
                     dependents.entry(blocker).or_default().push(*id);
                 }
             }
+            if let Some(task) = item.attached_to.as_deref().filter(|_| visible(item)) {
+                attached.entry(task.to_string()).or_default().push(*id);
+            }
         }
-        Graph { all, blockers, dependents }
+        Links { uids, blockers, dependents, attached }
+    }
+}
+
+/// Links already built, each beside the version of the board it was built
+/// from. Held weakly: storage keeps the version it last read alive, and a
+/// version it let go of can never be asked about again.
+static LINKS: Mutex<Vec<(Weak<ItemMap>, Arc<Links>)>> = Mutex::new(Vec::new());
+
+/// The links of a shared board, built on the first read of its version.
+fn links_of(all: &Arc<ItemMap>) -> Arc<Links> {
+    let mut kept = LINKS.lock().unwrap_or_else(PoisonError::into_inner);
+    kept.retain(|(board, _)| board.strong_count() > 0);
+    if let Some((_, links)) = kept.iter().find(|(board, _)| board.upgrade().is_some_and(|board| Arc::ptr_eq(&board, all)))
+    {
+        return Arc::clone(links);
+    }
+    let links = Arc::new(Links::build(all));
+    kept.push((Arc::downgrade(all), Arc::clone(&links)));
+    links
+}
+
+/// Dependencies resolved once for a whole board, in both directions.
+struct Graph<'a> {
+    all: &'a ItemMap,
+    links: Arc<Links>,
+}
+
+impl<'a> Graph<'a> {
+    fn new(all: &'a ItemMap, links: Arc<Links>) -> Self {
+        Graph { all, links }
     }
 
     /// The blockers of `id` that still hold, in id order.
     fn open_blockers(&self, id: u32) -> Vec<u32> {
         let mut ids: Vec<u32> = self
+            .links
             .blockers
             .get(&id)
             .into_iter()
@@ -124,7 +166,7 @@ impl<'a> Graph<'a> {
         let mut seen = HashSet::new();
         let mut stack = vec![id];
         while let Some(at) = stack.pop() {
-            for &dependent in self.dependents.get(&at).into_iter().flatten() {
+            for &dependent in self.links.dependents.get(&at).into_iter().flatten() {
                 if self.all.get(&dependent).is_some_and(holds) && seen.insert(dependent) {
                     stack.push(dependent);
                 }
@@ -169,14 +211,14 @@ impl<'a> Graph<'a> {
             .all
             .values()
             .filter(|item| holds(item))
-            .map(|item| (item.id, self.dependents.get(&item.id).into_iter().flatten().filter(|d| open(d)).count()))
+            .map(|item| (item.id, self.links.dependents.get(&item.id).into_iter().flatten().filter(|d| open(d)).count()))
             .collect();
         let mut settle: Vec<u32> = waiting.iter().filter(|(_, n)| **n == 0).map(|(id, _)| *id).collect();
         let mut values: HashMap<u32, Inherited> = HashMap::new();
         while let Some(id) = settle.pop() {
             let item = &self.all[&id];
             let mut value = Inherited { priority: item.priority.unwrap_or(1), finish_by: due_day(item), waited_on: false };
-            for dependent in self.dependents.get(&id).into_iter().flatten() {
+            for dependent in self.links.dependents.get(&id).into_iter().flatten() {
                 let Some(above) = values.get(dependent) else { continue };
                 value.priority = value.priority.max(above.priority);
                 if let Some(day) = above.finish_by {
@@ -185,7 +227,7 @@ impl<'a> Graph<'a> {
                 value.waited_on = true;
             }
             values.insert(id, value);
-            for blocker in self.blockers.get(&id).into_iter().flatten() {
+            for blocker in self.links.blockers.get(&id).into_iter().flatten() {
                 if let Some(n) = waiting.get_mut(blocker) {
                     *n -= 1;
                     if *n == 0 {
@@ -305,25 +347,27 @@ fn is_zero(n: &usize) -> bool {
 struct Reader<'a> {
     graph: Graph<'a>,
     /// Visible notes, by the uid of the task each is attached to.
-    attached: HashMap<&'a str, Vec<&'a Item>>,
     order: HashMap<&'a str, usize>,
     today: String,
 }
 
 impl<'a> Reader<'a> {
-    fn new(all: &'a ItemMap, phases: &'a [String]) -> Self {
-        let mut attached: HashMap<&str, Vec<&Item>> = HashMap::new();
-        for item in all.values().filter(|item| visible(item)) {
-            if let Some(task) = item.attached_to.as_deref() {
-                attached.entry(task).or_default().push(item);
-            }
-        }
+    fn new(all: &'a ItemMap, links: Arc<Links>, phases: &'a [String]) -> Self {
         Reader {
-            graph: Graph::new(all),
-            attached,
+            graph: Graph::new(all, links),
             order: phase_order(phases),
             today: chrono::Local::now().format("%Y-%m-%d").to_string(),
         }
+    }
+
+    /// A reader over a shared board, on the links its version already has.
+    fn shared(all: &'a Arc<ItemMap>, phases: &'a [String]) -> Self {
+        Reader::new(all, links_of(all), phases)
+    }
+
+    /// The display id holding `uid`.
+    fn uid(&self, uid: &str) -> Option<u32> {
+        self.graph.links.uids.get(uid).copied()
     }
 
     fn entry(&self, item: &Item) -> Entry {
@@ -336,9 +380,10 @@ impl<'a> Reader<'a> {
         let notes = item
             .uid
             .as_deref()
-            .and_then(|uid| self.attached.get(uid))
+            .and_then(|uid| self.graph.links.attached.get(uid))
             .into_iter()
             .flatten()
+            .filter_map(|id| self.graph.all.get(id))
             .map(|note| NoteRef { id: note.id, uid: note.uid.clone(), description: note.description.clone() })
             .collect();
         Entry {
@@ -490,9 +535,9 @@ fn is_zero_u32(n: &u32) -> bool {
 
 /// Builds the resume view of the board `ekko` has open, labelled `board`.
 pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
-    let all = ekko.storage.get()?;
+    let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
-    let reader = Reader::new(&all, &phases);
+    let reader = Reader::shared(&all, &phases);
 
     let (next, _) = reader.next(None);
     let (doing, ready): (Vec<Entry>, Vec<Entry>) =
@@ -530,7 +575,6 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         .map(|item| item.id)
         .collect();
 
-    let index = uid_index(&all);
     let freed_by_cancelling = all
         .values()
         .filter(|item| visible(item) && holds(item) && reader.graph.open_blockers(item.id).is_empty())
@@ -538,7 +582,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
             item.blocked_by
                 .iter()
                 .flatten()
-                .filter_map(|uid| index.get(uid.as_str()).copied())
+                .filter_map(|uid| reader.uid(uid))
                 .filter(|blocker| all.get(blocker).and_then(State::of) == Some(State::Cancelled))
                 .map(move |blocker| (item.id, blocker))
         })
@@ -569,9 +613,9 @@ pub fn next(ekko: &Ekko, limit: Option<usize>) -> Result<Vec<Entry>, EkkoError> 
 
 /// `next`, with how many tasks were candidates in all.
 pub fn next_listed(ekko: &Ekko, limit: Option<usize>) -> Result<(Vec<Entry>, usize), EkkoError> {
-    let all = ekko.storage.get()?;
+    let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
-    Ok(Reader::new(&all, &phases).next(limit))
+    Ok(Reader::shared(&all, &phases).next(limit))
 }
 
 /// An item and its neighbourhood: one hop along every relation, plus how
@@ -618,11 +662,11 @@ pub fn context(ekko: &Ekko, target: &str) -> Result<Context, EkkoError> {
 /// otherwise spends a call apiece on. An id that names nothing refuses them
 /// all, the way it does for every other command.
 pub fn contexts(ekko: &Ekko, targets: &[String]) -> Result<Vec<Context>, EkkoError> {
-    let all = ekko.storage.get()?;
+    let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
     let raw: Vec<String> = targets.iter().map(|target| target.trim_start_matches('@').to_string()).collect();
     let ids = ekko.validate_ids(&raw, &all)?;
-    let reader = Reader::new(&all, &phases);
+    let reader = Reader::shared(&all, &phases);
     Ok(ids.into_iter().map(|id| neighbourhood(&all, &reader, id)).collect())
 }
 
@@ -637,15 +681,15 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
             description: clip(&other.description, TASK_CLIP),
         })
     };
-    let mut blockers: Vec<Link> = reader.graph.blockers.get(&id).into_iter().flatten().filter_map(link).collect();
+    let mut blockers: Vec<Link> = reader.graph.links.blockers.get(&id).into_iter().flatten().filter_map(link).collect();
     let mut dependents: Vec<Link> =
-        reader.graph.dependents.get(&id).into_iter().flatten().filter_map(link).collect();
+        reader.graph.links.dependents.get(&id).into_iter().flatten().filter_map(link).collect();
     blockers.sort_by_key(|l| l.id);
     dependents.sort_by_key(|l| l.id);
     let attached_to = item
         .attached_to
         .as_deref()
-        .and_then(|uid| uid_index(all).get(uid).copied())
+        .and_then(|uid| reader.uid(uid))
         .and_then(|task| link(&task));
     let (waits_on, root_ids) = reader.graph.upstream(id);
     let roots = root_ids.iter().filter_map(link).collect();
@@ -682,7 +726,7 @@ pub struct Found {
 /// boards it is on.
 pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String], limit: usize) -> Result<Found, EkkoError> {
     let query = Query::new(text.unwrap_or_default());
-    let all = ekko.storage.get()?;
+    let all = ekko.storage.get_shared()?;
     if query.is_empty() && filters.is_empty() {
         return Ok(Found { summary: Some(summary(&all)), ..Found::default() });
     }
@@ -691,7 +735,7 @@ pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String], limit: usize)
         _ => Vec::new(),
     };
     let phases = ekko.storage.get_phases()?;
-    let reader = Reader::new(&all, &phases);
+    let reader = Reader::shared(&all, &phases);
 
     let mut seen = HashSet::new();
     let mut candidates: Vec<&Item> = groups
@@ -804,10 +848,10 @@ const CLOCK_CURSOR: i64 = 100_000_000_000;
 /// A cursor from before revisions, a clock reading, is answered the old way,
 /// by `updatedAt`, and handed a revision to use from then on.
 pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
-    let all = ekko.storage.get()?;
+    let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
     let cursor = ekko.storage.get_counters()?.revision as i64;
-    let reader = Reader::new(&all, &phases);
+    let reader = Reader::shared(&all, &phases);
     let moved = |item: &&Item| {
         if since >= CLOCK_CURSOR {
             updated(item) >= since
@@ -823,11 +867,10 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
     // What the journal saw after the cursor: work set free or left waiting,
     // named only while it still is, and items taken out of storage.
     let journal = ekko.storage.read_journal()?;
-    let index = uid_index(&all);
     let resolve = |named: &serde_json::Value| {
         named["uid"]
             .as_str()
-            .and_then(|uid| index.get(uid).copied())
+            .and_then(|uid| reader.uid(uid))
             .or_else(|| named["id"].as_u64().map(|id| id as u32).filter(|id| all.get(id).is_some_and(|item| item.uid.is_none())))
     };
     let after = |entry: &serde_json::Value| {
@@ -1496,7 +1539,7 @@ mod tests {
     /// What each task inherits, read straight off the graph.
     fn inherited_on(ekko: &Ekko) -> HashMap<u32, Inherited> {
         let all = ekko.storage.get().unwrap();
-        Graph::new(&all).inherited()
+        Graph::new(&all, Arc::new(Links::build(&all))).inherited()
     }
 
     /// A diamond -- 1 held up by 2 and 3, both held up by 4 -- settles 4

@@ -24,10 +24,12 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read as _};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -156,8 +158,36 @@ impl Storage {
         Ok(())
     }
 
+    /// The board, to change. A version this process already parsed is cloned
+    /// rather than parsed again; one it has not is parsed and not kept, so a
+    /// one-shot command pays nothing for a cache it would never read twice.
     pub fn get(&self) -> Result<ItemMap, StorageError> {
-        read_map(&self.storage_file)
+        let Some((file, version)) = open_versioned(&self.storage_file)? else {
+            return Ok(BTreeMap::new());
+        };
+        match kept_board(&self.storage_file, version) {
+            Some(board) => Ok(ItemMap::clone(&board)),
+            None => parse_map(file),
+        }
+    }
+
+    /// The board, to read, shared with every other read of the same version
+    /// in this process. The MCP server answers many calls from one process,
+    /// and parsing is most of what a read costs: 25 ms of a 41 ms `context`
+    /// on a board of 20,000 items. A version is the file's identity as its
+    /// open descriptor reports it, so the check costs one `fstat`, and a write
+    /// -- always a rename, so always a new inode -- is never answered from
+    /// the version it replaced.
+    pub fn get_shared(&self) -> Result<Arc<ItemMap>, StorageError> {
+        let Some((file, version)) = open_versioned(&self.storage_file)? else {
+            return Ok(Arc::default());
+        };
+        if let Some(board) = kept_board(&self.storage_file, version) {
+            return Ok(board);
+        }
+        let board = Arc::new(parse_map(file)?);
+        keep_board(&self.storage_file, version, Arc::clone(&board));
+        Ok(board)
     }
 
     pub fn get_archive(&self) -> Result<ItemMap, StorageError> {
@@ -379,6 +409,58 @@ fn read_map(path: &Path) -> Result<ItemMap, StorageError> {
     Ok(serde_json::from_str(&content)?)
 }
 
+/// Which version of a file an open descriptor holds. Every write replaces the
+/// file by rename, so a new version is a new inode; the modification time and
+/// the size catch an edit made in place by something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Version {
+    dev: u64,
+    ino: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    len: u64,
+}
+
+/// The file open, with the version the descriptor holds -- read from the same
+/// descriptor the content will be, so the two cannot disagree -- or `None`
+/// when the board has no file yet.
+fn open_versioned(path: &Path) -> Result<Option<(File, Version)>, StorageError> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let meta = file.metadata()?;
+    let version =
+        Version { dev: meta.dev(), ino: meta.ino(), mtime: meta.mtime(), mtime_nsec: meta.mtime_nsec(), len: meta.len() };
+    Ok(Some((file, version)))
+}
+
+fn parse_map(mut file: File) -> Result<ItemMap, StorageError> {
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(serde_json::from_str(&content)?)
+}
+
+/// Boards this process has parsed, by storage file: the latest version of
+/// each, and only a few files, since a process reads one board or a handful.
+const BOARDS_KEPT: usize = 8;
+static BOARDS: Mutex<Vec<(PathBuf, Version, Arc<ItemMap>)>> = Mutex::new(Vec::new());
+
+fn kept_board(path: &Path, version: Version) -> Option<Arc<ItemMap>> {
+    let boards = BOARDS.lock().unwrap_or_else(PoisonError::into_inner);
+    boards.iter().find(|(file, kept, _)| file == path && *kept == version).map(|(_, _, board)| Arc::clone(board))
+}
+
+fn keep_board(path: &Path, version: Version, board: Arc<ItemMap>) {
+    let mut boards = BOARDS.lock().unwrap_or_else(PoisonError::into_inner);
+    boards.retain(|(file, _, _)| file != path);
+    if boards.len() >= BOARDS_KEPT {
+        boards.remove(0);
+    }
+    boards.push((path.to_path_buf(), version, board));
+}
+
 fn write_atomic(path: &Path, temp_dir: &Path, data: &ItemMap) -> Result<(), StorageError> {
     replace_durably(path, temp_dir, json::to_pretty_string(data)?.as_bytes())
 }
@@ -465,6 +547,56 @@ mod tests {
         storage.set(&data).unwrap();
 
         assert_eq!(storage.get().unwrap(), data);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A version already read is handed out again without parsing, and a write
+    /// -- a rename, so a new inode -- is never answered from the version it
+    /// replaced, by this process's reads or another `Storage` on the same file.
+    #[test]
+    fn get_shared_reuses_a_version_until_a_write_replaces_it() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        let mut data = BTreeMap::new();
+        data.insert(1, sample_item(1));
+        storage.set(&data).unwrap();
+
+        let first = storage.get_shared().unwrap();
+        let again = Storage::new(&dir).unwrap().get_shared().unwrap();
+        assert!(Arc::ptr_eq(&first, &again), "the same version is parsed once");
+        assert_eq!(storage.get().unwrap(), *first, "a copy to change is the same board");
+
+        data.insert(2, sample_item(2));
+        storage.set(&data).unwrap();
+        let after = storage.get_shared().unwrap();
+        assert!(!Arc::ptr_eq(&first, &after));
+        assert_eq!(*after, data);
+        assert_eq!(storage.get().unwrap(), data);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An edit made in place by something else -- same inode -- still shows.
+    #[test]
+    fn get_shared_sees_an_edit_made_in_place() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        let mut data = BTreeMap::new();
+        data.insert(1, sample_item(1));
+        storage.set(&data).unwrap();
+        let first = storage.get_shared().unwrap();
+
+        data.insert(2, sample_item(2));
+        let file = dir.join("storage").join("storage.json");
+        let mut handle = OpenOptions::new().write(true).truncate(true).open(&file).unwrap();
+        use std::io::Write as _;
+        handle.write_all(json::to_pretty_string(&data).unwrap().as_bytes()).unwrap();
+        drop(handle);
+
+        let after = storage.get_shared().unwrap();
+        assert!(!Arc::ptr_eq(&first, &after));
+        assert_eq!(*after, data);
 
         fs::remove_dir_all(&dir).ok();
     }
