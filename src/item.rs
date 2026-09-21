@@ -252,6 +252,20 @@ impl Item {
             trashed: None,
         }
     }
+
+    /// The word the views a person reads put on a note that is more than a
+    /// note: "handoff", or the kind of knowledge it holds. None for anything
+    /// else. The two never meet on one note, since a handoff cannot be given
+    /// a kind.
+    pub fn mark(&self) -> Option<&'static str> {
+        if self.is_task {
+            None
+        } else if self.handoff {
+            Some("handoff")
+        } else {
+            self.knowledge.map(Knowledge::word)
+        }
+    }
 }
 
 /// The kinds of lasting knowledge a note can hold; see `Item::knowledge`.

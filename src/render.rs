@@ -407,8 +407,8 @@ impl<'a> Renderer<'a> {
         }
 
         // Everything the line spends before the description: the id column,
-        // the icon and their separators.
-        let overhead = 12;
+        // the icon, the mark and their separators.
+        let overhead = 12 + item.mark().map_or(0, |mark| mark.len() + 3);
         let available = width.saturating_sub(overhead);
         let chars = item.description.chars().count();
         if available < MIN_FOLD_WIDTH || chars <= available {
@@ -448,6 +448,13 @@ impl<'a> Renderer<'a> {
             parts.push(self.painter.grey(&description));
         } else {
             parts.push(description);
+        }
+
+        // A handoff or a typed note says so first, in the brackets the agent's
+        // listings use, so the note a session resumes from and the traps the
+        // board keeps stand out from the notes around them.
+        if let Some(mark) = item.mark() {
+            parts.insert(0, self.painter.grey(&format!("[{mark}]")));
         }
 
         // Cancelled excluded alongside complete: an abandoned task has no
@@ -1495,6 +1502,42 @@ mod tests {
         note.date = GOLDEN_DAY.to_string();
         note.timestamp = golden_now().timestamp_millis();
         note
+    }
+
+    #[test]
+    fn a_handoff_and_a_typed_note_carry_their_mark_and_a_plain_note_none() {
+        let mut handoff = long_note("where it stopped");
+        handoff.id = 2;
+        handoff.handoff = true;
+        let mut gotcha = long_note("a trap");
+        gotcha.id = 3;
+        gotcha.knowledge = Some(crate::item::Knowledge::Gotcha);
+        let output = render_with(Config::default(), |r| {
+            r.display_by_board(&[("@b".to_string(), vec![long_note("just a note"), handoff, gotcha])]);
+        });
+
+        // The mark is painted, so it is found ahead of the text, not beside it.
+        let marked = |text: &str, mark: &str| {
+            let line = output.lines().find(|l| l.contains(text)).expect("the note should render");
+            line.find(mark).is_some_and(|at| at < line.find(text).unwrap())
+        };
+        assert!(marked("where it stopped", "[handoff]"), "{output}");
+        assert!(marked("a trap", "[gotcha]"), "{output}");
+        let plain = output.lines().find(|l| l.contains("just a note")).unwrap();
+        assert!(!plain.contains("[handoff]") && !plain.contains("[gotcha]"), "an ordinary note is left alone");
+    }
+
+    #[test]
+    fn a_marked_note_still_folds_inside_the_width() {
+        let mut note = long_note(&"x".repeat(300));
+        note.knowledge = Some(crate::item::Knowledge::Procedure);
+        let output = render_folded_at(100, |r| {
+            r.display_by_board(&[("@b".to_string(), vec![note])]);
+        });
+
+        let body = output.lines().find(|l| l.contains('x')).expect("the note should render");
+        assert!(body.contains("[procedure]"));
+        assert!(body.chars().count() <= 100, "the mark pushed the line over: {}", body.chars().count());
     }
 
     #[test]

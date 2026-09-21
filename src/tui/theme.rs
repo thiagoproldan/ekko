@@ -288,6 +288,17 @@ pub fn state_look(glyphs: Glyphs, state: Option<State>) -> (&'static str, Style)
 
 /// How an item's description is drawn: finished work steps back, and
 /// cancelled work is struck through, as the board view does it.
+/// What goes before a handoff's or a typed note's text in a list: the word,
+/// in the notes' colour, then a space. Empty for anything else.
+pub fn mark(item: &Item) -> String {
+    item.mark().map(|mark| format!("{mark} ")).unwrap_or_default()
+}
+
+/// The style of `mark`.
+pub fn mark_style() -> Style {
+    Style::new().fg(palette::LINK).add_modifier(Modifier::ITALIC)
+}
+
 pub fn description_style(item: &Item) -> Style {
     match State::of(item) {
         Some(State::Done) => Style::new().fg(palette::MUTED),

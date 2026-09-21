@@ -31,6 +31,9 @@ use crate::storage::ItemMap;
 const NOTE_CLIP: usize = 300;
 /// How much of a task's description a one-line listing carries.
 const TASK_CLIP: usize = 160;
+/// How new a handoff is for the handoff prompt to take it for this session's
+/// own: an hour, longer than a session takes between writing one and asking.
+const RECENT_HANDOFF_MS: i64 = 60 * 60 * 1000;
 /// Unattached notes `prime` shows, newest first.
 const RECENT_NOTES: usize = 5;
 /// Blocked tasks `prime` lists before counting the rest.
@@ -982,7 +985,12 @@ pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoErr
     let tasks: Vec<&Item> = match task {
         Some(target) => {
             let ids = ekko.validate_ids(&[target.trim_start_matches('@').to_string()], &all)?;
-            let item = &all[&ids[0]];
+            let mut item = &all[&ids[0]];
+            // A note's id stands for the task it explains: the id a session
+            // has at hand is often its own handoff's, from the write before.
+            if let Some(&task) = item.attached_to.as_deref().filter(|_| !item.is_task).and_then(|uid| reader.graph.links.uids.get(uid)) {
+                item = &all[&task];
+            }
             if !item.is_task || !holds(item) {
                 return Err(EkkoError::InvalidInput(format!(
                     "{} is not open work, and only an open task has anything to hand over",
@@ -1022,8 +1030,33 @@ pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoErr
          - Files and lines touched or about to be, as path:line.\n\
          - The next step, concrete enough to start on without asking.\n\
          - Open questions for the user.\n\
-         Leave out what the board or the code already says. A handoff replaces the task's earlier one, which stays on the task as an ordinary note. Then tell the user it is safe to /clear.\n"
+         Leave out what the board or the code already says. A handoff replaces the task's earlier one, which stays on the task as an ordinary note. Then tell the user it is safe to /clear, and that after it any message, even just \"continue\", starts the next session: Claude Code never starts a turn on its own.\n"
     );
+    // A handoff written minutes ago is most likely this session's own, and a
+    // second one would demote it, or land on a task the session never
+    // touched because it happened to be the one left in progress.
+    let now = chrono::Local::now().timestamp_millis();
+    let recent = all
+        .values()
+        .filter(|note| note.handoff && visible(note))
+        .map(|note| (note, now - note.updated_at.unwrap_or(note.timestamp)))
+        .filter(|(_, age)| *age < RECENT_HANDOFF_MS)
+        .min_by_key(|(_, age)| *age);
+    if let Some((note, age)) = recent {
+        let on = note.attached_to.as_deref().and_then(|uid| reader.graph.links.uids.get(uid)).copied();
+        let minutes = age.max(0) / 60_000;
+        let when = if minutes < 1 { "under a minute ago".to_string() } else { format!("{minutes} min ago") };
+        let target = match (tasks.as_slice(), on) {
+            ([task], Some(on)) if task.id == on => "this task".to_string(),
+            (_, Some(on)) => format!("task {on}"),
+            (_, None) => "no open task".to_string(),
+        };
+        let _ = writeln!(
+            out,
+            "\nHandoff {} on {target} was written {when}. If this session wrote it, do not write another: bring it up to date with edit append on {}.",
+            note.id, note.id
+        );
+    }
     if let [task] = tasks.as_slice() {
         let _ = writeln!(out, "\nTask {}: {}", task.id, clip(&task.description, NOTE_CLIP));
         let earlier = task
@@ -1480,6 +1513,7 @@ impl Prime {
                 total: self.recent_notes.len(),
                 rest: None,
                 kept: NOTES_KEPT,
+                reserved: false,
             },
             Section {
                 heading: format!("\nGotchas and procedures ({})", self.knowledge_total),
@@ -1487,6 +1521,7 @@ impl Prime {
                 total: self.knowledge_total,
                 rest: Some(KNOWLEDGE_REST),
                 kept: KNOWLEDGE_SHOWN,
+                reserved: true,
             },
         ];
         let shown = fit(&sections, &mut room);
@@ -1646,6 +1681,10 @@ struct Section {
     total: usize,
     rest: Option<&'static str>,
     kept: usize,
+    /// Fitted ahead of every other section in the first pass, though written
+    /// in its place: a few short lines a resume must not lose to a board the
+    /// work already fills, the way the gotchas once fell off a full prime.
+    reserved: bool,
 }
 
 impl Section {
@@ -1672,7 +1711,7 @@ impl Section {
                 (entry_line(entry, today), notes)
             })
             .collect();
-        Section { heading: format!("\n{title} ({total})"), blocks, total, rest: Some(rest), kept }
+        Section { heading: format!("\n{title} ({total})"), blocks, total, rest: Some(rest), kept, reserved: false }
     }
 
     /// The heading, the entries `shown` admits -- with their notes where it
@@ -1701,12 +1740,20 @@ impl Section {
 /// admits up to each section's `kept`, the second spends what is left, so a
 /// long ready list cannot crowd out the blocked work and the loose notes a
 /// resume also needs. An entry goes with its notes when they fit with it and
-/// alone when only it does. When everything fits, everything shows, in order.
+/// alone when only it does. A reserved section goes first in the first pass.
+/// When everything fits, everything shows, in order.
 fn fit(sections: &[Section], room: &mut Room) -> Vec<Vec<bool>> {
     let cost = |line: &str| line.chars().count() + 1;
     let mut shown: Vec<Vec<bool>> = vec![Vec::new(); sections.len()];
+    let mut order: Vec<usize> = (0..sections.len()).collect();
     for first in [true, false] {
-        for (section, shown) in sections.iter().zip(shown.iter_mut()) {
+        if first {
+            order.sort_by_key(|&at| !sections[at].reserved);
+        } else {
+            order.sort_unstable();
+        }
+        for &at in &order {
+            let (section, shown) = (&sections[at], &mut shown[at]);
             let cap = if first { section.kept } else { usize::MAX };
             while shown.len() < section.blocks.len().min(cap) {
                 let (line, notes) = &section.blocks[shown.len()];
@@ -2326,7 +2373,31 @@ mod tests {
         let uid = ekko.storage.get().unwrap()[&1].uid.clone().unwrap();
         assert!(text.contains("Write the handoff for task 1 now") && text.contains(&uid), "{text}");
         assert!(text.contains("Its current handoff, 2, which this one replaces: halfway through the lexer"), "{text}");
-        assert!(matches!(handoff_prompt(&ekko, Some("2")), Err(EkkoError::InvalidInput(_))), "a note has nothing to hand over");
+        assert!(text.contains("any message, even just \"continue\", starts the next session"), "{text}");
+        assert!(text.contains("Handoff 2 on this task was written under a minute ago"), "{text}");
+
+        let by_note = handoff_prompt(&ekko, Some("2")).unwrap();
+        assert!(by_note.contains("Write the handoff for task 1 now"), "a handoff's id stands for its task: {by_note}");
+        ekko.create_note(&words(&["a loose thought"])).unwrap();
+        assert!(matches!(handoff_prompt(&ekko, Some("3")), Err(EkkoError::InvalidInput(_))), "a loose note has nothing to hand over");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With a fresh handoff on one task and another task left in progress,
+    /// the prompt points at the fresh one rather than asking for a second.
+    #[test]
+    fn the_handoff_prompt_points_at_a_fresh_handoff_on_another_task() {
+        let (ekko, dir) = board("handoff-prompt-fresh");
+        ekko.create_task(&words(&["the task left in progress"])).unwrap();
+        ekko.create_task(&words(&["the task this session worked on"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        hand_over(&ekko, 2, "stopped after the parser");
+
+        let text = handoff_prompt(&ekko, None).unwrap();
+        assert!(text.contains("Write the handoff for task 1 now"), "{text}");
+        assert!(text.contains("Handoff 3 on task 2 was written under a minute ago"), "{text}");
+        assert!(text.contains("edit append on 3"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2410,6 +2481,37 @@ mod tests {
         assert!(text.contains("\nGotchas and procedures (12)\n"), "{text}");
         assert!(text.contains(&format!("      +7 more: {KNOWLEDGE_REST}\n")), "{text}");
         assert!(text.contains("\nDecisions (20): search with the decision filter\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Work in progress with long notes fills a prime without a cap of its
+    /// own; the gotchas are still listed, and a cut says what it left out.
+    #[test]
+    fn gotchas_survive_a_prime_filled_by_work_in_progress() {
+        let (ekko, dir) = board("knowledge-reserved");
+        let reason = "a reason that runs long enough to matter ".repeat(7);
+        let mut ops = Vec::new();
+        for k in 1..=40 {
+            ops.push(serde_json::json!({"op": "create", "text": format!("task {k} in progress")}));
+        }
+        for k in 1..=40 {
+            for _ in 0..3 {
+                ops.push(serde_json::json!({"op": "create", "kind": "note", "text": reason, "attached_to": k}));
+            }
+        }
+        ops.push(serde_json::json!({"op": "create", "kind": "gotcha", "text": "restart before writing after an upgrade"}));
+        ops.push(serde_json::json!({"op": "create", "kind": "procedure", "text": "release in the order note 184 gives"}));
+        write(&ekko, &ops);
+        for k in 1..=40 {
+            ekko.set_state(&words(&[format!("@{k}").as_str(), "progress"]), false).unwrap();
+        }
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.chars().count() <= PRIME_BUDGET, "{} characters", text.chars().count());
+        assert!(text.contains("more: context <id> reads one"), "the work in progress filled it: {text}");
+        assert!(text.contains("\nGotchas and procedures (2)\n"), "{text}");
+        assert!(text.contains("restart before writing after an upgrade"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

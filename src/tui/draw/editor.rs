@@ -246,7 +246,8 @@ fn board_doc(buf: &mut Buffer, app: &App, glyphs: Glyphs, list: Rect, hits: &mut
                 let indent: u16 = if item.attached_to.is_some() { 6 } else { 4 };
                 let (glyph, look) = theme::item_look(glyphs, item);
                 let prefix = id_width as u16 + 4;
-                let room = width.saturating_sub(indent + prefix + meta_width + 3) as usize;
+                let mark = theme::mark(item);
+                let room = width.saturating_sub(indent + prefix + meta_width + 3 + mark.len() as u16) as usize;
                 let mut description = theme::description_style(item);
                 if selected && focused {
                     description = description.fg(palette::BRIGHT);
@@ -255,6 +256,7 @@ fn board_doc(buf: &mut Buffer, app: &App, glyphs: Glyphs, list: Rect, hits: &mut
                     Span::styled(format!("{:>id_width$}. ", item.id), muted()),
                     Span::styled(glyph, look),
                     Span::raw(" "),
+                    Span::styled(mark, theme::mark_style()),
                     Span::styled(clip(&item.description, room), description),
                 ];
                 put(buf, list.x + indent, y, width.saturating_sub(indent), spans);
@@ -309,6 +311,9 @@ pub(super) fn item_lines(app: &App, glyphs: Glyphs, key: &str, width: usize) -> 
 
     let (glyph, look) = theme::item_look(glyphs, item);
     let mut header = vec![Span::styled(format!("{glyph} {}", state_word(item)), look), Span::styled(format!("   #{}", item.id), muted())];
+    if let Some(mark) = item.mark() {
+        header.push(Span::styled(format!("   {mark}"), theme::mark_style()));
+    }
     if archived {
         header.push(Span::styled("   archived", Style::new().fg(palette::YELLOW)));
     }

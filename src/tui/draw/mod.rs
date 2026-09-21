@@ -498,6 +498,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A typed note says its kind on the board's row and in its tab's header,
+    /// and the search view offers the kinds as chips.
+    #[test]
+    fn a_typed_note_carries_its_mark_on_the_board_and_in_its_tab() {
+        let (dir, mut app) = sample("marks");
+        let at = app.snapshot.items.iter().position(|item| item.id == 4).unwrap();
+        app.snapshot.items[at].knowledge = Some(crate::item::Knowledge::Gotcha);
+        app.snapshot.all.get_mut(&4).unwrap().knowledge = Some(crate::item::Knowledge::Gotcha);
+
+        let all = screen(&drawn(&mut app, Glyphs::Nerd, 170, 46));
+        assert!(all.contains("gotcha why the watcher polls"), "{all}");
+
+        let key = crate::tui::board::key(&app.snapshot.all[&4]);
+        app.tabs.open(Doc::Item(key), false);
+        app.view = View::Search;
+        let all = screen(&drawn(&mut app, Glyphs::Nerd, 170, 46));
+        let header = all.lines().find(|line| line.contains("#4") && !line.contains("@render")).expect("the note's tab has a header");
+        assert!(header.contains("gotcha"), "{header}");
+        assert!(all.contains(" procedure "), "the kinds are not among the chips:\n{all}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_small_terminal_says_so_instead_of_drawing_boxes() {
         let (dir, mut app) = sample("small");

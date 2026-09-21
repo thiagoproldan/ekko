@@ -235,7 +235,8 @@ fn search_view(buf: &mut Buffer, app: &App, glyphs: Glyphs, body: Rect, focused:
                 let item = &app.snapshot.items[index];
                 let (glyph, look) = theme::item_look(glyphs, item);
                 let id = format!(" {} ", item.id);
-                let room = (line_width as usize).saturating_sub(id.len() + 5);
+                let mark = theme::mark(item);
+                let room = (line_width as usize).saturating_sub(id.len() + 5 + mark.len());
                 let mut description = theme::description_style(item);
                 if selected && focused {
                     description = description.fg(palette::BRIGHT);
@@ -243,6 +244,7 @@ fn search_view(buf: &mut Buffer, app: &App, glyphs: Glyphs, body: Rect, focused:
                 let spans = vec![
                     Span::styled(glyph, look),
                     Span::styled(id, muted()),
+                    Span::styled(mark, theme::mark_style()),
                     Span::styled(clip(&item.description, room), description),
                 ];
                 put(buf, body.x + 3, y, line_width.saturating_sub(3), spans);
