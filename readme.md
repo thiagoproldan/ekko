@@ -305,6 +305,8 @@ Ekko has a frontend for each kind of reader: the board and `--ui` for a person, 
 | `link` | `blocked_by`, or `attached_to` |
 | `batch` | several of the writes above in one write, all or nothing, with `$1`, `$2` naming the items earlier operations created |
 | `stash`, `trash` | put items away, or bring them back |
+| `away` | what is put away: the stash, and the trash with the days each item has left, one line per item |
+| `phases` | declare the project's phases in order, replacing the sequence; answers with the roadmap |
 
 There is no `clear` and no `destroy`: an agent that needs either asks the user to run it.
 

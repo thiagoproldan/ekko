@@ -95,7 +95,7 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
     assert!(init["instructions"].as_str().is_some_and(|s| s.contains("shared with the user")));
 
     let tools = replies["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 16);
+    assert_eq!(tools.len(), 18);
     assert!(tools.iter().all(|tool| tool["inputSchema"]["type"] == "object" && tool["description"].is_string()));
 
     let created: Value = serde_json::from_str(text(&replies["3"])).unwrap();
@@ -252,6 +252,40 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
     assert_eq!(replies["5"]["error"]["code"], -32601);
     assert_eq!(replies["6"]["error"]["code"], -32602);
     assert_eq!(replies["null"]["error"]["code"], -32700);
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// What is put away reads through a read-only tool, and the phase sequence is
+/// declared over MCP: no question a session asks sends the agent to the files.
+#[test]
+fn away_lists_the_stash_and_the_trash_and_phases_declares_the_sequence() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
+            call(2, "create", json!({"text": "kept for later"})),
+            call(3, "create", json!({"text": "made by mistake"})),
+            call(4, "stash", json!({"items": [1]})),
+            call(5, "trash", json!({"items": [2]})),
+            call(6, "away", json!({})),
+            call(7, "away", json!({"which": "trash"})),
+            call(8, "phases", json!({"sequence": ["setup", "build"]})),
+            call(9, "away", json!({"which": "archive"})),
+            call(10, "phases", json!({"sequence": []})),
+        ],
+    );
+
+    let both = text(&replies["6"]);
+    assert!(both.contains("kept for later") && both.contains("made by mistake"), "{both}");
+    let trash = text(&replies["7"]);
+    assert!(trash.contains("made by mistake") && !trash.contains("kept for later"), "{trash}");
+    let roadmap = text(&replies["8"]);
+    assert!(roadmap.contains("setup") && roadmap.contains("build"), "{roadmap}");
+    assert_eq!(replies["9"]["result"]["isError"], true, "{}", replies["9"]);
+    assert_eq!(replies["10"]["result"]["isError"], true, "{}", replies["10"]);
 
     fs::remove_dir_all(&home).ok();
 }

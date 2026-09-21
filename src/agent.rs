@@ -773,6 +773,51 @@ pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String], limit: usize)
     Ok(Found { total: ranked.hits.len(), every_word: ranked.every_word, hits, summary: None })
 }
 
+/// What is put away, the way `search` lists what it finds: the stash in id
+/// order, then the trash oldest first with the days each item has left there,
+/// one line per item with its state and its text clipped, at most `limit` of
+/// each and a total when there are more. The terminal's stash view prints
+/// every note whole, grouped by board -- 8 KB on this project's own board.
+pub fn away(ekko: &Ekko, stash: bool, trash: bool, limit: usize) -> Result<String, EkkoError> {
+    let all = ekko.storage.get_shared()?;
+    let phases = ekko.storage.get_phases()?;
+    let reader = Reader::shared(&all, &phases);
+    let now = chrono::Local::now().timestamp_millis();
+    let mut out = String::new();
+    let mut section = |title: &str, items: Vec<&Item>, empty: &str| {
+        let _ = writeln!(out, "{title} ({})", items.len());
+        if items.is_empty() {
+            let _ = writeln!(out, "      {empty}");
+        }
+        for item in items.iter().take(limit) {
+            let entry = reader.entry_counting(item, false);
+            let mut body = format!("[{}] {}", entry.state, clip(&item.description, TASK_CLIP));
+            if let Some(at) = item.trashed {
+                let left = crate::render::TRASH_DAYS - (now - at) / 86_400_000;
+                let _ = write!(body, " \u{b7} {}", match left {
+                    d if d <= 0 => "expires today".to_string(),
+                    1 => "expires tomorrow".to_string(),
+                    d => format!("expires in {d}d"),
+                });
+            }
+            let _ = writeln!(out, "{}", listed_line(&entry, &body, true, &reader.today));
+        }
+        if items.len() > limit {
+            let _ = writeln!(out, "      {} of {} shown: raise limit.", limit, items.len());
+        }
+    };
+    if stash {
+        let items: Vec<&Item> = all.values().filter(|item| item.stashed.is_some() && item.trashed.is_none()).collect();
+        section("Stash", items, "nothing is stashed");
+    }
+    if trash {
+        let mut items: Vec<&Item> = all.values().filter(|item| item.trashed.is_some()).collect();
+        items.sort_by_key(|item| (item.trashed, item.id));
+        section("Trash", items, "the trash is empty");
+    }
+    Ok(out)
+}
+
 /// What a board holds, for a search that named nothing to look for: counts
 /// by state and by board, in a few lines, instead of every item.
 fn summary(all: &ItemMap) -> String {

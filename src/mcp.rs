@@ -38,7 +38,7 @@ const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"
 
 const TOOLS: &[&str] = &[
     "prime", "next", "context", "search", "changes", "roadmap", "projects", "create", "set_state",
-    "force_state", "edit", "update", "link", "batch", "stash", "trash",
+    "force_state", "edit", "update", "link", "batch", "stash", "trash", "away", "phases",
 ];
 
 const INSTRUCTIONS: &str = "\
@@ -316,6 +316,27 @@ impl Server {
                 let ops = args.remove("ops").ok_or_else(|| invalid("batch needs ops"))?;
                 finish(args)?;
                 batch(&ekko, ops)
+            }
+            "away" => {
+                let which = take(args, "which", |v| v.as_str().map(str::to_string), "stash or trash")?;
+                let limit = positive(take(args, "limit", Value::as_u64, "a positive integer")?)?;
+                finish(args)?;
+                let (stash, trash) = match which.as_deref() {
+                    None => (true, true),
+                    Some("stash") => (true, false),
+                    Some("trash") => (false, true),
+                    Some(other) => return Err(invalid(format!("which is stash or trash, not {other}"))),
+                };
+                Ok(agent::away(&ekko, stash, trash, limit.unwrap_or(agent::SEARCH_LIMIT))?)
+            }
+            "phases" => {
+                let sequence = take_strings(args, "sequence")?;
+                finish(args)?;
+                if sequence.is_empty() {
+                    return Err(invalid("sequence is required: every phase, in the order work goes through them"));
+                }
+                ekko.set_phases(&sequence)?;
+                Ok(agent::roadmap_text(&ekko.display_roadmap()?))
             }
             "stash" | "trash" => {
                 let items = take_items(args)?;
@@ -774,6 +795,18 @@ fn tool_definitions() -> Value {
             "description": "Move items to the trash, kept 30 days, or bring them back with away false. Ask the user first; prefer set_state cancelled for work decided against.",
             "inputSchema": object(json!({"project": project, "items": items, "away": {"type": "boolean", "default": true}}), &["items"]),
             "annotations": json!({"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false}),
+        },
+        {
+            "name": "away",
+            "description": "What is put away: the stash, and the trash with the days each item has left there, one line per item with its state, at most limit (default 20) of each. which narrows it to one of them.",
+            "inputSchema": object(json!({"project": project, "which": {"type": "string", "enum": ["stash", "trash"]}, "limit": {"type": "integer", "minimum": 1}}), &[]),
+            "annotations": read,
+        },
+        {
+            "name": "phases",
+            "description": "Declare the project's phases in the order work goes through them, replacing the sequence: reordering is declaring it again. Answers with the roadmap.",
+            "inputSchema": object(json!({"project": project, "sequence": {"type": "array", "items": {"type": "string"}, "minItems": 1}}), &["sequence"]),
+            "annotations": write,
         }
     ])
 }
