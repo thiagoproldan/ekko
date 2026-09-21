@@ -1074,6 +1074,37 @@ pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoErr
     Ok(out)
 }
 
+/// How much of an item's text names it where a person picks it from a list.
+const MENTION_CLIP: usize = 60;
+
+/// The items a person can mention by name, as (id, what to call it): the
+/// open tasks, the handoffs, and the decisions, gotchas and procedures in
+/// force, by id. Closed work and plain notes are left out, so the list stays
+/// one a person can pick from; context still reads any of them.
+pub fn mentionable(ekko: &Ekko) -> Result<Vec<(u32, String)>, EkkoError> {
+    let all = ekko.storage.get_shared()?;
+    let links = links_of(&all);
+    Ok(all
+        .values()
+        .filter(|item| visible(item))
+        .filter(|item| {
+            holds(item) || item.handoff || (item.knowledge.is_some() && !links.superseded_by.contains_key(&item.id))
+        })
+        .map(|item| (item.id, format!("{} \u{b7} {}", item.id, mention_name(&item.description))))
+        .collect())
+}
+
+/// An item's text cut to fit a menu line, with an ellipsis where it was cut
+/// and no count: a menu is read at a glance, and the item reads whole.
+fn mention_name(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= MENTION_CLIP {
+        return flat;
+    }
+    let head: String = flat.chars().take(MENTION_CLIP).collect();
+    format!("{}\u{2026}", head.trim_end())
+}
+
 /// What a board holds, for a search that named nothing to look for: counts
 /// by state and by board, in a few lines, instead of every item.
 fn summary(all: &ItemMap) -> String {

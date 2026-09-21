@@ -21,6 +21,11 @@ fn temp_home() -> PathBuf {
 /// returns the replies by id, with the ones that could carry no id under
 /// `null`.
 fn session(home: &PathBuf, lines: &[String]) -> HashMap<String, Value> {
+    transcript(home, lines).into_iter().map(|reply| (reply["id"].to_string(), reply)).collect()
+}
+
+/// Every message the server wrote, in order, notifications included.
+fn transcript(home: &PathBuf, lines: &[String]) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
         .arg("--mcp")
         .env("HOME", home)
@@ -45,10 +50,7 @@ fn session(home: &PathBuf, lines: &[String]) -> HashMap<String, Value> {
     assert!(status.success(), "the server did not exit cleanly when stdin closed");
 
     out.lines()
-        .map(|line| {
-            let reply: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("not one JSON message per line: {e}: {line}"));
-            (reply["id"].to_string(), reply)
-        })
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("not one JSON message per line: {e}: {line}")))
         .collect()
 }
 
@@ -241,7 +243,7 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
     assert_eq!(discover["supportedVersions"][0], "2026-07-28");
     assert!(discover["supportedVersions"].as_array().unwrap().contains(&json!("2025-11-25")));
     assert_eq!(discover["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "ekko");
-    assert_eq!(discover["capabilities"], json!({"tools": {}, "prompts": {}}));
+    assert_eq!(discover["capabilities"], json!({"tools": {}, "prompts": {}, "resources": {"listChanged": true}}));
 
     assert_eq!(replies["2"]["result"]["resultType"], "complete");
     assert_eq!(text(&replies["2"]), "Nothing is in progress or ready.\n");
@@ -355,6 +357,58 @@ fn typed_notes_are_written_listed_and_searched_over_stdio() {
     let create = tools.iter().find(|tool| tool["name"] == "create").unwrap();
     assert!(create["inputSchema"]["properties"]["kind"]["enum"].as_array().unwrap().contains(&json!("gotcha")));
     assert!(create["inputSchema"]["properties"]["supersedes"].is_object());
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// The board as resources a person mentions with @: the prime and the items
+/// worth picking are listed, any item reads as context does, and a write
+/// after the client read the list is followed by list_changed -- the notice
+/// Claude Code reads the list again on, so a new item can be mentioned.
+#[test]
+fn the_board_is_served_as_resources_and_a_new_item_changes_the_list() {
+    let home = temp_home();
+    let messages = transcript(
+        &home,
+        &[
+            request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
+            call(2, "create", json!({"text": "an open task"})),
+            call(3, "create", json!({"text": "a finished task"})),
+            call(4, "set_state", json!({"items": [2], "state": "done"})),
+            call(5, "create", json!({"kind": "note", "text": "a plain note"})),
+            call(6, "create", json!({"kind": "gotcha", "text": "a trap to remember"})),
+            request(7, "resources/list", json!({})),
+            request(8, "resources/read", json!({"uri": "item://1"})),
+            request(9, "resources/read", json!({"uri": "item://2"})),
+            request(10, "resources/read", json!({"uri": "prime://"})),
+            request(11, "resources/read", json!({"uri": "item://99"})),
+            request(12, "resources/templates/list", json!({})),
+            call(13, "create", json!({"text": "made mid-session"})),
+            request(14, "resources/list", json!({})),
+            request(15, "ping", json!({})),
+        ],
+    );
+
+    let notices: Vec<usize> = messages.iter().enumerate().filter(|(_, m)| m.get("id").is_none()).map(|(at, _)| at).collect();
+    assert_eq!(notices.len(), 1, "one change after the list was read, and none before: {messages:?}");
+    assert_eq!(messages[notices[0]]["method"], "notifications/resources/list_changed");
+    assert_eq!(messages[notices[0] - 1]["id"], 13, "the notice follows the write's reply");
+
+    let by_id: HashMap<String, &Value> = messages.iter().map(|m| (m["id"].to_string(), m)).collect();
+    let uris = |id: &str| -> Vec<String> {
+        by_id[id]["result"]["resources"].as_array().unwrap().iter().map(|r| r["uri"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(uris("7"), ["prime://", "item://1", "item://4"], "closed work and plain notes are left out");
+    assert_eq!(by_id["7"]["result"]["resources"][1]["name"], "1 \u{b7} an open task");
+    assert_eq!(uris("14"), ["prime://", "item://1", "item://4", "item://5"]);
+
+    let read = |id: &str| by_id[id]["result"]["contents"][0]["text"].as_str().unwrap_or_else(|| panic!("{}", by_id[id])).to_string();
+    assert!(read("8").contains("an open task"), "{}", read("8"));
+    assert!(read("9").contains("a finished task"), "an unlisted item still reads: {}", read("9"));
+    assert!(read("10").starts_with("ekko \u{b7} "), "{}", read("10"));
+    assert_eq!(by_id["11"]["error"]["code"], -32002);
+    assert_eq!(by_id["12"]["result"]["resourceTemplates"], json!([]));
 
     fs::remove_dir_all(&home).ok();
 }

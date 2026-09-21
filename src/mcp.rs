@@ -10,13 +10,18 @@
 //! time. Dual-era, per the 2026-07-28 revision: a request whose `_meta` names
 //! a protocol version is served statelessly under that revision, and an
 //! `initialize` handshake is served under the legacy revision it negotiates.
-//! Written by hand rather than through an SDK because the whole protocol a
-//! tools-only server needs is five methods, and the binary stays one file on
+//! Written by hand rather than through an SDK because the whole protocol this
+//! server needs is a handful of methods, and the binary stays one file on
 //! disk with no runtime.
+//!
+//! The board is also served as resources, `prime://` and `item://<id>`, so a
+//! person can mention an item with @ and Claude Code attaches it to the
+//! prompt without the agent spending a call.
 //!
 //! Logs, if any, go to stderr: stdout carries protocol messages and nothing
 //! else. The server exits when stdin closes.
 
+use std::cell::RefCell;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -62,6 +67,10 @@ pub struct Server {
     cwd: PathBuf,
     ekko_dir_env: Option<String>,
     project_env: Option<String>,
+    /// The resource list the client last read, and the board's revision it
+    /// was built at. None until a client asks for the list: a client that
+    /// never did has nothing to be told has changed.
+    listed: RefCell<Option<(u64, Vec<Value>)>>,
 }
 
 struct RpcError {
@@ -107,10 +116,12 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(reply) = server.handle_line(&line) {
-            if writeln!(stdout, "{reply}").and_then(|()| stdout.flush()).is_err() {
-                break;
-            }
+        // The reply first, then any notice: a write's list_changed follows
+        // the answer to the write.
+        let reply = server.handle_line(&line);
+        let notice = server.list_changed();
+        if reply.into_iter().chain(notice).try_for_each(|message| writeln!(stdout, "{message}")).and_then(|()| stdout.flush()).is_err() {
+            break;
         }
     }
     ExitCode::SUCCESS
@@ -118,7 +129,30 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
 
 impl Server {
     pub fn new(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>) -> Self {
-        Server { home, cwd, ekko_dir_env, project_env }
+        Server { home, cwd, ekko_dir_env, project_env, listed: RefCell::new(None) }
+    }
+
+    /// The notification that the resource list changed, when it has since
+    /// the client last read it -- through this server's writes or anyone
+    /// else's. Claude Code reads the list again on it, and only an item on
+    /// the list it read can be mentioned with @, so without this an item
+    /// made mid-session could not be. Checked after every message, so a
+    /// change made from a terminal is noticed at the session's next call.
+    pub fn list_changed(&self) -> Option<Value> {
+        let mut listed = self.listed.borrow_mut();
+        let (revision, resources) = listed.as_mut()?;
+        let (ekko, _) = self.open(None).ok()?;
+        let now = ekko.storage.get_counters().ok()?.revision;
+        if now == *revision {
+            return None;
+        }
+        let current = resource_list(&ekko).ok()?;
+        *revision = now;
+        if current == *resources {
+            return None;
+        }
+        *resources = current;
+        Some(json!({"jsonrpc": "2.0", "method": "notifications/resources/list_changed"}))
     }
 
     /// One incoming line to at most one reply: notifications and stray
@@ -160,7 +194,7 @@ impl Server {
             "initialize" => return Ok(self.initialize(params)),
             "server/discover" => json!({
                 "supportedVersions": supported(),
-                "capabilities": {"tools": {}, "prompts": {}},
+                "capabilities": capabilities(),
                 "instructions": INSTRUCTIONS,
             }),
             "ping" => json!({}),
@@ -168,6 +202,11 @@ impl Server {
             "tools/call" => self.call(params)?,
             "prompts/list" => json!({"prompts": prompt_definitions()}),
             "prompts/get" => self.prompt(params)?,
+            "resources/list" => json!({"resources": self.resources()?}),
+            // None: Claude Code offers a template in its @ menu, and a URI
+            // typed from it is never read -- only a listed one is.
+            "resources/templates/list" => json!({"resourceTemplates": []}),
+            "resources/read" => self.read(params)?,
             _ => return Err(RpcError::new(-32601, format!("Method not found: {method}"))),
         };
         Ok(if version.is_some() || method == "server/discover" { complete(result) } else { result })
@@ -178,7 +217,7 @@ impl Server {
         let version = LEGACY.iter().find(|v| **v == requested).copied().unwrap_or(LEGACY[0]);
         json!({
             "protocolVersion": version,
-            "capabilities": {"tools": {}, "prompts": {}},
+            "capabilities": capabilities(),
             "serverInfo": server_info(),
             "instructions": INSTRUCTIONS,
         })
@@ -203,6 +242,37 @@ impl Server {
             "description": "Write the handoff the next session resumes from",
             "messages": [{"role": "user", "content": {"type": "text", "text": text}}],
         }))
+    }
+
+    /// The session's board as resources a person mentions with @: its prime,
+    /// and the items `agent::mentionable` names. Remembered, with the
+    /// revision it was built at, for `list_changed` to compare against.
+    fn resources(&self) -> Result<Vec<Value>, RpcError> {
+        let (ekko, _) = self.open(None).map_err(resource_error)?;
+        let revision = ekko.storage.get_counters().map_err(|error| resource_error(error.into()))?.revision;
+        let resources = resource_list(&ekko).map_err(resource_error)?;
+        *self.listed.borrow_mut() = Some((revision, resources.clone()));
+        Ok(resources)
+    }
+
+    /// A resource's text: `prime://` reads as the prime tool answers, and
+    /// `item://<id>` as context does, concise -- any item, listed or not.
+    fn read(&self, params: &Value) -> Result<Value, RpcError> {
+        let uri = params
+            .get("uri")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::new(-32602, "Invalid params: resources/read needs a uri"))?;
+        let (ekko, location) = self.open(None).map_err(resource_error)?;
+        let text = if uri == "prime://" {
+            agent::prime(&ekko, &Self::label(&location)).map_err(resource_error)?.text()
+        } else if let Some(id) = uri.strip_prefix("item://").filter(|id| !id.is_empty()) {
+            let read = agent::contexts(&ekko, &[id.to_string()])
+                .map_err(|error| RpcError::new(-32002, format!("Resource not found: {uri}: {error}")))?;
+            read.iter().map(|context| context.text_with(agent::Detail::Concise)).collect::<Vec<_>>().join("\n")
+        } else {
+            return Err(RpcError::new(-32002, format!("Resource not found: {uri}")));
+        };
+        Ok(json!({"contents": [{"uri": uri, "mimeType": "text/plain", "text": text}]}))
     }
 
     fn call(&self, params: &Value) -> Result<Value, RpcError> {
@@ -654,6 +724,26 @@ fn render(home: &std::path::Path, outcome: &Outcome) -> String {
 
 fn supported() -> Vec<&'static str> {
     MODERN.iter().chain(LEGACY).copied().collect()
+}
+
+/// Tools, prompts, and resources whose list can change: an item made
+/// mid-session joins the list, and the client is told.
+fn capabilities() -> Value {
+    json!({"tools": {}, "prompts": {}, "resources": {"listChanged": true}})
+}
+
+/// The resource list `resources/list` answers with, in the order a person
+/// scans it: the prime first, then the items by id.
+fn resource_list(ekko: &Ekko) -> Result<Vec<Value>, EkkoError> {
+    let prime = json!({"uri": "prime://", "name": "prime \u{b7} the board's resume view", "mimeType": "text/plain"});
+    let items = agent::mentionable(ekko)?
+        .into_iter()
+        .map(|(id, name)| json!({"uri": format!("item://{id}"), "name": name, "mimeType": "text/plain"}));
+    Ok(std::iter::once(prime).chain(items).collect())
+}
+
+fn resource_error(error: EkkoError) -> RpcError {
+    RpcError::new(-32603, format!("{}: {error}", error.code()))
 }
 
 fn server_info() -> Value {
