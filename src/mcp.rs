@@ -43,6 +43,14 @@ const MODERN: &[&str] = &["2026-07-28"];
 /// answered with the first, which the client may accept or disconnect over.
 const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// The tools Claude Code loads at session start instead of behind ToolSearch.
+/// A deferred tool costs a session one ToolSearch round trip before its first
+/// use: a median of 2.9 s over 20 loads on 2026-09-21, and up to 20 s. These
+/// five are the ones nearly every session calls. Their definitions cost about
+/// 1,500 tokens in every session, in every project, since the plugin is
+/// loaded everywhere, so the rest stay deferred.
+const ALWAYS_LOADED: &[&str] = &["context", "search", "create", "set_state", "edit"];
+
 const TOOLS: &[&str] = &[
     "prime", "next", "context", "search", "changes", "roadmap", "projects", "create", "set_state",
     "force_state", "edit", "update", "link", "batch", "stash", "trash", "away", "phases",
@@ -846,7 +854,7 @@ fn tool_definitions() -> Value {
         json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
     };
 
-    json!([
+    let mut tools = json!([
         {
             "name": "prime",
             "description": "The resume view of the board: in progress, ready in the order to take it up, blocked, recent notes, what needs attention, and a cursor for changes. Already in context at session start.",
@@ -992,5 +1000,11 @@ fn tool_definitions() -> Value {
             "inputSchema": object(json!({"project": project, "sequence": {"type": "array", "items": {"type": "string"}, "minItems": 1}}), &["sequence"]),
             "annotations": write,
         }
-    ])
+    ]);
+    for tool in tools.as_array_mut().expect("an array") {
+        if ALWAYS_LOADED.contains(&tool["name"].as_str().unwrap_or_default()) {
+            tool["_meta"] = json!({"anthropic/alwaysLoad": true});
+        }
+    }
+    tools
 }

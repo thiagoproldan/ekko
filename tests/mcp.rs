@@ -98,6 +98,10 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
 
     let tools = replies["2"]["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 18);
+    // The five nearly every session calls load at session start; the rest stay behind ToolSearch.
+    let loaded: Vec<&str> =
+        tools.iter().filter(|tool| tool["_meta"]["anthropic/alwaysLoad"] == true).map(|tool| tool["name"].as_str().unwrap()).collect();
+    assert_eq!(loaded, ["context", "search", "create", "set_state", "edit"]);
     assert!(tools.iter().all(|tool| tool["inputSchema"]["type"] == "object" && tool["description"].is_string()));
 
     let created: Value = serde_json::from_str(text(&replies["3"])).unwrap();
