@@ -17,7 +17,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use crate::ekko::{
-    apply_state, canonical_state, parse_due_date, phase_inversion, phase_order, remove_duplicates,
+    apply_state, canonical_state, holds, parse_due_date, phase_inversion, phase_order, remove_duplicates,
     uid_index, Ekko, EkkoError, Linked,
 };
 use crate::item::Item;
@@ -47,6 +47,8 @@ pub enum Kind {
     #[default]
     Task,
     Note,
+    /// A note that hands a task over to the next session; see `Item::handoff`.
+    Handoff,
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,7 +275,7 @@ impl<'a> Draft<'a> {
         if text.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
-        if spec.kind == Kind::Note {
+        if spec.kind != Kind::Task {
             for (field, given) in [
                 ("priority", spec.priority.is_some()),
                 ("due date", spec.due.is_some()),
@@ -283,6 +285,9 @@ impl<'a> Draft<'a> {
                     return Err(invalid(format!("A note has no {field}; only a task does")));
                 }
             }
+        }
+        if spec.kind == Kind::Handoff && spec.attached_to.is_none() {
+            return Err(invalid("A handoff is attached_to the task it hands over"));
         }
         let priority = spec.priority.unwrap_or(1);
         if !(1..=3).contains(&priority) {
@@ -297,7 +302,7 @@ impl<'a> Draft<'a> {
         let id = self.ekko.generate_id(&self.data);
         let mut item = match spec.kind {
             Kind::Task => Item::new_task(id, text.to_string(), boards(&spec.boards), priority),
-            Kind::Note => Item::new_note(id, text.to_string(), boards(&spec.boards)),
+            Kind::Note | Kind::Handoff => Item::new_note(id, text.to_string(), boards(&spec.boards)),
         };
         item.due_date = due;
         item.phase = phase;
@@ -314,8 +319,32 @@ impl<'a> Draft<'a> {
             let target = self.resolve(target)?;
             let attached = Ekko::attach_target(&self.data, id, Some(target))?;
             self.item(id).attached_to = attached.map(|(_, uid)| uid);
+            if spec.kind == Kind::Handoff {
+                self.hand_over(id, target)?;
+            }
         }
         Ok(id)
+    }
+
+    /// Makes note `id` the handoff of `task`: an open task only, since a
+    /// finished one has nothing left to hand over, and the only one there --
+    /// the handoff it replaces stays on the task as an ordinary note.
+    fn hand_over(&mut self, id: u32, task: u32) -> Result<(), EkkoError> {
+        if !holds(&self.data[&task]) {
+            return Err(invalid(format!("{task} is finished, and a finished task has nothing to hand over")));
+        }
+        let uid = self.data[&task].uid.clone();
+        let earlier: Vec<u32> = self
+            .data
+            .values()
+            .filter(|note| note.handoff && note.id != id && note.attached_to.is_some() && note.attached_to == uid)
+            .map(|note| note.id)
+            .collect();
+        for note in earlier {
+            self.item(note).handoff = false;
+        }
+        self.item(id).handoff = true;
+        Ok(())
     }
 
     fn declared_phase(&self, phase: Option<&str>) -> Result<Option<String>, EkkoError> {
@@ -466,7 +495,13 @@ impl<'a> Draft<'a> {
             (None, Some(target)) => {
                 let target = target.as_ref().map(|t| self.resolve(t)).transpose()?;
                 let attached = Ekko::attach_target(&self.data, id, target)?;
+                let moved = self.data[&id].attached_to != attached.as_ref().map(|(_, uid)| uid.clone());
                 self.item(id).attached_to = attached.map(|(_, uid)| uid);
+                // A handoff hands over the task it was written on; moved or
+                // detached, it is an ordinary note about that work.
+                if moved {
+                    self.item(id).handoff = false;
+                }
             }
             _ => return Err(invalid("A link takes exactly one of blocked_by or attached_to")),
         }
@@ -559,6 +594,67 @@ mod tests {
         assert_eq!(data[&3].attached_to, data[&2].uid);
         assert_eq!(State::of(&data[&1]), Some(State::Done));
         assert_eq!(ekko.storage.get().unwrap(), *data, "what was reported is not what was written");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A handoff is a note on an open task, and the newest one is the only
+    /// handoff there: the one it replaces stays on the task as a plain note.
+    #[test]
+    fn a_handoff_replaces_the_one_before_on_its_task() {
+        let (ekko, dir) = board("handoff");
+        batch(
+            &ekko,
+            &[
+                json!({"op": "create", "text": "the work"}),
+                json!({"op": "create", "kind": "handoff", "text": "stopped at the parser", "attached_to": "$1"}),
+            ],
+        )
+        .unwrap();
+        let written = batch(&ekko, &[json!({"op": "create", "kind": "handoff", "text": "parser done, tests next", "attached_to": 1})]).unwrap();
+
+        let data = &written.data;
+        assert!(!data[&3].is_task && data[&3].handoff);
+        assert_eq!(data[&3].attached_to, data[&1].uid);
+        assert!(!data[&2].handoff, "the earlier handoff is demoted");
+        assert_eq!(data[&2].attached_to, data[&1].uid, "and kept on the task");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Nothing to hand over without a task, or on one already finished.
+    #[test]
+    fn a_handoff_needs_an_open_task() {
+        let (ekko, dir) = board("handoff-refused");
+        batch(&ekko, &[json!({"op": "create", "text": "finished work"}), json!({"op": "set_state", "items": [1], "state": "done"})])
+            .unwrap();
+
+        let loose = batch(&ekko, &[json!({"op": "create", "kind": "handoff", "text": "where I stopped"})]);
+        assert!(matches!(loose, Err(EkkoError::InvalidInput(ref m)) if m.contains("attached_to")), "{:?}", loose.as_ref().err());
+        let finished = batch(&ekko, &[json!({"op": "create", "kind": "handoff", "text": "where I stopped", "attached_to": 1})]);
+        assert!(matches!(finished, Err(EkkoError::InvalidInput(ref m)) if m.contains("finished")), "{:?}", finished.as_ref().err());
+        assert_eq!(ekko.storage.get().unwrap().len(), 1, "a refused handoff wrote nothing");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A handoff hands over the task it was written on: moved to another task
+    /// or detached, it is an ordinary note.
+    #[test]
+    fn a_moved_handoff_is_an_ordinary_note() {
+        let (ekko, dir) = board("handoff-moved");
+        batch(
+            &ekko,
+            &[
+                json!({"op": "create", "text": "first"}),
+                json!({"op": "create", "text": "second"}),
+                json!({"op": "create", "kind": "handoff", "text": "where I stopped", "attached_to": "$1"}),
+            ],
+        )
+        .unwrap();
+        let moved = batch(&ekko, &[json!({"op": "link", "item": 3, "attached_to": 2})]).unwrap();
+        assert!(!moved.data[&3].handoff);
+        assert_eq!(moved.data[&3].attached_to, moved.data[&2].uid);
 
         std::fs::remove_dir_all(&dir).ok();
     }

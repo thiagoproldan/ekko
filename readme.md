@@ -298,7 +298,7 @@ Ekko has a frontend for each kind of reader: the board and `--ui` for a person, 
 | `search` | items matching a text and/or the `--list` filters |
 | `changes` | what was written since a cursor, including items stashed or trashed since |
 | `roadmap`, `projects` | as the flags of the same name |
-| `create` | a task or a note, with every field apart from the text, relations included |
+| `create` | a task, a note, or a handoff, with every field apart from the text, relations included |
 | `set_state`, `force_state` | idempotent state changes; `force_state` overrides the dependency rule, and is a tool of its own so it can be permissioned apart |
 | `edit` | the whole text, one exact replacement, or an append -- optionally conditioned on the `updatedAt` last read |
 | `update` | boards, priority, due date, phase, star |
@@ -309,6 +309,8 @@ Ekko has a frontend for each kind of reader: the board and `--ui` for a person, 
 | `phases` | declare the project's phases in order, replacing the sequence; answers with the roadmap |
 
 There is no `clear` and no `destroy`: an agent that needs either asks the user to run it.
+
+**Handoffs.** A long session is cheaper to clear and resume than to carry, as long as what it knows survives the clear. `create` with `kind: "handoff"` writes that: a note on the open task the session was working, saying where it stopped, what it decided and why, the files and lines, the next step and the open questions. The next prime quotes the newest handoff on open work in a section of its own -- line by line, up to 3,500 characters on top of the prime's 6,000, so the whole still fits the 10,000 characters Claude Code keeps of a hook -- and `context` reads a longer one whole. A new handoff on the same task demotes the one before to an ordinary note, and one moved to another task, or detached, is an ordinary note too. The server also offers `handoff` as an MCP prompt, which Claude Code lists as a slash command: it asks the agent to write the handoff now, naming the task in progress and the handoff it replaces.
 
 A write that is wrong in any way is refused and writes nothing, and the refusal comes back as a tool result reading `CODE: message` -- the codes `--json` uses, plus `INVALID_INPUT` for an argument that makes no sense, `STALE` for an edit made against an older version of the item, and `EDIT_MATCH` for a replacement whose text is not there exactly once. A misspelled field is refused rather than ignored: an ignored `blockedBy` would create the task and silently drop the dependency. Text is never read for `@board`, `p:N` or `d:DATE` the way the CLI reads a description, so prose keeps every word.
 

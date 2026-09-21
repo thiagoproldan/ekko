@@ -241,7 +241,7 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
     assert_eq!(discover["supportedVersions"][0], "2026-07-28");
     assert!(discover["supportedVersions"].as_array().unwrap().contains(&json!("2025-11-25")));
     assert_eq!(discover["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "ekko");
-    assert_eq!(discover["capabilities"], json!({"tools": {}}));
+    assert_eq!(discover["capabilities"], json!({"tools": {}, "prompts": {}}));
 
     assert_eq!(replies["2"]["result"]["resultType"], "complete");
     assert_eq!(text(&replies["2"]), "Nothing is in progress or ready.\n");
@@ -286,6 +286,39 @@ fn away_lists_the_stash_and_the_trash_and_phases_declares_the_sequence() {
     assert!(roadmap.contains("setup") && roadmap.contains("build"), "{roadmap}");
     assert_eq!(replies["9"]["result"]["isError"], true, "{}", replies["9"]);
     assert_eq!(replies["10"]["result"]["isError"], true, "{}", replies["10"]);
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// The server offers `handoff` as a prompt -- what Claude Code turns into a
+/// slash command -- and fills it in from the board: the task in progress, by
+/// id and uid. A handoff written through create then leads the next prime.
+#[test]
+fn the_handoff_prompt_is_offered_and_a_handoff_leads_the_prime() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
+            call(2, "create", json!({"text": "port the parser"})),
+            call(3, "set_state", json!({"items": [1], "state": "progress"})),
+            request(4, "prompts/list", json!({})),
+            request(5, "prompts/get", json!({"name": "handoff"})),
+            call(6, "create", json!({"kind": "handoff", "text": "Stopped after the lexer.\nNext: the parser's error paths.", "attached_to": 1})),
+            call(7, "prime", json!({})),
+            request(8, "prompts/get", json!({"name": "nothing"})),
+        ],
+    );
+
+    assert!(replies["1"]["result"]["capabilities"]["prompts"].is_object(), "{}", replies["1"]);
+    assert_eq!(replies["4"]["result"]["prompts"][0]["name"], "handoff");
+    let prompt = replies["5"]["result"]["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(prompt.contains("Write the handoff for task 1 now"), "{prompt}");
+    let prime = text(&replies["7"]);
+    assert!(prime.contains("Where the last session stopped: handoff 2 on task 1 [in progress]"), "{prime}");
+    assert!(prime.contains("    > Next: the parser's error paths."), "{prime}");
+    assert!(replies["8"]["error"].is_object(), "{}", replies["8"]);
 
     fs::remove_dir_all(&home).ok();
 }

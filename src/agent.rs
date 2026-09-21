@@ -55,6 +55,12 @@ const URGENCY_AGE_DAYS: f64 = 365.0;
 const PRIME_BUDGET: usize = 6_000;
 /// Ready tasks whose attached notes a prime quotes; later ones show the task.
 const READY_WITH_NOTES: usize = 3;
+/// The most of a handoff a prime quotes, in characters, on top of
+/// `PRIME_BUDGET`: together they stay under the 10,000 Claude Code keeps of a
+/// hook's output. About a thousand tokens -- where the last session stopped,
+/// what it decided and why, the files and the next step; a longer handoff
+/// shows its start and points at `context` for the rest.
+const HANDOFF_BUDGET: usize = 3_500;
 /// What a cut prime keeps of each section before any section grows into the
 /// room left: the ten best ready tasks, the first blocked ones -- whose lines
 /// name what holds them -- and the newest loose notes. Without these a long
@@ -334,6 +340,9 @@ pub struct Entry {
     /// dates, when that is not its own due date.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_by: Option<String>,
+    /// A note that is its task's handoff; see `Item::handoff`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub handoff: bool,
     pub updated_at: i64,
     /// Notes attached to this task.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -419,6 +428,7 @@ impl<'a> Reader<'a> {
             notes,
             inherits: None,
             finish_by: None,
+            handoff: item.handoff,
         }
     }
 
@@ -535,6 +545,21 @@ pub struct Prime {
     /// needed will never happen.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub freed_by_cancelling: Vec<(u32, u32)>,
+    /// The newest handoff on open work: where the last session stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Handoff>,
+}
+
+/// A handoff as the prime shows it: the note, and the task it hands over.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Handoff {
+    pub id: u32,
+    pub uid: Option<String>,
+    pub task: u32,
+    pub task_state: &'static str,
+    pub updated_at: i64,
+    pub description: String,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -548,7 +573,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     let reader = Reader::shared(&all, &phases);
 
     let (next, _) = reader.next(None);
-    let (doing, ready): (Vec<Entry>, Vec<Entry>) =
+    let (mut doing, mut ready): (Vec<Entry>, Vec<Entry>) =
         next.into_iter().partition(|entry| entry.state == "in progress");
 
     let mut blocked: Vec<&Item> = all
@@ -560,7 +585,31 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     let blocked_total = blocked.len();
     // Entries only for what a prime shows: working one out walks the graph,
     // and a long chain holds thousands of blocked tasks nobody reads.
-    let blocked: Vec<Entry> = blocked.into_iter().take(BLOCKED_SHOWN).map(|item| reader.entry(item)).collect();
+    let mut blocked: Vec<Entry> = blocked.into_iter().take(BLOCKED_SHOWN).map(|item| reader.entry(item)).collect();
+
+    // The newest handoff on open work, shown once in its own section rather
+    // than clipped again among the notes of its task.
+    let handoff = all
+        .values()
+        .filter(|note| note.handoff && visible(note))
+        .filter_map(|note| {
+            let task = &all[&reader.uid(note.attached_to.as_deref()?)?];
+            (visible(task) && holds(task)).then_some((note, task))
+        })
+        .max_by_key(|(note, _)| (updated(note), note.id))
+        .map(|(note, task)| Handoff {
+            id: note.id,
+            uid: note.uid.clone(),
+            task: task.id,
+            task_state: state_word(task),
+            updated_at: updated(note),
+            description: note.description.clone(),
+        });
+    if let Some(shown) = &handoff {
+        for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()) {
+            entry.notes.retain(|note| note.id != shown.id);
+        }
+    }
 
     let mut notes: Vec<&Item> =
         all.values().filter(|item| visible(item) && !item.is_task && item.attached_to.is_none()).collect();
@@ -611,6 +660,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         inversions,
         overdue,
         freed_by_cancelling,
+        handoff,
     })
 }
 
@@ -814,6 +864,77 @@ pub fn away(ekko: &Ekko, stash: bool, trash: bool, limit: usize) -> Result<Strin
         let mut items: Vec<&Item> = all.values().filter(|item| item.trashed.is_some()).collect();
         items.sort_by_key(|item| (item.trashed, item.id));
         section("Trash", items, "the trash is empty");
+    }
+    Ok(out)
+}
+
+/// What the `handoff` prompt asks of an agent about to lose its context: to
+/// write, now, the note the next session resumes from -- which task it hands
+/// over, what to put in it and in what order, and the handoff it replaces.
+/// `task` names the task; without it, the task in progress is meant, and
+/// when that is not exactly one task the prompt says so and lists them.
+pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoError> {
+    let all = ekko.storage.get_shared()?;
+    let phases = ekko.storage.get_phases()?;
+    let reader = Reader::shared(&all, &phases);
+    let tasks: Vec<&Item> = match task {
+        Some(target) => {
+            let ids = ekko.validate_ids(&[target.trim_start_matches('@').to_string()], &all)?;
+            let item = &all[&ids[0]];
+            if !item.is_task || !holds(item) {
+                return Err(EkkoError::InvalidInput(format!(
+                    "{} is not open work, and only an open task has anything to hand over",
+                    item.id
+                )));
+            }
+            vec![item]
+        }
+        None => all.values().filter(|item| visible(item) && State::of(item) == Some(State::Progress)).collect(),
+    };
+
+    let mut out = String::new();
+    match tasks.as_slice() {
+        [task] => {
+            let _ = writeln!(
+                out,
+                "Write the handoff for task {} now, before this session's context is cleared: create with kind \"handoff\" and attached_to \"{}\".",
+                task.id,
+                task.uid.as_deref().unwrap_or_default()
+            );
+        }
+        [] => out.push_str(
+            "Write the handoff for the task this session worked on, now, before its context is cleared: create with kind \"handoff\" and attached_to that task. No task is in progress, so ask the user which one if it is not clear.\n",
+        ),
+        many => {
+            out.push_str("Write the handoff for the task this session worked on, now, before its context is cleared: create with kind \"handoff\" and attached_to that task. More than one task is in progress:\n");
+            for task in many {
+                let _ = writeln!(out, "{:>4}. {}", task.id, clip(&task.description, TASK_CLIP));
+            }
+        }
+    }
+    let _ = write!(
+        out,
+        "\nThe next session reads it under the prime in place of this transcript, so write what only this session knows, in this order and within about 3,000 characters:\n\
+         - Where it stopped: the last thing done, and the state it left things in.\n\
+         - Decisions, each with its reason, including approaches tried and dropped.\n\
+         - Files and lines touched or about to be, as path:line.\n\
+         - The next step, concrete enough to start on without asking.\n\
+         - Open questions for the user.\n\
+         Leave out what the board or the code already says. A handoff replaces the task's earlier one, which stays on the task as an ordinary note. Then tell the user it is safe to /clear.\n"
+    );
+    if let [task] = tasks.as_slice() {
+        let _ = writeln!(out, "\nTask {}: {}", task.id, clip(&task.description, NOTE_CLIP));
+        let earlier = task
+            .uid
+            .as_deref()
+            .and_then(|uid| reader.graph.links.attached.get(uid))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| all.get(id))
+            .find(|note| note.handoff);
+        if let Some(note) = earlier {
+            let _ = writeln!(out, "Its current handoff, {}, which this one replaces: {}", note.id, clip(&note.description, NOTE_CLIP));
+        }
     }
     Ok(out)
 }
@@ -1206,6 +1327,9 @@ impl Prime {
         let close = "\nAn item in full, with its dependencies and notes: context <id>.\n";
         let fixed = out.chars().count() + attention.chars().count() + close.chars().count() + 4 * MORE_LINE;
         let mut room = Room(budget.saturating_sub(fixed));
+        if let Some(handoff) = &self.handoff {
+            out.push_str(&handoff.text());
+        }
 
         let sections = [
             Section::of_entries("In progress", &self.doing, usize::MAX, self.doing.len(), "context <id> reads one", usize::MAX, &today),
@@ -1324,6 +1448,47 @@ pub fn projects_text(projects: &[ProjectSummary]) -> String {
         );
     }
     out
+}
+
+impl Handoff {
+    /// The handoff as its own prime section: which task it hands over and
+    /// when it was written, then its text line by line, each quoted so a line
+    /// such as "1. run the tests" is never read as an item id. Within
+    /// `HANDOFF_BUDGET` characters, prefixes included; a longer handoff says
+    /// how much it left and where the rest is.
+    fn text(&self) -> String {
+        let written = chrono::DateTime::from_timestamp_millis(self.updated_at)
+            .map(|at| at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        let mut out = format!(
+            "\nWhere the last session stopped: handoff {} on task {} [{}], written {written}\n",
+            self.id, self.task, self.task_state
+        );
+        let body = self.description.trim();
+        let total = body.chars().count();
+        let mut spent = 0;
+        let mut shown = 0;
+        for line in body.lines() {
+            let quoted = format!("    > {line}");
+            let cost = quoted.chars().count() + 1;
+            if spent + cost > HANDOFF_BUDGET {
+                let room = HANDOFF_BUDGET.saturating_sub(spent + 8);
+                if room > 40 {
+                    let head: String = line.chars().take(room).collect();
+                    let _ = writeln!(out, "    > {head}");
+                    shown += head.chars().count();
+                }
+                break;
+            }
+            let _ = writeln!(out, "{quoted}");
+            spent += cost;
+            shown += line.chars().count() + 1;
+        }
+        if shown < total {
+            let _ = writeln!(out, "    \u{2026} +{} chars: context {} reads it whole", total - shown.min(total), self.id);
+        }
+        out
+    }
 }
 
 /// The characters a budgeted view has left.
@@ -1469,7 +1634,11 @@ impl Context {
         let mut out = String::new();
         let _ = writeln!(out, "{:>4}. {}", item.id, item.description);
 
-        let mut facts = vec![if item.state == "note" { "note".to_string() } else { format!("task, {}", item.state) }];
+        let mut facts = vec![match (item.state, item.handoff) {
+            ("note", true) => "note, the handoff of the task it is attached to".to_string(),
+            ("note", false) => "note".to_string(),
+            (state, _) => format!("task, {state}"),
+        }];
         if let Some(priority) = item.priority {
             facts.push(format!("priority {priority}"));
         }
@@ -1934,6 +2103,82 @@ mod tests {
         assert_eq!(section("\nBlocked (6)").len(), BLOCKED_KEPT, "{text}");
         assert!(text.contains("+1 more: search with the blocked filter"), "{text}");
         assert!(section("\nRecent notes").len() >= NOTES_KEPT, "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Writes a handoff through the same structured write an agent uses.
+    fn hand_over(ekko: &Ekko, task: u32, text: &str) {
+        let mut draft = crate::ops::Draft::open(ekko).unwrap();
+        let op: crate::ops::Op =
+            serde_json::from_value(serde_json::json!({"op": "create", "kind": "handoff", "text": text, "attached_to": task}))
+                .unwrap();
+        draft.apply(&op).unwrap();
+        draft.commit(false).unwrap();
+    }
+
+    /// The newest handoff on open work gets a section of its own, line by
+    /// line and quoted, and is not repeated among its task's notes; a done
+    /// task's handoff is history and does not show.
+    #[test]
+    fn prime_shows_the_newest_handoff_on_open_work_in_its_own_section() {
+        let (ekko, dir) = board("handoff-prime");
+        ekko.create_task(&words(&["the work in progress"])).unwrap();
+        ekko.create_task(&words(&["finished work"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        hand_over(&ekko, 2, "old news");
+        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
+        hand_over(&ekko, 1, "Stopped after the parser.\n1. run the tests\n2. wire the flag");
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.contains("Where the last session stopped: handoff 4 on task 1 [in progress]"), "{text}");
+        assert!(text.contains("    > 1. run the tests\n    > 2. wire the flag\n"), "{text}");
+        assert!(!text.contains("old news"), "{text}");
+        assert!(!line_ids(&text).contains(&4), "the handoff is not listed again as a note: {text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A long handoff shows its start within its own budget, and the prime as
+    /// a whole stays under the 10,000 characters a hook keeps.
+    #[test]
+    fn a_long_handoff_is_cut_and_the_prime_fits_the_hook() {
+        let (ekko, dir) = board("handoff-long");
+        let reason = "a reason that runs long enough to matter ".repeat(7);
+        for k in 1..=80 {
+            let task = format!("ready task number {k}, described at the length real tasks on a board run to, so a listing fills");
+            ekko.create_task(&words(&[task.as_str()])).unwrap();
+        }
+        for k in 1..=20 {
+            ekko.create_note(&words(&[reason.as_str()])).unwrap();
+            ekko.set_attached_to(&words(&[format!("@{}", 80 + k).as_str(), k.to_string().as_str()])).unwrap();
+        }
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        let long: String = (1..=200).map(|k| format!("step {k}: something this session found out and the next must know\n")).collect();
+        hand_over(&ekko, 1, &long);
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.chars().count() < 10_000, "{} characters", text.chars().count());
+        assert!(text.contains("chars: context 101 reads it whole"), "{text}");
+        assert!(text.contains("Ready, best first"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The prompt names the task in progress and the handoff it replaces, so
+    /// the agent writes without reading first.
+    #[test]
+    fn the_handoff_prompt_names_the_task_and_the_handoff_it_replaces() {
+        let (ekko, dir) = board("handoff-prompt");
+        ekko.create_task(&words(&["port the parser"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        hand_over(&ekko, 1, "halfway through the lexer");
+
+        let text = handoff_prompt(&ekko, None).unwrap();
+        let uid = ekko.storage.get().unwrap()[&1].uid.clone().unwrap();
+        assert!(text.contains("Write the handoff for task 1 now") && text.contains(&uid), "{text}");
+        assert!(text.contains("Its current handoff, 2, which this one replaces: halfway through the lexer"), "{text}");
+        assert!(matches!(handoff_prompt(&ekko, Some("2")), Err(EkkoError::InvalidInput(_))), "a note has nothing to hand over");
 
         std::fs::remove_dir_all(&dir).ok();
     }

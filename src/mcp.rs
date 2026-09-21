@@ -49,7 +49,7 @@ Each session starts with the board's prime already in context -- in progress, re
 - next is the order to take work up. context gives items, several per call: blockers and the roots free to start, what they block, notes clipped unless detail is full.
 - Display ids are never reused, but a restore from the archive renumbers an item: hold the uid a write returns to follow it.
 - set_state is idempotent. A task blocked by open work cannot be completed (BLOCKED), and a task that completed work depends on cannot be reopened (COMPLETED_DEPENDENTS): finish the other side, or clear a wrong dependency with link. force_state overrides the rule and is only for when the user has said so.
-- Leave reasoning on the board: create a note with attached_to set to the task it explains. Change text with edit's replace or append instead of resending it, with if_updated_at from your last read when the user may have edited it.
+- Leave reasoning on the board: create a note with attached_to set to the task it explains. Before a long session is cleared, create kind handoff on the task in progress: where you stopped, why, the next step. Change text with edit's replace or append instead of resending it, with if_updated_at from your last read when the user may have edited it.
 - A write's reply names the tasks it set free (nowReady) or left waiting (nowBlocked): no next or prime is needed to find them.
 - batch applies several operations in one write, all or nothing; $1, $2 name the items created by the batch's first and second operations.
 - trash is recoverable for 30 days and still needs the user's consent. For work decided against, set_state cancelled keeps the record.
@@ -160,12 +160,14 @@ impl Server {
             "initialize" => return Ok(self.initialize(params)),
             "server/discover" => json!({
                 "supportedVersions": supported(),
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {}, "prompts": {}},
                 "instructions": INSTRUCTIONS,
             }),
             "ping" => json!({}),
             "tools/list" => json!({"tools": tool_definitions()}),
             "tools/call" => self.call(params)?,
+            "prompts/list" => json!({"prompts": prompt_definitions()}),
+            "prompts/get" => self.prompt(params)?,
             _ => return Err(RpcError::new(-32601, format!("Method not found: {method}"))),
         };
         Ok(if version.is_some() || method == "server/discover" { complete(result) } else { result })
@@ -176,10 +178,31 @@ impl Server {
         let version = LEGACY.iter().find(|v| **v == requested).copied().unwrap_or(LEGACY[0]);
         json!({
             "protocolVersion": version,
-            "capabilities": {"tools": {}},
+            "capabilities": {"tools": {}, "prompts": {}},
             "serverInfo": server_info(),
             "instructions": INSTRUCTIONS,
         })
+    }
+
+    /// A prompt, filled in from the board it names. `handoff` is the only one:
+    /// Claude Code offers it as `/mcp__<server>__handoff`, so a person can ask
+    /// for the handoff in one command, and the text it sends already says
+    /// which task and which earlier handoff, sparing the agent a read.
+    fn prompt(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
+        if name != "handoff" {
+            return Err(RpcError::new(-32602, format!("Unknown prompt: {name}")));
+        }
+        let arguments = params.get("arguments");
+        let argument = |key: &str| arguments.and_then(|a| a.get(key)).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
+        let text = self
+            .open(argument("project"))
+            .and_then(|(ekko, _)| agent::handoff_prompt(&ekko, argument("task")))
+            .map_err(|error| RpcError::new(-32602, format!("{}: {error}", error.code())))?;
+        Ok(json!({
+            "description": "Write the handoff the next session resumes from",
+            "messages": [{"role": "user", "content": {"type": "text", "text": text}}],
+        }))
     }
 
     fn call(&self, params: &Value) -> Result<Value, RpcError> {
@@ -653,6 +676,17 @@ fn error_reply(id: Value, error: RpcError) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": body})
 }
 
+fn prompt_definitions() -> Value {
+    json!([{
+        "name": "handoff",
+        "description": "Write the handoff the next session resumes from, before this one's context is cleared.",
+        "arguments": [
+            {"name": "task", "description": "The task to hand over, by id or uid; the one in progress when omitted.", "required": false},
+            {"name": "project", "description": "Work on this project instead of the session's board.", "required": false},
+        ],
+    }])
+}
+
 fn tool_definitions() -> Value {
     let project = json!({"type": "string", "description": "Work on this project instead of the session's board, which prime names on its first line."});
     let if_rev = json!({"type": "integer", "description": "The cursor from an earlier read: if the board has not moved since, the answer is one line saying so."});
@@ -713,7 +747,7 @@ fn tool_definitions() -> Value {
             "description": "Create a task or a note. The text is kept exactly as given. A note explaining a task should be attached_to it.",
             "inputSchema": object(json!({
                 "project": project,
-                "kind": {"type": "string", "enum": ["task", "note"], "default": "task"},
+                "kind": {"type": "string", "enum": ["task", "note", "handoff"], "default": "task", "description": "handoff: a note attached_to an open task saying where this session stopped, what it decided and why, the files and the next step; it replaces the task's earlier handoff, and the next session's prime shows it."},
                 "text": {"type": "string"},
                 "boards": {"type": "array", "items": {"type": "string"}},
                 "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Tasks only."},

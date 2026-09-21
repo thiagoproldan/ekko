@@ -150,6 +150,20 @@ pub struct Item {
     /// migrating anything; the next write stores the new name.
     #[serde(rename = "attachedTo", alias = "anchor", default, skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<String>,
+    /// Marks a note as the handoff of the task it is attached to: where the
+    /// last session stopped, what it decided and why, the files it touched
+    /// and the next step -- what a new session reads under the prime instead
+    /// of a transcript it would pay to re-read.
+    ///
+    /// Only a note attached to an open task carries it, and only the newest
+    /// on a task: writing another demotes the one before to an ordinary note,
+    /// which keeps it as history. A flag on the note rather than a board
+    /// named `handoff`: a board is a name anyone can pick, move an item off,
+    /// or already use for something else, and none of those should silently
+    /// change what a session resumes from. Absent unless set, so a board
+    /// without handoffs is stored exactly as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handoff: bool,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -179,6 +193,7 @@ impl Item {
             phase: None,
             blocked_by: None,
             attached_to: None,
+            handoff: false,
             stashed: None,
             trashed: None,
             priority: Some(priority),
@@ -207,6 +222,7 @@ impl Item {
             phase: None,
             blocked_by: None,
             attached_to: None,
+            handoff: false,
             stashed: None,
             trashed: None,
         }
