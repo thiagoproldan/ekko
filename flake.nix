@@ -44,21 +44,24 @@
           };
         };
 
-        # The Claude Code plugin: the MCP server, and the SessionStart hook that
-        # puts the board's resume view in context. Generated from plugin/ with
-        # the binary pinned by store path, so the plugin can never drive a
+        # The Claude Code plugin: the MCP server, the SessionStart hook that
+        # puts the board's resume view in context, and the hooks that draw the
+        # board in the session's task list. Generated from plugin/ with the
+        # binary pinned by store path, so the plugin can never drive a
         # different revision of ekko than the one it was built with -- the
-        # skill it replaces went stale exactly that way, once.
+        # skill it replaces went stale exactly that way, once. Every hook
+        # command in plugin.json starts with `ekko `, and each is pinned.
         packages.plugin =
           let
             ekko = self.packages.${system}.default;
             manifest = builtins.fromJSON (builtins.readFile ./plugin/.claude-plugin/plugin.json);
+            pin = hook: hook // { command = "${ekko}/bin/" + hook.command; };
             pinned = manifest // {
               inherit (cargoToml.package) version;
               mcpServers.ekko = manifest.mcpServers.ekko // { command = "${ekko}/bin/ekko"; };
-              hooks.SessionStart = [
-                { hooks = [ { type = "command"; command = "${ekko}/bin/ekko --prime --hook"; } ]; }
-              ];
+              hooks = builtins.mapAttrs (
+                _event: groups: map (group: group // { hooks = map pin group.hooks; }) groups
+              ) manifest.hooks;
             };
           in
           pkgs.writeTextDir ".claude-plugin/plugin.json" (builtins.toJSON pinned);

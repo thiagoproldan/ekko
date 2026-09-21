@@ -13,6 +13,7 @@ mod project;
 mod paths;
 mod render;
 mod storage;
+mod tasklist;
 mod tui;
 
 use std::path::{Path, PathBuf};
@@ -56,7 +57,8 @@ const HELP: &str = r#"
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
       --prime             Summarise the board for picking work back up
-      --hook              With --prime: answer a SessionStart hook's event on stdin
+      --hook              With --prime or --tasklist: answer a Claude Code hook's event on stdin
+      --tasklist          With --hook: draw the board in the session's Claude Code task list
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
@@ -238,9 +240,11 @@ fn main() -> ExitCode {
                     // Suppressed for --projects, which is already about them,
                     // and for --destroy, whose reply names the project it
                     // just removed -- a header above that would announce a
-                    // board nobody can open any more.
+                    // board nobody can open any more. And for a hook's reply,
+                    // which Claude Code reads as JSON only when it is nothing
+                    // else: --tasklist's watchPaths would become context.
                     if let Some(project) = &location.project {
-                        if !cli.projects && !cli.destroy && !cli.prime {
+                        if !cli.projects && !cli.destroy && !cli.prime && !cli.tasklist {
                             r.display_project(&project.name);
                         }
                     }
@@ -340,6 +344,9 @@ fn dispatch(
     }
     if cli.roadmap {
         return Ok(vec![ekko.display_roadmap()?]);
+    }
+    if cli.tasklist {
+        return Ok(vec![Outcome::Hook(tasklist::hook(ekko, &read_hook_input(), home_dir))]);
     }
     if cli.prime {
         if cli.hook {

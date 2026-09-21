@@ -229,3 +229,52 @@ fn a_typed_note_takes_its_kind_from_the_flags_beside_note() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// The plugin's task-list hook through the real binary, in a project found
+/// from the folder, as a session runs it: the event on stdin, Claude Code's
+/// config directory from CLAUDE_CONFIG_DIR, the list written under the
+/// session's id, and a reply that is JSON and nothing else -- a project's
+/// header above it would turn the watchPaths into context. `--tasklist`
+/// means nothing without `--hook`, and `--hook` nothing without `--prime` or
+/// `--tasklist`, so each alone is refused.
+#[test]
+fn the_tasklist_hook_writes_the_sessions_list() {
+    use std::io::Write as _;
+    let dir = temp_ekko_dir();
+    let app = dir.join("app");
+    fs::create_dir_all(&app).unwrap();
+    let config = dir.join("claude");
+    let ekko = |args: &[&str], stdin: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(&app)
+            .env("HOME", &dir)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .env("CLAUDE_CONFIG_DIR", &config)
+            .env_remove("CLAUDE_CODE_TASK_LIST_ID")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to run ekko");
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    assert!(ekko(&["init"], "").status.success());
+    assert!(ekko(&["--task", "the work in progress"], "").status.success());
+    assert!(ekko(&["--begin", "1"], "").status.success());
+    let started = ekko(&["--tasklist", "--hook"], r#"{"session_id":"s-1","hook_event_name":"SessionStart"}"#);
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    let reply: serde_json::Value = serde_json::from_slice(&started.stdout).expect("a JSON hook reply");
+    assert_eq!(reply["hookSpecificOutput"]["watchPaths"][0].as_str(), app.join(".ekko/storage/storage.json").to_str(), "{reply}");
+    let task: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(config.join("tasks").join("s-1").join("1.json")).unwrap()).unwrap();
+    assert_eq!((task["status"].as_str(), task["activeForm"].as_str()), (Some("in_progress"), Some("1. the work in progress")));
+
+    assert!(!ekko(&["--tasklist"], "").status.success(), "--tasklist without --hook was accepted");
+    assert!(!ekko(&["--hook"], "").status.success(), "--hook alone was accepted");
+
+    fs::remove_dir_all(&dir).ok();
+}

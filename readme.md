@@ -77,7 +77,7 @@ $ nix run github:thiagoproldan/ekko -- --help
 $ nix profile install github:thiagoproldan/ekko
 ```
 
-The flake also exposes the Claude Code plugin as `packages.plugin` -- the MCP server (`ekko --mcp`) and a SessionStart hook running `ekko --prime` -- with the binary pinned by store path, so the plugin can never drive a different revision of ekko than the one it was built with. Outside Nix, `claude --plugin-dir plugin` loads the same plugin from this repository against the `ekko` on your PATH.
+The flake also exposes the Claude Code plugin as `packages.plugin` -- the MCP server (`ekko --mcp`), a SessionStart hook running `ekko --prime`, and the hooks that draw the board in the session's task list -- with the binary pinned by store path, so the plugin can never drive a different revision of ekko than the one it was built with. Outside Nix, `claude --plugin-dir plugin` loads the same plugin from this repository against the `ekko` on your PATH.
 
 With cargo, from a clone:
 
@@ -127,6 +127,8 @@ $ ekko --help
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
       --prime             Summarise the board for picking work back up
+      --hook              With --prime or --tasklist: answer a Claude Code hook's event on stdin
+      --tasklist          With --hook: draw the board in the session's Claude Code task list
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
@@ -324,9 +326,17 @@ Reads come back as plain text and writes as compact JSON, never coloured, whatev
 
 ### The plugin
 
-[`plugin/`](plugin/.claude-plugin/plugin.json) is a Claude Code plugin: the MCP server, and a SessionStart hook running `ekko --prime`, so a session starts with the board's resume view in context. The flake builds it as `packages.plugin` with the binary pinned by store path. Placed as a skills-directory plugin, at `~/.claude/skills/ekko/.claude-plugin/plugin.json`, it loads with no marketplace; `claude --plugin-dir plugin` loads it for one session. Its tools are named `mcp__plugin_ekko_ekko__<tool>` for permissions.
+[`plugin/`](plugin/.claude-plugin/plugin.json) is a Claude Code plugin: the MCP server, a SessionStart hook running `ekko --prime`, so a session starts with the board's resume view in context, and the hooks that draw the board in the session's task list. The flake builds it as `packages.plugin` with the binary pinned by store path. Placed as a skills-directory plugin, at `~/.claude/skills/ekko/.claude-plugin/plugin.json`, it loads with no marketplace; `claude --plugin-dir plugin` loads it for one session. Its tools are named `mcp__plugin_ekko_ekko__<tool>` for permissions.
 
 It replaced the `/ekko` skill, which sat in every conversation whether the board was used or not.
+
+**The task list.** Claude Code draws a task list under the spinner -- ✔ done, ◼ in progress, with the task's line as the spinner's, ◻ pending -- from the files its TaskCreate and TaskUpdate tools write. The plugin draws the board there instead: `ekko --tasklist --hook` writes the session's own list when the session starts, after each ekko write, and whenever the board's file changes, including from the terminal, `--ui` or another session. The list holds what the session finished, the work in progress, and the next five ready tasks, each under its id on the board. Three settings sit outside the plugin, because a plugin cannot set them:
+
+- `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` in Claude Code's environment. Claude Code offers its task tools, and so draws the list, only on Claude 3.x, Opus 4.0-4.7, Sonnet 4.0-4.6 and Haiku 4.5; on any other model, Opus 5 included, it draws nothing without this.
+- `CLAUDE_CODE_TODO_REMINDER_MODE=off`, and the native task tools denied (`TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`), so the agent keeps its tasks on the board. The list is the board's, and each write replaces it whole: a task written there any other way would vanish at the next.
+- The expanded view: `app:toggleTodos` (`ctrl+t`, which Konsole and others keep for a new tab; `~/.claude/keybindings.json` can move it) switches between the whole list and one `Next:` line, and Claude Code remembers the choice.
+
+None of this is documented by Claude Code: the file format and the rules come from its 2.1.278 binary and from testing it, so a Claude Code that changes them breaks the drawing, never the board.
 
 ### Reading the board as an agent
 

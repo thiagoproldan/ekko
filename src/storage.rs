@@ -225,6 +225,11 @@ impl Storage {
     pub fn acquire_lock(&self) -> Result<LockGuard<'_>, StorageError> {
         Ok(LockGuard { _storage: self, _file: lock_path(&self.lock_file)? })
     }
+
+    /// The board's file, for a watcher to follow: every write replaces it.
+    pub fn storage_path(&self) -> &Path {
+        &self.storage_file
+    }
 }
 
 /// Takes an exclusive `flock` on `path`, creating the file if needed, and

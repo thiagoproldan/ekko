@@ -1,6 +1,6 @@
 {
   "name": "ekko",
-  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes, and the board's resume view added to context when a session starts.",
+  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes; the board's resume view added to context when a session starts; and the board drawn in the session's task list under the spinner.",
   "homepage": "https://github.com/thiagoproldan/ekko",
   "license": "MIT",
   "mcpServers": {
@@ -16,6 +16,32 @@
           {
             "type": "command",
             "command": "ekko --prime --hook"
+          },
+          {
+            "type": "command",
+            "command": "ekko --tasklist --hook"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__plugin_ekko_ekko__(create|set_state|force_state|edit|update|link|batch|stash|trash|phases)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ekko --tasklist --hook"
+          }
+        ]
+      }
+    ],
+    "FileChanged": [
+      {
+        "matcher": "storage.json",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ekko --tasklist --hook"
           }
         ]
       }

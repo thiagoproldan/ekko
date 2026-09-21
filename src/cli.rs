@@ -21,6 +21,7 @@ pub struct InitCli {
 
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+#[command(group(clap::ArgGroup::new("hooked").args(["prime", "tasklist"])))]
 pub struct Cli {
     /// Attach a note to the task it explains, by id: the note first, then
     /// its task. No task detaches it.
@@ -136,11 +137,18 @@ pub struct Cli {
     #[arg(long)]
     pub prime: bool,
 
-    /// With --prime: answer Claude Code's SessionStart hook, whose event
-    /// arrives as JSON on stdin. A session that resumes or forks gets what
-    /// moved since this hook last served it, not a second prime.
-    #[arg(long, requires = "prime")]
+    /// With --prime or --tasklist: answer a Claude Code hook, whose event
+    /// arrives as JSON on stdin. For --prime, a session that resumes or forks
+    /// gets what moved since this hook last served it, not a second prime.
+    #[arg(long, requires = "hooked")]
     pub hook: bool,
+
+    /// With --hook: draw the board in the session's own Claude Code task
+    /// list, the one under the spinner -- see `tasklist`. The plugin runs it
+    /// when a session starts, after each ekko write, and when the board's
+    /// file changes.
+    #[arg(long, requires = "hook")]
+    pub tasklist: bool,
 
     /// What to take up next, best first, optionally only the first N.
     #[arg(long, num_args = 0..=1, value_name = "N")]
