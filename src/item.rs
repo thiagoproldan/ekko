@@ -432,6 +432,115 @@ impl State {
     pub fn can_start(self) -> bool {
         self.is_open() && self != State::Waiting
     }
+
+    /// The word the views print for this state: the prime, `next`, `context`
+    /// and their JSON alike. Spelled here and nowhere else, so nothing reads
+    /// a state back from its word.
+    pub fn word(self) -> &'static str {
+        match self {
+            State::Pending => "pending",
+            State::Progress => "in progress",
+            State::Paused => "paused",
+            State::Waiting => "waiting",
+            State::Done => "done",
+            State::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// What `--set` and `set_state` ask for: a state for a task to end up in,
+/// `undone`, or a star put on or taken off.
+///
+/// The words for these are spelled in `word`, and read back in `from_word`,
+/// and nowhere else. They used to be strings matched in several places, one
+/// of them with a catch-all arm -- which is how `cancelled` and `unstarted`
+/// once shipped with no confirmation at all. Matched as this instead, a new
+/// state does not compile until every one of those places says what it does
+/// with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    /// The state to end up in, whatever the task is in now. `unstarted` is
+    /// `Become(Pending)`: the way back to never-started, from anywhere.
+    Become(State),
+    /// `undone`: done becomes pending, and anything else is left alone,
+    /// because a task that is not done already is what "undone" asks for.
+    Undone,
+    Starred,
+    Unstarred,
+}
+
+impl Setting {
+    /// Every setting, in the order a caller is told them.
+    pub const ALL: [Setting; 9] = [
+        Setting::Become(State::Done),
+        Setting::Undone,
+        Setting::Become(State::Progress),
+        Setting::Become(State::Paused),
+        Setting::Become(State::Waiting),
+        Setting::Become(State::Cancelled),
+        Setting::Become(State::Pending),
+        Setting::Starred,
+        Setting::Unstarred,
+    ];
+
+    /// The word for it: what `--json` reports and the MCP schema lists.
+    pub fn word(self) -> &'static str {
+        match self {
+            Setting::Become(State::Done) => "done",
+            Setting::Undone => "undone",
+            Setting::Become(State::Progress) => "progress",
+            Setting::Become(State::Paused) => "paused",
+            Setting::Become(State::Waiting) => "waiting",
+            Setting::Become(State::Cancelled) => "cancelled",
+            Setting::Become(State::Pending) => "unstarted",
+            Setting::Starred => "starred",
+            Setting::Unstarred => "unstarred",
+        }
+    }
+
+    /// The setting a word asks for: its own word, or one of the others `--set`
+    /// has always taken for it. Deliberately the same words `--list` filters
+    /// on, so there is one set of names to learn rather than two.
+    pub fn from_word(word: &str) -> Option<Setting> {
+        Some(match word {
+            "done" | "checked" | "complete" => Setting::Become(State::Done),
+            "undone" | "unchecked" | "incomplete" | "pending" => Setting::Undone,
+            "progress" | "started" | "begun" => Setting::Become(State::Progress),
+            "paused" => Setting::Become(State::Paused),
+            "waiting" => Setting::Become(State::Waiting),
+            // Repointed: with a real paused state these became opposites.
+            // Also the way back from a mistyped `--set progress`.
+            "unstarted" | "unstart" => Setting::Become(State::Pending),
+            "cancel" | "cancelled" | "canceled" => Setting::Become(State::Cancelled),
+            "star" | "starred" => Setting::Starred,
+            "unstar" | "unstarred" => Setting::Unstarred,
+            _ => return None,
+        })
+    }
+
+    /// Whether this is about a task's state, which a note does not have.
+    /// Starring is the one setting that applies to both.
+    pub fn is_state(self) -> bool {
+        !matches!(self, Setting::Starred | Setting::Unstarred)
+    }
+
+    /// Applies this to an item. A task's state goes through `State::after`
+    /// and `State::write`, so it always lands on one of the six encodings; a
+    /// note has no state and is left alone, the way `--check` and `--begin`
+    /// leave notes alone.
+    pub fn apply(self, item: &mut Item) {
+        let change = match self {
+            Setting::Become(state) => Change::Become(state),
+            Setting::Undone => Change::Undo,
+            Setting::Starred | Setting::Unstarred => {
+                item.is_starred = self == Setting::Starred;
+                return;
+            }
+        };
+        if let Some(current) = State::of(item) {
+            current.after(change).write(item);
+        }
+    }
 }
 
 /// `(done, total)` for a set of items, counted the one way Ekko counts
@@ -755,6 +864,27 @@ mod tests {
         let json = serde_json::to_value(&typed).unwrap();
         assert_eq!((json["knowledge"].as_str(), json["supersedes"].as_str()), (Some("decision"), Some("18d0-1")));
         assert_eq!(serde_json::from_value::<Item>(json).unwrap(), typed);
+    }
+
+    /// Each setting's word reads back as that setting and no other -- so no
+    /// two share a word, and `--json` never reports one `--set` would refuse
+    /// -- and every state is one a task can be set to.
+    #[test]
+    fn every_setting_word_reads_back_as_that_setting() {
+        for setting in Setting::ALL {
+            assert_eq!(Setting::from_word(setting.word()), Some(setting), "{setting:?}");
+        }
+        for state in State::ALL {
+            assert!(Setting::ALL.contains(&Setting::Become(state)), "{state:?} cannot be set");
+        }
+    }
+
+    /// No two states print as the same word, so a view never says one state
+    /// where it means another.
+    #[test]
+    fn every_state_prints_as_a_word_of_its_own() {
+        let words: std::collections::HashSet<&str> = State::ALL.iter().map(|state| state.word()).collect();
+        assert_eq!(words.len(), State::ALL.len(), "{words:?}");
     }
 
     /// A board as ekko 0.10.2 wrote it, with every field it stores on an item

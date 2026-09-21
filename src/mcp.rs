@@ -34,6 +34,7 @@ use crate::agent;
 use crate::config;
 use crate::directory;
 use crate::ekko::{Ekko, EkkoError, Outcome};
+use crate::item::Setting;
 use crate::ops::{self, Committed, Draft, Op};
 use crate::render::{Painter, Renderer};
 use crate::storage::ItemMap;
@@ -847,7 +848,7 @@ fn tool_definitions() -> Value {
     let if_rev = json!({"type": "integer", "description": "The cursor from an earlier read: if the board has not moved since, the answer is one line saying so."});
     let item = json!({"type": ["integer", "string"], "description": "A display id, or a uid -- which never changes."});
     let items = json!({"type": "array", "items": item, "minItems": 1});
-    let state = json!({"type": "string", "enum": ["done", "undone", "progress", "paused", "waiting", "cancelled", "unstarted", "starred", "unstarred"]});
+    let state = json!({"type": "string", "enum": Setting::ALL.map(Setting::word)});
     let read = json!({"readOnlyHint": true, "openWorldHint": false});
     let write = json!({"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false});
     let object = |properties: Value, required: &[&str]| {

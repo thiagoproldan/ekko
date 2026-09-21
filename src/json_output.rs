@@ -34,8 +34,8 @@ fn success_value(outcome: &Outcome) -> Value {
         Outcome::Star { starred, unstarred } => {
             json!({"ok": true, "command": command, "starred": starred, "unstarred": unstarred})
         }
-        Outcome::Set { ids, states, overridden, reopened } => with_overrides(
-            json!({"ok": true, "command": command, "ids": ids, "states": states}),
+        Outcome::Set { ids, settings, overridden, reopened } => with_overrides(
+            json!({"ok": true, "command": command, "ids": ids, "states": settings.iter().map(|s| s.word()).collect::<Vec<_>>()}),
             overridden,
             reopened,
         ),

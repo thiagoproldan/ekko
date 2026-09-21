@@ -17,10 +17,9 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use crate::ekko::{
-    apply_state, canonical_state, holds, parse_due_date, phase_inversion, phase_order, remove_duplicates,
-    uid_index, Ekko, EkkoError, Linked,
+    holds, parse_due_date, phase_inversion, phase_order, remove_duplicates, uid_index, Ekko, EkkoError, Linked,
 };
-use crate::item::{Item, Knowledge};
+use crate::item::{Item, Knowledge, Setting};
 use crate::storage::{ItemMap, LockGuard};
 
 /// An item as a caller names it: a display id, a uid, or `$N` for the item
@@ -397,14 +396,14 @@ impl<'a> Draft<'a> {
     }
 
     pub fn set_state(&mut self, items: &[Ref], state: &str) -> Result<Vec<u32>, EkkoError> {
-        let canonical = canonical_state(state).ok_or_else(|| EkkoError::UnknownState(state.to_string()))?;
+        let setting = Setting::from_word(state).ok_or_else(|| EkkoError::UnknownState(state.to_string()))?;
         if items.is_empty() {
             return Err(EkkoError::MissingId);
         }
         let ids = self.resolve_all(items)?;
         // The terminal skips task states on notes quietly, as taskbook did; a
         // structured write that changed nothing would still answer ok.
-        if !matches!(canonical, "starred" | "unstarred") {
+        if setting.is_state() {
             if let Some(note) = ids.iter().find(|id| !self.data[*id].is_task) {
                 return Err(invalid(format!(
                     "{note} is a note, and a note has no state; of the states only starred and unstarred apply to it"
@@ -412,7 +411,7 @@ impl<'a> Draft<'a> {
             }
         }
         for id in &ids {
-            apply_state(self.item(*id), canonical);
+            setting.apply(self.item(*id));
         }
         Ok(ids)
     }

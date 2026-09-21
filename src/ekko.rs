@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config;
 use crate::directory::DirectoryError;
-use crate::item::{tally, Change, Item, Knowledge, State};
+use crate::item::{tally, Change, Item, Knowledge, Setting, State};
 use crate::render::{CalendarMonth, Inversion, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
 use crate::storage::{ItemMap, Storage, StorageError};
 
@@ -263,7 +263,7 @@ impl std::fmt::Display for EkkoError {
             EkkoError::RenamedFlag { old, new } => write!(f, "{old} was renamed to {new}"),
             EkkoError::RemovedFlag { old, instead } => write!(f, "{old} was removed. {instead}"),
             EkkoError::UnknownState(term) => {
-                write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, waiting, cancelled, unstarted, starred, unstarred")
+                write!(f, "Unknown state: {term}. Expected one of: {}", Setting::ALL.map(Setting::word).join(", "))
             }
             EkkoError::InvalidCustomAppDir(path) => {
                 write!(f, "Custom app directory was not found on your system: {path}")
@@ -349,7 +349,7 @@ pub enum Outcome {
     /// the flips performed.
     Set {
         ids: Vec<u32>,
-        states: Vec<String>,
+        settings: Vec<Setting>,
         overridden: Vec<(u32, Vec<u32>)>,
         reopened: Vec<(u32, Vec<u32>)>,
     },
@@ -436,29 +436,23 @@ impl Outcome {
                 out.mark_complete_overriding(checked, overridden);
                 out.mark_incomplete(unchecked, reopened);
             }
-            Outcome::Set { ids, states, overridden, reopened } => {
+            Outcome::Set { ids, settings, overridden, reopened } => {
                 // Reuses the toggles' own messages where one exists, rather
                 // than inventing a parallel vocabulary: the same transition
-                // should read the same way however it was requested. The two
-                // states with no toggle behind them get their own verbs.
-                //
-                // Every canonical state `canonical_state` can return must
-                // appear here. The catch-all below cannot be removed (the
-                // match is on `&str`), so it will not fail a build -- it
-                // will silently print nothing, which is how `cancelled` and
-                // `unstarted` shipped mute. Add the arm when adding a state.
-                for state in states {
-                    match state.as_str() {
-                        "done" => out.mark_complete_overriding(ids, overridden),
-                        "undone" => out.mark_incomplete(ids, reopened),
-                        "progress" => out.mark_started(ids, reopened),
-                        "paused" => out.mark_paused(ids, reopened),
-                        "waiting" => out.mark_waiting(ids, reopened),
-                        "cancelled" => out.mark_cancelled(ids),
-                        "unstarted" => out.mark_reset(ids, reopened),
-                        "starred" => out.mark_starred(ids),
-                        "unstarred" => out.mark_unstarred(ids),
-                        _ => {}
+                // should read the same way however it was requested. The
+                // states with no toggle behind them get their own verbs. No
+                // catch-all: a new state has to say here what it did.
+                for setting in settings {
+                    match setting {
+                        Setting::Become(State::Done) => out.mark_complete_overriding(ids, overridden),
+                        Setting::Undone => out.mark_incomplete(ids, reopened),
+                        Setting::Become(State::Progress) => out.mark_started(ids, reopened),
+                        Setting::Become(State::Paused) => out.mark_paused(ids, reopened),
+                        Setting::Become(State::Waiting) => out.mark_waiting(ids, reopened),
+                        Setting::Become(State::Cancelled) => out.mark_cancelled(ids),
+                        Setting::Become(State::Pending) => out.mark_reset(ids, reopened),
+                        Setting::Starred => out.mark_starred(ids),
+                        Setting::Unstarred => out.mark_unstarred(ids),
                     }
                 }
             }
@@ -1539,27 +1533,26 @@ impl Ekko {
             id_tokens.iter().map(|token| token.trim_start_matches('@').to_string()).collect();
         let ids = self.validate_ids(&raw_ids, &data)?;
 
-        let mut states = Vec::new();
+        let mut settings = Vec::new();
         for token in &state_tokens {
-            match canonical_state(token) {
-                Some(state) => states.push(state.to_string()),
-                None => return Err(EkkoError::UnknownState((*token).clone())),
+            let setting = Setting::from_word(token).ok_or_else(|| EkkoError::UnknownState((*token).clone()))?;
+            if !settings.contains(&setting) {
+                settings.push(setting);
             }
         }
-        let states = remove_duplicates(states);
 
         let before = data.clone();
         for id in &ids {
             if let Some(item) = data.get_mut(id) {
-                for state in &states {
-                    apply_state(item, state);
+                for setting in &settings {
+                    setting.apply(item);
                 }
             }
         }
         let (overridden, reopened) = Self::refuse_broken_dependencies(&before, &data, force)?;
 
         self.save_touching(&mut data)?;
-        Ok(Outcome::Set { ids, states, overridden, reopened })
+        Ok(Outcome::Set { ids, settings, overridden, reopened })
     }
 
     /// The board, restricted to items changed at or after `since` (epoch
@@ -2121,56 +2114,6 @@ pub(crate) fn remove_duplicates(items: Vec<String>) -> Vec<String> {
         }
     }
     seen
-}
-/// The state vocabulary `--set` accepts, mapped to its canonical spelling.
-/// Deliberately the same words `--list` filters on, so there is one set of
-/// names to learn rather than two.
-pub(crate) fn canonical_state(term: &str) -> Option<&'static str> {
-    match term {
-        "done" | "checked" | "complete" => Some("done"),
-        "undone" | "unchecked" | "incomplete" | "pending" => Some("undone"),
-        "progress" | "started" | "begun" => Some("progress"),
-        "paused" => Some("paused"),
-        "waiting" => Some("waiting"),
-        // Repointed: with a real paused state these became opposites.
-        // Also the way back from a mistyped `--set progress`.
-        "unstarted" | "unstart" => Some("unstarted"),
-        "cancel" | "cancelled" | "canceled" => Some("cancelled"),
-        "star" | "starred" => Some("starred"),
-        "unstar" | "unstarred" => Some("unstarred"),
-        _ => None,
-    }
-}
-
-/// Applies one canonical state. Task states go through `State::after` and
-/// `State::write`, so the result is always one of the six encodings; notes
-/// have no state and skip them, matching how `--check` and `--begin` ignore
-/// notes. Starring is the one that applies to both.
-pub(crate) fn apply_state(item: &mut Item, state: &str) {
-    match state {
-        "starred" => item.is_starred = true,
-        "unstarred" => item.is_starred = false,
-        other => {
-            if let (Some(current), Some(change)) = (State::of(item), change_for(other)) {
-                current.after(change).write(item);
-            }
-        }
-    }
-}
-
-/// The state change a canonical `--set` word asks for. `unstarted` is the
-/// way back to never-started from anywhere, done and cancelled included.
-fn change_for(state: &str) -> Option<Change> {
-    Some(match state {
-        "done" => Change::Become(State::Done),
-        "undone" => Change::Undo,
-        "progress" => Change::Become(State::Progress),
-        "paused" => Change::Become(State::Paused),
-        "waiting" => Change::Become(State::Waiting),
-        "cancelled" => Change::Become(State::Cancelled),
-        "unstarted" => Change::Become(State::Pending),
-        _ => return None,
-    })
 }
 /// The attribute terms `--list` filters on. Kept beside
 /// `Ekko::filter_by_attributes`, which is the code that acts on them --
@@ -3194,9 +3137,9 @@ mod tests {
     }
 
     /// Every state `--set` accepts has to say so. `cancelled` and
-    /// `unstarted` shipped mute: they reached `apply_state` but not the
-    /// match that renders the confirmation, so the write landed and the
-    /// terminal stayed silent -- indistinguishable from a failure, and
+    /// `unstarted` shipped mute: they were applied, but the match that
+    /// renders the confirmation had no arm for them, so the write landed and
+    /// the terminal stayed silent -- indistinguishable from a failure, and
     /// worst on `unstarted`, whose whole job is undoing a `--set` aimed at
     /// the wrong id. Drives the real `set_state` rather than building an
     /// `Outcome` by hand, so an arm can never be reachable only in a test.
@@ -3205,20 +3148,7 @@ mod tests {
         let (ekko, dir) = fresh_ekko();
         ekko.create_task(&words(&["a task to move through every state"])).unwrap();
 
-        // Every canonical state `canonical_state` can return.
-        let states = [
-            "done",
-            "undone",
-            "progress",
-            "paused",
-            "waiting",
-            "cancelled",
-            "unstarted",
-            "starred",
-            "unstarred",
-        ];
-
-        for state in states {
+        for state in Setting::ALL.map(Setting::word) {
             let outcome = ekko.set_state(&words(&["@1", state]), false).unwrap();
 
             let mut buffer: Vec<u8> = Vec::new();

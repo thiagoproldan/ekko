@@ -83,7 +83,7 @@ pub fn tasks(ekko: &Ekko, since: u64) -> Result<Vec<Task>, Box<dyn Error>> {
     let done = done.split_off(done.len().saturating_sub(DONE_SHOWN));
 
     let (doing, ready): (Vec<_>, Vec<_>) =
-        agent::next(ekko, None)?.into_iter().partition(|entry| entry.state == "in progress");
+        agent::next(ekko, None)?.into_iter().partition(|entry| entry.state == Some(State::Progress));
 
     let rows = done
         .iter()

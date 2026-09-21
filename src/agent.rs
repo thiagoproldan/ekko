@@ -334,7 +334,10 @@ fn due_ramp(overdue_days: i32) -> f64 {
 pub struct Entry {
     pub id: u32,
     pub uid: Option<String>,
-    pub state: &'static str,
+    /// The task's state, or `None` for a note; written as the state's word,
+    /// or `note`.
+    #[serde(serialize_with = "state_or_note")]
+    pub state: Option<State>,
     /// `stashed` or `trashed` for an item put away; absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub away: Option<&'static str>,
@@ -470,7 +473,7 @@ impl<'a> Reader<'a> {
         Entry {
             id: item.id,
             uid: item.uid.clone(),
-            state: state_word(item),
+            state: State::of(item),
             away: if item.trashed.is_some() {
                 Some("trashed")
             } else if item.stashed.is_some() {
@@ -563,15 +566,16 @@ fn updated(item: &Item) -> i64 {
 }
 
 fn state_word(item: &Item) -> &'static str {
-    match State::of(item) {
-        None => "note",
-        Some(State::Pending) => "pending",
-        Some(State::Progress) => "in progress",
-        Some(State::Paused) => "paused",
-        Some(State::Waiting) => "waiting",
-        Some(State::Done) => "done",
-        Some(State::Cancelled) => "cancelled",
-    }
+    word_or_note(State::of(item))
+}
+
+/// A task's state as the views print it, or `note` for what has none.
+fn word_or_note(state: Option<State>) -> &'static str {
+    state.map_or("note", State::word)
+}
+
+fn state_or_note<S: serde::Serializer>(state: &Option<State>, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(word_or_note(*state))
 }
 
 /// `text` on one line, cut at `max` characters with a count of what was cut.
@@ -660,7 +664,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
 
     let (next, _) = reader.next(None);
     let (mut doing, mut ready): (Vec<Entry>, Vec<Entry>) =
-        next.into_iter().partition(|entry| entry.state == "in progress");
+        next.into_iter().partition(|entry| entry.state == Some(State::Progress));
 
     let mut blocked: Vec<&Item> = all
         .values()
@@ -1141,13 +1145,14 @@ fn summary(all: &ItemMap) -> String {
     let notes = shown.len() - tasks.len();
     let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
 
-    let states: Vec<String> = ["in progress", "paused", "waiting", "pending", "done", "cancelled"]
-        .iter()
-        .filter_map(|word| {
-            let n = tasks.iter().filter(|item| state_word(item) == *word).count();
-            (n > 0).then(|| format!("{n} {word}"))
-        })
-        .collect();
+    let states: Vec<String> =
+        [State::Progress, State::Paused, State::Waiting, State::Pending, State::Done, State::Cancelled]
+            .into_iter()
+            .filter_map(|state| {
+                let n = tasks.iter().filter(|item| State::of(item) == Some(state)).count();
+                (n > 0).then(|| format!("{n} {}", state.word()))
+            })
+            .collect();
     let tasks_part = if states.is_empty() {
         count(tasks.len(), "task", "tasks")
     } else {
@@ -1429,8 +1434,8 @@ fn entry_line(entry: &Entry, today: &str) -> String {
 fn listed_line(entry: &Entry, body: &str, stated: bool, today: &str) -> String {
     let mut line = format!("{:>4}. {}", entry.id, body);
     let mut meta = Vec::new();
-    if !stated && matches!(entry.state, "paused" | "in progress") {
-        meta.push(entry.state.to_string());
+    if let Some(state @ (State::Paused | State::Progress)) = entry.state.filter(|_| !stated) {
+        meta.push(state.word().to_string());
     }
     if let Some(priority @ 2..) = entry.priority {
         meta.push(format!("p{priority}"));
@@ -1481,7 +1486,7 @@ fn knowledge_line(note: &NoteRef) -> String {
 /// What a listing says an item is, in brackets: a task's state or a note's
 /// kind, and for a superseded note, what supersedes it.
 fn listed_state(entry: &Entry) -> String {
-    let word = entry.knowledge.map_or(entry.state, Knowledge::word);
+    let word = entry.knowledge.map_or_else(|| word_or_note(entry.state), Knowledge::word);
     match entry.superseded_by.as_slice() {
         [] => word.to_string(),
         newer => format!("{word}, superseded by {}", join(newer)),
@@ -1516,11 +1521,11 @@ impl Prime {
         let tasks = s.complete + s.in_progress + s.paused + s.waiting + s.pending;
         let mut counts = vec![format!("{}/{tasks} tasks done ({}%)", s.complete, s.percent)];
         for (n, word) in [
-            (s.in_progress, "in progress"),
-            (s.paused, "paused"),
-            (s.waiting, "waiting"),
-            (s.pending, "pending"),
-            (s.cancelled, "cancelled"),
+            (s.in_progress, State::Progress.word()),
+            (s.paused, State::Paused.word()),
+            (s.waiting, State::Waiting.word()),
+            (s.pending, State::Pending.word()),
+            (s.cancelled, State::Cancelled.word()),
             (s.notes, "notes"),
             (s.stashed, "stashed"),
             (s.trashed, "in the trash"),
@@ -1890,10 +1895,10 @@ impl Context {
         let _ = writeln!(out, "{:>4}. {}", item.id, item.description);
 
         let mut facts = vec![match (item.state, item.handoff, item.knowledge) {
-            ("note", true, _) => "note, the handoff of the task it is attached to".to_string(),
-            ("note", false, Some(kind)) => format!("note, a {}", kind.word()),
-            ("note", false, None) => "note".to_string(),
-            (state, _, _) => format!("task, {state}"),
+            (None, true, _) => "note, the handoff of the task it is attached to".to_string(),
+            (None, false, Some(kind)) => format!("note, a {}", kind.word()),
+            (None, false, None) => "note".to_string(),
+            (Some(state), _, _) => format!("task, {}", state.word()),
         }];
         if let Some(priority) = item.priority {
             facts.push(format!("priority {priority}"));
