@@ -314,13 +314,18 @@ impl Storage {
 ///
 /// A board with no file yet reads as both at zero, and its next write sets
 /// them right.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Counters {
     #[serde(default)]
     pub revision: u64,
     #[serde(default)]
     pub highest_id: u32,
+    /// Whatever a later version keeps here that this one does not know,
+    /// written back as read -- every write rewrites this file, and would
+    /// otherwise drop it, for the reason `Item::unknown` exists.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 impl Storage {
@@ -337,8 +342,8 @@ impl Storage {
     }
 
     /// Written through the same temp-file and rename dance as everything else.
-    pub fn set_counters(&self, counters: Counters) -> Result<(), StorageError> {
-        replace_durably(&self.counters_file(), &self.temp_dir, serde_json::to_string_pretty(&counters)?.as_bytes())
+    pub fn set_counters(&self, counters: &Counters) -> Result<(), StorageError> {
+        replace_durably(&self.counters_file(), &self.temp_dir, serde_json::to_string_pretty(counters)?.as_bytes())
     }
 }
 
@@ -611,9 +616,28 @@ mod tests {
         let storage = Storage::new(&dir).unwrap();
 
         assert_eq!(storage.get_counters().unwrap(), Counters::default());
-        storage.set_counters(Counters { revision: 7, highest_id: 42 }).unwrap();
-        assert_eq!(storage.get_counters().unwrap(), Counters { revision: 7, highest_id: 42 });
+        storage.set_counters(&Counters { revision: 7, highest_id: 42, ..Counters::default() }).unwrap();
+        assert_eq!(storage.get_counters().unwrap(), Counters { revision: 7, highest_id: 42, ..Counters::default() });
         assert!(dir.join("storage").join("counters.json").exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A counter a later version keeps survives this version's rewrite of
+    /// counters.json, which every write makes.
+    #[test]
+    fn counters_keep_what_a_later_version_added() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        let file = dir.join("storage").join("counters.json");
+        fs::write(&file, r#"{"revision": 3, "highestId": 5, "journalFrom": 2}"#).unwrap();
+
+        let mut counters = storage.get_counters().unwrap();
+        counters.revision += 1;
+        storage.set_counters(&counters).unwrap();
+
+        let written: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(written, serde_json::json!({"revision": 4, "highestId": 5, "journalFrom": 2}));
 
         fs::remove_dir_all(&dir).ok();
     }

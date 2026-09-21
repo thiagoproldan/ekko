@@ -870,7 +870,7 @@ impl Ekko {
         let gone: Vec<&Item> = before.iter().filter(|(id, _)| !data.contains_key(*id)).map(|(_, item)| item).collect();
 
         let kept = self.storage.get_counters()?;
-        let mut counters = kept;
+        let mut counters = kept.clone();
         counters.highest_id = counters.highest_id.max(before.keys().chain(data.keys()).max().copied().unwrap_or(0));
         // A write that changes nothing leaves the revision where it was, so a
         // retried command does not tell every reader that the board moved.
@@ -888,7 +888,7 @@ impl Ekko {
         // item carries, which no cursor can miss; the other order would leave
         // items stamped with a revision the next write hands out again.
         if counters != kept {
-            self.storage.set_counters(counters)?;
+            self.storage.set_counters(&counters)?;
         }
         self.storage.set(data)?;
 
@@ -1838,7 +1838,7 @@ impl Ekko {
             // revision says so, and `changes` tells its reader to prime again.
             let mut counters = self.storage.get_counters()?;
             counters.revision += 1;
-            self.storage.set_counters(counters)?;
+            self.storage.set_counters(&counters)?;
         }
         self.storage.set_phases(&cleaned)?;
         Ok(Outcome::Phases(cleaned))
@@ -4067,6 +4067,45 @@ mod tests {
         for code in ["BLOCKED", "COMPLETED_DEPENDENTS", "ALREADY_DONE"] {
             assert!(refused.contains(code), "the sequence never reached {code}: {refused:?}");
         }
+
+        cleanup(&dir);
+    }
+
+    /// A board a later ekko wrote, rewritten by this one. A write rewrites the
+    /// whole file, so a field this version does not know used to vanish from
+    /// every item at once: that is how an older ekko dropped knowledge,
+    /// supersedes and waiting. Now it survives on the item a command changed,
+    /// on the items it left alone, and on the way into the archive.
+    #[test]
+    fn fields_from_a_later_version_survive_this_versions_writes() {
+        let (ekko, dir) = fresh_ekko();
+        let item = |id: u32, description: &str, done: bool, extra: &str| {
+            format!(
+                r#""{id}": {{"_id": {id}, "_date": "Mon Sep 21 2026", "_timestamp": 0, "description": "{description}",
+                "isStarred": false, "boards": ["My Board"], "_isTask": true, "isComplete": {done},
+                "inProgress": false, {extra}, "priority": 1}}"#
+            )
+        };
+        let later = format!(
+            "{{{}, {}, {}}}",
+            item(1, "changed", false, r#""checkBack": "2026-10-01""#),
+            item(2, "left alone", false, r#""with": ["upstream"]"#),
+            item(3, "archived", true, r#""outcome": {"shipped": "v0.11.0"}"#),
+        );
+        fs::write(dir.join("storage").join("storage.json"), later).unwrap();
+
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        ekko.clear().unwrap();
+
+        let read = |file: &str| -> serde_json::Value { serde_json::from_str(&fs::read_to_string(dir.join(file)).unwrap()).unwrap() };
+        let stored = read("storage/storage.json");
+        assert_eq!(stored["1"]["inProgress"], true, "the change itself landed");
+        assert_eq!(stored["1"]["checkBack"], "2026-10-01");
+        assert_eq!(stored["2"]["with"], serde_json::json!(["upstream"]));
+        let archive = read("archive/archive.json");
+        let archived: Vec<&serde_json::Value> = archive.as_object().unwrap().values().collect();
+        assert_eq!(archived.len(), 1, "{archive}");
+        assert_eq!(archived[0]["outcome"], serde_json::json!({"shipped": "v0.11.0"}));
 
         cleanup(&dir);
     }

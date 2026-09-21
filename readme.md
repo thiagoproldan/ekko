@@ -949,6 +949,8 @@ All task/note data lives in one JSON file, written atomically (temp file + renam
 $ cat ~/.ekko/storage/storage.json
 ```
 
+A field Ekko does not know is kept, not dropped. Every write rewrites the whole file, so a version that threw away what it could not read would erase whatever a newer one added -- a note's kind, a waiting state -- from every item at once. From v0.11.0 on, such a field keeps its value and is written back after the fields that version knows, in `storage.json`, `archive.json` and `counters.json` alike, so an older binary still running against a board a newer one wrote loses nothing. Versions before v0.11.0 do drop them: after an upgrade, restart anything still running an old `ekko` -- an MCP server above all -- before it writes.
+
 Every command that writes (`--task`, `--check`, `--delete`, ...) takes a lock at `<ekko-dir>/.lock` for its duration, so two `ekko` processes -- two terminals, two scripts, two agents -- touching the same directory at once queue up instead of silently clobbering each other's write. A second process waits up to 5 seconds before reporting `LOCK_TIMEOUT`.
 
 The lock is `flock(2)`, which means there is no such thing as a stale one: the kernel drops it when the holding process exits, however it exits. Nothing has to notice a dead holder, and nothing ever steals a lock from a live one. An earlier port of taskbook's pid-file scheme did try to tell the two apart, and the gap between checking and acting silently lost writes; `tests/concurrency.rs` spawns real processes and kills them mid-hold to keep that fixed. You never need to touch the file by hand.

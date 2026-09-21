@@ -9,6 +9,7 @@
 //! read `storage.json`/`archive.json` files an existing JS install already
 //! produced, unchanged.
 
+use std::collections::BTreeMap;
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -199,6 +200,22 @@ pub struct Item {
     // still readable, but always written back out as a number now.
     #[serde(default, deserialize_with = "deserialize_priority", skip_serializing_if = "Option::is_none")]
     pub priority: Option<u8>,
+    /// Every field this version does not know, with the value it was read
+    /// with, written back after the fields it does, in name order.
+    ///
+    /// A write rewrites the whole file, so without this an older ekko drops
+    /// whatever a newer one added from every item at once -- a note's kind,
+    /// what it supersedes, a waiting state -- the moment it writes anything.
+    /// Kept, such a field outlives every version that cannot read it, and
+    /// means what it meant again as soon as one that can reads it, which also
+    /// puts it back in its place. Empty on anything this version made, so a
+    /// board with nothing unknown on it is byte-identical to before.
+    ///
+    /// A `BTreeMap` rather than serde_json's order-keeping map, which carries
+    /// a hasher on every item: a cold read of 5,000 items was 5% slower with
+    /// it, and is 2% slower with this.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 impl Item {
@@ -230,6 +247,7 @@ impl Item {
             stashed: None,
             trashed: None,
             priority: Some(priority),
+            unknown: BTreeMap::new(),
         }
     }
 
@@ -261,6 +279,7 @@ impl Item {
             supersedes: None,
             stashed: None,
             trashed: None,
+            unknown: BTreeMap::new(),
         }
     }
 
@@ -736,5 +755,185 @@ mod tests {
         let json = serde_json::to_value(&typed).unwrap();
         assert_eq!((json["knowledge"].as_str(), json["supersedes"].as_str()), (Some("decision"), Some("18d0-1")));
         assert_eq!(serde_json::from_value::<Item>(json).unwrap(), typed);
+    }
+
+    /// A board as ekko 0.10.2 wrote it, with every field it stores on an item
+    /// that carries it. Captured from the binary rather than typed out, apart
+    /// from `phase` and `handoff`, which the CLI cannot set on a bare
+    /// directory and were placed where the serializer puts them.
+    const BOARD: &str = r#"{
+    "1": {
+        "_id": 1,
+        "_date": "Mon Sep 21 2026",
+        "_timestamp": 1789993060230,
+        "description": "Ship the release",
+        "isStarred": true,
+        "boards": [
+            "@work"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "dueDate": "2026-10-01",
+        "uid": "18d7553459722c26-6426a",
+        "updatedAt": 1789993060287,
+        "rev": 10,
+        "phase": "release",
+        "blockedBy": [
+            "18d755345a4df713-6426b"
+        ],
+        "priority": 2
+    },
+    "2": {
+        "_id": 2,
+        "_date": "Mon Sep 21 2026",
+        "_timestamp": 1789993060244,
+        "description": "Wait for the reply",
+        "isStarred": false,
+        "boards": [
+            "@work"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18d755345a4df713-6426b",
+        "updatedAt": 1789993060292,
+        "rev": 11,
+        "waiting": true,
+        "priority": 1
+    },
+    "3": {
+        "_id": 3,
+        "_date": "Mon Sep 21 2026",
+        "_timestamp": 1789993060250,
+        "description": "Pause this one",
+        "isStarred": false,
+        "boards": [
+            "My Board"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18d755345aa3083d-6426c",
+        "updatedAt": 1789993060307,
+        "rev": 14,
+        "paused": true,
+        "stashed": 1789993060307,
+        "priority": 1
+    },
+    "4": {
+        "_id": 4,
+        "_date": "Mon Sep 21 2026",
+        "_timestamp": 1789993060255,
+        "description": "Drop this one",
+        "isStarred": false,
+        "boards": [
+            "My Board"
+        ],
+        "_isTask": true,
+        "isComplete": false,
+        "inProgress": false,
+        "uid": "18d755345af38d72-6426d",
+        "updatedAt": 1789993060313,
+        "rev": 15,
+        "cancelled": true,
+        "priority": 1
+    },
+    "5": {
+        "_id": 5,
+        "_date": "Mon Sep 21 2026",
+        "_timestamp": 1789993060260,
+        "description": "A done one",
+        "isStarred": false,
+        "boards": [
+            "My Board"
+        ],
+        "_isTask": true,
+        "isComplete": true,
+        "inProgress": false,
+        "uid": "18d755345b4568d2-6426e",
+        "updatedAt": 1789993060319,
+        "rev": 16,
+        "priority": 1
+    },
+    "6": {
+        "_id": 6,
+        "_date": "Mon Sep 21 2026",
+        "_timestamp": 1789993060266,
+        "description": "Ship it as a patch",
+        "isStarred": false,
+        "boards": [
+            "My Board"
+        ],
+        "_isTask": false,
+        "uid": "18d755345b973028-6426f",
+        "updatedAt": 1789993060326,
+        "rev": 17,
+        "trashed": 1789993060326,
+        "knowledge": "decision"
+    },
+    "7": {
+        "_id": 7,
+        "_date": "Mon Sep 21 2026",
+        "_timestamp": 1789993060271,
+        "description": "Ship it as a minor",
+        "isStarred": false,
+        "boards": [
+            "@work"
+        ],
+        "_isTask": false,
+        "uid": "18d755345be5e14a-64270",
+        "updatedAt": 1789993060333,
+        "rev": 18,
+        "attachedTo": "18d7553459722c26-6426a",
+        "knowledge": "decision",
+        "supersedes": "18d755345b973028-6426f"
+    },
+    "8": {
+        "_id": 8,
+        "_date": "Mon Sep 21 2026",
+        "_timestamp": 1789993060276,
+        "description": "Where the last session stopped",
+        "isStarred": false,
+        "boards": [
+            "My Board"
+        ],
+        "_isTask": false,
+        "uid": "18d755345c32f7ff-64271",
+        "updatedAt": 1789993060340,
+        "rev": 19,
+        "attachedTo": "18d755345a4df713-6426b",
+        "handoff": true
+    }
+}"#;
+
+    /// A board with nothing unknown on it is written back byte for byte:
+    /// keeping the fields this version does not know costs a board that has
+    /// none nothing at all.
+    #[test]
+    fn a_board_with_nothing_unknown_is_written_back_byte_for_byte() {
+        let board: BTreeMap<u32, Item> = serde_json::from_str(BOARD).unwrap();
+        assert_eq!(crate::json::to_pretty_string(&board).unwrap(), BOARD);
+    }
+
+    /// Fields a later version added, which this one does not know, come
+    /// through a read and a write with their values, instead of being dropped
+    /// the way every field was before `unknown` held them. They are written
+    /// after the fields this version knows; the later version puts them back
+    /// in their places on its own next write.
+    #[test]
+    fn fields_from_a_later_version_survive_a_read_and_a_write() {
+        let later = r#"{"_id": 1, "_date": "Mon Sep 21 2026", "_timestamp": 0, "description": "x",
+            "isStarred": false, "boards": ["My Board"], "_isTask": true, "isComplete": false,
+            "inProgress": false, "with": ["upstream", {"since": 1789993060230}], "priority": 1,
+            "checkBack": "2026-10-01"}"#;
+
+        let item: Item = serde_json::from_str(later).unwrap();
+        let written = serde_json::to_value(&item).unwrap();
+
+        assert_eq!(written["with"], serde_json::json!(["upstream", {"since": 1789993060230_u64}]));
+        assert_eq!(written["checkBack"], "2026-10-01");
+        assert_eq!(item.priority, Some(1), "the known fields around them are still read");
+        assert_eq!(serde_json::from_value::<Item>(written).unwrap(), item);
     }
 }
