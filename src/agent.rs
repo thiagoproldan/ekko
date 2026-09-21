@@ -1493,6 +1493,74 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// What each task inherits, read straight off the graph.
+    fn inherited_on(ekko: &Ekko) -> HashMap<u32, Inherited> {
+        let all = ekko.storage.get().unwrap();
+        Graph::new(&all).inherited()
+    }
+
+    /// A diamond -- 1 held up by 2 and 3, both held up by 4 -- settles 4
+    /// once, with the highest priority and the earliest finish of both paths.
+    #[test]
+    fn inherited_on_a_diamond_counts_each_path_once() {
+        let (ekko, dir) = board("diamond");
+        ekko.create_task(&words(&["top", "p:3", "d:2030-01-10"])).unwrap();
+        ekko.create_task(&words(&["left"])).unwrap();
+        ekko.create_task(&words(&["right", "p:2", "d:2030-01-05"])).unwrap();
+        ekko.create_task(&words(&["bottom"])).unwrap();
+        ekko.set_blocked_by(&words(&["@1", "2", "3"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "4"])).unwrap();
+        ekko.set_blocked_by(&words(&["@3", "4"])).unwrap();
+
+        let values = inherited_on(&ekko);
+        let bottom = values[&4];
+        assert_eq!(bottom.priority, 3, "the top's p3 reaches it through either side");
+        // Through the left: day before the top's date, then a day before that.
+        // Through the right: its own date is earlier, one day before it.
+        let day = |date: &str| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap().num_days_from_ce();
+        assert_eq!(bottom.finish_by, Some(day("2030-01-04")));
+        assert!(bottom.waited_on);
+        assert!(!values[&1].waited_on, "nothing waits on the top");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Down a chain each step finishes a day before the one it holds up.
+    #[test]
+    fn inherited_down_a_chain_takes_a_day_per_step() {
+        let (ekko, dir) = board("chain");
+        ekko.create_task(&words(&["end", "p:2", "d:2030-03-10"])).unwrap();
+        ekko.create_task(&words(&["middle"])).unwrap();
+        ekko.create_task(&words(&["start"])).unwrap();
+        ekko.set_blocked_by(&words(&["@1", "2"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "3"])).unwrap();
+
+        let values = inherited_on(&ekko);
+        let day = |date: &str| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap().num_days_from_ce();
+        assert_eq!(values[&2].finish_by, Some(day("2030-03-09")));
+        assert_eq!(values[&3].finish_by, Some(day("2030-03-08")));
+        assert_eq!(values[&3].priority, 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Cancelled work holds nothing up, so its prerequisite inherits nothing
+    /// from it: neither its priority, its date, nor the weight of being waited on.
+    #[test]
+    fn inherited_ignores_a_cancelled_dependent() {
+        let (ekko, dir) = board("cancelled");
+        ekko.create_task(&words(&["prerequisite"])).unwrap();
+        ekko.create_task(&words(&["dropped", "p:3", "d:2030-01-01"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        ekko.set_state(&words(&["@2", "cancelled"]), false).unwrap();
+
+        let values = inherited_on(&ekko);
+        assert_eq!(values[&1], Inherited { priority: 1, finish_by: None, waited_on: false });
+        assert!(!values.contains_key(&2), "a cancelled task is not open work");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Phase order outranks priority, and the root comes after every phase.
     #[test]
     fn an_earlier_phase_comes_before_a_higher_priority_in_a_later_one() {
