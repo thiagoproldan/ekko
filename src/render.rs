@@ -226,6 +226,13 @@ pub struct Inversion {
 pub struct Stats {
     pub percent: u32,
     pub complete: u32,
+    /// The tasks the percentage is out of, as `tally` counts them: done and
+    /// every open state, never cancelled. The one total -- the prime and the
+    /// board read it here rather than summing the counts again. Left out of
+    /// the JSON to keep it as it was: a caller there sums the counts, as it
+    /// always has.
+    #[serde(skip_serializing)]
+    pub total: u32,
     pub in_progress: u32,
     /// Started, then set aside. Only surfaces in the stats line when it is
     /// above zero, so a board nobody pauses prints exactly what it always
@@ -1037,9 +1044,9 @@ impl<'a> Renderer<'a> {
             ));
         }
 
-        let total =
-            stats.pending + stats.in_progress + stats.paused + stats.waiting + stats.cancelled + stats.complete + stats.notes;
-        if total == 0 {
+        // Everything on the board: the tasks in the total, the cancelled ones
+        // outside it, and the notes.
+        if stats.total + stats.cancelled + stats.notes == 0 {
             self.emit("\n ", None, "Type `ekko --help` to get started", "");
         }
 
@@ -1443,7 +1450,7 @@ mod tests {
     // Matches the golden `.ans` files' own stats line: 1 done, 1
     // in-progress, 2 pending, 0 notes -> 25% (1 of 4 tasks complete).
     fn golden_stats() -> Stats {
-        Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 2, notes: 0, stashed: 0, trashed: 0 }
+        Stats { percent: 25, complete: 1, total: 4, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 2, notes: 0, stashed: 0, trashed: 0 }
     }
 
     #[test]
@@ -1628,7 +1635,7 @@ mod tests {
         // The compatibility promise: boards that never pause or wait on
         // anything print exactly what they always did, goldens included.
         let output = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 2, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 25, complete: 1, total: 4, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 2, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert!(!output.contains("paused") && !output.contains("waiting"), "a zero count must not appear:\n{output}");
@@ -1637,7 +1644,7 @@ mod tests {
     #[test]
     fn the_stats_line_reports_paused_once_there_is_any() {
         let output = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 2, waiting: 0, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, total: 4, in_progress: 1, paused: 2, waiting: 0, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert!(output.contains("2") && output.contains("paused"), "{output}");
@@ -1646,7 +1653,7 @@ mod tests {
     #[test]
     fn the_stats_line_reports_waiting_once_there_is_any() {
         let output = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 0, paused: 0, waiting: 3, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, total: 4, in_progress: 0, paused: 0, waiting: 3, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert!(output.contains("\x1b[36m3\x1b[39m") && output.contains("waiting"), "{output}");
@@ -1655,10 +1662,10 @@ mod tests {
     #[test]
     fn more_than_one_in_progress_earns_a_warning_and_one_does_not() {
         let one = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 0, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, total: 1, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 0, notes: 0, stashed: 0, trashed: 0 });
         });
         let several = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 3, paused: 0, waiting: 0, cancelled: 0, pending: 0, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, total: 3, in_progress: 3, paused: 0, waiting: 0, cancelled: 0, pending: 0, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert!(!one.contains("in progress --"), "a single cursor is the healthy case:\n{one}");
@@ -1685,7 +1692,7 @@ mod tests {
         let config = Config { display_progress_overview: false, ..Config::default() };
 
         let output = render_with(config, |r| {
-            r.display_stats(&Stats { percent: 50, complete: 1, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 50, complete: 1, total: 3, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert_eq!(output, "");
@@ -1741,6 +1748,7 @@ mod tests {
             r.display_stats(&Stats {
                 percent: 100,
                 complete: 2,
+                total: 2,
                 in_progress: 0,
                 paused: 0,
                 waiting: 0,
@@ -1762,6 +1770,7 @@ mod tests {
             r.display_stats(&Stats {
                 percent: 50,
                 complete: 1,
+                total: 2,
                 in_progress: 0,
                 paused: 0,
                 waiting: 0,

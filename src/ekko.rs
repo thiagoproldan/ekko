@@ -695,9 +695,10 @@ impl Ekko {
     /// The item keeps its real state underneath, so unstashing puts it
     /// back where it belongs. Only the counting hides it.
     pub(crate) fn compute_stats(&self, data: &ItemMap) -> Stats {
-        let (mut complete, mut in_progress, mut paused, mut waiting, mut cancelled, mut pending, mut notes) =
-            (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+        let (mut in_progress, mut paused, mut waiting, mut cancelled, mut pending, mut notes) =
+            (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
         let (mut stashed, mut trashed) = (0u32, 0u32);
+        let mut shown = Vec::new();
         for item in data.values() {
             if item.trashed.is_some() {
                 trashed += 1;
@@ -707,9 +708,11 @@ impl Ekko {
                 stashed += 1;
                 continue;
             }
+            shown.push(item);
             match State::of(item) {
                 Some(State::Cancelled) => cancelled += 1,
-                Some(State::Done) => complete += 1,
+                // Counted with the total, by `tally`, below.
+                Some(State::Done) => {}
                 Some(State::Progress) => in_progress += 1,
                 // Counted apart from pending on purpose: lumping them back
                 // together is exactly the conflation this state exists to
@@ -721,12 +724,14 @@ impl Ekko {
                 None => notes += 1,
             }
         }
-        // `cancelled` is absent from the total on purpose: counting it would
-        // mean a board can never reach 100% once anything is dropped, which
-        // reads as unfinished work rather than as work that went away.
-        let total = complete + pending + in_progress + paused + waiting;
+        // Through `tally`, as the board titles, --projects and the roadmap
+        // count, so the percentage cannot disagree with them: a state the
+        // total should hold is in it without anyone adding it here, and
+        // cancelled stays out, or a board could never reach 100% once
+        // anything is dropped.
+        let (complete, total) = tally(shown);
         let percent = (complete * 100).checked_div(total).unwrap_or(0);
-        Stats { percent, complete, in_progress, paused, waiting, cancelled, pending, notes, stashed, trashed }
+        Stats { percent, complete, total, in_progress, paused, waiting, cancelled, pending, notes, stashed, trashed }
     }
 
     /// `all` is the whole of storage, stashed and trashed included, and is
@@ -3997,6 +4002,35 @@ mod tests {
         for code in ["BLOCKED", "COMPLETED_DEPENDENTS", "ALREADY_DONE"] {
             assert!(refused.contains(code), "the sequence never reached {code}: {refused:?}");
         }
+
+        cleanup(&dir);
+    }
+
+    /// One total, counted once. On a board holding every state, a note, and a
+    /// task put away each way, the stats and the prime's "done/total" are
+    /// what `tally` counts over what is on the board: cancelled out of the
+    /// total, done in it and counted, the note and the put-away tasks in
+    /// neither.
+    #[test]
+    fn the_stats_and_the_prime_count_the_total_tally_counts() {
+        let (ekko, dir) = fresh_ekko();
+        for word in ["pending", "progress", "paused", "waiting", "done", "cancelled", "stashed", "trashed"] {
+            ekko.create_task(&words(&[word])).unwrap();
+        }
+        ekko.create_note(&words(&["a note"])).unwrap();
+        for (id, state) in [(2, "progress"), (3, "paused"), (4, "waiting"), (5, "done"), (6, "cancelled")] {
+            ekko.set_state(&words(&[format!("@{id}").as_str(), state]), false).unwrap();
+        }
+        ekko.set_stashed(&words(&["7"]), true).unwrap();
+        ekko.delete_items(&words(&["8"])).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        let shown = data.values().filter(|item| item.stashed.is_none() && item.trashed.is_none());
+        assert_eq!(tally(shown), (1, 5));
+        let stats = ekko.compute_stats(&data);
+        assert_eq!((stats.complete, stats.total, stats.percent), (1, 5, 20));
+        let prime = crate::agent::prime(&ekko, "board").unwrap().text();
+        assert!(prime.contains("1/5 tasks done (20%)"), "{prime}");
 
         cleanup(&dir);
     }

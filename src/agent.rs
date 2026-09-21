@@ -1518,8 +1518,7 @@ impl Prime {
         let _ = writeln!(out, "ekko \u{b7} {} \u{b7} cursor {}", self.board, self.cursor);
 
         let s = &self.stats;
-        let tasks = s.complete + s.in_progress + s.paused + s.waiting + s.pending;
-        let mut counts = vec![format!("{}/{tasks} tasks done ({}%)", s.complete, s.percent)];
+        let mut counts = vec![format!("{}/{} tasks done ({}%)", s.complete, s.total, s.percent)];
         for (n, word) in [
             (s.in_progress, State::Progress.word()),
             (s.paused, State::Paused.word()),
