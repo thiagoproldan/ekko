@@ -520,6 +520,27 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A waiting task has its own glyph on the board in both glyph sets, the
+    /// stats say how many wait, and the search view offers the state as a chip.
+    #[test]
+    fn a_waiting_task_is_drawn_as_waiting() {
+        let (dir, mut app) = sample("waiting");
+        let ekko = crate::ekko::Ekko::new(crate::storage::Storage::new(&dir).unwrap());
+        ekko.set_state(&words(&["@2", "waiting"]), false).unwrap();
+        app.reload(&ekko).unwrap();
+
+        for (glyphs, glyph) in [(Glyphs::Nerd, "\u{eb7b}"), (Glyphs::Plain, "\u{25d4}")] {
+            let all = screen(&drawn(&mut app, glyphs, 170, 46));
+            let row = all.lines().find(|line| line.contains("draw the frame")).expect("the task's row");
+            assert!(row.contains(glyph), "{row}");
+            assert!(all.contains("1 waiting"), "{all}");
+        }
+        app.view = View::Search;
+        let all = screen(&drawn(&mut app, Glyphs::Nerd, 170, 46));
+        assert!(all.contains(" waiting "), "the state is not among the chips:\n{all}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_small_terminal_says_so_instead_of_drawing_boxes() {
         let (dir, mut app) = sample("small");

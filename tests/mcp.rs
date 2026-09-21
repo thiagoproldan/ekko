@@ -365,6 +365,40 @@ fn typed_notes_are_written_listed_and_searched_over_stdio() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// The waiting state over stdio: set_state takes it, next and a write's reply
+/// leave the task out as work to take up, prime and search list it, and the
+/// schema an agent reads offers it.
+#[test]
+fn a_waiting_task_is_set_listed_and_never_offered_as_ready() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            call(1, "batch", json!({"ops": [
+                {"op": "create", "text": "blocker"},
+                {"op": "create", "text": "needs the vendor's reply", "blocked_by": ["$1"]},
+                {"op": "set_state", "items": ["$2"], "state": "waiting"}
+            ]})),
+            call(2, "set_state", json!({"items": [1], "state": "done"})),
+            call(3, "next", json!({})),
+            call(4, "prime", json!({})),
+            call(5, "search", json!({"filters": ["waiting"]})),
+            request(6, "tools/list", json!({})),
+        ],
+    );
+
+    let done: Value = serde_json::from_str(text(&replies["2"])).unwrap();
+    assert!(done.get("nowReady").is_none(), "a waiting task was reported ready: {done}");
+    assert!(!text(&replies["3"]).contains("vendor"), "{}", text(&replies["3"]));
+    assert!(text(&replies["4"]).contains("\nWaiting (1)\n   2. needs the vendor's reply"), "{}", text(&replies["4"]));
+    assert!(text(&replies["5"]).contains("2. [waiting] needs the vendor's reply"), "{}", text(&replies["5"]));
+    let tools = replies["6"]["result"]["tools"].as_array().unwrap();
+    let set_state = tools.iter().find(|tool| tool["name"] == "set_state").unwrap();
+    assert!(set_state["inputSchema"]["properties"]["state"]["enum"].as_array().unwrap().contains(&json!("waiting")));
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// A server kept running while a test talks to it, a message at a time: what
 /// the resources server does on its own, between requests, shows only here.
 struct Live {

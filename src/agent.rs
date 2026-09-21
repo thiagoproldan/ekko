@@ -71,6 +71,7 @@ const HANDOFF_BUDGET: usize = 3_500;
 /// blocked work and the notes were never mentioned.
 const READY_KEPT: usize = 10;
 const BLOCKED_KEPT: usize = 5;
+const WAITING_KEPT: usize = 5;
 const NOTES_KEPT: usize = 3;
 /// Gotchas and procedures a prime lists, newest first, each by its first
 /// line: the traps and the steps a session should have in mind before it
@@ -499,7 +500,10 @@ impl<'a> Reader<'a> {
     }
 
     fn ready(&self, item: &Item) -> bool {
-        visible(item) && holds(item) && self.graph.open_blockers(item.id).is_empty()
+        visible(item)
+            && holds(item)
+            && State::of(item).is_some_and(State::can_start)
+            && self.graph.open_blockers(item.id).is_empty()
     }
 
     /// What to take up next, best first: work already in progress, then
@@ -564,6 +568,7 @@ fn state_word(item: &Item) -> &'static str {
         Some(State::Pending) => "pending",
         Some(State::Progress) => "in progress",
         Some(State::Paused) => "paused",
+        Some(State::Waiting) => "waiting",
         Some(State::Done) => "done",
         Some(State::Cancelled) => "cancelled",
     }
@@ -598,6 +603,12 @@ pub struct Prime {
     /// The first blocked tasks, by priority; `blocked_total` counts them all.
     pub blocked: Vec<Entry>,
     pub blocked_total: usize,
+    /// The first tasks in the waiting state, by priority; `waiting_total`
+    /// counts them all. Absent on a board that waits on nothing.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<Entry>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub waiting_total: usize,
     pub recent_notes: Vec<NoteRef>,
     /// Done tasks still waiting on open work, as (task, blocker) pairs.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -653,7 +664,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
 
     let mut blocked: Vec<&Item> = all
         .values()
-        .filter(|item| visible(item) && holds(item) && State::of(item) != Some(State::Progress))
+        .filter(|item| visible(item) && holds(item) && !matches!(State::of(item), Some(State::Progress | State::Waiting)))
         .filter(|item| !reader.graph.open_blockers(item.id).is_empty())
         .collect();
     blocked.sort_by_key(|item| (std::cmp::Reverse(item.priority.unwrap_or(1)), item.id));
@@ -661,6 +672,15 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     // Entries only for what a prime shows: working one out walks the graph,
     // and a long chain holds thousands of blocked tasks nobody reads.
     let mut blocked: Vec<Entry> = blocked.into_iter().take(BLOCKED_SHOWN).map(|item| reader.entry(item)).collect();
+
+    // Held by something outside the board, so in no list of work to take
+    // up, blocked or not: listed apart, where a session sees what it should
+    // not start and what to ask about.
+    let mut waiting: Vec<&Item> =
+        all.values().filter(|item| visible(item) && State::of(item) == Some(State::Waiting)).collect();
+    waiting.sort_by_key(|item| (std::cmp::Reverse(item.priority.unwrap_or(1)), item.id));
+    let waiting_total = waiting.len();
+    let mut waiting: Vec<Entry> = waiting.into_iter().take(BLOCKED_SHOWN).map(|item| reader.entry(item)).collect();
 
     // The newest handoff on open work, shown once in its own section rather
     // than clipped again among the notes of its task.
@@ -681,7 +701,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
             description: note.description.clone(),
         });
     if let Some(shown) = &handoff {
-        for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()) {
+        for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()).chain(waiting.iter_mut()) {
             entry.notes.retain(|note| note.id != shown.id);
         }
     }
@@ -700,7 +720,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     let knowledge_total = lasting.len();
     let knowledge: Vec<NoteRef> = lasting.into_iter().take(KNOWLEDGE_SHOWN).map(|note| reader.note_ref(note)).collect();
     let decisions = all.values().filter(in_force).filter(|note| note.knowledge == Some(Knowledge::Decision)).count();
-    for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()) {
+    for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()).chain(waiting.iter_mut()) {
         entry.notes.retain(|note| note.superseded_by.is_empty() && !knowledge.iter().any(|shown| shown.id == note.id));
     }
 
@@ -725,7 +745,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
 
     let freed_by_cancelling = all
         .values()
-        .filter(|item| visible(item) && holds(item) && reader.graph.open_blockers(item.id).is_empty())
+        .filter(|item| reader.ready(item))
         .flat_map(|item| {
             item.blocked_by
                 .iter()
@@ -746,6 +766,8 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         ready,
         blocked,
         blocked_total,
+        waiting,
+        waiting_total,
         recent_notes,
         broken: broken_dependencies(&all).into_iter().collect(),
         inversions,
@@ -1113,7 +1135,7 @@ fn summary(all: &ItemMap) -> String {
     let notes = shown.len() - tasks.len();
     let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
 
-    let states: Vec<String> = ["in progress", "paused", "pending", "done", "cancelled"]
+    let states: Vec<String> = ["in progress", "paused", "waiting", "pending", "done", "cancelled"]
         .iter()
         .filter_map(|word| {
             let n = tasks.iter().filter(|item| state_word(item) == *word).count();
@@ -1477,19 +1499,20 @@ impl Prime {
     /// The resume view in at most `budget` characters. The header, what needs
     /// attention and the closing line always fit; the sections fill what is
     /// left in the order an agent needs them -- work in progress, ready work
-    /// best first, blocked work, loose notes -- and a section cut short says
-    /// how much it left out and where the rest is.
+    /// best first, blocked work, waiting work, loose notes -- and a section
+    /// cut short says how much it left out and where the rest is.
     pub fn text_within(&self, budget: usize) -> String {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut out = String::new();
         let _ = writeln!(out, "ekko \u{b7} {} \u{b7} cursor {}", self.board, self.cursor);
 
         let s = &self.stats;
-        let tasks = s.complete + s.in_progress + s.paused + s.pending;
+        let tasks = s.complete + s.in_progress + s.paused + s.waiting + s.pending;
         let mut counts = vec![format!("{}/{tasks} tasks done ({}%)", s.complete, s.percent)];
         for (n, word) in [
             (s.in_progress, "in progress"),
             (s.paused, "paused"),
+            (s.waiting, "waiting"),
             (s.pending, "pending"),
             (s.cancelled, "cancelled"),
             (s.notes, "notes"),
@@ -1519,10 +1542,14 @@ impl Prime {
         } else {
             format!("      +{} more: {KNOWLEDGE_REST}\n", self.knowledge_total).chars().count()
         };
+        // The waiting section's own "+N more" line is only reserved on a board
+        // that has one, which leaves every other prime as it was.
+        let waiting_more = if self.waiting.is_empty() { 0 } else { MORE_LINE };
         let fixed = out.chars().count()
             + attention.chars().count()
             + close.chars().count()
             + 4 * MORE_LINE
+            + waiting_more
             + knowledge_more
             + decisions.chars().count();
         let mut room = Room(budget.saturating_sub(fixed));
@@ -1534,6 +1561,7 @@ impl Prime {
             Section::of_entries("In progress", &self.doing, usize::MAX, self.doing.len(), "context <id> reads one", usize::MAX, &today),
             Section::of_entries("Ready, best first", &self.ready, READY_WITH_NOTES, self.ready.len(), "next lists them", READY_KEPT, &today),
             Section::of_entries("Blocked", &self.blocked, 0, self.blocked_total, "search with the blocked filter", BLOCKED_KEPT, &today),
+            Section::of_entries("Waiting", &self.waiting, 0, self.waiting_total, "search with the waiting filter", WAITING_KEPT, &today),
             Section {
                 heading: "\nRecent notes, not attached to a task".to_string(),
                 blocks: self
@@ -2149,6 +2177,33 @@ mod tests {
         assert!(lines[reason - 1].trim_start().starts_with("1. "), "the reason is not under its work:\n{text}");
 
         assert_eq!(view.cursor, ekko.storage.get_counters().unwrap().revision as i64);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A waiting task is in no list of work to take up -- not ready, not next,
+    /// not blocked even when it is -- and has a section of its own, which a
+    /// board that waits on nothing never shows. The task list Claude Code
+    /// draws leaves it out with the rest.
+    #[test]
+    fn prime_lists_waiting_work_apart_from_the_work_to_take_up() {
+        let (ekko, dir) = board("waiting");
+        ekko.create_task(&words(&["ready"])).unwrap();
+        ekko.create_task(&words(&["on the vendor", "p:2"])).unwrap();
+        ekko.create_task(&words(&["on the vendor and on 1"])).unwrap();
+        ekko.set_blocked_by(&words(&["@3", "1"])).unwrap();
+        assert!(!prime(&ekko, "default board").unwrap().text().contains("Waiting"));
+
+        ekko.set_state(&words(&["@2", "@3", "waiting"]), false).unwrap();
+        let view = prime(&ekko, "default board").unwrap();
+        assert_eq!((ids(&view.ready), ids(&view.blocked), ids(&view.waiting)), (vec![1], vec![], vec![2, 3]));
+        assert_eq!(ids(&next(&ekko, None).unwrap()), vec![1]);
+
+        let text = view.text();
+        let section = text.split("\nWaiting (2)\n").nth(1).expect("a waiting section").split("\n\n").next().unwrap();
+        assert_eq!(line_ids(section), vec![2, 3], "{text}");
+        assert!(section.contains("\u{21e0} 1"), "a waiting task still names its blocker: {text}");
+        assert!(text.contains("2 waiting \u{b7} 1 pending"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

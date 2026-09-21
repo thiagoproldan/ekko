@@ -34,6 +34,7 @@ Added by Ekko, each of them invisible until you use it:
 
 - **Due dates** via `d:YYYY-MM-DD`, coloured by urgency and filterable with `--list due|overdue`
 - **A real paused state**, so "set aside" stops looking like "never started"
+- **A waiting state**, for work held by something outside the board, which `--list ready` and `--next` stop offering
 - **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
 - **Projects**: a board per folder or repository, made with `ekko init` and found from inside it the way git finds a repository
 - **Phases and `--roadmap`**: a project's roadmap, read backwards as history and forwards as a plan
@@ -638,7 +639,7 @@ $ ekko --check 3 --force
 
 The dependency is left in place, so the task shows `✔` beside `⇠ 1, 2` for as long as those stay open: the override leaves a trace instead of erasing the reason it was needed. `--force` has no short form, since `-f` is `--find` and overriding a rule should take typing the word, and on any command other than `--check` and `--set` it is an error (`FORCE_WITHOUT_COMPLETING`) rather than a flag quietly accepted and ignored. `--ui` never forces: a frame full of keys is exactly where one gets pressed without deliberation.
 
-**The same rule holds from the other side.** A task that completed work is blocked by cannot be reopened -- not by `--check`, `--begin`, or `--set undone`, `progress`, `paused` or `unstarted` -- because, open again, it would be holding up work that is already done. Reviving a cancelled blocker counts as reopening it; cancelling a done one does not, since it stays closed. The refusal names the completed dependents (`COMPLETED_DEPENDENTS`), and `--force` with `--check` or `--set` reopens anyway and says what it overrode. A blocker whose dependents are still open reopens freely: live evaluation simply blocks them again.
+**The same rule holds from the other side.** A task that completed work is blocked by cannot be reopened -- not by `--check`, `--begin`, or `--set undone`, `progress`, `paused`, `waiting` or `unstarted` -- because, open again, it would be holding up work that is already done. Reviving a cancelled blocker counts as reopening it; cancelling a done one does not, since it stays closed. The refusal names the completed dependents (`COMPLETED_DEPENDENTS`), and `--force` with `--check` or `--set` reopens anyway and says what it overrode. A blocker whose dependents are still open reopens freely: live evaluation simply blocks them again.
 
 **And from the third side:** a task already done cannot be given a blocker that is still open. `--blocked-by` refuses it as `ALREADY_DONE`, and nothing forces that one.
 
@@ -753,7 +754,7 @@ Three consequences worth knowing, each of them deliberate:
 
 - **It is not pending.** `--list pending` excludes cancelled tasks, because a dropped task is not waiting to be done. `--list cancelled` finds them.
 - **It is not counted in any total.** Cancelled work is not work, so it is out of the percentage, the board's `[done/total]`, `--projects` and the roadmap alike, and a board that drops something can still reach 100%. It still appears in the stats line, so nothing is hidden.
-- **It is one state, not a flag beside the others.** A task is always exactly one of pending, in progress, paused, done or cancelled, and every command moves it from one to another. `--check` on a cancelled task makes it done, not done-and-cancelled; the board, the stats line and `--list` all read a task's state the same way, so they cannot disagree about it.
+- **It is one state, not a flag beside the others.** A task is always exactly one of pending, in progress, paused, waiting, done or cancelled, and every command moves it from one to another. `--check` on a cancelled task makes it done, not done-and-cancelled; the board, the stats line and `--list` all read a task's state the same way, so they cannot disagree about it.
 - **Priority markers are dropped with it.** A struck-through line still shouting `(!!)` reads as a contradiction.
 
 The task keeps its description, so the record of what was dropped survives. If *why* matters, put it in the description (`--edit`) or leave a note beside it -- Ekko does not ask for a reason, and a field nobody fills in would be worse than the habit.
@@ -782,6 +783,24 @@ Nothing is paused automatically. Ekko instead points out when more than one task
 Both additions are conditional: the `paused` count joins the stats line only when it is above zero, and the warning only appears when it applies. A board that keeps to one task at a time prints exactly what it printed before.
 
 This is an Ekko addition, though the concept is not: taskbook's own help calls `--begin` "Start/pause task". It named pausing without giving it anywhere to live.
+
+### Waiting
+
+Some tasks cannot move until something outside the board happens: a reply, a release, a date. A dependency cannot say that, because what it waits on is not on the board. Left pending, such a task shows up in `--list ready` and `--next` as work to take up today, which is wrong.
+
+A waiting task has its own state and its own icon:
+
+```
+    1. ☐  never started
+    2. ⏸  paused
+    3. ◔  waiting
+```
+
+`ekko --set @3 waiting` marks it; `--set @3 progress`, `--begin` or `--check` take it up again once what it waited on has happened. What it waits on belongs in a note attached to it (`--attached-to`), where the reason for everything else already lives.
+
+Waiting is not paused. A paused task was set aside by choice and can be taken up any time, so it stays ready. A waiting task leaves `--list ready`, `--next`, the ready work in `--prime` and the task list Claude Code draws, even when nothing on the board blocks it. It is still open work, though: `--list pending` includes it, it counts in the percentage, and what depends on it stays blocked. `--list waiting` finds it, `--prime` lists it in a section of its own, and the stats line gains a `waiting` count only when there is one.
+
+This is an Ekko addition. `waiting` is stored only on a task that is waiting, so a board that never uses it stays byte-identical, and taskbook reads a waiting task as pending.
 
 ### Stable ids
 
@@ -823,7 +842,7 @@ $ ekko --set @3 done
 $ ekko --set @1 @2 progress starred
 ```
 
-Accepted states, with their aliases: `done`/`checked`/`complete`, `undone`/`unchecked`/`incomplete`/`pending`, `progress`/`started`/`begun`, `paused`, `cancelled`/`cancel`/`canceled`, `unstarted`/`unstart`, `starred`/`star`, `unstarred`/`unstar`. They are the same words `--list` filters on, so there is one vocabulary rather than two. An unrecognised state is an error (`UNKNOWN_STATE`), not a silent no-op.
+Accepted states, with their aliases: `done`/`checked`/`complete`, `undone`/`unchecked`/`incomplete`/`pending`, `progress`/`started`/`begun`, `paused`, `waiting`, `cancelled`/`cancel`/`canceled`, `unstarted`/`unstart`, `starred`/`star`, `unstarred`/`unstar`. They are the same words `--list` filters on, so there is one vocabulary rather than two. An unrecognised state is an error (`UNKNOWN_STATE`), not a silent no-op.
 
 Task-only states are ignored on notes, matching how `--check` already ignores them; starring applies to both.
 
@@ -939,12 +958,13 @@ The by default supported listing attributes, together with their respective alia
 - `pending`, `unchecked`, `incomplete` - Items that are pending tasks (note: an in-progress task is not yet complete either, so it matches this too).
 - `progress`, `started`, `begun` - Items that are in-progress tasks.
 - `paused` - Tasks that were started and then set aside.
+- `waiting` - Tasks held by something outside the board, so never ready.
 - `done`, `checked`, `complete` - Items that complete tasks.
 - `star`, `starred` - Items that are starred.
 - `due` - Tasks that have a due date.
 - `overdue` - Tasks whose due date has passed and that are still open (a cancelled task is not late).
 - `cancelled`, `canceled` - Tasks that were dropped rather than finished.
-- `ready` - Open tasks with nothing outstanding blocking them.
+- `ready` - Open tasks with nothing outstanding blocking them, waiting ones left out.
 - `blocked` - Items blocked by something still open.
 - `decision`, `decisions` - Notes recording what was settled, and why.
 - `gotcha`, `gotchas` - Notes recording a trap, and how to avoid it.

@@ -13,8 +13,8 @@ use crate::ekko::{is_known_attribute, Ekko};
 use crate::storage::ItemMap;
 
 /// The filters offered as chips under the search field.
-pub const CHIPS: [&str; 13] = [
-    "pending", "progress", "paused", "done", "blocked", "ready", "starred", "due", "overdue", "notes", "decision", "gotcha", "procedure",
+pub const CHIPS: [&str; 14] = [
+    "pending", "progress", "paused", "waiting", "done", "blocked", "ready", "starred", "due", "overdue", "notes", "decision", "gotcha", "procedure",
 ];
 
 #[derive(Debug, Default, PartialEq)]

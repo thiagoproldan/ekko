@@ -90,6 +90,15 @@ pub struct Item {
     /// byte-identical to before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelled: Option<bool>,
+    /// Cannot move until something outside the board happens -- a reply, a
+    /// release, a date. Unlike paused, which is set aside by choice and can
+    /// be taken up any time, a waiting task is not ready, whatever its
+    /// dependencies say.
+    ///
+    /// `Option`, omitted when unset, so a board that waits on nothing is
+    /// byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<bool>,
     /// Which phase of a project this belongs to, when it belongs to one.
     ///
     /// `None` means the project root -- outside the roadmap, and the only shape
@@ -211,6 +220,7 @@ impl Item {
             rev: None,
             paused: None,
             cancelled: None,
+            waiting: None,
             phase: None,
             blocked_by: None,
             attached_to: None,
@@ -242,6 +252,7 @@ impl Item {
             rev: None,
             paused: None,
             cancelled: None,
+            waiting: None,
             phase: None,
             blocked_by: None,
             attached_to: None,
@@ -299,20 +310,22 @@ impl Knowledge {
     }
 }
 
-/// The five states a task can be in, as one value.
+/// The six states a task can be in, as one value.
 ///
-/// Storage keeps four flags -- `isComplete` and `inProgress` from taskbook,
-/// `paused` and `cancelled` from Ekko -- which is sixteen combinations for
-/// five meaningful states. Reading the flags in several places, each with its
-/// own precedence, is how a task once came out cancelled on the board, cancelled
-/// in the stats line and done in `--list done`, all at the same time. So every
-/// surface reads a task's state through `State::of`, and every command writes
-/// through `State::write`, which only ever produces one of five encodings.
+/// Storage keeps five flags -- `isComplete` and `inProgress` from taskbook,
+/// `paused`, `cancelled` and `waiting` from Ekko -- which is thirty-two
+/// combinations for six meaningful states. Reading the flags in several
+/// places, each with its own precedence, is how a task once came out cancelled
+/// on the board, cancelled in the stats line and done in `--list done`, all at
+/// the same time. So every surface reads a task's state through `State::of`,
+/// and every command writes through `State::write`, which only ever produces
+/// one of six encodings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Pending,
     Progress,
     Paused,
+    Waiting,
     Done,
     Cancelled,
 }
@@ -335,15 +348,16 @@ pub enum Change {
 
 impl State {
     #[cfg(test)]
-    pub const ALL: [State; 5] =
-        [State::Pending, State::Progress, State::Paused, State::Done, State::Cancelled];
+    pub const ALL: [State; 6] =
+        [State::Pending, State::Progress, State::Paused, State::Waiting, State::Done, State::Cancelled];
 
     /// The state of a task, or `None` for a note.
     ///
-    /// Flag combinations that are not one of the five encodings -- older
+    /// Flag combinations that are not one of the six encodings -- older
     /// data, a hand-edited file -- resolve by one fixed precedence: cancelled,
-    /// then done, then in progress, then paused. It is the precedence the
-    /// board has always drawn with, so reading through here changed no icon.
+    /// then done, then in progress, then paused, then waiting. It is the
+    /// precedence the board has always drawn with, waiting added last, so
+    /// reading through here changed no icon.
     pub fn of(item: &Item) -> Option<State> {
         if !item.is_task {
             return None;
@@ -356,24 +370,27 @@ impl State {
             State::Progress
         } else if item.paused.unwrap_or(false) {
             State::Paused
+        } else if item.waiting.unwrap_or(false) {
+            State::Waiting
         } else {
             State::Pending
         })
     }
 
     /// Writes this state onto a task as exactly one encoding. `isComplete`
-    /// and `inProgress` are always present, as taskbook wrote them; `paused`
-    /// and `cancelled` appear only when true, so a board that never uses them
-    /// stays byte-identical to what taskbook would have written.
+    /// and `inProgress` are always present, as taskbook wrote them; `paused`,
+    /// `cancelled` and `waiting` appear only when true, so a board that never
+    /// uses them stays byte-identical to what taskbook would have written.
     pub fn write(self, item: &mut Item) {
         item.is_complete = Some(self == State::Done);
         item.in_progress = Some(self == State::Progress);
         item.paused = (self == State::Paused).then_some(true);
         item.cancelled = (self == State::Cancelled).then_some(true);
+        item.waiting = (self == State::Waiting).then_some(true);
     }
 
     /// The one transition function. Total -- every state and every change
-    /// has an answer -- and every answer is one of the five states.
+    /// has an answer -- and every answer is one of the six states.
     pub fn after(self, change: Change) -> State {
         match change {
             Change::ToggleDone if self == State::Done => State::Pending,
@@ -386,9 +403,15 @@ impl State {
         }
     }
 
-    /// Still work to do: pending, in progress or paused.
+    /// Still work to do: pending, in progress, paused or waiting.
     pub fn is_open(self) -> bool {
-        matches!(self, State::Pending | State::Progress | State::Paused)
+        matches!(self, State::Pending | State::Progress | State::Paused | State::Waiting)
+    }
+
+    /// Open work that can be taken up once nothing on the board holds it:
+    /// every open state but waiting, whose hold is outside the board.
+    pub fn can_start(self) -> bool {
+        self.is_open() && self != State::Waiting
     }
 }
 
@@ -564,10 +587,10 @@ mod tests {
         item
     }
 
-    /// The four flags a state is stored in -- compared on their own, because
+    /// The five flags a state is stored in -- compared on their own, because
     /// every freshly made item also carries its own uid and timestamp.
-    fn flags(item: &Item) -> (Option<bool>, Option<bool>, Option<bool>, Option<bool>) {
-        (item.is_complete, item.in_progress, item.paused, item.cancelled)
+    fn flags(item: &Item) -> [Option<bool>; 5] {
+        [item.is_complete, item.in_progress, item.paused, item.cancelled, item.waiting]
     }
 
     /// Every state against every change, spelled out rather than derived, so
@@ -582,6 +605,7 @@ mod tests {
             (Pending, ToggleDone, Done), (Pending, ToggleProgress, Progress), (Pending, Undo, Pending),
             (Progress, ToggleDone, Done), (Progress, ToggleProgress, Pending), (Progress, Undo, Progress),
             (Paused, ToggleDone, Done), (Paused, ToggleProgress, Progress), (Paused, Undo, Paused),
+            (Waiting, ToggleDone, Done), (Waiting, ToggleProgress, Progress), (Waiting, Undo, Waiting),
             (Done, ToggleDone, Pending), (Done, ToggleProgress, Progress), (Done, Undo, Pending),
             (Cancelled, ToggleDone, Done), (Cancelled, ToggleProgress, Progress), (Cancelled, Undo, Cancelled),
         ];
@@ -591,7 +615,7 @@ mod tests {
                 cases.push((from, Become(target), target));
             }
         }
-        assert_eq!(cases.len(), 5 * 8, "five states times eight changes");
+        assert_eq!(cases.len(), 6 * 9, "six states times nine changes");
 
         for (from, change, to) in cases {
             assert_eq!(from.after(change), to, "{from:?} after {change:?}");
@@ -614,16 +638,17 @@ mod tests {
         }
     }
 
-    /// All sixteen flag combinations read as one state, by one precedence,
+    /// All thirty-two flag combinations read as one state, by one precedence,
     /// and writing that state back yields its canonical encoding.
     #[test]
     fn every_flag_combination_reads_as_exactly_one_state() {
-        for bits in 0u8..16 {
+        for bits in 0u8..32 {
             let mut item = Item::new_task(1, "t".into(), vec![], 1);
             item.is_complete = Some(bits & 1 != 0);
             item.in_progress = Some(bits & 2 != 0);
             item.paused = (bits & 4 != 0).then_some(true);
             item.cancelled = (bits & 8 != 0).then_some(true);
+            item.waiting = (bits & 16 != 0).then_some(true);
 
             let expected = if bits & 8 != 0 {
                 State::Cancelled
@@ -633,14 +658,16 @@ mod tests {
                 State::Progress
             } else if bits & 4 != 0 {
                 State::Paused
+            } else if bits & 16 != 0 {
+                State::Waiting
             } else {
                 State::Pending
             };
             let state = State::of(&item).expect("a task has a state");
-            assert_eq!(state, expected, "flags {bits:04b}");
+            assert_eq!(state, expected, "flags {bits:05b}");
 
             state.write(&mut item);
-            assert_eq!(flags(&item), flags(&task_in(expected)), "flags {bits:04b} did not normalise");
+            assert_eq!(flags(&item), flags(&task_in(expected)), "flags {bits:05b} did not normalise");
         }
     }
 
@@ -658,7 +685,7 @@ mod tests {
             from.after(change).write(&mut item);
             let json = serde_json::to_value(&item).unwrap();
             assert!(json.get("isComplete").is_some() && json.get("inProgress").is_some());
-            assert!(json.get("paused").is_none() && json.get("cancelled").is_none(), "{json}");
+            assert!(json.get("paused").is_none() && json.get("cancelled").is_none() && json.get("waiting").is_none(), "{json}");
         }
     }
 
@@ -667,10 +694,11 @@ mod tests {
         let done = task_in(State::Done);
         let pending = task_in(State::Pending);
         let paused = task_in(State::Paused);
+        let waiting = task_in(State::Waiting);
         let cancelled = task_in(State::Cancelled);
         let note = Item::new_note(9, "n".into(), vec![]);
 
-        assert_eq!(tally([&done, &pending, &paused, &cancelled, &note]), (1, 3));
+        assert_eq!(tally([&done, &pending, &paused, &waiting, &cancelled, &note]), (1, 4));
     }
 
     /// `--anchor` became `--attached-to`, and the stored field was renamed

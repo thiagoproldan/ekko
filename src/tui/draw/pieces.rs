@@ -195,6 +195,9 @@ pub(super) fn stats_spans(stats: &Stats) -> Vec<Span<'static>> {
     if stats.paused > 0 {
         parts.push((format!("{} paused", stats.paused), palette::YELLOW));
     }
+    if stats.waiting > 0 {
+        parts.push((format!("{} waiting", stats.waiting), palette::ORANGE));
+    }
     parts.push((format!("{} pending", stats.pending), palette::TEXT));
     parts.push((format!("{} {}", stats.notes, if stats.notes == 1 { "note" } else { "notes" }), palette::LINK));
     let mut spans = Vec::new();
@@ -213,6 +216,7 @@ pub(super) fn state_word(item: &Item) -> &'static str {
         Some(State::Pending) => "pending",
         Some(State::Progress) => "in progress",
         Some(State::Paused) => "paused",
+        Some(State::Waiting) => "waiting",
         Some(State::Done) => "done",
         Some(State::Cancelled) => "cancelled",
     }
@@ -223,6 +227,7 @@ pub(super) fn entry_look(glyphs: Glyphs, state: &str) -> (&'static str, Style) {
     let state = match state {
         "in progress" => Some(State::Progress),
         "paused" => Some(State::Paused),
+        "waiting" => Some(State::Waiting),
         "done" => Some(State::Done),
         "cancelled" => Some(State::Cancelled),
         "note" => None,

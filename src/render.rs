@@ -103,6 +103,10 @@ impl Painter {
         self.wrap("33", "39", text)
     }
 
+    fn cyan(&self, text: &str) -> String {
+        self.wrap("36", "39", text)
+    }
+
     fn red(&self, text: &str) -> String {
         self.wrap("31", "39", text)
     }
@@ -227,6 +231,9 @@ pub struct Stats {
     /// above zero, so a board nobody pauses prints exactly what it always
     /// did -- goldens included.
     pub paused: u32,
+    /// Held by something outside the board. Also only shown above zero, and
+    /// in the denominator: it is still work, just not work anyone can start.
+    pub waiting: u32,
     /// Abandoned on purpose. Counted, but deliberately kept out of the
     /// percentage denominator: cancelled work is not work, so a board that
     /// drops something can still reach 100%.
@@ -258,6 +265,7 @@ pub enum Level {
     Pending, // pending task
     Wait,    // in-progress task
     Paused,  // started, then set aside
+    Waiting, // held by something outside the board -- not Wait, which is in progress
     Cancelled, // abandoned on purpose, kept for the record
     Note,
     Error,
@@ -276,6 +284,7 @@ impl Level {
             Some(State::Done) => Level::Success,
             Some(State::Progress) => Level::Wait,
             Some(State::Paused) => Level::Paused,
+            Some(State::Waiting) => Level::Waiting,
             Some(State::Pending) => Level::Pending,
         }
     }
@@ -286,6 +295,7 @@ impl Level {
             Level::Pending => "\u{2610}", // ☐
             Level::Wait => "\u{2026}",    // …
             Level::Paused => "\u{23f8}",  // ⏸ -- no variation selector, so it stays one column wide like the rest
+            Level::Waiting => "\u{25d4}", // ◔ -- a clock face a quarter gone, one column, in the mono fonts
             Level::Cancelled => "\u{2298}", // ⊘ -- covered by the mono fonts, unlike the pause glyph
             Level::Note => "\u{25cf}",    // ●
             Level::Error => "\u{2716}",   // ✖
@@ -298,6 +308,7 @@ impl Level {
             Level::Pending => painter.magenta(text),
             Level::Wait => painter.blue(text),
             Level::Paused => painter.yellow(text),
+            Level::Waiting => painter.cyan(text),
             Level::Cancelled => painter.grey(text),
             Level::Note => painter.blue(text),
             Level::Error => painter.red(text),
@@ -985,6 +996,13 @@ impl<'a> Renderer<'a> {
                 self.painter.grey("paused")
             ));
         }
+        if stats.waiting > 0 {
+            status.push(format!(
+                "{} {}",
+                self.painter.cyan(&stats.waiting.to_string()),
+                self.painter.grey("waiting")
+            ));
+        }
         if stats.cancelled > 0 {
             status.push(format!(
                 "{} {}",
@@ -1020,7 +1038,7 @@ impl<'a> Renderer<'a> {
         }
 
         let total =
-            stats.pending + stats.in_progress + stats.paused + stats.cancelled + stats.complete + stats.notes;
+            stats.pending + stats.in_progress + stats.paused + stats.waiting + stats.cancelled + stats.complete + stats.notes;
         if total == 0 {
             self.emit("\n ", None, "Type `ekko --help` to get started", "");
         }
@@ -1136,6 +1154,10 @@ impl<'a> Renderer<'a> {
 
     pub fn mark_paused(&mut self, ids: &[u32], reopened: &[(u32, Vec<u32>)]) {
         self.mark_reopening("Paused", ids, reopened);
+    }
+
+    pub fn mark_waiting(&mut self, ids: &[u32], reopened: &[(u32, Vec<u32>)]) {
+        self.mark_reopening("Waiting", ids, reopened);
     }
 
     pub fn mark_cancelled(&mut self, ids: &[u32]) {
@@ -1421,7 +1443,7 @@ mod tests {
     // Matches the golden `.ans` files' own stats line: 1 done, 1
     // in-progress, 2 pending, 0 notes -> 25% (1 of 4 tasks complete).
     fn golden_stats() -> Stats {
-        Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 2, notes: 0, stashed: 0, trashed: 0 }
+        Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 2, notes: 0, stashed: 0, trashed: 0 }
     }
 
     #[test]
@@ -1602,32 +1624,41 @@ mod tests {
     }
 
     #[test]
-    fn the_stats_line_is_unchanged_when_nothing_is_paused() {
-        // The compatibility promise: boards that never pause anything print
-        // exactly what they always did, goldens included.
+    fn the_stats_line_is_unchanged_when_nothing_is_paused_or_waiting() {
+        // The compatibility promise: boards that never pause or wait on
+        // anything print exactly what they always did, goldens included.
         let output = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 2, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 25, complete: 1, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 2, notes: 0, stashed: 0, trashed: 0 });
         });
 
-        assert!(!output.contains("paused"), "a zero count must not appear:\n{output}");
+        assert!(!output.contains("paused") && !output.contains("waiting"), "a zero count must not appear:\n{output}");
     }
 
     #[test]
     fn the_stats_line_reports_paused_once_there_is_any() {
         let output = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 2, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 2, waiting: 0, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert!(output.contains("2") && output.contains("paused"), "{output}");
     }
 
     #[test]
+    fn the_stats_line_reports_waiting_once_there_is_any() {
+        let output = render_with(Config::default(), |r| {
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 0, paused: 0, waiting: 3, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
+        });
+
+        assert!(output.contains("\x1b[36m3\x1b[39m") && output.contains("waiting"), "{output}");
+    }
+
+    #[test]
     fn more_than_one_in_progress_earns_a_warning_and_one_does_not() {
         let one = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 0, cancelled: 0, pending: 0, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 0, notes: 0, stashed: 0, trashed: 0 });
         });
         let several = render_with(Config::default(), |r| {
-            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 3, paused: 0, cancelled: 0, pending: 0, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 0, complete: 0, in_progress: 3, paused: 0, waiting: 0, cancelled: 0, pending: 0, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert!(!one.contains("in progress --"), "a single cursor is the healthy case:\n{one}");
@@ -1654,7 +1685,7 @@ mod tests {
         let config = Config { display_progress_overview: false, ..Config::default() };
 
         let output = render_with(config, |r| {
-            r.display_stats(&Stats { percent: 50, complete: 1, in_progress: 1, paused: 0, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
+            r.display_stats(&Stats { percent: 50, complete: 1, in_progress: 1, paused: 0, waiting: 0, cancelled: 0, pending: 1, notes: 0, stashed: 0, trashed: 0 });
         });
 
         assert_eq!(output, "");
@@ -1712,6 +1743,7 @@ mod tests {
                 complete: 2,
                 in_progress: 0,
                 paused: 0,
+                waiting: 0,
                 cancelled: 0,
                 pending: 0,
                 notes: 0,
@@ -1732,6 +1764,7 @@ mod tests {
                 complete: 1,
                 in_progress: 0,
                 paused: 0,
+                waiting: 0,
                 cancelled: 0,
                 pending: 1,
                 notes: 0,

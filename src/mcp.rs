@@ -847,7 +847,7 @@ fn tool_definitions() -> Value {
     let if_rev = json!({"type": "integer", "description": "The cursor from an earlier read: if the board has not moved since, the answer is one line saying so."});
     let item = json!({"type": ["integer", "string"], "description": "A display id, or a uid -- which never changes."});
     let items = json!({"type": "array", "items": item, "minItems": 1});
-    let state = json!({"type": "string", "enum": ["done", "undone", "progress", "paused", "cancelled", "unstarted", "starred", "unstarred"]});
+    let state = json!({"type": "string", "enum": ["done", "undone", "progress", "paused", "waiting", "cancelled", "unstarted", "starred", "unstarred"]});
     let read = json!({"readOnlyHint": true, "openWorldHint": false});
     let write = json!({"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false});
     let object = |properties: Value, required: &[&str]| {
@@ -875,7 +875,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "search",
-            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, done, cancelled, ready, blocked, due, overdue, star, task, note, decision, gotcha, procedure, or a board name -- as @name when a filter has the same one. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
+            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, waiting, done, cancelled, ready, blocked, due, overdue, star, task, note, decision, gotcha, procedure, or a board name -- as @name when a filter has the same one. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
             "inputSchema": object(json!({"project": project, "text": {"type": "string"}, "filters": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1}}), &[]),
             "annotations": read,
         },

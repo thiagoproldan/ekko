@@ -257,7 +257,7 @@ impl std::fmt::Display for EkkoError {
             ),
             EkkoError::RenamedFlag { old, new } => write!(f, "{old} was renamed to {new}"),
             EkkoError::UnknownState(term) => {
-                write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, cancelled, unstarted, starred, unstarred")
+                write!(f, "Unknown state: {term}. Expected one of: done, undone, progress, paused, waiting, cancelled, unstarted, starred, unstarred")
             }
             EkkoError::InvalidCustomAppDir(path) => {
                 write!(f, "Custom app directory was not found on your system: {path}")
@@ -447,6 +447,7 @@ impl Outcome {
                         "undone" => out.mark_incomplete(ids, reopened),
                         "progress" => out.mark_started(ids, reopened),
                         "paused" => out.mark_paused(ids, reopened),
+                        "waiting" => out.mark_waiting(ids, reopened),
                         "cancelled" => out.mark_cancelled(ids),
                         "unstarted" => out.mark_reset(ids, reopened),
                         "starred" => out.mark_starred(ids),
@@ -694,8 +695,8 @@ impl Ekko {
     /// The item keeps its real state underneath, so unstashing puts it
     /// back where it belongs. Only the counting hides it.
     pub(crate) fn compute_stats(&self, data: &ItemMap) -> Stats {
-        let (mut complete, mut in_progress, mut paused, mut cancelled, mut pending, mut notes) =
-            (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+        let (mut complete, mut in_progress, mut paused, mut waiting, mut cancelled, mut pending, mut notes) =
+            (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
         let (mut stashed, mut trashed) = (0u32, 0u32);
         for item in data.values() {
             if item.trashed.is_some() {
@@ -715,6 +716,7 @@ impl Ekko {
                 // undo, and "0 pending" while two tasks sit half-done was the
                 // original lie.
                 Some(State::Paused) => paused += 1,
+                Some(State::Waiting) => waiting += 1,
                 Some(State::Pending) => pending += 1,
                 None => notes += 1,
             }
@@ -722,9 +724,9 @@ impl Ekko {
         // `cancelled` is absent from the total on purpose: counting it would
         // mean a board can never reach 100% once anything is dropped, which
         // reads as unfinished work rather than as work that went away.
-        let total = complete + pending + in_progress + paused;
+        let total = complete + pending + in_progress + paused + waiting;
         let percent = (complete * 100).checked_div(total).unwrap_or(0);
-        Stats { percent, complete, in_progress, paused, cancelled, pending, notes, stashed, trashed }
+        Stats { percent, complete, in_progress, paused, waiting, cancelled, pending, notes, stashed, trashed }
     }
 
     /// `all` is the whole of storage, stashed and trashed included, and is
@@ -747,6 +749,7 @@ impl Ekko {
                     data.retain(|_, item| State::of(item) == Some(State::Progress));
                 }
                 "paused" => data.retain(|_, item| State::of(item) == Some(State::Paused)),
+                "waiting" => data.retain(|_, item| State::of(item) == Some(State::Waiting)),
                 // Matches the JS version exactly: "pending" only checks
                 // `!isComplete`, so an in-progress task passes this filter
                 // too. Not something this port introduced or should
@@ -768,7 +771,7 @@ impl Ekko {
                 "ready" => {
                     let index = uid_index(all);
                     data.retain(|_, item| {
-                        State::of(item).is_some_and(State::is_open)
+                        State::of(item).is_some_and(State::can_start)
                             && Self::unmet_blockers_indexed(&index, all, item).is_empty()
                     });
                 }
@@ -1794,10 +1797,12 @@ impl Ekko {
     /// makes after every completion. Only tasks that existed before count: a
     /// task the write created, or reopened, is the caller's own doing, not
     /// news about the board. A stashed task is not listed, so it is not news
-    /// either.
+    /// either, and neither is one in the waiting state: its blockers going
+    /// does not free it, since what holds it is outside the board.
     pub(crate) fn readiness_changes(before: &ItemMap, after: &ItemMap) -> (Vec<u32>, Vec<u32>) {
         let (before_index, after_index) = (uid_index(before), uid_index(after));
-        let listed = |item: &Item| holds(item) && item.stashed.is_none();
+        let listed =
+            |item: &Item| holds(item) && State::of(item).is_some_and(State::can_start) && item.stashed.is_none();
         let mut released = Vec::new();
         let mut blocked = Vec::new();
         for (id, item) in after {
@@ -2120,6 +2125,7 @@ pub(crate) fn canonical_state(term: &str) -> Option<&'static str> {
         "undone" | "unchecked" | "incomplete" | "pending" => Some("undone"),
         "progress" | "started" | "begun" => Some("progress"),
         "paused" => Some("paused"),
+        "waiting" => Some("waiting"),
         // Repointed: with a real paused state these became opposites.
         // Also the way back from a mistyped `--set progress`.
         "unstarted" | "unstart" => Some("unstarted"),
@@ -2131,7 +2137,7 @@ pub(crate) fn canonical_state(term: &str) -> Option<&'static str> {
 }
 
 /// Applies one canonical state. Task states go through `State::after` and
-/// `State::write`, so the result is always one of the five encodings; notes
+/// `State::write`, so the result is always one of the six encodings; notes
 /// have no state and skip them, matching how `--check` and `--begin` ignore
 /// notes. Starring is the one that applies to both.
 pub(crate) fn apply_state(item: &mut Item, state: &str) {
@@ -2154,6 +2160,7 @@ fn change_for(state: &str) -> Option<Change> {
         "undone" => Change::Undo,
         "progress" => Change::Become(State::Progress),
         "paused" => Change::Become(State::Paused),
+        "waiting" => Change::Become(State::Waiting),
         "cancelled" => Change::Become(State::Cancelled),
         "unstarted" => Change::Become(State::Pending),
         _ => return None,
@@ -2185,6 +2192,7 @@ pub(crate) fn is_known_attribute(term: &str) -> bool {
             | "cancelled"
             | "canceled"
             | "paused"
+            | "waiting"
             | "ready"
             | "blocked"
             | "due"
@@ -2513,6 +2521,42 @@ mod tests {
 
         assert_eq!(ids(ekko.list_by_attributes(&words(&["ready"])).unwrap()), vec![1]);
         assert_eq!(ids(ekko.list_by_attributes(&words(&["blocked"])).unwrap()), vec![2]);
+
+        cleanup(&dir);
+    }
+
+    /// A waiting task is held by something outside the board: never ready,
+    /// however free of blockers, yet still open work -- pending, in the total,
+    /// and holding what depends on it. Its blocker finishing does not free
+    /// it, so no write reports it as ready.
+    #[test]
+    fn a_waiting_task_is_open_work_that_is_never_ready() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["free"])).unwrap();
+        ekko.create_task(&words(&["on the vendor"])).unwrap();
+        ekko.create_task(&words(&["after the vendor"])).unwrap();
+        ekko.create_task(&words(&["blocker"])).unwrap();
+        ekko.set_blocked_by(&words(&["@3", "2"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "4"])).unwrap();
+        ekko.set_state(&words(&["@2", "waiting"]), false).unwrap();
+
+        assert_eq!(listed(&ekko, "ready"), vec![1, 4]);
+        assert_eq!(listed(&ekko, "waiting"), vec![2]);
+        assert_eq!(listed(&ekko, "pending"), vec![1, 2, 3, 4]);
+        assert_eq!(listed(&ekko, "blocked"), vec![2, 3]);
+        let Outcome::Stats(stats) = ekko.display_stats().unwrap() else { panic!() };
+        assert_eq!((stats.waiting, stats.pending, stats.percent), (1, 3, 0));
+
+        let before = ekko.storage.get().unwrap();
+        ekko.check_tasks(&words(&["4"]), false).unwrap();
+        let after = ekko.storage.get().unwrap();
+        assert_eq!(Ekko::readiness_changes(&before, &after), (vec![], vec![]), "4 done frees 2 only on the board");
+        assert_eq!(listed(&ekko, "ready"), vec![1]);
+        assert!(ekko.check_tasks(&words(&["3"]), false).is_err(), "3 still waits on the waiting 2");
+
+        ekko.begin_tasks(&words(&["2"])).unwrap();
+        assert_eq!(State::of(&ekko.storage.get().unwrap()[&2]), Some(State::Progress));
+        assert!(listed(&ekko, "waiting").is_empty());
 
         cleanup(&dir);
     }
@@ -3161,6 +3205,7 @@ mod tests {
             "undone",
             "progress",
             "paused",
+            "waiting",
             "cancelled",
             "unstarted",
             "starred",
@@ -3636,23 +3681,24 @@ mod tests {
         cleanup(&dir);
     }
 
-    /// All sixteen flag combinations written straight into storage, as old
+    /// All thirty-two flag combinations written straight into storage, as old
     /// data or a hand edit could leave them. The board's icon, the stats line
     /// and every state filter must agree on each one -- including paused,
     /// which --set accepted and --list used to reject.
     #[test]
     fn every_surface_agrees_on_every_flag_combination() {
         let (ekko, dir) = fresh_ekko();
-        for _ in 0..16 {
+        for _ in 0..32 {
             ekko.create_task(&words(&["combination"])).unwrap();
         }
         let mut data = ekko.storage.get().unwrap();
-        for bits in 0u8..16 {
+        for bits in 0u8..32 {
             let item = data.get_mut(&(u32::from(bits) + 1)).unwrap();
             item.is_complete = Some(bits & 1 != 0);
             item.in_progress = Some(bits & 2 != 0);
             item.paused = (bits & 4 != 0).then_some(true);
             item.cancelled = (bits & 8 != 0).then_some(true);
+            item.waiting = (bits & 16 != 0).then_some(true);
         }
         ekko.storage.set(&data).unwrap();
 
@@ -3664,17 +3710,25 @@ mod tests {
         assert_eq!(listed(&ekko, "done"), with(State::Done));
         assert_eq!(listed(&ekko, "progress"), with(State::Progress));
         assert_eq!(listed(&ekko, "paused"), with(State::Paused));
+        assert_eq!(listed(&ekko, "waiting"), with(State::Waiting));
         assert_eq!(listed(&ekko, "cancelled"), with(State::Cancelled));
         let mut open: Vec<u32> =
-            [State::Pending, State::Progress, State::Paused].into_iter().flat_map(&with).collect();
+            [State::Pending, State::Progress, State::Paused, State::Waiting].into_iter().flat_map(&with).collect();
         open.sort_unstable();
         assert_eq!(listed(&ekko, "pending"), open);
 
         let Outcome::Stats(stats) = ekko.display_stats().unwrap() else { panic!() };
         let count = |state: State| with(state).len() as u32;
         assert_eq!(
-            (stats.complete, stats.in_progress, stats.paused, stats.cancelled, stats.pending),
-            (count(State::Done), count(State::Progress), count(State::Paused), count(State::Cancelled), count(State::Pending))
+            (stats.complete, stats.in_progress, stats.paused, stats.waiting, stats.cancelled, stats.pending),
+            (
+                count(State::Done),
+                count(State::Progress),
+                count(State::Paused),
+                count(State::Waiting),
+                count(State::Cancelled),
+                count(State::Pending)
+            )
         );
 
         for item in data.values() {
@@ -3684,6 +3738,7 @@ mod tests {
                 State::Done => matches!(level, Level::Success),
                 State::Progress => matches!(level, Level::Wait),
                 State::Paused => matches!(level, Level::Paused),
+                State::Waiting => matches!(level, Level::Waiting),
                 State::Cancelled => matches!(level, Level::Cancelled),
                 State::Pending => matches!(level, Level::Pending),
             };
@@ -3975,7 +4030,7 @@ mod tests {
             seed ^= seed << 17;
             seed % bound
         };
-        let states = ["done", "undone", "progress", "paused", "cancelled", "unstarted"];
+        let states = ["done", "undone", "progress", "paused", "waiting", "cancelled", "unstarted"];
         let mut refused: HashSet<String> = HashSet::new();
 
         for step in 0..500 {
@@ -3985,11 +4040,11 @@ mod tests {
                 0 => (format!("--check {a} {b}"), ekko.check_tasks(&words(&[a.as_str(), b.as_str()]), false)),
                 1 => (format!("--begin {a}"), ekko.begin_tasks(&words(&[a.as_str()]))),
                 2 => {
-                    let state = states[roll(6) as usize];
+                    let state = states[roll(states.len() as u64) as usize];
                     (format!("--set {at_a} {state}"), ekko.set_state(&words(&[at_a.as_str(), state]), false))
                 }
                 3 => {
-                    let state = states[roll(6) as usize];
+                    let state = states[roll(states.len() as u64) as usize];
                     let input = words(&[at_a.as_str(), at_b.as_str(), state]);
                     (format!("--set {at_a} {at_b} {state}"), ekko.set_state(&input, false))
                 }

@@ -41,8 +41,8 @@ pub mod palette {
     /// Not on the measured screen: VS Code's error and warning foregrounds.
     pub const RED: Color = Color::Rgb(0xF1, 0x4C, 0x4C);
     pub const YELLOW: Color = Color::Rgb(0xCC, 0xA7, 0x00);
-    /// Not on the measured screen: VS Code's purple and orange, for tags and
-    /// for groups.
+    /// Not on the measured screen: VS Code's purple and orange -- purple for
+    /// tags, orange for a task waiting on something outside the board.
     pub const PURPLE: Color = Color::Rgb(0xB1, 0x80, 0xD7);
     pub const ORANGE: Color = Color::Rgb(0xD1, 0x86, 0x16);
 
@@ -128,6 +128,7 @@ pub struct Icons {
     pub done: &'static str,
     pub progress: &'static str,
     pub paused: &'static str,
+    pub waiting: &'static str,
     pub pending: &'static str,
     pub cancelled: &'static str,
     pub note: &'static str,
@@ -185,6 +186,7 @@ const NERD: Icons = Icons {
     done: "\u{eba4}",
     progress: "\u{eb2c}",
     paused: "\u{ead1}",
+    waiting: "\u{eb7b}",
     pending: "\u{25cb}",
     cancelled: "\u{eabd}",
     note: "\u{eb26}",
@@ -238,6 +240,7 @@ const PLAIN: Icons = Icons {
     done: "✔",
     progress: "…",
     paused: "⏸",
+    waiting: "◔",
     pending: "☐",
     cancelled: "⊘",
     note: "●",
@@ -281,6 +284,7 @@ pub fn state_look(glyphs: Glyphs, state: Option<State>) -> (&'static str, Style)
         Some(State::Pending) => (icons.pending, base.fg(palette::MUTED)),
         Some(State::Progress) => (icons.progress, base.fg(palette::ACCENT)),
         Some(State::Paused) => (icons.paused, base.fg(palette::YELLOW)),
+        Some(State::Waiting) => (icons.waiting, base.fg(palette::ORANGE)),
         Some(State::Done) => (icons.done, base.fg(palette::GREEN)),
         Some(State::Cancelled) => (icons.cancelled, base.fg(palette::MUTED)),
     }
