@@ -55,6 +55,14 @@ const URGENCY_AGE_DAYS: f64 = 365.0;
 const PRIME_BUDGET: usize = 6_000;
 /// Ready tasks whose attached notes a prime quotes; later ones show the task.
 const READY_WITH_NOTES: usize = 3;
+/// What a cut prime keeps of each section before any section grows into the
+/// room left: the ten best ready tasks, the first blocked ones -- whose lines
+/// name what holds them -- and the newest loose notes. Without these a long
+/// ready list filled the whole budget, and on a board of 20,000 items the
+/// blocked work and the notes were never mentioned.
+const READY_KEPT: usize = 10;
+const BLOCKED_KEPT: usize = 5;
+const NOTES_KEPT: usize = 3;
 /// The longest a "+N more" line gets, reserved for each section a cut leaves short.
 const MORE_LINE: usize = 48;
 /// The most a resumed session is told about what moved before the whole
@@ -1154,20 +1162,25 @@ impl Prime {
         let fixed = out.chars().count() + attention.chars().count() + close.chars().count() + 4 * MORE_LINE;
         let mut room = Room(budget.saturating_sub(fixed));
 
-        listed(&mut out, &mut room, "In progress", &self.doing, usize::MAX, self.doing.len(), "context <id> reads one", &today);
-        listed(&mut out, &mut room, "Ready, best first", &self.ready, READY_WITH_NOTES, self.ready.len(), "next lists them", &today);
-        listed(&mut out, &mut room, "Blocked", &self.blocked, 0, self.blocked_total, "search with the blocked filter", &today);
-
-        let heading = "\nRecent notes, not attached to a task";
-        if !self.recent_notes.is_empty() && room.take(heading) {
-            let _ = writeln!(out, "{heading}");
-            for note in &self.recent_notes {
-                let line = note_line(note, NOTE_CLIP).trim_start_matches("    ").to_string();
-                if !room.take(&line) {
-                    break;
-                }
-                let _ = writeln!(out, "{line}");
-            }
+        let sections = [
+            Section::of_entries("In progress", &self.doing, usize::MAX, self.doing.len(), "context <id> reads one", usize::MAX, &today),
+            Section::of_entries("Ready, best first", &self.ready, READY_WITH_NOTES, self.ready.len(), "next lists them", READY_KEPT, &today),
+            Section::of_entries("Blocked", &self.blocked, 0, self.blocked_total, "search with the blocked filter", BLOCKED_KEPT, &today),
+            Section {
+                heading: "\nRecent notes, not attached to a task".to_string(),
+                blocks: self
+                    .recent_notes
+                    .iter()
+                    .map(|note| (note_line(note, NOTE_CLIP).trim_start_matches("    ").to_string(), Vec::new()))
+                    .collect(),
+                total: self.recent_notes.len(),
+                rest: None,
+                kept: NOTES_KEPT,
+            },
+        ];
+        let shown = fit(&sections, &mut room);
+        for (section, shown) in sections.iter().zip(&shown) {
+            section.write(&mut out, shown);
         }
 
         out.push_str(&attention);
@@ -1271,61 +1284,95 @@ pub fn projects_text(projects: &[ProjectSummary]) -> String {
 /// The characters a budgeted view has left.
 struct Room(usize);
 
-impl Room {
-    /// Whether `line` and its newline still fit; if they do, they are spent.
-    fn take(&mut self, line: &str) -> bool {
-        let cost = line.chars().count() + 1;
-        let fits = cost <= self.0;
-        if fits {
-            self.0 -= cost;
+/// One prime section before it is fitted: its heading, each entry as its own
+/// line and the notes quoted under it, how many there are in all, where the
+/// rest is, and how many entries the first pass of `fit` keeps.
+struct Section {
+    heading: String,
+    blocks: Vec<(String, Vec<String>)>,
+    total: usize,
+    rest: Option<&'static str>,
+    kept: usize,
+}
+
+impl Section {
+    /// A section of entries best first, quoting the notes of the first
+    /// `with_notes`, titled with `total`.
+    fn of_entries(
+        title: &str,
+        entries: &[Entry],
+        with_notes: usize,
+        total: usize,
+        rest: &'static str,
+        kept: usize,
+        today: &str,
+    ) -> Self {
+        let blocks = entries
+            .iter()
+            .enumerate()
+            .map(|(at, entry)| {
+                let notes = if at < with_notes {
+                    entry.notes.iter().map(|note| note_line(note, NOTE_CLIP)).collect()
+                } else {
+                    Vec::new()
+                };
+                (entry_line(entry, today), notes)
+            })
+            .collect();
+        Section { heading: format!("\n{title} ({total})"), blocks, total, rest: Some(rest), kept }
+    }
+
+    /// The heading, the entries `shown` admits -- with their notes where it
+    /// says so -- and a line counting what was left out and saying where it is.
+    fn write(&self, out: &mut String, shown: &[bool]) {
+        if shown.is_empty() {
+            return;
         }
-        fits
+        let _ = writeln!(out, "{}", self.heading);
+        for ((line, notes), with_notes) in self.blocks.iter().zip(shown) {
+            let _ = writeln!(out, "{line}");
+            if *with_notes {
+                for note in notes {
+                    let _ = writeln!(out, "{note}");
+                }
+            }
+        }
+        if let Some(rest) = self.rest.filter(|_| shown.len() < self.total) {
+            let _ = writeln!(out, "      +{} more: {rest}", self.total - shown.len());
+        }
     }
 }
 
-/// One prime section within the room left: its title with `total`, entries
-/// best first while they fit, the notes of the first `with_notes` of them
-/// while those fit too, and a line counting what was left out of `total` and
-/// saying where it is.
-#[allow(clippy::too_many_arguments)]
-fn listed(
-    out: &mut String,
-    room: &mut Room,
-    title: &str,
-    entries: &[Entry],
-    with_notes: usize,
-    total: usize,
-    rest: &str,
-    today: &str,
-) {
-    if entries.is_empty() {
-        return;
-    }
-    let heading = format!("\n{title} ({total})");
-    if !room.take(&heading) {
-        return;
-    }
-    let _ = writeln!(out, "{heading}");
-    let mut shown = 0;
-    for (at, entry) in entries.iter().enumerate() {
-        let line = entry_line(entry, today);
-        if !room.take(&line) {
-            break;
-        }
-        let _ = writeln!(out, "{line}");
-        shown += 1;
-        if at < with_notes {
-            for note in &entry.notes {
-                let line = note_line(note, NOTE_CLIP);
-                if room.take(&line) {
-                    let _ = writeln!(out, "{line}");
+/// Which entries of each section fit in `room`, and whether each goes with
+/// its notes. Two passes, both in the order the sections are given: the first
+/// admits up to each section's `kept`, the second spends what is left, so a
+/// long ready list cannot crowd out the blocked work and the loose notes a
+/// resume also needs. An entry goes with its notes when they fit with it and
+/// alone when only it does. When everything fits, everything shows, in order.
+fn fit(sections: &[Section], room: &mut Room) -> Vec<Vec<bool>> {
+    let cost = |line: &str| line.chars().count() + 1;
+    let mut shown: Vec<Vec<bool>> = vec![Vec::new(); sections.len()];
+    for first in [true, false] {
+        for (section, shown) in sections.iter().zip(shown.iter_mut()) {
+            let cap = if first { section.kept } else { usize::MAX };
+            while shown.len() < section.blocks.len().min(cap) {
+                let (line, notes) = &section.blocks[shown.len()];
+                let heading = if shown.is_empty() { cost(&section.heading) } else { 0 };
+                let alone = heading + cost(line);
+                let together = alone + notes.iter().map(|note| cost(note)).sum::<usize>();
+                if !notes.is_empty() && together <= room.0 {
+                    room.0 -= together;
+                    shown.push(true);
+                } else if alone <= room.0 {
+                    room.0 -= alone;
+                    shown.push(false);
+                } else {
+                    break;
                 }
             }
         }
     }
-    if shown < total {
-        let _ = writeln!(out, "      +{} more: {rest}", total - shown);
-    }
+    shown
 }
 
 /// Entries one per line, or `empty` when there are none.
@@ -1806,6 +1853,42 @@ mod tests {
         assert!(text.chars().count() <= PRIME_BUDGET, "{} characters:\n{text}", text.chars().count());
         assert!(text.contains("Ready, best first (80)") && text.contains("more: next lists them"), "{text}");
         assert!(text.ends_with("context <id>.\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A long ready list no longer crowds out the rest of a resume: the cut
+    /// keeps the ten best ready tasks, blocked work with what holds it, and
+    /// the newest loose notes, then spends what is left on more ready work.
+    #[test]
+    fn a_cut_prime_keeps_blocked_work_and_notes_beside_ready_work() {
+        let (ekko, dir) = board("kept");
+        let long = "described at the length real tasks on a board run to, so that a listing fills and then some";
+        for k in 1..=120 {
+            let task = format!("ready task {k}, {long}");
+            ekko.create_task(&words(&[task.as_str()])).unwrap();
+        }
+        for k in 121..=126 {
+            let task = format!("blocked task {k}, {long}");
+            ekko.create_task(&words(&[task.as_str()])).unwrap();
+            ekko.set_blocked_by(&words(&[format!("@{k}").as_str(), "1"])).unwrap();
+        }
+        for k in 1..=4 {
+            let note = format!("loose note {k}");
+            ekko.create_note(&words(&[note.as_str()])).unwrap();
+        }
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.chars().count() <= PRIME_BUDGET, "{} characters:\n{text}", text.chars().count());
+        let section = |title: &str| -> Vec<u32> {
+            text.split(title).nth(1).map(|rest| line_ids(rest.split("\n\n").next().unwrap_or_default())).unwrap_or_default()
+        };
+        let ready = section("\nReady, best first");
+        assert!(ready.len() > READY_KEPT, "the room left goes to more ready work: {ready:?}");
+        assert_eq!(ready[0], 1, "the task others wait on leads");
+        assert_eq!(section("\nBlocked (6)").len(), BLOCKED_KEPT, "{text}");
+        assert!(text.contains("+1 more: search with the blocked filter"), "{text}");
+        assert!(section("\nRecent notes").len() >= NOTES_KEPT, "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
