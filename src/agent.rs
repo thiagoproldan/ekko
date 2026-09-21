@@ -1028,7 +1028,7 @@ pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoErr
          - Where it stopped: the last thing done, and the state it left things in.\n\
          - Decisions, each with its reason, including approaches tried and dropped.\n\
          - Files and lines touched or about to be, as path:line.\n\
-         - The next step, concrete enough to start on without asking.\n\
+         - The next step, concrete enough to start on without asking. When it needs the user's word first (it spends their quota, publishes, deletes, or is their choice), write only that the next session asks them whether to do it, and leave out how: a plan on the page reads as leave to start.\n\
          - Open questions for the user.\n\
          Leave out what the board or the code already says. A handoff replaces the task's earlier one, which stays on the task as an ordinary note. Then tell the user it is safe to /clear, and that after it any message, even just \"continue\", starts the next session: Claude Code never starts a turn on its own.\n"
     );
@@ -2405,6 +2405,7 @@ mod tests {
         assert!(text.contains("Write the handoff for task 1 now") && text.contains(&uid), "{text}");
         assert!(text.contains("Its current handoff, 2, which this one replaces: halfway through the lexer"), "{text}");
         assert!(text.contains("any message, even just \"continue\", starts the next session"), "{text}");
+        assert!(text.contains("write only that the next session asks them whether to do it"), "{text}");
         assert!(text.contains("Handoff 2 on this task was written under a minute ago"), "{text}");
 
         let by_note = handoff_prompt(&ekko, Some("2")).unwrap();
