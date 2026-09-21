@@ -49,6 +49,7 @@ const HELP: &str = r#"
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes
       --mcp               Serve the board to an agent over MCP (stdio)
+      --resources         With --mcp: serve only the board as @-mentionable resources
       --move, -m          Move item between boards
       --next [N]          List what to take up next, best first
       --note, -n          Create note
@@ -177,7 +178,8 @@ fn main() -> ExitCode {
     // Before any board is opened: the server opens one per call, because each
     // call may name a different project.
     if cli.mcp {
-        return mcp::run(home_dir, cwd, ekko_dir_env, project_env);
+        let mode = if cli.resources { mcp::Mode::Resources } else { mcp::Mode::Board };
+        return mcp::run(home_dir, cwd, ekko_dir_env, project_env, mode);
     }
 
     // Before opening anything: an old flag name gets the same answer

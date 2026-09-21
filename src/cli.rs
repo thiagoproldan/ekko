@@ -67,6 +67,13 @@ pub struct Cli {
     #[arg(long)]
     pub mcp: bool,
 
+    /// With --mcp: serve only the board's resources, prime:// and
+    /// item://<id>, for a server registered under a plain name. Claude Code
+    /// cannot resolve an @ mention of a plugin server's resources: it splits
+    /// the mention at the first colon, and a plugin server's name has two.
+    #[arg(long, requires = "mcp")]
+    pub resources: bool,
+
     #[arg(long, short = 'a')]
     pub archive: bool,
     #[arg(long, short = 'b')]

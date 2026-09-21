@@ -14,17 +14,19 @@
 //! server needs is a handful of methods, and the binary stays one file on
 //! disk with no runtime.
 //!
-//! The board is also served as resources, `prime://` and `item://<id>`, so a
-//! person can mention an item with @ and Claude Code attaches it to the
-//! prompt without the agent spending a call.
+//! With `--resources`, a second server offers the board as resources instead,
+//! `prime://` and `item://<id>`, so a person can mention an item with @ and
+//! Claude Code attaches it to the prompt without the agent spending a call.
 //!
 //! Logs, if any, go to stderr: stdout carries protocol messages and nothing
 //! else. The server exits when stdin closes.
 
-use std::cell::RefCell;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
@@ -67,11 +69,30 @@ pub struct Server {
     cwd: PathBuf,
     ekko_dir_env: Option<String>,
     project_env: Option<String>,
+    mode: Mode,
     /// The resource list the client last read, and the board's revision it
     /// was built at. None until a client asks for the list: a client that
-    /// never did has nothing to be told has changed.
-    listed: RefCell<Option<(u64, Vec<Value>)>>,
+    /// never did has nothing to be told has changed. Behind a mutex because
+    /// the resources server also checks it from a thread of its own.
+    listed: Mutex<Option<(u64, Vec<Value>)>>,
 }
+
+/// What a server offers. Two servers rather than one because Claude Code
+/// cannot resolve an @ mention of a plugin server's resources -- it splits
+/// the mention at the first colon, and `plugin:ekko:ekko` has two -- so the
+/// resources are served apart, under a plain name registered outside the
+/// plugin, while the tools stay with the plugin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Tools and prompts: `ekko --mcp`, the plugin's server.
+    Board,
+    /// Resources only: `ekko --mcp --resources`.
+    Resources,
+}
+
+/// How often the resources server looks at the board's revision. The writes
+/// go through the plugin's server, so this one hears of none of them.
+const POLL: Duration = Duration::from_secs(2);
 
 struct RpcError {
     code: i64,
@@ -107,10 +128,29 @@ fn invalid(message: impl Into<String>) -> ToolError {
     ToolError { code: "INVALID_INPUT", message: message.into() }
 }
 
-pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>) -> ExitCode {
-    let server = Server::new(home, cwd, ekko_dir_env, project_env);
+/// Writes messages whole and in order: the resources server's poller writes
+/// between replies, and a line from each must never interleave.
+fn send(stdout: &Mutex<io::Stdout>, messages: impl IntoIterator<Item = Value>) -> io::Result<()> {
+    let mut out = stdout.lock().unwrap_or_else(PoisonError::into_inner);
+    messages.into_iter().try_for_each(|message| writeln!(out, "{message}"))?;
+    out.flush()
+}
+
+pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>, mode: Mode) -> ExitCode {
+    let server = Arc::new(Server::new(home, cwd, ekko_dir_env, project_env, mode));
+    let stdout = Arc::new(Mutex::new(io::stdout()));
+    if mode == Mode::Resources {
+        let (server, stdout) = (Arc::clone(&server), Arc::clone(&stdout));
+        thread::spawn(move || loop {
+            thread::sleep(POLL);
+            if let Some(notice) = server.list_changed() {
+                if send(&stdout, [notice]).is_err() {
+                    break;
+                }
+            }
+        });
+    }
     let stdin = io::stdin();
-    let mut stdout = io::stdout().lock();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
@@ -120,7 +160,7 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
         // the answer to the write.
         let reply = server.handle_line(&line);
         let notice = server.list_changed();
-        if reply.into_iter().chain(notice).try_for_each(|message| writeln!(stdout, "{message}")).and_then(|()| stdout.flush()).is_err() {
+        if send(&stdout, reply.into_iter().chain(notice)).is_err() {
             break;
         }
     }
@@ -128,18 +168,18 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
 }
 
 impl Server {
-    pub fn new(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>) -> Self {
-        Server { home, cwd, ekko_dir_env, project_env, listed: RefCell::new(None) }
+    pub fn new(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>, mode: Mode) -> Self {
+        Server { home, cwd, ekko_dir_env, project_env, mode, listed: Mutex::new(None) }
     }
 
     /// The notification that the resource list changed, when it has since
-    /// the client last read it -- through this server's writes or anyone
-    /// else's. Claude Code reads the list again on it, and only an item on
-    /// the list it read can be mentioned with @, so without this an item
-    /// made mid-session could not be. Checked after every message, so a
-    /// change made from a terminal is noticed at the session's next call.
+    /// the client last read it -- through anyone's writes. Claude Code reads
+    /// the list again on it, and only an item on the list it read can be
+    /// mentioned with @, so without this an item made mid-session could not
+    /// be. Checked after every message and, in the resources server, every
+    /// `POLL` besides.
     pub fn list_changed(&self) -> Option<Value> {
-        let mut listed = self.listed.borrow_mut();
+        let mut listed = self.listed.lock().unwrap_or_else(PoisonError::into_inner);
         let (revision, resources) = listed.as_mut()?;
         let (ekko, _) = self.open(None).ok()?;
         let now = ekko.storage.get_counters().ok()?.revision;
@@ -190,23 +230,20 @@ impl Server {
             }
         }
 
+        let board = self.mode == Mode::Board;
         let result = match method {
             "initialize" => return Ok(self.initialize(params)),
-            "server/discover" => json!({
-                "supportedVersions": supported(),
-                "capabilities": capabilities(),
-                "instructions": INSTRUCTIONS,
-            }),
+            "server/discover" => self.discover(),
             "ping" => json!({}),
-            "tools/list" => json!({"tools": tool_definitions()}),
-            "tools/call" => self.call(params)?,
-            "prompts/list" => json!({"prompts": prompt_definitions()}),
-            "prompts/get" => self.prompt(params)?,
-            "resources/list" => json!({"resources": self.resources()?}),
+            "tools/list" if board => json!({"tools": tool_definitions()}),
+            "tools/call" if board => self.call(params)?,
+            "prompts/list" if board => json!({"prompts": prompt_definitions()}),
+            "prompts/get" if board => self.prompt(params)?,
+            "resources/list" if !board => json!({"resources": self.resources()?}),
             // None: Claude Code offers a template in its @ menu, and a URI
             // typed from it is never read -- only a listed one is.
-            "resources/templates/list" => json!({"resourceTemplates": []}),
-            "resources/read" => self.read(params)?,
+            "resources/templates/list" if !board => json!({"resourceTemplates": []}),
+            "resources/read" if !board => self.read(params)?,
             _ => return Err(RpcError::new(-32601, format!("Method not found: {method}"))),
         };
         Ok(if version.is_some() || method == "server/discover" { complete(result) } else { result })
@@ -215,12 +252,32 @@ impl Server {
     fn initialize(&self, params: &Value) -> Value {
         let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
         let version = LEGACY.iter().find(|v| **v == requested).copied().unwrap_or(LEGACY[0]);
-        json!({
-            "protocolVersion": version,
-            "capabilities": capabilities(),
-            "serverInfo": server_info(),
-            "instructions": INSTRUCTIONS,
-        })
+        let mut reply = json!({"protocolVersion": version, "serverInfo": server_info()});
+        reply.as_object_mut().expect("an object").extend(self.offer());
+        reply
+    }
+
+    fn discover(&self) -> Value {
+        let mut reply = json!({"supportedVersions": supported()});
+        reply.as_object_mut().expect("an object").extend(self.offer());
+        reply
+    }
+
+    /// The capabilities, and the instructions only where there are tools for
+    /// them to explain: the resources server sits beside the plugin's in the
+    /// same session, and one copy of them is what the model should read.
+    fn offer(&self) -> Map<String, Value> {
+        let mut offer = Map::new();
+        match self.mode {
+            Mode::Board => {
+                offer.insert("capabilities".into(), json!({"tools": {}, "prompts": {}}));
+                offer.insert("instructions".into(), json!(INSTRUCTIONS));
+            }
+            Mode::Resources => {
+                offer.insert("capabilities".into(), json!({"resources": {"listChanged": true}}));
+            }
+        }
+        offer
     }
 
     /// A prompt, filled in from the board it names. `handoff` is the only one:
@@ -251,7 +308,7 @@ impl Server {
         let (ekko, _) = self.open(None).map_err(resource_error)?;
         let revision = ekko.storage.get_counters().map_err(|error| resource_error(error.into()))?.revision;
         let resources = resource_list(&ekko).map_err(resource_error)?;
-        *self.listed.borrow_mut() = Some((revision, resources.clone()));
+        *self.listed.lock().unwrap_or_else(PoisonError::into_inner) = Some((revision, resources.clone()));
         Ok(resources)
     }
 
@@ -724,12 +781,6 @@ fn render(home: &std::path::Path, outcome: &Outcome) -> String {
 
 fn supported() -> Vec<&'static str> {
     MODERN.iter().chain(LEGACY).copied().collect()
-}
-
-/// Tools, prompts, and resources whose list can change: an item made
-/// mid-session joins the list, and the client is told.
-fn capabilities() -> Value {
-    json!({"tools": {}, "prompts": {}, "resources": {"listChanged": true}})
 }
 
 /// The resource list `resources/list` answers with, in the order a person

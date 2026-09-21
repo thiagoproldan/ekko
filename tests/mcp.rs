@@ -243,7 +243,7 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
     assert_eq!(discover["supportedVersions"][0], "2026-07-28");
     assert!(discover["supportedVersions"].as_array().unwrap().contains(&json!("2025-11-25")));
     assert_eq!(discover["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "ekko");
-    assert_eq!(discover["capabilities"], json!({"tools": {}, "prompts": {}, "resources": {"listChanged": true}}));
+    assert_eq!(discover["capabilities"], json!({"tools": {}, "prompts": {}}));
 
     assert_eq!(replies["2"]["result"]["resultType"], "complete");
     assert_eq!(text(&replies["2"]), "Nothing is in progress or ready.\n");
@@ -361,54 +361,119 @@ fn typed_notes_are_written_listed_and_searched_over_stdio() {
     fs::remove_dir_all(&home).ok();
 }
 
-/// The board as resources a person mentions with @: the prime and the items
-/// worth picking are listed, any item reads as context does, and a write
-/// after the client read the list is followed by list_changed -- the notice
-/// Claude Code reads the list again on, so a new item can be mentioned.
+/// A server kept running while a test talks to it, a message at a time: what
+/// the resources server does on its own, between requests, shows only here.
+struct Live {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    messages: std::sync::mpsc::Receiver<Value>,
+}
+
+impl Live {
+    fn start(home: &PathBuf, args: &[&str]) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .env("HOME", home)
+            .env("EKKO_DIR", home)
+            .env_remove("EKKO_PROJECT")
+            .current_dir(home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn ekko");
+        let stdout = child.stdout.take().unwrap();
+        let (sender, messages) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                let message = serde_json::from_str(&line).unwrap_or_else(|e| panic!("not one JSON message per line: {e}: {line}"));
+                if sender.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        Live { stdin: child.stdin.take(), child, messages }
+    }
+
+    /// Sends a request and returns its reply, failing on anything else first.
+    fn ask(&mut self, line: String) -> Value {
+        writeln!(self.stdin.as_mut().unwrap(), "{line}").unwrap();
+        self.next(std::time::Duration::from_secs(5)).expect("no reply")
+    }
+
+    fn next(&self, within: std::time::Duration) -> Option<Value> {
+        self.messages.recv_timeout(within).ok()
+    }
+
+    fn stop(mut self) {
+        drop(self.stdin.take());
+        assert!(self.child.wait().unwrap().success(), "the server did not exit cleanly when stdin closed");
+    }
+}
+
+/// The board as resources a person mentions with @, from their own server:
+/// the plugin's server keeps the tools and offers no resources, because
+/// Claude Code cannot resolve a mention of a server named plugin:ekko:ekko.
+/// The resources server lists the prime and the items worth picking, reads
+/// any item as context does, and when the board changes -- through the other
+/// server or a terminal, which it never hears of -- tells the client within
+/// seconds, so a new item can be mentioned.
 #[test]
-fn the_board_is_served_as_resources_and_a_new_item_changes_the_list() {
+fn the_board_is_served_as_resources_by_a_server_of_their_own() {
     let home = temp_home();
-    let messages = transcript(
+    let board = session(
         &home,
         &[
-            request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})),
-            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
-            call(2, "create", json!({"text": "an open task"})),
-            call(3, "create", json!({"text": "a finished task"})),
-            call(4, "set_state", json!({"items": [2], "state": "done"})),
-            call(5, "create", json!({"kind": "note", "text": "a plain note"})),
-            call(6, "create", json!({"kind": "gotcha", "text": "a trap to remember"})),
-            request(7, "resources/list", json!({})),
-            request(8, "resources/read", json!({"uri": "item://1"})),
-            request(9, "resources/read", json!({"uri": "item://2"})),
-            request(10, "resources/read", json!({"uri": "prime://"})),
-            request(11, "resources/read", json!({"uri": "item://99"})),
-            request(12, "resources/templates/list", json!({})),
-            call(13, "create", json!({"text": "made mid-session"})),
-            request(14, "resources/list", json!({})),
-            request(15, "ping", json!({})),
+            call(1, "create", json!({"text": "an open task"})),
+            call(2, "create", json!({"text": "a finished task"})),
+            call(3, "set_state", json!({"items": [2], "state": "done"})),
+            call(4, "create", json!({"kind": "note", "text": "a plain note"})),
+            call(5, "create", json!({"kind": "gotcha", "text": "a trap to remember"})),
+            request(6, "resources/list", json!({})),
         ],
     );
+    assert_eq!(board["6"]["error"]["code"], -32601, "the plugin's server offers no resources: {}", board["6"]);
 
-    let notices: Vec<usize> = messages.iter().enumerate().filter(|(_, m)| m.get("id").is_none()).map(|(at, _)| at).collect();
-    assert_eq!(notices.len(), 1, "one change after the list was read, and none before: {messages:?}");
-    assert_eq!(messages[notices[0]]["method"], "notifications/resources/list_changed");
-    assert_eq!(messages[notices[0] - 1]["id"], 13, "the notice follows the write's reply");
+    let mut live = Live::start(&home, &["--mcp", "--resources"]);
+    let init = live.ask(request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})));
+    assert_eq!(init["result"]["capabilities"], json!({"resources": {"listChanged": true}}));
+    assert!(init["result"].get("instructions").is_none(), "the plugin's server carries the one copy: {init}");
+    assert_eq!(live.ask(request(2, "tools/list", json!({})))["error"]["code"], -32601);
 
-    let by_id: HashMap<String, &Value> = messages.iter().map(|m| (m["id"].to_string(), m)).collect();
-    let uris = |id: &str| -> Vec<String> {
-        by_id[id]["result"]["resources"].as_array().unwrap().iter().map(|r| r["uri"].as_str().unwrap().to_string()).collect()
+    let uris = |reply: &Value| -> Vec<String> {
+        reply["result"]["resources"].as_array().unwrap().iter().map(|r| r["uri"].as_str().unwrap().to_string()).collect()
     };
-    assert_eq!(uris("7"), ["prime://", "item://1", "item://4"], "closed work and plain notes are left out");
-    assert_eq!(by_id["7"]["result"]["resources"][1]["name"], "1 \u{b7} an open task");
-    assert_eq!(uris("14"), ["prime://", "item://1", "item://4", "item://5"]);
+    let listed = live.ask(request(3, "resources/list", json!({})));
+    assert_eq!(uris(&listed), ["prime://", "item://1", "item://4"], "closed work and plain notes are left out");
+    assert_eq!(listed["result"]["resources"][1]["name"], "1 \u{b7} an open task");
 
-    let read = |id: &str| by_id[id]["result"]["contents"][0]["text"].as_str().unwrap_or_else(|| panic!("{}", by_id[id])).to_string();
-    assert!(read("8").contains("an open task"), "{}", read("8"));
-    assert!(read("9").contains("a finished task"), "an unlisted item still reads: {}", read("9"));
-    assert!(read("10").starts_with("ekko \u{b7} "), "{}", read("10"));
-    assert_eq!(by_id["11"]["error"]["code"], -32002);
-    assert_eq!(by_id["12"]["result"]["resourceTemplates"], json!([]));
+    let text_of = |reply: &Value| reply["result"]["contents"][0]["text"].as_str().unwrap_or_else(|| panic!("{reply}")).to_string();
+    assert!(text_of(&live.ask(request(4, "resources/read", json!({"uri": "item://1"})))).contains("an open task"));
+    let unlisted = text_of(&live.ask(request(5, "resources/read", json!({"uri": "item://2"}))));
+    assert!(unlisted.contains("a finished task"), "an unlisted item still reads: {unlisted}");
+    assert!(text_of(&live.ask(request(6, "resources/read", json!({"uri": "prime://"})))).starts_with("ekko \u{b7} "));
+    assert_eq!(live.ask(request(7, "resources/read", json!({"uri": "item://99"})))["error"]["code"], -32002);
+    assert_eq!(live.ask(request(8, "resources/templates/list", json!({})))["result"]["resourceTemplates"], json!([]));
 
+    // A write from a terminal, which this server takes no part in.
+    let written = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        .args(["--task", "made", "from", "a", "terminal"])
+        .env("HOME", &home)
+        .env("EKKO_DIR", &home)
+        .env_remove("EKKO_PROJECT")
+        .output()
+        .unwrap();
+    assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stderr));
+    let notice = live.next(std::time::Duration::from_secs(10)).expect("no list_changed within 10 seconds of the write");
+    assert_eq!(notice, json!({"jsonrpc": "2.0", "method": "notifications/resources/list_changed"}));
+    assert_eq!(uris(&live.ask(request(9, "resources/list", json!({})))), ["prime://", "item://1", "item://4", "item://5"]);
+
+    // A write that leaves the list as it was is not announced.
+    let starred = Command::new(env!("CARGO_BIN_EXE_ekko")).args(["--star", "1"]).env("HOME", &home).env("EKKO_DIR", &home).output().unwrap();
+    assert!(starred.status.success(), "{}", String::from_utf8_lossy(&starred.stderr));
+    assert_eq!(live.next(std::time::Duration::from_secs(5)), None, "the list did not change, yet the client was told it did");
+
+    live.stop();
     fs::remove_dir_all(&home).ok();
 }
