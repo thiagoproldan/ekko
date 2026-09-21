@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config;
 use crate::directory::DirectoryError;
-use crate::item::{tally, Change, Item, State};
+use crate::item::{tally, Change, Item, Knowledge, State};
 use crate::render::{CalendarMonth, Inversion, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
 use crate::storage::{ItemMap, Storage, StorageError};
 
@@ -787,7 +787,13 @@ impl Ekko {
                             && item.due_date.as_deref().is_some_and(|d| d < today.as_str())
                     });
                 }
-                _ => {}
+                // Superseded ones included: this is where history is found,
+                // and every listing says what superseded them.
+                other => {
+                    if let Some(kind) = Knowledge::from_word(other) {
+                        data.retain(|_, item| item.knowledge == Some(kind));
+                    }
+                }
             }
         }
         data
@@ -910,13 +916,55 @@ impl Ekko {
         self.assign_phase(&outcome, phase)
     }
 
+    /// `kind` and `supersedes` are `--kind` and `--supersedes`: without them,
+    /// an ordinary note.
     pub fn create_note_in(
         &self,
         input: &[String],
         phase: Option<&str>,
+        kind: Option<&str>,
+        supersedes: Option<&str>,
     ) -> Result<Outcome, EkkoError> {
-        let outcome = self.create_note(input)?;
+        let outcome = match (kind, supersedes) {
+            (None, None) => self.create_note(input)?,
+            _ => self.create_typed_note(input, kind, supersedes)?,
+        };
         self.assign_phase(&outcome, phase)
+    }
+
+    /// `--note --kind`: a decision, a gotcha or a procedure, and with
+    /// `--supersedes` the earlier note of its kind it replaces -- under the
+    /// rules a structured write keeps, checked by the same function.
+    pub fn create_typed_note(
+        &self,
+        input: &[String],
+        kind: Option<&str>,
+        supersedes: Option<&str>,
+    ) -> Result<Outcome, EkkoError> {
+        let kind = match kind {
+            Some(word) => Knowledge::from_word(word).ok_or_else(|| {
+                EkkoError::InvalidInput(format!("{word} is not a kind of note: decision, gotcha or procedure"))
+            })?,
+            None => {
+                return Err(EkkoError::InvalidInput(
+                    "--supersedes names what a typed note replaces: give it --kind decision, gotcha or procedure".into(),
+                ))
+            }
+        };
+        let _lock = self.storage.acquire_lock()?;
+        let (boards, description, _priority, _due) = self.parse_create_options(input)?;
+        let mut data = self.storage.get()?;
+        let id = self.generate_id(&data);
+        let mut item = Item::new_note(id, description, boards);
+        item.knowledge = Some(kind);
+        data.insert(id, item);
+        if let Some(older) = supersedes {
+            let older = self.validate_ids(&[older.trim_start_matches('@').to_string()], &data)?[0];
+            crate::ops::supersede(&mut data, id, Some(older), &|id| id.to_string())?;
+        }
+        let item = data[&id].clone();
+        self.save_touching(&mut data)?;
+        Ok(Outcome::Note(item))
     }
 
     fn assign_phase(&self, outcome: &Outcome, phase: Option<&str>) -> Result<Outcome, EkkoError> {
@@ -1850,12 +1898,17 @@ impl Ekko {
             let at_board =
                 if term.starts_with('@') { term.clone() } else { format!("@{term}") };
 
-            if stored_boards.contains(&at_board) {
+            // A bare word naming an attribute is that attribute, even beside a
+            // board of the same name. The board came first once, and a board
+            // `@due` made the due filter unreachable by either spelling; this
+            // way `@due` is the board and `due` the filter, and both are
+            // reachable.
+            if !term.starts_with('@') && is_known_attribute(term) {
+                attributes.push(term.clone());
+            } else if stored_boards.contains(&at_board) {
                 boards.push(at_board);
             } else if term == "myboard" {
                 boards.push("My Board".to_string());
-            } else if is_known_attribute(term) {
-                attributes.push(term.clone());
             } else {
                 // Second: a term that names neither a board nor a known
                 // attribute is a typo or a board that does not exist, and
@@ -2105,7 +2158,7 @@ pub(crate) fn is_known_attribute(term: &str) -> bool {
             | "blocked"
             | "due"
             | "overdue"
-    )
+    ) || Knowledge::from_word(term).is_some()
 }
 
 #[cfg(test)]
@@ -2953,6 +3006,57 @@ mod tests {
         let result = ekko.list_by_attributes(&words(&["nonexistent"]));
 
         assert!(matches!(result, Err(EkkoError::UnknownListTerm(ref t)) if t == "nonexistent"));
+
+        cleanup(&dir);
+    }
+
+    /// A board named like an attribute used to take the word over, and with
+    /// a board `@due` no spelling reached the due filter (task 116). The bare
+    /// word is the attribute now, and `@due` the board.
+    #[test]
+    fn a_board_named_like_an_attribute_leaves_the_attribute_reachable() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["@due", "on the board named due"])).unwrap();
+        ekko.create_task(&words(&["has a date", "d:2026-12-01"])).unwrap();
+        let ids = |terms: &[&str]| -> Vec<u32> {
+            let Outcome::List(groups) = ekko.list_by_attributes(&words(terms)).unwrap() else { panic!() };
+            groups.iter().flat_map(|(_, items)| items.iter().map(|item| item.id)).collect()
+        };
+
+        assert_eq!(ids(&["due"]), vec![2]);
+        assert_eq!(ids(&["@due"]), vec![1]);
+
+        cleanup(&dir);
+    }
+
+    /// `--note --kind` writes a typed note, `--supersedes` the note it
+    /// replaces, and `--list` finds each kind by name.
+    #[test]
+    fn a_typed_note_is_written_from_the_terminal_and_listed_by_its_kind() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_note_in(&words(&["ship weekly"]), None, Some("decision"), None).unwrap();
+        ekko.create_note_in(&words(&["ship on demand"]), None, Some("decision"), Some("1")).unwrap();
+        ekko.create_note_in(&words(&["@ops", "run migrations first"]), None, Some("gotcha"), None).unwrap();
+        ekko.create_note_in(&words(&["a plain one"]), None, None, None).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        assert_eq!(data[&2].supersedes, data[&1].uid);
+        assert_eq!((data[&3].knowledge, data[&3].boards.clone()), (Some(Knowledge::Gotcha), vec!["@ops".to_string()]));
+        assert_eq!(data[&4].knowledge, None);
+        let ids = |terms: &[&str]| -> Vec<u32> {
+            let Outcome::List(groups) = ekko.list_by_attributes(&words(terms)).unwrap() else { panic!() };
+            groups.iter().flat_map(|(_, items)| items.iter().map(|item| item.id)).collect()
+        };
+        assert_eq!(ids(&["decisions"]), vec![1, 2]);
+        assert_eq!(ids(&["gotcha"]), vec![3]);
+
+        let wrong = ekko.create_note_in(&words(&["x"]), None, Some("insight"), None);
+        assert!(matches!(wrong, Err(EkkoError::InvalidInput(ref m)) if m.contains("insight is not a kind")));
+        let untyped = ekko.create_note_in(&words(&["x"]), None, None, Some("1"));
+        assert!(matches!(untyped, Err(EkkoError::InvalidInput(ref m)) if m.contains("--kind")));
+        let across = ekko.create_note_in(&words(&["x"]), None, Some("gotcha"), Some("2"));
+        assert!(matches!(across, Err(EkkoError::InvalidInput(ref m)) if m.contains("supersedes only a gotcha")));
+        assert_eq!(ekko.storage.get().unwrap().len(), 4, "no refusal wrote anything");
 
         cleanup(&dir);
     }

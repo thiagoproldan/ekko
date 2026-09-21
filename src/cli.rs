@@ -103,6 +103,16 @@ pub struct Cli {
     pub r#move: bool,
     #[arg(long, short = 'n')]
     pub note: bool,
+    /// With --note: the lasting kind of note it is -- decision (what was
+    /// settled, and why), gotcha (a trap, and how to avoid it) or procedure
+    /// (steps that work). Refused without --note, rather than accepted and
+    /// ignored.
+    #[arg(long, value_name = "KIND", requires = "note")]
+    pub kind: Option<String>,
+    /// With --note --kind: the earlier note of the same kind this one
+    /// replaces, by id. The older one stays on the board, as history.
+    #[arg(long, value_name = "ID", requires = "note")]
+    pub supersedes: Option<String>,
     /// Scope work to one phase of a project. Areas are phase-scoped, so this
     /// is what distinguishes `@render` under `setup` from `@render` under
     /// `compositor`.

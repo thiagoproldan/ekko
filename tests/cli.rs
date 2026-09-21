@@ -197,3 +197,35 @@ fn a_blocked_task_needs_force_and_force_needs_a_task_to_complete() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// `--kind` and `--supersedes` only mean something beside `--note`, and the
+/// real parser has to say so rather than accept them and write an ordinary
+/// note -- or a task -- with the kind quietly dropped.
+#[test]
+fn a_typed_note_takes_its_kind_from_the_flags_beside_note() {
+    let dir = temp_ekko_dir();
+    let ekko = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
+            .args(args)
+            .output()
+            .expect("failed to run ekko")
+    };
+    let reply = |output: &process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout).expect("a --json reply")
+    };
+
+    let first = ekko(&["--note", "--kind", "decision", "ship weekly"]);
+    assert!(first.status.success(), "{}", reply(&first));
+    assert_eq!(reply(&first)["item"]["knowledge"], "decision");
+    let second = ekko(&["--note", "--kind", "decision", "--supersedes", "1", "ship on demand"]);
+    assert!(second.status.success(), "{}", reply(&second));
+    assert_eq!(reply(&second)["item"]["supersedes"], reply(&first)["item"]["uid"]);
+
+    let stray = ekko(&["--task", "--kind", "gotcha", "a task"]);
+    assert!(!stray.status.success(), "--kind was accepted beside --task");
+    let board = fs::read_to_string(dir.join(".ekko").join("storage").join("storage.json")).unwrap();
+    assert!(!board.contains("a task"), "{board}");
+
+    fs::remove_dir_all(&dir).ok();
+}

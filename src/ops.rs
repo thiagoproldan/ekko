@@ -20,7 +20,7 @@ use crate::ekko::{
     apply_state, canonical_state, holds, parse_due_date, phase_inversion, phase_order, remove_duplicates,
     uid_index, Ekko, EkkoError, Linked,
 };
-use crate::item::Item;
+use crate::item::{Item, Knowledge};
 use crate::storage::{ItemMap, LockGuard};
 
 /// An item as a caller names it: a display id, a uid, or `$N` for the item
@@ -49,6 +49,22 @@ pub enum Kind {
     Note,
     /// A note that hands a task over to the next session; see `Item::handoff`.
     Handoff,
+    /// Notes of what stays true; see `Item::knowledge`.
+    Decision,
+    Gotcha,
+    Procedure,
+}
+
+impl Kind {
+    /// The lasting knowledge a note of this kind holds, if it holds any.
+    pub fn knowledge(self) -> Option<Knowledge> {
+        match self {
+            Kind::Decision => Some(Knowledge::Decision),
+            Kind::Gotcha => Some(Knowledge::Gotcha),
+            Kind::Procedure => Some(Knowledge::Procedure),
+            Kind::Task | Kind::Note | Kind::Handoff => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +81,9 @@ pub struct Create {
     #[serde(default)]
     pub blocked_by: Vec<Ref>,
     pub attached_to: Option<Ref>,
+    /// The earlier note of the same kind a decision, gotcha or procedure
+    /// replaces.
+    pub supersedes: Option<Ref>,
     #[serde(default)]
     pub starred: bool,
 }
@@ -103,6 +122,9 @@ pub struct Update {
     #[serde(default, deserialize_with = "present")]
     pub phase: Option<Option<String>>,
     pub starred: Option<bool>,
+    /// Retypes a note: decision, gotcha or procedure, or `note` for an
+    /// ordinary one.
+    pub kind: Option<Kind>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +136,10 @@ pub struct Link {
     /// The task a note explains; `null` detaches it.
     #[serde(default, deserialize_with = "present")]
     pub attached_to: Option<Option<Ref>>,
+    /// The earlier note a decision, gotcha or procedure replaces; `null`
+    /// makes it replace nothing.
+    #[serde(default, deserialize_with = "present")]
+    pub supersedes: Option<Option<Ref>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,6 +315,9 @@ impl<'a> Draft<'a> {
         if spec.kind == Kind::Handoff && spec.attached_to.is_none() {
             return Err(invalid("A handoff is attached_to the task it hands over"));
         }
+        if spec.supersedes.is_some() && spec.kind.knowledge().is_none() {
+            return Err(invalid("Only a decision, a gotcha or a procedure supersedes an earlier note"));
+        }
         let priority = spec.priority.unwrap_or(1);
         if !(1..=3).contains(&priority) {
             return Err(EkkoError::InvalidPriority);
@@ -302,11 +331,14 @@ impl<'a> Draft<'a> {
         let id = self.ekko.generate_id(&self.data);
         let mut item = match spec.kind {
             Kind::Task => Item::new_task(id, text.to_string(), boards(&spec.boards), priority),
-            Kind::Note | Kind::Handoff => Item::new_note(id, text.to_string(), boards(&spec.boards)),
+            Kind::Note | Kind::Handoff | Kind::Decision | Kind::Gotcha | Kind::Procedure => {
+                Item::new_note(id, text.to_string(), boards(&spec.boards))
+            }
         };
         item.due_date = due;
         item.phase = phase;
         item.is_starred = spec.starred;
+        item.knowledge = spec.kind.knowledge();
         self.data.insert(id, item);
 
         // Relations after the item is in the draft: both checks read it there.
@@ -322,6 +354,11 @@ impl<'a> Draft<'a> {
             if spec.kind == Kind::Handoff {
                 self.hand_over(id, target)?;
             }
+        }
+        if let Some(older) = &spec.supersedes {
+            let older = self.resolve(older)?;
+            let names = self.names();
+            supersede(&mut self.data, id, Some(older), &|id| names.name(id))?;
         }
         Ok(id)
     }
@@ -420,8 +457,14 @@ impl<'a> Draft<'a> {
 
     pub fn update(&mut self, spec: &Update) -> Result<Vec<u32>, EkkoError> {
         let id = self.resolve(&spec.item)?;
-        if spec.boards.is_none() && spec.priority.is_none() && spec.due.is_none() && spec.phase.is_none() && spec.starred.is_none() {
-            return Err(invalid("An update needs at least one of boards, priority, due, phase or starred"));
+        if spec.boards.is_none()
+            && spec.priority.is_none()
+            && spec.due.is_none()
+            && spec.phase.is_none()
+            && spec.starred.is_none()
+            && spec.kind.is_none()
+        {
+            return Err(invalid("An update needs at least one of boards, priority, due, phase, starred or kind"));
         }
         let is_task = self.data[&id].is_task;
 
@@ -456,7 +499,47 @@ impl<'a> Draft<'a> {
         if let Some(starred) = spec.starred {
             self.item(id).is_starred = starred;
         }
+        if let Some(kind) = spec.kind {
+            self.retype(id, kind)?;
+        }
         Ok(vec![id])
+    }
+
+    /// Gives note `id` the kind `kind` names -- decision, gotcha, procedure,
+    /// or `note` for none -- which is how a note written before typed notes
+    /// existed becomes one. A task has no kind, a handoff expires and so is
+    /// never a decision, and a note in a line of supersession keeps the kind
+    /// of that line: a decision replaced by a gotcha would be neither.
+    fn retype(&mut self, id: u32, kind: Kind) -> Result<(), EkkoError> {
+        let named = self.names().name(id);
+        let item = &self.data[&id];
+        if item.is_task {
+            return Err(invalid(format!("{named} is a task; only a note takes a kind")));
+        }
+        let knowledge = match kind {
+            Kind::Task | Kind::Handoff => {
+                return Err(invalid("update gives a note the kind note, decision, gotcha or procedure"));
+            }
+            other => other.knowledge(),
+        };
+        if knowledge == item.knowledge {
+            return Ok(());
+        }
+        if item.handoff {
+            return Err(invalid(format!(
+                "{named} is a handoff, which the next one replaces; write what stays true as a note of its own"
+            )));
+        }
+        let replaced = item.uid.as_deref().is_some_and(|uid| {
+            self.data.values().any(|note| note.trashed.is_none() && note.supersedes.as_deref() == Some(uid))
+        });
+        if item.supersedes.is_some() || replaced {
+            return Err(invalid(format!(
+                "{named} supersedes a note or is superseded by one, and a line of them keeps one kind: clear supersedes with link first"
+            )));
+        }
+        self.item(id).knowledge = knowledge;
+        Ok(())
     }
 
     /// Moving an item between phases can turn its dependencies, in either
@@ -486,13 +569,13 @@ impl<'a> Draft<'a> {
 
     pub fn link(&mut self, spec: &Link) -> Result<Vec<u32>, EkkoError> {
         let id = self.resolve(&spec.item)?;
-        match (&spec.blocked_by, &spec.attached_to) {
-            (Some(blockers), None) => {
+        match (&spec.blocked_by, &spec.attached_to, &spec.supersedes) {
+            (Some(blockers), None, None) => {
                 let blockers = self.resolve_all(blockers)?;
                 let uids = self.ekko.blocker_uids(&self.data, &self.phases, id, &blockers)?;
                 self.item(id).blocked_by = if uids.is_empty() { None } else { Some(uids) };
             }
-            (None, Some(target)) => {
+            (None, Some(target), None) => {
                 let target = target.as_ref().map(|t| self.resolve(t)).transpose()?;
                 let attached = Ekko::attach_target(&self.data, id, target)?;
                 let moved = self.data[&id].attached_to != attached.as_ref().map(|(_, uid)| uid.clone());
@@ -503,7 +586,12 @@ impl<'a> Draft<'a> {
                     self.item(id).handoff = false;
                 }
             }
-            _ => return Err(invalid("A link takes exactly one of blocked_by or attached_to")),
+            (None, None, Some(older)) => {
+                let older = older.as_ref().map(|o| self.resolve(o)).transpose()?;
+                let names = self.names();
+                supersede(&mut self.data, id, older, &|id| names.name(id))?;
+            }
+            _ => return Err(invalid("A link takes exactly one of blocked_by, attached_to or supersedes")),
         }
         Ok(vec![id])
     }
@@ -514,6 +602,82 @@ impl<'a> Draft<'a> {
         let (overridden, reopened) = Ekko::refuse_broken_dependencies(&self.before, &self.data, force)?;
         let (released, blocked) = self.ekko.save_against(&self.before, &mut self.data)?;
         Ok(Committed { data: self.data, overridden, reopened, released, blocked })
+    }
+}
+
+/// Makes note `id` supersede note `older`, or, with `None`, supersede
+/// nothing. Both are notes of one kind -- a decision replaces a decision --
+/// the older one is out of the trash, and a note has one successor at most,
+/// so notes replacing one another form a single line whose newest is the one
+/// in force. A line turned back on itself would have no newest, and is
+/// refused. The CLI and the structured writes all set it through here, each
+/// saying through `name` how a refusal names an item -- see `Names`.
+pub(crate) fn supersede(
+    data: &mut ItemMap,
+    id: u32,
+    older: Option<u32>,
+    name: &dyn Fn(u32) -> String,
+) -> Result<(), EkkoError> {
+    let note = &data[&id];
+    let Some(kind) = note.knowledge else {
+        return Err(invalid(format!(
+            "{} is {}, and only a decision, a gotcha or a procedure supersedes",
+            name(id),
+            described(note)
+        )));
+    };
+    let Some(older) = older else {
+        data.get_mut(&id).expect("ids are resolved against the board").supersedes = None;
+        return Ok(());
+    };
+    if older == id {
+        return Err(invalid(format!("{} cannot supersede itself", name(id))));
+    }
+    let replaced = &data[&older];
+    if replaced.knowledge != Some(kind) {
+        return Err(invalid(format!(
+            "{} is {}, and a {kind} supersedes only a {kind}",
+            name(older),
+            described(replaced),
+            kind = kind.word()
+        )));
+    }
+    if replaced.trashed.is_some() {
+        return Err(invalid(format!("{} is in the trash, so it is no longer in force to be replaced", name(older))));
+    }
+    let uid = replaced.uid.clone().ok_or_else(|| invalid(format!("{} has no uid for a note to point at", name(older))))?;
+    let newer = data.values().find(|other| {
+        other.id != id && other.trashed.is_none() && other.supersedes.as_deref() == Some(uid.as_str())
+    });
+    if let Some(newer) = newer {
+        return Err(invalid(format!("{} is already superseded by {1}: supersede {1} instead", name(older), name(newer.id))));
+    }
+    let index = uid_index(data);
+    let mut seen = std::collections::HashSet::new();
+    let mut at = older;
+    while let Some(next) = data[&at].supersedes.as_deref().and_then(|uid| index.get(uid)).copied() {
+        if next == id {
+            return Err(invalid(format!(
+                "{} already supersedes {}, directly or through others: the newer note supersedes the older",
+                name(older),
+                name(id)
+            )));
+        }
+        if !seen.insert(next) {
+            break;
+        }
+        at = next;
+    }
+    data.get_mut(&id).expect("ids are resolved against the board").supersedes = Some(uid);
+    Ok(())
+}
+
+/// What an item is, for a refusal: "a task", "an ordinary note", "a gotcha".
+fn described(item: &Item) -> String {
+    match (item.is_task, item.knowledge) {
+        (true, _) => "a task".to_string(),
+        (false, None) => "an ordinary note".to_string(),
+        (false, Some(kind)) => format!("a {}", kind.word()),
     }
 }
 
@@ -655,6 +819,130 @@ mod tests {
         let moved = batch(&ekko, &[json!({"op": "link", "item": 3, "attached_to": 2})]).unwrap();
         assert!(!moved.data[&3].handoff);
         assert_eq!(moved.data[&3].attached_to, moved.data[&2].uid);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn refusal(result: Result<Committed, EkkoError>) -> String {
+        match result {
+            Err(EkkoError::InvalidInput(message)) => message,
+            Err(other) => panic!("refused as {other:?}, not as invalid input"),
+            Ok(_) => panic!("written, not refused"),
+        }
+    }
+
+    /// A decision names the one it replaces, and only the newer note is
+    /// written: the older one stays exactly as it was, as history.
+    #[test]
+    fn a_decision_supersedes_an_earlier_one_without_touching_it() {
+        let (ekko, dir) = board("supersede");
+        batch(&ekko, &[json!({"op": "create", "kind": "decision", "text": "ship weekly"})]).unwrap();
+        let before = ekko.storage.get().unwrap()[&1].clone();
+        let written =
+            batch(&ekko, &[json!({"op": "create", "kind": "decision", "text": "ship on demand", "supersedes": 1})]).unwrap();
+
+        let data = &written.data;
+        assert!(!data[&2].is_task && !data[&2].handoff);
+        assert_eq!(data[&2].knowledge, Some(Knowledge::Decision));
+        assert_eq!(data[&2].supersedes, before.uid);
+        assert_eq!(data[&1], before, "the superseded note is not rewritten");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A note replaces one of its own kind that is still in force, and each
+    /// note is replaced once: the rest is refused and writes nothing.
+    #[test]
+    fn supersedes_takes_one_note_of_the_same_kind_still_in_force() {
+        let (ekko, dir) = board("supersede-refused");
+        batch(
+            &ekko,
+            &[
+                json!({"op": "create", "kind": "decision", "text": "one"}),
+                json!({"op": "create", "kind": "gotcha", "text": "a trap"}),
+                json!({"op": "create", "text": "a task"}),
+                json!({"op": "create", "kind": "decision", "text": "thrown away"}),
+                json!({"op": "create", "kind": "decision", "text": "two", "supersedes": "$1"}),
+            ],
+        )
+        .unwrap();
+        ekko.set_trashed(&["4".to_string()], true).unwrap();
+        let create = |kind: &str, supersedes: u32| json!({"op": "create", "kind": kind, "text": "x", "supersedes": supersedes});
+
+        assert!(refusal(batch(&ekko, &[create("gotcha", 1)])).contains("1 is a decision, and a gotcha supersedes only a gotcha"));
+        assert!(refusal(batch(&ekko, &[create("decision", 2)])).contains("2 is a gotcha"));
+        assert!(refusal(batch(&ekko, &[create("decision", 3)])).contains("3 is a task"));
+        assert!(refusal(batch(&ekko, &[create("decision", 4)])).contains("in the trash"));
+        assert!(refusal(batch(&ekko, &[create("note", 1)])).contains("Only a decision, a gotcha or a procedure"));
+        assert!(refusal(batch(&ekko, &[create("decision", 1)])).contains("already superseded by 5: supersede 5 instead"));
+        assert_eq!(ekko.storage.get().unwrap().len(), 5, "no refusal wrote anything");
+
+        // A replacement in the trash replaces nothing, and frees its place.
+        ekko.set_trashed(&["5".to_string()], true).unwrap();
+        let again = batch(&ekko, &[create("decision", 1)]).unwrap();
+        assert_eq!(again.data[&6].supersedes, again.data[&1].uid);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// link sets what a note supersedes after the fact, or clears it, and
+    /// refuses a line of replacements that would turn back on itself.
+    #[test]
+    fn link_sets_and_clears_supersedes_and_refuses_a_loop() {
+        let (ekko, dir) = board("supersede-link");
+        batch(
+            &ekko,
+            &[
+                json!({"op": "create", "kind": "procedure", "text": "release by hand"}),
+                json!({"op": "create", "kind": "procedure", "text": "release with the script"}),
+                json!({"op": "create", "kind": "procedure", "text": "release from CI"}),
+                json!({"op": "create", "text": "an ordinary note", "kind": "note"}),
+            ],
+        )
+        .unwrap();
+        let link = |item: u32, supersedes: Value| json!({"op": "link", "item": item, "supersedes": supersedes});
+
+        let linked = batch(&ekko, &[link(2, json!(1)), link(3, json!(2))]).unwrap();
+        assert_eq!(linked.data[&3].supersedes, linked.data[&2].uid);
+        assert!(refusal(batch(&ekko, &[link(1, json!(3))])).contains("3 already supersedes 1"), "a loop through 2 is refused");
+        assert!(refusal(batch(&ekko, &[link(1, json!(1))])).contains("cannot supersede itself"));
+        assert!(refusal(batch(&ekko, &[link(4, json!(1))])).contains("4 is an ordinary note"));
+
+        let cleared = batch(&ekko, &[link(3, Value::Null)]).unwrap();
+        assert_eq!(cleared.data[&3].supersedes, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// update types a note written before typed notes existed, or makes a
+    /// typed one ordinary again -- never a task, a handoff, or a note in a
+    /// line of supersession, whose kind the whole line shares.
+    #[test]
+    fn update_retypes_a_note_but_not_a_task_a_handoff_or_a_line() {
+        let (ekko, dir) = board("retype");
+        batch(
+            &ekko,
+            &[
+                json!({"op": "create", "text": "the work"}),
+                json!({"op": "create", "kind": "note", "text": "settled long ago"}),
+                json!({"op": "create", "kind": "handoff", "text": "stopped here", "attached_to": "$1"}),
+                json!({"op": "create", "kind": "gotcha", "text": "a trap"}),
+                json!({"op": "create", "kind": "gotcha", "text": "the same trap, better", "supersedes": "$4"}),
+            ],
+        )
+        .unwrap();
+        let retype = |item: u32, kind: &str| json!({"op": "update", "item": item, "kind": kind});
+
+        let typed = batch(&ekko, &[retype(2, "decision")]).unwrap();
+        assert_eq!(typed.data[&2].knowledge, Some(Knowledge::Decision));
+        let plain = batch(&ekko, &[retype(2, "note")]).unwrap();
+        assert_eq!(plain.data[&2].knowledge, None);
+
+        assert!(refusal(batch(&ekko, &[retype(1, "decision")])).contains("1 is a task"));
+        assert!(refusal(batch(&ekko, &[retype(3, "decision")])).contains("handoff"));
+        assert!(refusal(batch(&ekko, &[retype(2, "task")])).contains("note, decision, gotcha or procedure"));
+        assert!(refusal(batch(&ekko, &[retype(4, "procedure")])).contains("clear supersedes with link first"));
+        assert!(refusal(batch(&ekko, &[retype(5, "procedure")])).contains("clear supersedes with link first"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

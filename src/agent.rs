@@ -22,7 +22,7 @@ use chrono::Datelike;
 use serde::Serialize;
 
 use crate::ekko::{broken_dependencies, holds, phase_order, Ekko, EkkoError, Outcome};
-use crate::item::{Item, State};
+use crate::item::{Item, Knowledge, State};
 use crate::lexical::{self, Query};
 use crate::render::{Inversion, ProjectSummary, RoadmapStep, Stats};
 use crate::storage::ItemMap;
@@ -69,6 +69,13 @@ const HANDOFF_BUDGET: usize = 3_500;
 const READY_KEPT: usize = 10;
 const BLOCKED_KEPT: usize = 5;
 const NOTES_KEPT: usize = 3;
+/// Gotchas and procedures a prime lists, newest first, each by its first
+/// line: the traps and the steps a session should have in mind before it
+/// starts. Decisions are only counted -- there are more of them, and search
+/// finds the one that matters when it matters.
+const KNOWLEDGE_SHOWN: usize = 5;
+/// Where a prime says the gotchas and procedures it did not list are.
+const KNOWLEDGE_REST: &str = "search with the gotcha or procedure filter";
 /// The longest a "+N more" line gets, reserved for each section a cut leaves short.
 const MORE_LINE: usize = 48;
 /// The most a resumed session is told about what moved before the whole
@@ -103,6 +110,10 @@ struct Links {
     dependents: HashMap<u32, Vec<u32>>,
     /// Visible notes, in id order, by the uid of the task each is attached to.
     attached: HashMap<String, Vec<u32>>,
+    /// Superseded notes, each with the notes superseding it, in id order.
+    /// One in the trash supersedes nothing, the way a trashed blocker blocks
+    /// nothing, and one stashed still does: stashing hides, it does not undo.
+    superseded_by: HashMap<u32, Vec<u32>>,
 }
 
 impl Links {
@@ -112,6 +123,7 @@ impl Links {
         let mut blockers: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut dependents: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut attached: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut superseded_by: HashMap<u32, Vec<u32>> = HashMap::new();
         for (id, item) in all {
             for uid in item.blocked_by.iter().flatten() {
                 if let Some(&blocker) = uids.get(uid.as_str()) {
@@ -122,8 +134,14 @@ impl Links {
             if let Some(task) = item.attached_to.as_deref().filter(|_| visible(item)) {
                 attached.entry(task.to_string()).or_default().push(*id);
             }
+            if let Some(&older) = item.supersedes.as_deref().filter(|_| item.trashed.is_none()).and_then(|uid| uids.get(uid)) {
+                superseded_by.entry(older).or_default().push(*id);
+            }
         }
-        Links { uids, blockers, dependents, attached }
+        for newer in superseded_by.values_mut() {
+            newer.sort_unstable();
+        }
+        Links { uids, blockers, dependents, attached, superseded_by }
     }
 }
 
@@ -343,6 +361,16 @@ pub struct Entry {
     /// A note that is its task's handoff; see `Item::handoff`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub handoff: bool,
+    /// A note's lasting kind -- decision, gotcha or procedure; see
+    /// `Item::knowledge`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub knowledge: Option<Knowledge>,
+    /// The note this one supersedes, by display id, while it is on the board.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<u32>,
+    /// The notes superseding this one: it is history, no longer in force.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub superseded_by: Vec<u32>,
     pub updated_at: i64,
     /// Notes attached to this task.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -350,10 +378,27 @@ pub struct Entry {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NoteRef {
     pub id: u32,
     pub uid: Option<String>,
     pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub knowledge: Option<Knowledge>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub superseded_by: Vec<u32>,
+}
+
+impl NoteRef {
+    /// What a listing puts before a typed note's text -- "[gotcha] ", or
+    /// "[decision, superseded by 9] " -- and nothing before an ordinary one.
+    fn mark(&self) -> String {
+        match (self.knowledge, self.superseded_by.as_slice()) {
+            (None, _) => String::new(),
+            (Some(kind), []) => format!("[{}] ", kind.word()),
+            (Some(kind), newer) => format!("[{}, superseded by {}] ", kind.word(), join(newer)),
+        }
+    }
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -391,6 +436,21 @@ impl<'a> Reader<'a> {
         self.entry_counting(item, true)
     }
 
+    /// The notes superseding `id`: none while it is still in force.
+    fn superseded_by(&self, id: u32) -> Vec<u32> {
+        self.graph.links.superseded_by.get(&id).cloned().unwrap_or_default()
+    }
+
+    fn note_ref(&self, note: &Item) -> NoteRef {
+        NoteRef {
+            id: note.id,
+            uid: note.uid.clone(),
+            description: note.description.clone(),
+            knowledge: note.knowledge,
+            superseded_by: self.superseded_by(note.id),
+        }
+    }
+
     /// An entry, with how much open work waits on it worked out only when
     /// `count` says so.
     fn entry_counting(&self, item: &Item, count: bool) -> Entry {
@@ -401,7 +461,7 @@ impl<'a> Reader<'a> {
             .into_iter()
             .flatten()
             .filter_map(|id| self.graph.all.get(id))
-            .map(|note| NoteRef { id: note.id, uid: note.uid.clone(), description: note.description.clone() })
+            .map(|note| self.note_ref(note))
             .collect();
         Entry {
             id: item.id,
@@ -429,6 +489,9 @@ impl<'a> Reader<'a> {
             inherits: None,
             finish_by: None,
             handoff: item.handoff,
+            knowledge: item.knowledge,
+            supersedes: item.supersedes.as_deref().and_then(|uid| self.uid(uid)),
+            superseded_by: self.superseded_by(item.id),
         }
     }
 
@@ -548,6 +611,15 @@ pub struct Prime {
     /// The newest handoff on open work: where the last session stopped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<Handoff>,
+    /// The newest gotchas and procedures in force; `knowledge_total` counts
+    /// them all.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub knowledge: Vec<NoteRef>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub knowledge_total: usize,
+    /// Decisions in force, counted: search with the decision filter reads them.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub decisions: usize,
 }
 
 /// A handoff as the prime shows it: the note, and the task it hands over.
@@ -611,14 +683,30 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         }
     }
 
-    let mut notes: Vec<&Item> =
-        all.values().filter(|item| visible(item) && !item.is_task && item.attached_to.is_none()).collect();
-    notes.sort_by_key(|item| (std::cmp::Reverse(updated(item)), std::cmp::Reverse(item.id)));
-    let recent_notes = notes
-        .into_iter()
-        .take(RECENT_NOTES)
-        .map(|note| NoteRef { id: note.id, uid: note.uid.clone(), description: note.description.clone() })
+    // What stays true, beside the work: gotchas and procedures listed, loose
+    // or attached to any task, done ones included; decisions counted. A
+    // superseded note is history, and no section of a prime shows it.
+    let in_force =
+        |note: &&Item| visible(note) && !note.is_task && !reader.graph.links.superseded_by.contains_key(&note.id);
+    let mut lasting: Vec<&Item> = all
+        .values()
+        .filter(in_force)
+        .filter(|note| matches!(note.knowledge, Some(Knowledge::Gotcha | Knowledge::Procedure)))
         .collect();
+    lasting.sort_by_key(|note| (std::cmp::Reverse(updated(note)), std::cmp::Reverse(note.id)));
+    let knowledge_total = lasting.len();
+    let knowledge: Vec<NoteRef> = lasting.into_iter().take(KNOWLEDGE_SHOWN).map(|note| reader.note_ref(note)).collect();
+    let decisions = all.values().filter(in_force).filter(|note| note.knowledge == Some(Knowledge::Decision)).count();
+    for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()) {
+        entry.notes.retain(|note| note.superseded_by.is_empty() && !knowledge.iter().any(|shown| shown.id == note.id));
+    }
+
+    let mut notes: Vec<&Item> = all
+        .values()
+        .filter(|item| visible(item) && !item.is_task && item.attached_to.is_none() && item.knowledge.is_none())
+        .collect();
+    notes.sort_by_key(|item| (std::cmp::Reverse(updated(item)), std::cmp::Reverse(item.id)));
+    let recent_notes = notes.into_iter().take(RECENT_NOTES).map(|note| reader.note_ref(note)).collect();
 
     let (roadmap, rootless, inversions) = match (phases.is_empty(), ekko.display_roadmap()?) {
         (false, Outcome::Roadmap { steps, rootless, inversions }) => (steps, rootless, inversions),
@@ -661,6 +749,9 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         overdue,
         freed_by_cancelling,
         handoff,
+        knowledge,
+        knowledge_total,
+        decisions,
     })
 }
 
@@ -700,6 +791,12 @@ pub struct Context {
     pub dependents: Vec<Link>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<Link>,
+    /// The earlier note this one replaces, kept as history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<Link>,
+    /// The notes replacing this one: while any is there, it is not in force.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub superseded_by: Vec<Link>,
 }
 
 #[derive(Debug, Serialize)]
@@ -735,7 +832,7 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         all.get(id).map(|other| Link {
             id: other.id,
             uid: other.uid.clone(),
-            state: state_word(other),
+            state: other.knowledge.map_or_else(|| state_word(other), Knowledge::word),
             description: clip(&other.description, TASK_CLIP),
         })
     };
@@ -751,9 +848,12 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         .and_then(|task| link(&task));
     let (waits_on, root_ids) = reader.graph.upstream(id);
     let roots = root_ids.iter().filter_map(link).collect();
+    let entry = reader.entry(item);
+    let supersedes = entry.supersedes.as_ref().and_then(link);
+    let superseded_by = entry.superseded_by.iter().filter_map(link).collect();
 
     Context {
-        item: reader.entry(item),
+        item: entry,
         created: item.date.clone(),
         stashed: item.stashed.is_some(),
         trashed: item.trashed.is_some(),
@@ -762,6 +862,8 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         roots,
         dependents,
         attached_to,
+        supersedes,
+        superseded_by,
     }
 }
 
@@ -841,7 +943,7 @@ pub fn away(ekko: &Ekko, stash: bool, trash: bool, limit: usize) -> Result<Strin
         }
         for item in items.iter().take(limit) {
             let entry = reader.entry_counting(item, false);
-            let mut body = format!("[{}] {}", entry.state, clip(&item.description, TASK_CLIP));
+            let mut body = format!("[{}] {}", listed_state(&entry), clip(&item.description, TASK_CLIP));
             if let Some(at) = item.trashed {
                 let left = crate::render::TRASH_DAYS - (now - at) / 86_400_000;
                 let _ = write!(body, " \u{b7} {}", match left {
@@ -1209,7 +1311,7 @@ impl Changes {
             } else {
                 ""
             };
-            let _ = writeln!(out, "{:>4}. [{}{away}] {}{now}", entry.id, entry.state, clip(&entry.description, TASK_CLIP));
+            let _ = writeln!(out, "{:>4}. [{}{away}] {}{now}", entry.id, listed_state(entry), clip(&entry.description, TASK_CLIP));
         }
         for gone in &self.removed {
             let _ = writeln!(out, "{:>4}. [removed] {}", gone.id, gone.text);
@@ -1274,7 +1376,24 @@ fn listed_line(entry: &Entry, body: &str, stated: bool, today: &str) -> String {
 
 /// A note under its task, indented further, id still first on the line.
 fn note_line(note: &NoteRef, max: usize) -> String {
-    format!("{:>8}. {}", note.id, clip(&note.description, max))
+    format!("{:>8}. {}{}", note.id, note.mark(), clip(&note.description, max))
+}
+
+/// A gotcha or a procedure as a prime lists it: its kind, then its first
+/// line -- which is what a note written to be found leads with.
+fn knowledge_line(note: &NoteRef) -> String {
+    let first = note.description.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
+    format!("{:>4}. {}{}", note.id, note.mark(), clip(first, TASK_CLIP))
+}
+
+/// What a listing says an item is, in brackets: a task's state or a note's
+/// kind, and for a superseded note, what supersedes it.
+fn listed_state(entry: &Entry) -> String {
+    let word = entry.knowledge.map_or(entry.state, Knowledge::word);
+    match entry.superseded_by.as_slice() {
+        [] => word.to_string(),
+        newer => format!("{word}, superseded by {}", join(newer)),
+    }
 }
 
 fn join(ids: &[u32]) -> String {
@@ -1325,7 +1444,23 @@ impl Prime {
 
         let attention = self.attention();
         let close = "\nAn item in full, with its dependencies and notes: context <id>.\n";
-        let fixed = out.chars().count() + attention.chars().count() + close.chars().count() + 4 * MORE_LINE;
+        // Only a board with typed notes pays for them: without any, these two
+        // cost nothing and the prime is what it was before they existed.
+        let decisions = match self.decisions {
+            0 => String::new(),
+            n => format!("\nDecisions ({n}): search with the decision filter\n"),
+        };
+        let knowledge_more = if self.knowledge.is_empty() {
+            0
+        } else {
+            format!("      +{} more: {KNOWLEDGE_REST}\n", self.knowledge_total).chars().count()
+        };
+        let fixed = out.chars().count()
+            + attention.chars().count()
+            + close.chars().count()
+            + 4 * MORE_LINE
+            + knowledge_more
+            + decisions.chars().count();
         let mut room = Room(budget.saturating_sub(fixed));
         if let Some(handoff) = &self.handoff {
             out.push_str(&handoff.text());
@@ -1346,11 +1481,19 @@ impl Prime {
                 rest: None,
                 kept: NOTES_KEPT,
             },
+            Section {
+                heading: format!("\nGotchas and procedures ({})", self.knowledge_total),
+                blocks: self.knowledge.iter().map(|note| (knowledge_line(note), Vec::new())).collect(),
+                total: self.knowledge_total,
+                rest: Some(KNOWLEDGE_REST),
+                kept: KNOWLEDGE_SHOWN,
+            },
         ];
         let shown = fit(&sections, &mut room);
         for (section, shown) in sections.iter().zip(&shown) {
             section.write(&mut out, shown);
         }
+        out.push_str(&decisions);
 
         out.push_str(&attention);
         out.push_str(close);
@@ -1614,7 +1757,7 @@ impl Found {
             out.push_str("No item has every word; these have some.\n");
         }
         for (entry, body) in &self.hits {
-            let _ = writeln!(out, "{}", listed_line(entry, &format!("[{}] {body}", entry.state), true, &today));
+            let _ = writeln!(out, "{}", listed_line(entry, &format!("[{}] {body}", listed_state(entry)), true, &today));
         }
         if self.total > self.hits.len() {
             let _ = writeln!(out, "{} of {} shown: narrow the text or filters, or raise limit.", self.hits.len(), self.total);
@@ -1634,10 +1777,11 @@ impl Context {
         let mut out = String::new();
         let _ = writeln!(out, "{:>4}. {}", item.id, item.description);
 
-        let mut facts = vec![match (item.state, item.handoff) {
-            ("note", true) => "note, the handoff of the task it is attached to".to_string(),
-            ("note", false) => "note".to_string(),
-            (state, _) => format!("task, {state}"),
+        let mut facts = vec![match (item.state, item.handoff, item.knowledge) {
+            ("note", true, _) => "note, the handoff of the task it is attached to".to_string(),
+            ("note", false, Some(kind)) => format!("note, a {}", kind.word()),
+            ("note", false, None) => "note".to_string(),
+            (state, _, _) => format!("task, {state}"),
         }];
         if let Some(priority) = item.priority {
             facts.push(format!("priority {priority}"));
@@ -1679,6 +1823,10 @@ impl Context {
         if let Some(task) = &self.attached_to {
             links(&mut out, "Attached to", std::slice::from_ref(task));
         }
+        links(&mut out, "Superseded by, so no longer in force", &self.superseded_by);
+        if let Some(older) = &self.supersedes {
+            links(&mut out, "Supersedes", std::slice::from_ref(older));
+        }
         links(&mut out, "Blocked by", &self.blockers);
         if self.waits_on > 0 {
             let _ = writeln!(out, "      waits on {}, directly or through others", open_tasks(self.waits_on));
@@ -1705,7 +1853,7 @@ impl Context {
                     Detail::Full => note.description.clone(),
                     Detail::Concise => clip(&note.description, NOTE_CLIP),
                 };
-                let _ = writeln!(out, "{:>4}. {body}", note.id);
+                let _ = writeln!(out, "{:>4}. {}{body}", note.id, note.mark());
             }
         }
         out
@@ -2179,6 +2327,155 @@ mod tests {
         assert!(text.contains("Write the handoff for task 1 now") && text.contains(&uid), "{text}");
         assert!(text.contains("Its current handoff, 2, which this one replaces: halfway through the lexer"), "{text}");
         assert!(matches!(handoff_prompt(&ekko, Some("2")), Err(EkkoError::InvalidInput(_))), "a note has nothing to hand over");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Writes `ops` as one batch, the way an agent writes through MCP.
+    fn write(ekko: &Ekko, ops: &[serde_json::Value]) {
+        let mut draft = crate::ops::Draft::open(ekko).unwrap();
+        for value in ops {
+            let op: crate::ops::Op = serde_json::from_value(value.clone()).unwrap();
+            draft.apply(&op).unwrap();
+        }
+        draft.commit(false).unwrap();
+    }
+
+    /// Gotchas and procedures in force are listed once, by first line and
+    /// newest first; decisions in force are counted; a superseded note shows
+    /// nowhere, and a typed note is not repeated among the loose notes or
+    /// under its task.
+    #[test]
+    fn prime_lists_gotchas_and_procedures_counts_decisions_and_hides_the_superseded() {
+        let (ekko, dir) = board("knowledge-prime");
+        let note = |kind: &str, text: &str| serde_json::json!({"op": "create", "kind": kind, "text": text});
+        write(
+            &ekko,
+            &[
+                serde_json::json!({"op": "create", "text": "the work"}),
+                serde_json::json!({"op": "create", "kind": "gotcha", "text": "Tab clears isComplete\nsecond line, only in context", "attached_to": 1}),
+                note("procedure", "Release: bump, tag, push"),
+                note("decision", "ship weekly"),
+                serde_json::json!({"op": "create", "kind": "decision", "text": "ship on demand", "supersedes": 4}),
+                note("gotcha", "the old trap"),
+                serde_json::json!({"op": "create", "kind": "gotcha", "text": "the trap, restated", "supersedes": 6}),
+                note("note", "a plain note"),
+                serde_json::json!({"op": "create", "kind": "decision", "text": "crossterm, not ratatui", "attached_to": 1}),
+            ],
+        );
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        let listed = "\nGotchas and procedures (3)\n   7. [gotcha] the trap, restated\n   3. [procedure] Release: bump, tag, push\n   2. [gotcha] Tab clears isComplete\n";
+        assert!(text.contains(listed), "{text}");
+        assert!(text.contains("\nDecisions (2): search with the decision filter\n"), "{text}");
+        assert!(text.contains("       9. [decision] crossterm, not ratatui"), "a decision still explains its task: {text}");
+        for gone in ["second line", "the old trap", "ship weekly", "ship on demand"] {
+            assert!(!text.contains(gone), "{gone}: {text}");
+        }
+        assert_eq!(line_ids(&text).iter().filter(|id| **id == 2).count(), 1, "listed once: {text}");
+        assert!(text.contains("\nRecent notes, not attached to a task\n   8. a plain note\n\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// On a board the work already fills, typed notes still fit the prime's
+    /// budget: the section keeps its first lines and says where the rest are,
+    /// and the decisions line is always there.
+    #[test]
+    fn typed_notes_fit_a_prime_the_work_already_fills() {
+        let (ekko, dir) = board("knowledge-budget");
+        let reason = "a reason that runs long enough to matter ".repeat(7);
+        let mut ops = Vec::new();
+        for k in 1..=80 {
+            let text = format!("ready task number {k}, described at the length real tasks on a board run to, so a listing fills");
+            ops.push(serde_json::json!({"op": "create", "text": text}));
+        }
+        for k in 1..=80 {
+            ops.push(serde_json::json!({"op": "create", "kind": "note", "text": reason, "attached_to": k}));
+        }
+        for k in 1..=12 {
+            let kind = if k % 2 == 0 { "gotcha" } else { "procedure" };
+            let text = format!("lesson {k}: {}", "a first line long enough to be clipped ".repeat(6));
+            ops.push(serde_json::json!({"op": "create", "kind": kind, "text": text}));
+        }
+        for k in 1..=20 {
+            ops.push(serde_json::json!({"op": "create", "kind": "decision", "text": format!("decision {k}")}));
+        }
+        write(&ekko, &ops);
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.chars().count() <= PRIME_BUDGET, "{} characters", text.chars().count());
+        assert!(text.contains("more: next lists them"), "the work filled it: {text}");
+        assert!(text.contains("\nGotchas and procedures (12)\n"), "{text}");
+        assert!(text.contains(&format!("      +7 more: {KNOWLEDGE_REST}\n")), "{text}");
+        assert!(text.contains("\nDecisions (20): search with the decision filter\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A board with no typed notes gets no trace of them in its prime.
+    #[test]
+    fn a_prime_without_typed_notes_says_nothing_of_them() {
+        let (ekko, dir) = board("knowledge-none");
+        ekko.create_task(&words(&["a task"])).unwrap();
+        ekko.create_note(&words(&["a note"])).unwrap();
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(!text.contains("Gotchas") && !text.contains("Decisions"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// context names a note's kind and both ends of a supersession; trashing
+    /// the newer note puts the older one back in force.
+    #[test]
+    fn context_names_the_kind_and_both_ends_of_a_supersession() {
+        let (ekko, dir) = board("knowledge-context");
+        write(
+            &ekko,
+            &[
+                serde_json::json!({"op": "create", "kind": "decision", "text": "ship weekly"}),
+                serde_json::json!({"op": "create", "kind": "decision", "text": "ship on demand", "supersedes": 1}),
+            ],
+        );
+
+        let older = context(&ekko, "1").unwrap().text();
+        assert!(older.contains("      note, a decision \u{b7} "), "{older}");
+        assert!(older.contains("\nSuperseded by, so no longer in force\n   2. [decision] ship on demand\n"), "{older}");
+        let newer = context(&ekko, "2").unwrap().text();
+        assert!(newer.contains("\nSupersedes\n   1. [decision] ship weekly\n"), "{newer}");
+
+        ekko.set_trashed(&words(&["2"]), true).unwrap();
+        let older = context(&ekko, "1").unwrap().text();
+        assert!(!older.contains("Superseded by"), "{older}");
+        assert!(prime(&ekko, "default board").unwrap().text().contains("Decisions (1)"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// search finds notes by kind, superseded ones included and marked, so
+    /// the history is there and never reads as current.
+    #[test]
+    fn search_finds_notes_by_kind_and_marks_the_superseded() {
+        let (ekko, dir) = board("knowledge-search");
+        write(
+            &ekko,
+            &[
+                serde_json::json!({"op": "create", "kind": "decision", "text": "ship weekly"}),
+                serde_json::json!({"op": "create", "kind": "decision", "text": "ship on demand", "supersedes": 1}),
+                serde_json::json!({"op": "create", "kind": "gotcha", "text": "a trap"}),
+                serde_json::json!({"op": "create", "text": "a task"}),
+            ],
+        );
+
+        let decisions = search(&ekko, None, &words(&["decision"]), 20).unwrap();
+        assert_eq!(decisions.hits.iter().map(|(entry, _)| entry.id).collect::<Vec<_>>(), vec![1, 2]);
+        let text = decisions.text();
+        assert!(text.contains("   1. [decision, superseded by 2] ship weekly"), "{text}");
+        assert!(text.contains("   2. [decision] ship on demand"), "{text}");
+        let gotchas = search(&ekko, Some("trap"), &words(&["gotchas"]), 20).unwrap();
+        assert_eq!(gotchas.hits.iter().map(|(entry, _)| entry.id).collect::<Vec<_>>(), vec![3]);
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -42,6 +42,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Stable `uid`s**, accepted anywhere a display id is, because display ids get recycled and `--restore` hands out new ones
 - **`--since`**, reading only what changed rather than the whole board every time
 - **Folded notes** on screen, whole in pipes and `--json`
+- **Typed notes**: a decision, a gotcha or a procedure, written on purpose, and `--supersedes` for the one it replaces -- what stays true after the work is done
 - **Errors instead of silence** when a filter term matches nothing
 - **A `flock` lock and atomic writes**, so concurrent invocations queue rather than lose updates
 - **Stash and trash**: put finished work out of the way and keep it reachable, or remove it with 30 days to change your mind
@@ -121,6 +122,8 @@ $ ekko --help
       --move, -m          Move item between boards
       --next [N]          List what to take up next, best first
       --note, -n          Create note
+      --kind <KIND>       With --note: a decision, gotcha or procedure
+      --supersedes <ID>   With --kind: the earlier note of that kind it replaces
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
       --prime             Summarise the board for picking work back up
@@ -163,6 +166,7 @@ $ ekko --help
       $ ekko --move @1 cooking
       $ ekko --next 5
       $ ekko --note @coding Mergesort worse-case O(nlogn)
+      $ ekko --note --kind gotcha Run the migrations before the tests
       $ ekko --prime
       $ ekko --priority @3 2
       $ ekko --restore 4
@@ -292,17 +296,17 @@ Ekko has a frontend for each kind of reader: the board and `--ui` for a person, 
 
 | tool | what it does |
 |---|---|
-| `prime` | the resume view: in progress, ready in order, blocked, recent notes, what needs attention, and a cursor |
+| `prime` | the resume view: in progress, ready in order, blocked, recent notes, gotchas and procedures, what needs attention, and a cursor |
 | `next` | what to take up next, best first |
 | `context` | one item with its blockers, what it blocks and its notes, in full |
 | `search` | items matching a text and/or the `--list` filters |
 | `changes` | what was written since a cursor, including items stashed or trashed since |
 | `roadmap`, `projects` | as the flags of the same name |
-| `create` | a task, a note, or a handoff, with every field apart from the text, relations included |
+| `create` | a task, a note, a handoff, or a decision, gotcha or procedure, with every field apart from the text, relations included |
 | `set_state`, `force_state` | idempotent state changes; `force_state` overrides the dependency rule, and is a tool of its own so it can be permissioned apart |
 | `edit` | the whole text, one exact replacement, or an append -- optionally conditioned on the `updatedAt` last read |
-| `update` | boards, priority, due date, phase, star |
-| `link` | `blocked_by`, or `attached_to` |
+| `update` | boards, priority, due date, phase, star, a note's kind |
+| `link` | `blocked_by`, `attached_to`, or `supersedes` |
 | `batch` | several of the writes above in one write, all or nothing, with `$1`, `$2` naming the items earlier operations created |
 | `stash`, `trash` | put items away, or bring them back |
 | `away` | what is put away: the stash, and the trash with the days each item has left, one line per item |
@@ -311,6 +315,8 @@ Ekko has a frontend for each kind of reader: the board and `--ui` for a person, 
 There is no `clear` and no `destroy`: an agent that needs either asks the user to run it.
 
 **Handoffs.** A long session is cheaper to clear and resume than to carry, as long as what it knows survives the clear. `create` with `kind: "handoff"` writes that: a note on the open task the session was working, saying where it stopped, what it decided and why, the files and lines, the next step and the open questions. The next prime quotes the newest handoff on open work in a section of its own -- line by line, up to 3,500 characters on top of the prime's 6,000, so the whole still fits the 10,000 characters Claude Code keeps of a hook -- and `context` reads a longer one whole. A new handoff on the same task demotes the one before to an ordinary note, and one moved to another task, or detached, is an ordinary note too. The server also offers `handoff` as an MCP prompt, which Claude Code lists as a slash command: it asks the agent to write the handoff now, naming the task in progress and the handoff it replaces.
+
+**Typed notes.** A handoff is the half of what a session learns that expires; the other half stays true after the work is done. `create` with `kind` `decision` (what was settled, and why), `gotcha` (a trap, and how to avoid it) or `procedure` (steps that work) writes it -- loose, for the whole project, or attached to the task it explains, where it keeps its meaning after that task is done. `supersedes` names the earlier note of the same kind it replaces: the older one stays as history, marked superseded wherever it is listed, and stops being shown as current; trash the newer one and the older is current again, with nothing to undo. The prime lists the five newest gotchas and procedures by their first line and counts the decisions, which `search` with the `decision` filter reads. `update` gives a note written before a kind, and `link` changes what one supersedes. Nothing is captured behind anyone's back: every typed note is written on purpose, by the user or the agent.
 
 A write that is wrong in any way is refused and writes nothing, and the refusal comes back as a tool result reading `CODE: message` -- the codes `--json` uses, plus `INVALID_INPUT` for an argument that makes no sense, `STALE` for an edit made against an older version of the item, and `EDIT_MATCH` for a replacement whose text is not there exactly once. A misspelled field is refused rather than ignored: an ignored `blockedBy` would create the task and silently drop the dependency. Text is never read for `@board`, `p:N` or `d:DATE` the way the CLI reads a description, so prose keeps every word.
 
@@ -534,6 +540,26 @@ Three deliberate limits:
 - **Only when it helps.** Below about two dozen usable columns the marker would eat most of the line, so the note is left whole for the terminal to wrap.
 
 To read a folded note in full, pipe the output (`ekko | less`) or use `--json`, which never folds.
+
+### Typed Notes
+
+Most notes explain one piece of work and matter while it is open. Some stay true after it is done -- a decision and the reason for it, a trap and how to avoid it, the steps that work -- and those are worth telling apart from the rest. `--kind` types a note as it is written, and `--supersedes` names the earlier one of the same kind it replaces:
+
+```
+$ ekko --note --kind decision Ship on demand, whenever main is green
+$ ekko --note --kind gotcha Run the migrations before the tests, or half of them fail
+$ ekko --note --kind decision --supersedes 12 Ship weekly again: CI got too slow for on demand
+$ ekko --list decision
+```
+
+The older note is not rewritten or removed: it stays on the board as history, and `--context` on it names the note that superseded it, as it names on the newer one the note it replaced. Four rules keep the history readable:
+
+- **One kind per line of replacements.** A decision supersedes a decision, never a gotcha, so what replaced what never changes meaning halfway.
+- **One successor each.** A note already superseded is refused as a target, with the one that superseded it named, so replacements form a single line and its newest note is the one in force.
+- **No loops**, and no note superseding itself.
+- **Only what is in force.** A note in the trash cannot be superseded, and a superseding note in the trash replaces nothing: throw the newer one away and the older one is in force again.
+
+`--list decision`, `gotcha` and `procedure` find each kind, superseded notes included -- that is where the history is found.
 
 ### Dependencies
 
@@ -895,8 +921,11 @@ The by default supported listing attributes, together with their respective alia
 - `cancelled`, `canceled` - Tasks that were dropped rather than finished.
 - `ready` - Open tasks with nothing outstanding blocking them.
 - `blocked` - Items blocked by something still open.
+- `decision`, `decisions` - Notes recording what was settled, and why.
+- `gotcha`, `gotchas` - Notes recording a trap, and how to avoid it.
+- `procedure`, `procedures` - Notes recording steps that work.
 
-A board can be named either bare or in the `@name` form the board view prints, so `--list release` and `--list @release` are equivalent. A term matching neither a board nor an attribute above is an error (`UNKNOWN_LIST_TERM`), not a silent no-op.
+A board can be named either bare or in the `@name` form the board view prints, so `--list release` and `--list @release` are equivalent. A board that shares its name with an attribute above is reached as `@name`, and the bare word stays the attribute: a board `@due` once made the due filter unreachable by either spelling. A term matching neither a board nor an attribute above is an error (`UNKNOWN_LIST_TERM`), not a silent no-op.
 
 Both are deliberate departures from taskbook, which accepted the bare form only and listed *every* board when a term matched nothing -- indistinguishable, from the output alone, from a filter that legitimately matched everything. That is a bad answer for a person and a worse one for a script or an agent, which cannot tell the two apart at all.
 

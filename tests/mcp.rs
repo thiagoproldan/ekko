@@ -322,3 +322,39 @@ fn the_handoff_prompt_is_offered_and_a_handoff_leads_the_prime() {
 
     fs::remove_dir_all(&home).ok();
 }
+
+/// Typed notes end to end over stdio: create takes the kinds and supersedes,
+/// prime lists what is in force, search filters by kind, and the schema an
+/// agent reads offers all of it.
+#[test]
+fn typed_notes_are_written_listed_and_searched_over_stdio() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
+            call(2, "create", json!({"kind": "decision", "text": "ship weekly"})),
+            call(3, "create", json!({"kind": "decision", "text": "ship on demand", "supersedes": 1})),
+            call(4, "create", json!({"kind": "procedure", "text": "Release: bump, tag, push"})),
+            call(5, "prime", json!({})),
+            call(6, "search", json!({"filters": ["decision"]})),
+            call(7, "create", json!({"kind": "gotcha", "text": "wrong kind", "supersedes": 3})),
+            request(8, "tools/list", json!({})),
+        ],
+    );
+
+    let prime = text(&replies["5"]);
+    assert!(prime.contains("Gotchas and procedures (1)\n   3. [procedure] Release: bump, tag, push"), "{prime}");
+    assert!(prime.contains("Decisions (1): search with the decision filter"), "{prime}");
+    assert!(!prime.contains("ship weekly"), "{prime}");
+    let found = text(&replies["6"]);
+    assert!(found.contains("1. [decision, superseded by 2] ship weekly"), "{found}");
+    assert!(text(&replies["7"]).starts_with("INVALID_INPUT: 3 is a procedure, and a gotcha supersedes only a gotcha"), "{}", replies["7"]);
+    let tools = replies["8"]["result"]["tools"].as_array().unwrap();
+    let create = tools.iter().find(|tool| tool["name"] == "create").unwrap();
+    assert!(create["inputSchema"]["properties"]["kind"]["enum"].as_array().unwrap().contains(&json!("gotcha")));
+    assert!(create["inputSchema"]["properties"]["supersedes"].is_object());
+
+    fs::remove_dir_all(&home).ok();
+}

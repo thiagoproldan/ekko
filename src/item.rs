@@ -164,6 +164,27 @@ pub struct Item {
     /// without handoffs is stored exactly as before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handoff: bool,
+    /// What a note records that stays true after the work around it is done:
+    /// a decision (what was settled, and why), a gotcha (a trap, and how to
+    /// avoid it) or a procedure (steps that work). Written on purpose, by the
+    /// user or an agent, never captured: the durable half of what a session
+    /// learns, where a handoff is the half that expires.
+    ///
+    /// Apart from `handoff` because the two age differently: a handoff is
+    /// demoted by the next one, and a decision stays one until another
+    /// supersedes it. Absent unless set, so a board without typed notes is
+    /// stored exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge: Option<Knowledge>,
+    /// The earlier note of the same kind this one replaces, by `uid`.
+    ///
+    /// Stored on the newer note only: the one it replaces is never rewritten,
+    /// and stays on the board as history. Whether a note is superseded is
+    /// worked out from the notes pointing at it, so trashing the newer one
+    /// makes the older one current again with nothing to undo -- the way a
+    /// trashed blocker stops blocking. By uid, for the reason `blocked_by` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -194,6 +215,8 @@ impl Item {
             blocked_by: None,
             attached_to: None,
             handoff: false,
+            knowledge: None,
+            supersedes: None,
             stashed: None,
             trashed: None,
             priority: Some(priority),
@@ -223,8 +246,41 @@ impl Item {
             blocked_by: None,
             attached_to: None,
             handoff: false,
+            knowledge: None,
+            supersedes: None,
             stashed: None,
             trashed: None,
+        }
+    }
+}
+
+/// The kinds of lasting knowledge a note can hold; see `Item::knowledge`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Knowledge {
+    Decision,
+    Gotcha,
+    Procedure,
+}
+
+impl Knowledge {
+    /// The word for it, as stored and as every view prints it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Knowledge::Decision => "decision",
+            Knowledge::Gotcha => "gotcha",
+            Knowledge::Procedure => "procedure",
+        }
+    }
+
+    /// The kind a word names, singular or plural, the way `--list` takes
+    /// `note` and `notes` alike.
+    pub fn from_word(word: &str) -> Option<Knowledge> {
+        match word {
+            "decision" | "decisions" => Some(Knowledge::Decision),
+            "gotcha" | "gotchas" => Some(Knowledge::Gotcha),
+            "procedure" | "procedures" => Some(Knowledge::Procedure),
+            _ => None,
         }
     }
 }
@@ -621,5 +677,22 @@ mod tests {
         let json = serde_json::to_value(&note).unwrap();
         assert_eq!(json["attachedTo"], "18cf-2");
         assert!(json.get("anchor").is_none(), "the old name was written back out");
+    }
+
+    /// A typed note stores its kind and what it supersedes as two plain
+    /// fields; a note without them stores neither key, so a board with no
+    /// typed notes is written exactly as before they existed.
+    #[test]
+    fn a_typed_note_adds_two_fields_and_an_untyped_one_adds_none() {
+        let plain = Item::new_note(1, "a note".into(), vec!["My Board".into()]);
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("knowledge").is_none() && json.get("supersedes").is_none(), "{json}");
+
+        let mut typed = plain.clone();
+        typed.knowledge = Some(Knowledge::Decision);
+        typed.supersedes = Some("18d0-1".into());
+        let json = serde_json::to_value(&typed).unwrap();
+        assert_eq!((json["knowledge"].as_str(), json["supersedes"].as_str()), (Some("decision"), Some("18d0-1")));
+        assert_eq!(serde_json::from_value::<Item>(json).unwrap(), typed);
     }
 }

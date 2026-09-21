@@ -49,7 +49,7 @@ Each session starts with the board's prime already in context -- in progress, re
 - next is the order to take work up. context gives items, several per call: blockers and the roots free to start, what they block, notes clipped unless detail is full.
 - Display ids are never reused, but a restore from the archive renumbers an item: hold the uid a write returns to follow it.
 - set_state is idempotent. A task blocked by open work cannot be completed (BLOCKED), and a task that completed work depends on cannot be reopened (COMPLETED_DEPENDENTS): finish the other side, or clear a wrong dependency with link. force_state overrides the rule and is only for when the user has said so.
-- Leave reasoning on the board: create a note with attached_to set to the task it explains. Before a long session is cleared, create kind handoff on the task in progress: where you stopped, why, the next step. Change text with edit's replace or append instead of resending it, with if_updated_at from your last read when the user may have edited it.
+- Leave reasoning on the board: create a note with attached_to set to the task it explains; what stays true is kind decision, gotcha or procedure. Before a long session is cleared, create kind handoff on the task in progress: where you stopped, why, the next step. Change text with edit's replace or append instead of resending it, with if_updated_at from your last read when the user may have edited it.
 - A write's reply names the tasks it set free (nowReady) or left waiting (nowBlocked): no next or prime is needed to find them.
 - batch applies several operations in one write, all or nothing; $1, $2 name the items created by the batch's first and second operations.
 - trash is recoverable for 30 days and still needs the user's consent. For work decided against, set_state cancelled keeps the record.
@@ -720,7 +720,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "search",
-            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, done, cancelled, ready, blocked, due, overdue, star, task, note, or a board name. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
+            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, done, cancelled, ready, blocked, due, overdue, star, task, note, decision, gotcha, procedure, or a board name -- as @name when a filter has the same one. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
             "inputSchema": object(json!({"project": project, "text": {"type": "string"}, "filters": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1}}), &[]),
             "annotations": read,
         },
@@ -747,7 +747,7 @@ fn tool_definitions() -> Value {
             "description": "Create a task or a note. The text is kept exactly as given. A note explaining a task should be attached_to it.",
             "inputSchema": object(json!({
                 "project": project,
-                "kind": {"type": "string", "enum": ["task", "note", "handoff"], "default": "task", "description": "handoff: a note attached_to an open task saying where this session stopped, what it decided and why, the files and the next step; it replaces the task's earlier handoff, and the next session's prime shows it."},
+                "kind": {"type": "string", "enum": ["task", "note", "handoff", "decision", "gotcha", "procedure"], "default": "task", "description": "handoff: a note attached_to an open task saying where this session stopped, what it decided and why, the files and the next step; it replaces the task's earlier handoff, and the next session's prime shows it. decision (what was settled, and why), gotcha (a trap, and how to avoid it), procedure (steps that work): a note that stays true after its task is done, loose or attached_to it, written when the user settles something or a session learns it; prime lists gotchas and procedures by first line, so lead with the point."},
                 "text": {"type": "string"},
                 "boards": {"type": "array", "items": {"type": "string"}},
                 "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Tasks only."},
@@ -755,6 +755,7 @@ fn tool_definitions() -> Value {
                 "phase": {"type": "string", "description": "A declared phase of the project."},
                 "blocked_by": {"type": "array", "items": item, "description": "Tasks only."},
                 "attached_to": {"type": ["integer", "string"], "description": "Notes only: the task this note explains."},
+                "supersedes": {"type": ["integer", "string"], "description": "A decision, gotcha or procedure only: the earlier note of the same kind this one replaces. It stays as history, marked superseded, and prime stops showing it."},
                 "starred": {"type": "boolean"}
             }), &["text"]),
             "annotations": write,
@@ -786,7 +787,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "update",
-            "description": "Change an item's boards (replaced), priority, due date (null clears), phase (null moves it to the project root) or star.",
+            "description": "Change an item's boards (replaced), priority, due date (null clears), phase (null moves it to the project root), star, or a note's kind.",
             "inputSchema": object(json!({
                 "project": project,
                 "item": item,
@@ -794,18 +795,20 @@ fn tool_definitions() -> Value {
                 "priority": {"type": "integer", "minimum": 1, "maximum": 3},
                 "due": {"type": ["string", "null"]},
                 "phase": {"type": ["string", "null"]},
-                "starred": {"type": "boolean"}
+                "starred": {"type": "boolean"},
+                "kind": {"type": "string", "enum": ["note", "decision", "gotcha", "procedure"], "description": "Notes only: types a note, or makes it an ordinary one with note. Retype a note the user wrote only with their consent."}
             }), &["item"]),
             "annotations": write,
         },
         {
             "name": "link",
-            "description": "Exactly one of: blocked_by, replacing what the item is blocked by (empty clears it); or attached_to, attaching a note to the task it explains (null detaches).",
+            "description": "Exactly one of: blocked_by, replacing what the item is blocked by (empty clears it); attached_to, attaching a note to the task it explains (null detaches); or supersedes, the earlier note of the same kind a decision, gotcha or procedure replaces (null clears).",
             "inputSchema": object(json!({
                 "project": project,
                 "item": item,
                 "blocked_by": {"type": "array", "items": item},
-                "attached_to": {"type": ["integer", "string", "null"]}
+                "attached_to": {"type": ["integer", "string", "null"]},
+                "supersedes": {"type": ["integer", "string", "null"]}
             }), &["item"]),
             "annotations": write,
         },

@@ -51,6 +51,8 @@ const HELP: &str = r#"
       --move, -m          Move item between boards
       --next [N]          List what to take up next, best first
       --note, -n          Create note
+      --kind <KIND>       With --note: a decision, gotcha or procedure
+      --supersedes <ID>   With --kind: the earlier note of that kind it replaces
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
       --prime             Summarise the board for picking work back up
@@ -94,6 +96,7 @@ const HELP: &str = r#"
       $ ekko --move @1 cooking
       $ ekko --next 5
       $ ekko --note @coding Mergesort worse-case O(nlogn)
+      $ ekko --note --kind gotcha Run the migrations before the tests
       $ ekko --prime
       $ ekko --priority @3 2
       $ ekko --restore 4
@@ -393,7 +396,7 @@ fn dispatch(
         return Ok(vec![ekko.restore_items(&cli.input)?]);
     }
     if cli.note {
-        return Ok(vec![ekko.create_note_in(&cli.input, cli.phase.as_deref())?]);
+        return Ok(vec![ekko.create_note_in(&cli.input, cli.phase.as_deref(), cli.kind.as_deref(), cli.supersedes.as_deref())?]);
     }
     if cli.delete {
         return Ok(vec![ekko.delete_items(&cli.input)?]);
