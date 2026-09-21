@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ekko --prime"
+            "command": "ekko --prime --hook"
           }
         ]
       }

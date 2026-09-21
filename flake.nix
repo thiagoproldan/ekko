@@ -57,7 +57,7 @@
               inherit (cargoToml.package) version;
               mcpServers.ekko = manifest.mcpServers.ekko // { command = "${ekko}/bin/ekko"; };
               hooks.SessionStart = [
-                { hooks = [ { type = "command"; command = "${ekko}/bin/ekko --prime"; } ]; }
+                { hooks = [ { type = "command"; command = "${ekko}/bin/ekko --prime --hook"; } ]; }
               ];
             };
           in
@@ -72,6 +72,7 @@
             util-linux # flock(1): the storage tests spawn a real external lock holder
             rust-analyzer
             pkg-config # several crates (e.g. clipboard backends) probe system libs at build time
+            python3 # the agent evals under evals/agent/
           ];
 
           # Written to stderr, not stdout: this shell may be entered non-

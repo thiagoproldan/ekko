@@ -26,3 +26,4 @@ snap
 
 # UI reference screenshots -- third-party, kept locally
 /imgs_base_ui
+__pycache__/
