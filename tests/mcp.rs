@@ -445,14 +445,14 @@ fn the_board_is_served_as_resources_by_a_server_of_their_own() {
         reply["result"]["resources"].as_array().unwrap().iter().map(|r| r["uri"].as_str().unwrap().to_string()).collect()
     };
     let listed = live.ask(request(3, "resources/list", json!({})));
-    assert_eq!(uris(&listed), ["prime://", "item://1", "item://4"], "closed work and plain notes are left out");
+    assert_eq!(uris(&listed), ["prime://board", "item://1", "item://4"], "closed work and plain notes are left out");
     assert_eq!(listed["result"]["resources"][1]["name"], "1 \u{b7} an open task");
 
     let text_of = |reply: &Value| reply["result"]["contents"][0]["text"].as_str().unwrap_or_else(|| panic!("{reply}")).to_string();
     assert!(text_of(&live.ask(request(4, "resources/read", json!({"uri": "item://1"})))).contains("an open task"));
     let unlisted = text_of(&live.ask(request(5, "resources/read", json!({"uri": "item://2"}))));
     assert!(unlisted.contains("a finished task"), "an unlisted item still reads: {unlisted}");
-    assert!(text_of(&live.ask(request(6, "resources/read", json!({"uri": "prime://"})))).starts_with("ekko \u{b7} "));
+    assert!(text_of(&live.ask(request(6, "resources/read", json!({"uri": "prime://board"})))).starts_with("ekko \u{b7} "));
     assert_eq!(live.ask(request(7, "resources/read", json!({"uri": "item://99"})))["error"]["code"], -32002);
     assert_eq!(live.ask(request(8, "resources/templates/list", json!({})))["result"]["resourceTemplates"], json!([]));
 
@@ -467,7 +467,7 @@ fn the_board_is_served_as_resources_by_a_server_of_their_own() {
     assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stderr));
     let notice = live.next(std::time::Duration::from_secs(10)).expect("no list_changed within 10 seconds of the write");
     assert_eq!(notice, json!({"jsonrpc": "2.0", "method": "notifications/resources/list_changed"}));
-    assert_eq!(uris(&live.ask(request(9, "resources/list", json!({})))), ["prime://", "item://1", "item://4", "item://5"]);
+    assert_eq!(uris(&live.ask(request(9, "resources/list", json!({})))), ["prime://board", "item://1", "item://4", "item://5"]);
 
     // A write that leaves the list as it was is not announced.
     let starred = Command::new(env!("CARGO_BIN_EXE_ekko")).args(["--star", "1"]).env("HOME", &home).env("EKKO_DIR", &home).output().unwrap();

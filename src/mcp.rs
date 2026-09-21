@@ -15,7 +15,7 @@
 //! disk with no runtime.
 //!
 //! With `--resources`, a second server offers the board as resources instead,
-//! `prime://` and `item://<id>`, so a person can mention an item with @ and
+//! `prime://board` and `item://<id>`, so a person can mention an item with @ and
 //! Claude Code attaches it to the prompt without the agent spending a call.
 //!
 //! Logs, if any, go to stderr: stdout carries protocol messages and nothing
@@ -93,6 +93,12 @@ pub enum Mode {
 /// How often the resources server looks at the board's revision. The writes
 /// go through the plugin's server, so this one hears of none of them.
 const POLL: Duration = Duration::from_secs(2);
+
+/// The prime as a resource. Not `prime://`: Claude Code 2.1.278 extracts a
+/// mention with a pattern that ends in `\b`, so a URI ending in a symbol is
+/// cut back to its last letter, `@ekko:prime://` is read as `ekko:prime`,
+/// and nothing by that name is listed.
+const PRIME_URI: &str = "prime://board";
 
 struct RpcError {
     code: i64,
@@ -312,7 +318,7 @@ impl Server {
         Ok(resources)
     }
 
-    /// A resource's text: `prime://` reads as the prime tool answers, and
+    /// A resource's text: `prime://board` reads as the prime tool answers, and
     /// `item://<id>` as context does, concise -- any item, listed or not.
     fn read(&self, params: &Value) -> Result<Value, RpcError> {
         let uri = params
@@ -320,7 +326,7 @@ impl Server {
             .and_then(Value::as_str)
             .ok_or_else(|| RpcError::new(-32602, "Invalid params: resources/read needs a uri"))?;
         let (ekko, location) = self.open(None).map_err(resource_error)?;
-        let text = if uri == "prime://" {
+        let text = if uri == PRIME_URI {
             agent::prime(&ekko, &Self::label(&location)).map_err(resource_error)?.text()
         } else if let Some(id) = uri.strip_prefix("item://").filter(|id| !id.is_empty()) {
             let read = agent::contexts(&ekko, &[id.to_string()])
@@ -786,7 +792,7 @@ fn supported() -> Vec<&'static str> {
 /// The resource list `resources/list` answers with, in the order a person
 /// scans it: the prime first, then the items by id.
 fn resource_list(ekko: &Ekko) -> Result<Vec<Value>, EkkoError> {
-    let prime = json!({"uri": "prime://", "name": "prime \u{b7} the board's resume view", "mimeType": "text/plain"});
+    let prime = json!({"uri": PRIME_URI, "name": "prime \u{b7} the board's resume view", "mimeType": "text/plain"});
     let items = agent::mentionable(ekko)?
         .into_iter()
         .map(|(id, name)| json!({"uri": format!("item://{id}"), "name": name, "mimeType": "text/plain"}));
