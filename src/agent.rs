@@ -724,9 +724,15 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         entry.notes.retain(|note| note.superseded_by.is_empty() && !knowledge.iter().any(|shown| shown.id == note.id));
     }
 
+    // Under a handoff, only the loose notes changed after it: an older one is
+    // history the last session had the chance to carry into its handoff, and
+    // quoting it at every start cost a fifth of the prime and once led a
+    // session to recommend work long done. Without a handoff, the newest.
+    let since = handoff.as_ref().map_or(i64::MIN, |shown| shown.updated_at);
     let mut notes: Vec<&Item> = all
         .values()
         .filter(|item| visible(item) && !item.is_task && item.attached_to.is_none() && item.knowledge.is_none())
+        .filter(|item| updated(item) > since)
         .collect();
     notes.sort_by_key(|item| (std::cmp::Reverse(updated(item)), std::cmp::Reverse(item.id)));
     let recent_notes = notes.into_iter().take(RECENT_NOTES).map(|note| reader.note_ref(note)).collect();
@@ -1052,7 +1058,7 @@ pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoErr
          - Files and lines touched or about to be, as path:line.\n\
          - The next step, concrete enough to start on without asking. When it needs the user's word first (it spends their quota, publishes, deletes, or is their choice), write only that the next session asks them whether to do it, and leave out how: a plan on the page reads as leave to start.\n\
          - Open questions for the user.\n\
-         Leave out what the board or the code already says. A handoff replaces the task's earlier one, which stays on the task as an ordinary note. Then tell the user it is safe to /clear, and that after it any message, even just \"continue\", starts the next session: Claude Code never starts a turn on its own.\n"
+         Leave out what the board or the code already says, and name by id any note the next session must read: the prime leaves out loose notes older than the handoff. A handoff replaces the task's earlier one, which stays on the task as an ordinary note. Then tell the user it is safe to /clear, and that after it any message, even just \"continue\", starts the next session: Claude Code never starts a turn on its own.\n"
     );
     // A handoff written minutes ago is most likely this session's own, and a
     // second one would demote it, or land on a task the session never
@@ -2416,6 +2422,34 @@ mod tests {
         assert!(text.contains("    > 1. run the tests\n    > 2. wire the flag\n"), "{text}");
         assert!(!text.contains("old news"), "{text}");
         assert!(!line_ids(&text).contains(&4), "the handoff is not listed again as a note: {text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Under a handoff, the recent notes are the loose notes changed after it:
+    /// what came before is history the handoff had the chance to take in.
+    /// Without one, the newest are listed as always, and a note edited after
+    /// the handoff counts as new.
+    #[test]
+    fn a_handoff_leaves_out_the_loose_notes_older_than_it() {
+        let (ekko, dir) = board("handoff-notes");
+        let tick = || std::thread::sleep(std::time::Duration::from_millis(3));
+        ekko.create_task(&words(&["the work"])).unwrap();
+        ekko.create_note(&words(&["written before the handoff"])).unwrap();
+        ekko.create_note(&words(&["also before, edited after"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        let before = prime(&ekko, "default board").unwrap();
+        assert_eq!(before.recent_notes.iter().map(|note| note.id).collect::<Vec<_>>(), vec![3, 2]);
+
+        tick();
+        hand_over(&ekko, 1, "Stopped after the parser.");
+        tick();
+        ekko.create_note(&words(&["written after the handoff"])).unwrap();
+        ekko.edit_description(&words(&["@3", "also before, edited after it"])).unwrap();
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.contains("\nRecent notes, not attached to a task\n   3. also before, edited after it\n   5. written after the handoff\n"), "{text}");
+        assert!(!text.contains("written before the handoff"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
