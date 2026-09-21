@@ -100,6 +100,7 @@ const HELP: &str = r#"
       $ ekko --next 5
       $ ekko --note @coding Mergesort worse-case O(nlogn)
       $ ekko --note --kind gotcha Run the migrations before the tests
+      $ ekko --note @coding - < why.txt
       $ ekko --prime
       $ ekko --priority @3 2
       $ ekko --restore 4
@@ -322,6 +323,28 @@ fn read_hook_input() -> String {
     input
 }
 
+/// `input` with a lone `-` replaced by the description read from stdin, for
+/// --task, --note and --edit. A terminal on stdin is refused rather than
+/// waited on: the `-` is for a pipe or a heredoc.
+fn described(input: &[String]) -> Result<Vec<String>, EkkoError> {
+    use std::io::{IsTerminal, Read as _};
+    if !ekko::reads_stdin(input) {
+        return Ok(input.to_vec());
+    }
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(EkkoError::InvalidInput(
+            "- reads the description from stdin: pipe it in, or use a heredoc".into(),
+        ));
+    }
+    let mut text = String::new();
+    stdin
+        .lock()
+        .read_to_string(&mut text)
+        .map_err(|e| EkkoError::InvalidInput(format!("could not read the description from stdin: {e}")))?;
+    Ok(ekko::with_description(input, &text))
+}
+
 /// Priority order copied from index.js's chain of `if (flags.x)` checks --
 /// when more than one command flag is somehow set at once, the first
 /// match in this exact order wins, the rest are silently ignored, same as
@@ -399,13 +422,13 @@ fn dispatch(
         return Ok(vec![ekko.display_archive()?]);
     }
     if cli.task {
-        return Ok(vec![ekko.create_task_in(&cli.input, cli.phase.as_deref())?]);
+        return Ok(vec![ekko.create_task_in(&described(&cli.input)?, cli.phase.as_deref())?]);
     }
     if cli.restore {
         return Ok(vec![ekko.restore_items(&cli.input)?]);
     }
     if cli.note {
-        return Ok(vec![ekko.create_note_in(&cli.input, cli.phase.as_deref(), cli.kind.as_deref(), cli.supersedes.as_deref())?]);
+        return Ok(vec![ekko.create_note_in(&described(&cli.input)?, cli.phase.as_deref(), cli.kind.as_deref(), cli.supersedes.as_deref())?]);
     }
     if cli.delete {
         return Ok(vec![ekko.delete_items(&cli.input)?]);
@@ -441,7 +464,7 @@ fn dispatch(
         return Ok(vec![ekko.list_by_attributes(&cli.input)?, ekko.display_stats()?]);
     }
     if cli.edit {
-        return Ok(vec![ekko.edit_description(&cli.input)?]);
+        return Ok(vec![ekko.edit_description(&described(&cli.input)?)?]);
     }
     if cli.r#move {
         return Ok(vec![ekko.move_boards(&cli.input)?]);

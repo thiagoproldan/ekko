@@ -170,6 +170,7 @@ $ ekko --help
       $ ekko --next 5
       $ ekko --note @coding Mergesort worse-case O(nlogn)
       $ ekko --note --kind gotcha Run the migrations before the tests
+      $ ekko --note @coding - < why.txt
       $ ekko --prime
       $ ekko --priority @3 2
       $ ekko --restore 4
@@ -408,6 +409,17 @@ To create a new note use the `--note`/`-n` option with your note's body followin
 
 ```
 $ ekko -n Mergesort worse-case O(nlogn)
+```
+
+### Description from stdin
+
+A lone `-` in place of the description reads it from stdin, verbatim. Apostrophes, quotes and newlines are kept, and nothing in the text is read as a board, a priority or a due date. It works with `--task`, `--note` and `--edit`, and boards and options still go on the command line. A `-` among other words is just a word.
+
+```
+$ ekko -n @coding - < why.txt
+$ ekko -e @3 - <<'EOF'
+It's the user's call, not the agent's.
+EOF
 ```
 
 ### Create Board

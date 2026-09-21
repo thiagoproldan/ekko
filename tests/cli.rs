@@ -230,6 +230,48 @@ fn a_typed_note_takes_its_kind_from_the_flags_beside_note() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// A lone `-` takes the description from stdin, verbatim: apostrophes,
+/// quotes and newlines kept, and a first word like `@x` or `d:` not read as a
+/// board or a due date. A `-` among other words is only a word, and stdin is
+/// never read for it.
+#[test]
+fn a_lone_dash_reads_the_description_from_stdin() {
+    use std::io::Write as _;
+    let dir = temp_ekko_dir();
+    let ekko = |args: &[&str], stdin: &str| -> serde_json::Value {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("failed to run ekko");
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        serde_json::from_slice(&output.stdout).expect("a --json reply")
+    };
+
+    let text = "it's the user's \"call\"\nsecond line";
+    let task = ekko(&["--task", "@coding", "p:2", "-"], &format!("{text}\n"));
+    assert_eq!(task["item"]["description"], text, "{task}");
+    assert_eq!((task["item"]["boards"][0].as_str(), task["item"]["priority"].as_u64()), (Some("@coding"), Some(2)));
+
+    let note = ekko(&["--note", "--kind", "gotcha", "-"], "@x d:soon is not a board or a date");
+    assert_eq!(note["item"]["description"], "@x d:soon is not a board or a date", "{note}");
+    assert_eq!(note["item"]["boards"][0], "My Board");
+
+    let edited = ekko(&["--edit", "@1", "-"], "don't drop the apostrophe");
+    assert_eq!(edited["item"]["description"], "don't drop the apostrophe", "{edited}");
+
+    let literal = ekko(&["--task", "fix", "-", "now"], "never read");
+    assert_eq!(literal["item"]["description"], "fix - now", "{literal}");
+
+    let empty = ekko(&["--task", "-"], "  \n");
+    assert_eq!(empty["code"], "MISSING_DESC", "{empty}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// The plugin's task-list hook through the real binary, in a project found
 /// from the folder, as a session runs it: the event on stdin, Claude Code's
 /// config directory from CLAUDE_CONFIG_DIR, the list written under the

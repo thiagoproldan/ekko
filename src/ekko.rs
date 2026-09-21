@@ -599,6 +599,10 @@ impl Ekko {
         let mut boards = Vec::new();
         let mut words = Vec::new();
         for token in input {
+            if let Some(text) = verbatim(token) {
+                words.push(text.to_string());
+                continue;
+            }
             if is_priority_opt(token) || is_due_opt(token) {
                 continue;
             }
@@ -1135,7 +1139,7 @@ impl Ekko {
         let mut data = self.storage.get()?;
         let id = self.validate_ids(&[id_str], &data)?[0];
 
-        let new_description = rest.into_iter().cloned().collect::<Vec<_>>().join(" ");
+        let new_description = rest.into_iter().map(|t| verbatim(t).unwrap_or(t)).collect::<Vec<_>>().join(" ");
         if new_description.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
@@ -2029,6 +2033,33 @@ pub(crate) fn phase_inversion(order: &HashMap<&str, usize>, blocked: &Item, bloc
         blocker: blocker.id,
         blocker_phase: blocker_phase.to_string(),
     })
+}
+
+/// `-` standing alone for the description reads it from stdin, so text with
+/// apostrophes, quotes or newlines never meets the shell's quoting.
+pub const STDIN_WORD: &str = "-";
+
+/// Whether `input` asks for its description on stdin: exactly one `-`, and
+/// every other token a tag or an option. A `-` among other words, as in
+/// `fix - now`, stays an ordinary word.
+pub fn reads_stdin(input: &[String]) -> bool {
+    input.iter().filter(|t| *t == STDIN_WORD).count() == 1
+        && input.iter().all(|t| {
+            t == STDIN_WORD || (t.starts_with('@') && t.len() > 1) || is_priority_opt(t) || is_due_opt(t)
+        })
+}
+
+/// `input` with its `-` replaced by `text`, marked verbatim: a NUL never
+/// comes through argv, so the marked token cannot be mistaken for a typed
+/// one, and a description starting with `@` or `d:` is not read as a board
+/// or a due date.
+pub fn with_description(input: &[String], text: &str) -> Vec<String> {
+    let marked = format!("\0{}", text.trim());
+    input.iter().map(|t| if t == STDIN_WORD { marked.clone() } else { t.clone() }).collect()
+}
+
+fn verbatim(token: &str) -> Option<&str> {
+    token.strip_prefix('\0')
 }
 
 fn is_priority_opt(token: &str) -> bool {
