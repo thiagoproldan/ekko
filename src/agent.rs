@@ -80,8 +80,13 @@ const NOTES_KEPT: usize = 3;
 const KNOWLEDGE_SHOWN: usize = 5;
 /// Where a prime says the gotchas and procedures it did not list are.
 const KNOWLEDGE_REST: &str = "search with the gotcha or procedure filter";
-/// The longest a "+N more" line gets, reserved for each section a cut leaves short.
-const MORE_LINE: usize = 48;
+/// The longest a "+N more" line gets, reserved for each section a cut leaves
+/// short: the indent, a count of up to six digits, and the longest place to
+/// look, "search with the blocked filter".
+const MORE_LINE: usize = 52;
+/// Items each line of "Needs attention" names before it counts the rest. The
+/// block is outside the prime's budget, so it has to stay short on any board.
+const ATTENTION_SHOWN: usize = 10;
 /// The most a resumed session is told about what moved before the whole
 /// prime is cheaper to read than the list.
 const RESUME_CHANGES: usize = 2_000;
@@ -1507,6 +1512,17 @@ fn join(ids: &[u32]) -> String {
     ids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
 }
 
+/// The first `ATTENTION_SHOWN` of `items`, joined by `separator`, and a count
+/// of the rest with where to find them.
+fn capped(items: Vec<String>, separator: &str, rest: &str) -> String {
+    let more = items.len().saturating_sub(ATTENTION_SHOWN);
+    let mut text = items.into_iter().take(ATTENTION_SHOWN).collect::<Vec<_>>().join(separator);
+    if more > 0 {
+        let _ = write!(text, "{separator}+{more} more{rest}");
+    }
+    text
+}
+
 /// "1 open task", "3 open tasks".
 fn open_tasks(n: usize) -> String {
     if n == 1 { "1 open task".to_string() } else { format!("{n} open tasks") }
@@ -1621,7 +1637,7 @@ impl Prime {
         let mut attention = Vec::new();
         if !self.broken.is_empty() {
             let pairs: Vec<String> = self.broken.iter().map(|(task, blocker)| format!("{task} \u{21e0} {blocker}")).collect();
-            attention.push(format!("done work still waiting on open work: {}", pairs.join("; ")));
+            attention.push(format!("done work still waiting on open work: {}", capped(pairs, "; ", "")));
         }
         if !self.inversions.is_empty() {
             let pairs: Vec<String> = self
@@ -1629,15 +1645,16 @@ impl Prime {
                 .iter()
                 .map(|i| format!("{} ({}) \u{21e0} {} ({})", i.blocked, i.blocked_phase, i.blocker, i.blocker_phase))
                 .collect();
-            attention.push(format!("dependencies against the phase order: {}", pairs.join("; ")));
+            attention.push(format!("dependencies against the phase order: {}", capped(pairs, "; ", "")));
         }
         if !self.overdue.is_empty() {
-            attention.push(format!("overdue: {}", join(&self.overdue)));
+            let ids = self.overdue.iter().map(u32::to_string).collect();
+            attention.push(format!("overdue: {}", capped(ids, ", ", ": search with the overdue filter")));
         }
         if !self.freed_by_cancelling.is_empty() {
             let pairs: Vec<String> =
                 self.freed_by_cancelling.iter().map(|(task, blocker)| format!("{task} \u{21e0} {blocker}")).collect();
-            attention.push(format!("ready only because what it waited on was cancelled: {}", pairs.join("; ")));
+            attention.push(format!("ready only because what it waited on was cancelled: {}", capped(pairs, "; ", "")));
         }
         if !attention.is_empty() {
             let _ = writeln!(out, "\nNeeds attention");
@@ -2368,6 +2385,28 @@ mod tests {
         assert!(text.chars().count() <= PRIME_BUDGET, "{} characters:\n{text}", text.chars().count());
         assert!(text.contains("Ready, best first (80)") && text.contains("more: next lists them"), "{text}");
         assert!(text.ends_with("context <id>.\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// "Needs attention" sits outside the budget, so each of its lines names
+    /// a few items and counts the rest: 2,000 overdue tasks used to make an
+    /// 11,000-character prime, past what the SessionStart hook keeps.
+    #[test]
+    fn needs_attention_stays_short_on_a_board_of_overdue_work() {
+        let (ekko, dir) = board("overdue");
+        let data: ItemMap = (1..=2_000)
+            .map(|id| {
+                let mut item = Item::new_task(id, format!("overdue task {id}"), vec!["My Board".to_string()], 1);
+                item.due_date = Some("2020-01-01".to_string());
+                (id, item)
+            })
+            .collect();
+        ekko.storage.set(&data).unwrap();
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.chars().count() <= PRIME_BUDGET, "{} characters:\n{text}", text.chars().count());
+        assert!(text.contains("overdue: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, +1990 more: search with the overdue filter"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
