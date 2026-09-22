@@ -49,6 +49,13 @@ const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(5000);
 /// while it waits, so the margin is generous.
 const TEMP_FILE_ABANDONED: Duration = Duration::from_secs(600);
 
+/// The versions of storage.json `history/` keeps: the newest this many, and,
+/// of the older ones, the newest of each day for `HISTORY_DAYS` days -- the
+/// last hour of work to undo a bad write, and a few weeks to go back to.
+/// About 64 versions, 21 MB on a board of 330 KB.
+const HISTORY_RECENT: usize = 50;
+const HISTORY_DAYS: u64 = 14;
+
 /// Boards/timeline grouping iterates this in id order; a `BTreeMap` gives
 /// that for free and matches the JS version's behavior, where plain objects
 /// with integer-like string keys (`{"1": ..., "2": ...}`) iterate in
@@ -94,6 +101,8 @@ pub struct Storage {
     archive_file: PathBuf,
     temp_dir: PathBuf,
     lock_file: PathBuf,
+    /// Where the versions of storage.json a write replaced are kept.
+    history_dir: PathBuf,
 }
 
 /// Proof of a held lock. Releases it on drop, including when a caller
@@ -126,6 +135,7 @@ impl Storage {
             archive_file: archive_dir.join("archive.json"),
             temp_dir,
             lock_file: ekko_dir.join(".lock"),
+            history_dir: ekko_dir.join("history"),
         };
 
         storage.clean_temp_dir()?;
@@ -195,7 +205,32 @@ impl Storage {
     }
 
     pub fn set(&self, data: &ItemMap) -> Result<(), StorageError> {
+        self.keep_version();
         write_atomic(&self.storage_file, &self.temp_dir, data)
+    }
+
+    /// Keeps the version of storage.json this write is about to replace, in
+    /// `history/`, since the board is kept out of git and every write
+    /// replaces the file whole. A hard link costs no copy: a write replaces
+    /// the file by rename, so the old version's inode is never written again.
+    /// Named by that version's modification time, which orders them, and
+    /// pruned on the way past (see `HISTORY_RECENT`). Best effort: a history
+    /// that cannot be kept never stops the write it would have recorded.
+    fn keep_version(&self) {
+        let Ok(modified) = fs::metadata(&self.storage_file).and_then(|meta| meta.modified()) else { return };
+        let Ok(at) = modified.duration_since(UNIX_EPOCH) else { return };
+        if fs::create_dir_all(&self.history_dir).is_err() {
+            return;
+        }
+        let _ = fs::hard_link(&self.storage_file, self.history_dir.join(format!("{}.json", at.as_nanos())));
+        let Ok(entries) = fs::read_dir(&self.history_dir) else { return };
+        let kept: Vec<u128> = entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.strip_suffix(".json")?.parse().ok())
+            .collect();
+        for version in stale_versions(kept, SystemTime::now()) {
+            let _ = fs::remove_file(self.history_dir.join(format!("{version}.json")));
+        }
     }
 
     pub fn set_archive(&self, data: &ItemMap) -> Result<(), StorageError> {
@@ -489,6 +524,26 @@ impl Storage {
         }
         replace_durably(&path, &self.temp_dir, content.as_bytes())
     }
+}
+
+/// Of the versions in history, by modification time in nanoseconds, the ones
+/// to let go of at `now`: past the newest `HISTORY_RECENT`, all but the
+/// newest of each day, and every one older than `HISTORY_DAYS` days.
+fn stale_versions(mut versions: Vec<u128>, now: SystemTime) -> Vec<u128> {
+    const DAY: u128 = 86_400_000_000_000;
+    let now = now.duration_since(UNIX_EPOCH).map(|at| at.as_nanos()).unwrap_or(0);
+    versions.sort_unstable_by(|a, b| b.cmp(a));
+    let mut days_kept = Vec::new();
+    let mut stale = Vec::new();
+    for version in versions.into_iter().skip(HISTORY_RECENT) {
+        let age_days = now.saturating_sub(version) / DAY;
+        if age_days < u128::from(HISTORY_DAYS) && !days_kept.contains(&age_days) {
+            days_kept.push(age_days);
+        } else {
+            stale.push(version);
+        }
+    }
+    stale
 }
 
 fn read_map(path: &Path) -> Result<ItemMap, StorageError> {
@@ -938,5 +993,46 @@ mod tests {
 
         assert_eq!(storage.last_journal_rev().unwrap(), 4);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A write keeps the version it replaced, byte for byte, in history; the
+    /// first write has none to keep.
+    #[test]
+    fn a_write_keeps_the_version_it_replaces() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        let history = || fs::read_dir(dir.join("history")).map(|entries| entries.count()).unwrap_or(0);
+        storage.set(&BTreeMap::new()).unwrap();
+        assert_eq!(history(), 0, "nothing was there to keep");
+
+        let before = fs::read(dir.join("storage").join("storage.json")).unwrap();
+        let mut data = BTreeMap::new();
+        data.insert(1, Item::new_task(1, "kept".into(), vec!["My Board".into()], 1));
+        storage.set(&data).unwrap();
+
+        let kept: Vec<PathBuf> = fs::read_dir(dir.join("history")).unwrap().map(|entry| entry.unwrap().path()).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(fs::read(&kept[0]).unwrap(), before, "the replaced version, whole");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// History keeps the newest 50 versions, then the newest of each day for
+    /// two weeks, and nothing older.
+    #[test]
+    fn history_keeps_recent_versions_and_one_a_day() {
+        const MINUTE: u128 = 60_000_000_000;
+        const DAY: u128 = 1_440 * MINUTE;
+        let now = UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+        let at = now.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let recent: Vec<u128> = (0..60).map(|k| at - k * MINUTE).collect();
+        let older = vec![at - 2 * DAY, at - 2 * DAY - MINUTE, at - 3 * DAY, at - 20 * DAY];
+        let versions: Vec<u128> = recent.iter().chain(&older).copied().collect();
+
+        let mut stale = stale_versions(versions, now);
+        stale.sort_unstable();
+        let mut expected: Vec<u128> = recent[51..].to_vec();
+        expected.extend([at - 2 * DAY - MINUTE, at - 20 * DAY]);
+        expected.sort_unstable();
+        assert_eq!(stale, expected, "past the newest 50, one a day for 14 days");
     }
 }

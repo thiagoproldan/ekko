@@ -887,6 +887,16 @@ To restore one or more items, use the `--restore`/`-r` option followed by the id
 $ ekko -r 1 2
 ```
 
+### Board History
+
+Every write replaces `storage.json` whole, and a project's board is kept out of git, so Ekko keeps the versions a write replaced in `.ekko/history/`, named by the time each was written: the last 50, then the newest of each day for two weeks. They are hard links to files no write touches again, so keeping them costs no copy; on a board of 330 KB they come to about 21 MB.
+
+To go back to one, stop whatever writes to the board -- Claude Code sessions included -- and copy it over `.ekko/storage/storage.json`. The revision counter is left as it is, so the next write carries on past it; a session holding a cursor from before the copy should prime again.
+
+```
+$ cp .ekko/history/1790110000000000000.json .ekko/storage/storage.json
+```
+
 ### List Items
 
 To list a group of items where each item complies with a specific set of attributes, use the `--list`/`-l` option followed by the desired attributes. Board names along with item traits can be considered valid listing attributes. For example to list all items that belong to the default `myboard` and are pending tasks, the following could be used;
