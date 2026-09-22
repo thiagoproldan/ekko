@@ -41,11 +41,13 @@ const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// How old a leftover file in the temp directory has to be before
 /// `clean_temp_dir` treats it as debris from a crashed write rather than
-/// an in-flight one. Nothing to do with the lock -- `write_atomic` creates
-/// its temp file and renames it within microseconds, so anything still
-/// sitting there after a full second belongs to a process that died
-/// between the two steps.
-const TEMP_FILE_ABANDONED: Duration = Duration::from_millis(1000);
+/// an in-flight one. Nothing to do with the lock. A write creates its temp
+/// file, fsyncs it and renames it, and the fsync alone can stall past a
+/// second on a busy btrfs: at one second, the next process to open the
+/// board -- a hook, or the resources server every two seconds -- could
+/// delete a live writer's file and fail its rename. Debris costs nothing
+/// while it waits, so the margin is generous.
+const TEMP_FILE_ABANDONED: Duration = Duration::from_secs(600);
 
 /// Boards/timeline grouping iterates this in id order; a `BTreeMap` gives
 /// that for free and matches the JS version's behavior, where plain objects
@@ -137,10 +139,10 @@ impl Storage {
     /// needs to stay lock-free for read-only commands. That means it can
     /// run concurrently with another live process's in-flight
     /// `write_atomic`, so it only removes temp files old enough that they
-    /// cannot plausibly still be someone's in-progress write (that write
-    /// is one `fs::write` call to a fresh, uniquely-named file -- there
-    /// and gone in well under this margin under any real load); a fresh
-    /// temp file is left alone rather than risk deleting live work.
+    /// cannot plausibly still be someone's in-progress write (one fresh,
+    /// uniquely-named file, written, fsynced and renamed -- gone in well
+    /// under this margin under any real load); a fresh temp file is left
+    /// alone rather than risk deleting live work.
     fn clean_temp_dir(&self) -> Result<(), StorageError> {
         for entry in fs::read_dir(&self.temp_dir)? {
             let entry = entry?;
