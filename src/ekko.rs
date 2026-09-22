@@ -1984,6 +1984,28 @@ impl Ekko {
         let cleaned = remove_duplicates(
             names.iter().map(|n| n.trim_start_matches('@').to_string()).collect(),
         );
+        // Every item's phase is a declared one -- create and update refuse
+        // any other -- so a phase leaves the sequence only once it holds
+        // nothing, or its items would drop out of the roadmap and the filters.
+        let data = self.storage.get()?;
+        let mut held: Vec<(&str, u32)> = data
+            .values()
+            .filter(|item| item.trashed.is_none())
+            .filter_map(|item| Some((item.phase.as_deref()?, item.id)))
+            .filter(|(phase, _)| !cleaned.iter().any(|name| name == phase))
+            .collect();
+        if let Some(&(phase, _)) = held.iter().min() {
+            held.retain(|(other, _)| *other == phase);
+            let mut ids: Vec<u32> = held.iter().map(|(_, id)| *id).collect();
+            ids.sort_unstable();
+            let shown: Vec<String> = ids.iter().take(10).map(u32::to_string).collect();
+            let more = if ids.len() > 10 { format!(" and {} more", ids.len() - 10) } else { String::new() };
+            let what = if ids.len() == 1 { "that item" } else { "those items" };
+            return Err(EkkoError::InvalidInput(format!(
+                "Phase {phase} still holds {}{more}, so it cannot leave the sequence: move {what} to another phase, or to the root with no phase, first",
+                shown.join(", ")
+            )));
+        }
         let moved = self.storage.get_phases()? != cleaned;
         self.storage.set_phases(&cleaned)?;
         if moved {
@@ -2746,6 +2768,27 @@ mod tests {
         ekko.set_phases(&words(&["setup", "testing", "ship"])).unwrap();
 
         assert_eq!(ekko.storage.get_phases().unwrap(), words(&["setup", "testing", "ship"]));
+
+        cleanup(&dir);
+    }
+
+    /// Create and update refuse a phase that is not declared, so dropping
+    /// one from the sequence while items sit in it is refused too: they
+    /// would fall out of the roadmap, and their phase out of the filters.
+    /// Reordering, and dropping an empty phase, go through.
+    #[test]
+    fn a_phase_leaves_the_sequence_only_once_it_holds_nothing() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.set_phases(&words(&["setup", "ship"])).unwrap();
+        ekko.create_task_in(&words(&["shipping work"]), Some("ship")).unwrap();
+
+        let refused = ekko.set_phases(&words(&["setup"]));
+        assert!(matches!(&refused, Err(EkkoError::InvalidInput(m)) if m.contains("ship still holds 1")), "{refused:?}");
+        assert_eq!(ekko.storage.get_phases().unwrap(), words(&["setup", "ship"]), "nothing was written");
+
+        ekko.set_phases(&words(&["ship", "setup"])).unwrap();
+        ekko.set_phases(&words(&["ship"])).unwrap();
+        assert_eq!(ekko.storage.get_phases().unwrap(), words(&["ship"]));
 
         cleanup(&dir);
     }
