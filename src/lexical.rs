@@ -21,6 +21,11 @@
 //!   match any word are, and the caller is told which it got.
 //! - Hits rank by how many words they match, then by BM25 as Lucene computes
 //!   it: idf = ln(1 + (N - n + 0.5) / (n + 0.5)), k1 = 1.2, b = 0.75.
+//! - A query word loses its plural or verb ending before it is matched, so
+//!   "handoffs" finds "handoff" and "decisões" finds "decisão": on this board
+//!   13 of 18 inflected words found less than half of what their base form
+//!   did. Only the query is stemmed -- a text's word already matches any
+//!   query word it starts with -- so a stem can only widen what a word finds.
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
@@ -41,8 +46,9 @@ impl Query {
     pub fn new(text: &str) -> Self {
         let mut terms: Vec<String> = Vec::new();
         for word in words(&text.chars().collect::<Vec<_>>()) {
-            if !terms.contains(&word.folded) {
-                terms.push(word.folded);
+            let term = stem(&word.folded);
+            if !terms.contains(&term) {
+                terms.push(term);
             }
         }
         Query { terms }
@@ -56,6 +62,28 @@ impl Query {
     fn term_of(&self, word: &str) -> Option<usize> {
         self.terms.iter().position(|term| matches(term, word))
     }
+}
+
+/// A folded query word without its plural or verb ending, by light rules for
+/// English and Portuguese, the languages the boards are written in: a table
+/// of endings rather than a Snowball stemmer, for no dependency. A rule
+/// applies only when it leaves enough of the word -- four letters after
+/// -ing and -ed, whose short words are seldom inflected ("string", "need"),
+/// three after a plural -- and a word ending in -ss, -us or -is keeps its s.
+fn stem(word: &str) -> String {
+    let cut = |ending: &str, shortest: usize| {
+        word.strip_suffix(ending).filter(|stem| stem.chars().count() >= shortest).map(str::to_string)
+    };
+    let plural_s = !["ss", "us", "is"].iter().any(|kept| word.ends_with(kept));
+    // decisoes -> decis, dependencies -> dependenc, matches -> match: each a
+    // start shared by the singular and the plural.
+    cut("oes", 4)
+        .or_else(|| cut("ies", 4))
+        .or_else(|| cut("ing", 4))
+        .or_else(|| cut("ed", 4))
+        .or_else(|| ["ches", "shes", "sses", "xes", "zes"].iter().find_map(|ending| word.ends_with(ending).then(|| cut("es", 3)).flatten()))
+        .or_else(|| cut("s", 3).filter(|_| plural_s))
+        .unwrap_or_else(|| word.to_string())
 }
 
 fn matches(term: &str, word: &str) -> bool {
@@ -239,6 +267,47 @@ mod tests {
     fn ranked(query: &str, texts: &[&str]) -> (Vec<usize>, bool) {
         let ranked = rank(&Query::new(query), texts);
         (ranked.hits.iter().map(|hit| hit.index).collect(), ranked.every_word)
+    }
+
+    #[test]
+    fn a_query_word_loses_its_plural_or_verb_ending() {
+        for (word, stemmed) in [
+            ("handoffs", "handoff"),
+            ("decisions", "decision"),
+            ("blocking", "block"),
+            ("blocked", "block"),
+            ("blocks", "block"),
+            ("caching", "cach"),
+            ("stashed", "stash"),
+            ("releases", "release"),
+            ("matches", "match"),
+            ("fixes", "fix"),
+            ("dependencies", "dependenc"),
+            ("decisoes", "decis"),
+            ("sessoes", "sess"),
+            ("tarefas", "tarefa"),
+            // Left whole: too little would be left, or the s is the word's.
+            ("string", "string"),
+            ("need", "need"),
+            ("ids", "ids"),
+            ("status", "status"),
+            ("analysis", "analysis"),
+            ("process", "process"),
+            ("cycle", "cycle"),
+        ] {
+            assert_eq!(stem(word), stemmed, "{word}");
+        }
+    }
+
+    /// The inflected query finds what the base form finds, and a stem still
+    /// matches only the start of a word.
+    #[test]
+    fn an_inflected_query_finds_the_base_form() {
+        let texts = ["the handoff of task 3", "a decisão foi tomada", "blocked by 4", "recycled cycle notes"];
+        assert_eq!(ranked("handoffs", &texts).0, vec![0]);
+        assert_eq!(ranked("decisões", &texts).0, vec![1]);
+        assert_eq!(ranked("blocking", &texts).0, vec![2]);
+        assert_eq!(ranked("cycles", &texts).0, vec![3], "cycle, and never recycled");
     }
 
     #[test]
