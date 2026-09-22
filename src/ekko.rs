@@ -913,7 +913,7 @@ impl Ekko {
                 let touched = claims.contains(id)
                     || after.get(id).is_none_or(|new| State::of(new) != State::of(old) || put_away(old, new));
                 let mine = actor.is_some_and(|actor| actor.is(holder));
-                (touched && !mine && holder.alive()).then(|| (*id, holder.label(), holder.since))
+                (touched && !mine && holder.alive()).then(|| (*id, actor.map_or_else(|| holder.label(), |actor| actor.name(holder)), holder.since))
             })
             .collect()
     }

@@ -345,6 +345,9 @@ pub struct Renderer<'a> {
     /// view and resolving them from the view alone would report the wrong
     /// answer.
     blockers: std::collections::HashMap<u32, Vec<u32>>,
+    /// Where the conversation each Claude Code process runs is recorded, so a
+    /// task held names the one to resume; `None` names the one it recorded.
+    registry: Option<crate::holder::Registry>,
 }
 
 impl<'a> Renderer<'a> {
@@ -369,12 +372,18 @@ impl<'a> Renderer<'a> {
             now,
             fold_width: None,
             blockers: std::collections::HashMap::new(),
+            registry: None,
         }
     }
 
     /// Hands the renderer the unmet blockers it cannot work out for itself.
     pub fn with_blockers(&mut self, blockers: std::collections::HashMap<u32, Vec<u32>>) {
         self.blockers = blockers;
+    }
+
+    /// Hands the renderer the registry that names what each session runs.
+    pub fn with_registry(&mut self, registry: crate::holder::Registry) {
+        self.registry = Some(registry);
     }
 
     fn today(&self) -> String {
@@ -516,7 +525,7 @@ impl<'a> Renderer<'a> {
             return String::new();
         };
         let gone = if holder.alive() { "" } else { ", gone" };
-        self.painter.grey(&format!("held by {}{gone}", holder.label()))
+        self.painter.grey(&format!("held by {}{gone}", holder.label_in(self.registry.as_ref())))
     }
 
     fn get_blocked(&self, item: &Item) -> String {

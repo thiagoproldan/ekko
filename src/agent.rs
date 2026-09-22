@@ -463,7 +463,7 @@ impl<'a> Reader<'a> {
     fn held(&self, item: &Item) -> Option<Held> {
         let holder = item.held_by.as_ref().filter(|_| State::of(item) == Some(State::Progress))?;
         Some(Held {
-            by: holder.label(),
+            by: self.me.as_ref().map_or_else(|| holder.label(), |me| me.name(holder)),
             since: holder.since,
             yours: self.me.as_ref().is_some_and(|me| me.is(holder)),
             gone: !holder.alive(),
@@ -1464,16 +1464,25 @@ impl SessionEvent {
     }
 }
 
-/// Where the hook keeps the cursor it served each session: the XDG state
-/// directory, outside every board, so that reading a board still writes
-/// nothing to it.
-pub fn session_state_dir(home: &Path) -> PathBuf {
+/// Where ekko keeps what it knows of sessions: the XDG state directory,
+/// outside every board, so that reading a board still writes nothing to it.
+fn state_dir(home: &Path) -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local").join("state"))
         .join("ekko")
-        .join("sessions")
+}
+
+/// Where the hook keeps the cursor it served each session.
+pub fn session_state_dir(home: &Path) -> PathBuf {
+    state_dir(home).join("sessions")
+}
+
+/// Where the hook records the conversation each Claude Code process runs:
+/// see `holder::Registry`.
+pub fn processes_dir(home: &Path) -> PathBuf {
+    state_dir(home).join("processes")
 }
 
 /// What the SessionStart hook puts in context, by how the session began.
@@ -1485,6 +1494,11 @@ pub fn session_state_dir(home: &Path) -> PathBuf {
 /// when little did, and the prime only when the list would be longer. A
 /// session this hook never served is pointed at the prime it already holds.
 pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Path) -> Result<String, EkkoError> {
+    // The conversation now running in this session's process: what its
+    // claims name, and how a conversation resumed after a restart knows them.
+    if let (Some(actor), Some(conversation)) = (&ekko.actor, &event.session_id) {
+        actor.record(conversation);
+    }
     let revision = ekko.storage.get_counters()?.revision as i64;
     let served = event.session_id.as_deref().and_then(|session| served_cursor(state, session, board));
     let text = match (event.source.as_str(), served) {
@@ -3147,6 +3161,40 @@ mod tests {
         assert!(mine.contains("\n          notes 4, 5: context 2\n") && !mine.contains("why theirs"), "{mine}");
         let theirs = prime(&as_(&other), "default board").unwrap().text();
         assert!(theirs.contains("4. why theirs\n") && theirs.contains("\n          notes 3: context 1\n"), "{theirs}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The SessionStart hook records the conversation its session runs, so a
+    /// claim names it, and after a /clear the name moves on to the new one --
+    /// the conversation to resume, where the claim's own would resume the
+    /// work as it stood before the /clear.
+    #[test]
+    fn a_claim_names_the_conversation_its_session_runs() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let (_, dir) = board("conversations");
+        let registry = crate::holder::Registry::at(dir.join("processes"));
+        let as_ = |actor: &crate::holder::Actor| {
+            Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
+        };
+        let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
+            let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()) };
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
+        };
+        start(&me, "startup", "c1-mine");
+        start(&other, "startup", "c2-theirs");
+        as_(&me).create_task(&words(&["mine"])).unwrap();
+        as_(&me).set_state(&words(&["@1", "progress"]), false).unwrap();
+        let claim = as_(&me).storage.get().unwrap()[&1].held_by.clone().unwrap();
+        assert_eq!(claim.conversation.as_deref(), Some("c1-mine"));
+
+        let theirs = prime(&as_(&other), "default board").unwrap().text();
+        assert!(theirs.contains("held by default on pts/1 \u{b7} c1-mine"), "{theirs}");
+        start(&me, "clear", "c3-after-clear");
+        let theirs = prime(&as_(&other), "default board").unwrap().text();
+        assert!(theirs.contains("held by default on pts/1 \u{b7} c3-after\n"), "{theirs}");
+        let refused = as_(&other).set_state(&words(&["@1", "paused"]), false).unwrap_err().to_string();
+        assert!(refused.contains("default on pts/1 \u{b7} c3-after, since"), "{refused}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

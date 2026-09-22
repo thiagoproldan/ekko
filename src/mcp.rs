@@ -242,6 +242,7 @@ impl Server {
             let binary = Binary::resolve(&program, path_var.as_deref())?;
             Some((program, path_var, binary))
         });
+        let actor = holder::Actor::client_of_this_server().with_registry(holder::Registry::at(agent::processes_dir(&home)));
         Server {
             home,
             cwd,
@@ -252,7 +253,7 @@ impl Server {
             answered: Mutex::new(HashMap::new()),
             started,
             launched,
-            actor: holder::Actor::client_of_this_server(),
+            actor,
         }
     }
 

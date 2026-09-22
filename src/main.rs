@@ -214,7 +214,7 @@ fn main() -> ExitCode {
     // A command run by an agent through Bash, or by a hook, acts for the
     // Claude Code session it runs under; one typed at a terminal, for the user.
     let ekko = match Ekko::at(&location.dir) {
-        Ok(ekko) => ekko.acting_as(holder::Actor::of_this_command()),
+        Ok(ekko) => ekko.acting_as(holder::Actor::of_this_command().with_registry(holder::Registry::at(agent::processes_dir(&home_dir)))),
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
 
@@ -228,6 +228,7 @@ fn main() -> ExitCode {
                 let blockers = ekko.blocker_map().unwrap_or_default();
                 with_renderer(&home_dir, |r| {
                     r.with_blockers(blockers);
+                    r.with_registry(holder::Registry::at(agent::processes_dir(&home_dir)));
                     // Named before the board, and only when one is active: an
                     // EKKO_PROJECT set and forgotten would otherwise show a
                     // different board with nothing on screen saying so.

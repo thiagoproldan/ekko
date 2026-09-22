@@ -724,8 +724,8 @@ impl<'a> Draft<'a> {
                 Some(holder) if actor.is(holder) => {
                     format!("{id} was already in progress, yours since {}", crate::holder::when(holder.since))
                 }
-                Some(holder) if holder.alive() => format!("{id} was in progress under {}, still running: taken over", holder.label()),
-                Some(holder) => format!("{id} was in progress under {}, which is gone: now yours", holder.label()),
+                Some(holder) if holder.alive() => format!("{id} was in progress under {}, still running: taken over", actor.name(holder)),
+                Some(holder) => format!("{id} was in progress under {}, which is gone: now yours", actor.name(holder)),
                 None => format!("{id} was already in progress, held by no one: now yours"),
             };
             if !old.held_by.as_ref().is_some_and(|holder| actor.is(holder)) {
