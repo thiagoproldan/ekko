@@ -1018,20 +1018,32 @@ pub fn next(ekko: &Ekko, limit: Option<usize>) -> Result<Vec<Entry>, EkkoError> 
 /// Where each task stands in a sequence of steps (see `Reader::sequence`),
 /// for the board view, which reads items rather than entries.
 pub fn steps(ekko: &Ekko) -> Result<HashMap<u32, (usize, usize)>, EkkoError> {
+    Ok(sequences(ekko)?
+        .into_iter()
+        .map(|(id, sequence)| {
+            let at = sequence.iter().position(|step| *step == id).unwrap_or_default();
+            (id, (at + 1, sequence.len()))
+        })
+        .collect())
+}
+
+/// Each task that stands in a sequence of steps, with the whole sequence,
+/// first step first.
+pub fn sequences(ekko: &Ekko) -> Result<HashMap<u32, Vec<u32>>, EkkoError> {
     let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
     let reader = Reader::shared(&all, &phases);
-    let mut steps = HashMap::new();
+    let mut sequences = HashMap::new();
     for id in all.keys() {
-        if steps.contains_key(id) {
+        if sequences.contains_key(id) {
             continue;
         }
         let sequence = reader.sequence(*id);
-        for (at, step) in sequence.iter().enumerate() {
-            steps.insert(*step, (at + 1, sequence.len()));
+        for step in &sequence {
+            sequences.insert(*step, sequence.clone());
         }
     }
-    Ok(steps)
+    Ok(sequences)
 }
 
 /// `next`, with how many tasks were candidates in all.
@@ -3710,8 +3722,12 @@ mod tests {
         let read = contexts(&ekko, &["3".to_string()]).unwrap()[0].text();
         assert!(read.contains("      step 3 of 3: \u{2714} 1 \u{2192} \u{25fc} 2 \u{2192} \u{25fb} 3\n"), "{read}");
         let list = crate::tasklist::tasks(&ekko, 0).unwrap();
-        let doing = list.iter().find(|task| task.status == "in_progress").unwrap();
-        assert_eq!(doing.subject, "2. (2/3) build");
+        let drawn: Vec<(&str, &str)> = list.iter().map(|task| (task.status.as_str(), task.subject.as_str())).collect();
+        assert_eq!(
+            drawn[..3],
+            [("completed", "1. (1/3) plan"), ("in_progress", "2. (2/3) build"), ("pending", "3. (3/3) ship")],
+            "the whole way, the step still blocked included"
+        );
         assert_eq!(steps(&ekko).unwrap().get(&4), None, "a task on no line is no step");
 
         ekko.set_blocked_by(&words(&["@4", "2"])).unwrap();

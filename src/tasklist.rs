@@ -99,15 +99,31 @@ pub fn tasks(ekko: &Ekko, since: u64) -> Result<Vec<Task>, Box<dyn Error>> {
     let (doing, abandoned): (Vec<_>, Vec<_>) =
         progress.into_iter().partition(|entry| entry.held.as_ref().is_some_and(|held| held.yours));
 
-    // A step of a sequence says which: "(2/3) ".
-    let step = |entry: &agent::Entry| entry.step.map(|(step, of)| format!("({step}/{of}) ")).unwrap_or_default();
-    let rows = done
-        .iter()
-        .map(|item| (item.id, String::new(), item.description.as_str(), "completed"))
-        .chain(doing.iter().map(|entry| (entry.id, step(entry), entry.description.as_str(), "in_progress")))
-        .chain(ready.iter().take(NEXT_SHOWN).map(|entry| (entry.id, step(entry), entry.description.as_str(), "pending")))
-        .chain(abandoned.iter().map(|entry| (entry.id, "(abandoned) ".to_string(), entry.description.as_str(), "pending")));
-    Ok(rows.enumerate().map(|(at, (id, mark, text, status))| task(at + 1, id, &mark, text, status)).collect())
+    // A step of a sequence says which, done ones too: "(2/3) ". The steps
+    // still to come after one in progress follow it, blocked as they are,
+    // so the list shows the way ahead and not only what is ready.
+    let sequences = agent::sequences(ekko)?;
+    let step = |id: u32| {
+        let sequence = sequences.get(&id);
+        let at = sequence.and_then(|sequence| sequence.iter().position(|step| *step == id));
+        sequence.zip(at).map(|(sequence, at)| format!("({}/{}) ", at + 1, sequence.len())).unwrap_or_default()
+    };
+    let mut rows: Vec<(u32, String, &str, &str)> =
+        done.iter().map(|item| (item.id, step(item.id), item.description.as_str(), "completed")).collect();
+    for entry in &doing {
+        rows.push((entry.id, step(entry.id), entry.description.as_str(), "in_progress"));
+        let ahead = sequences.get(&entry.id).into_iter().flatten().skip_while(|id| **id != entry.id).skip(1);
+        for id in ahead {
+            let open = all.get(id).filter(|item| matches!(State::of(item), Some(State::Pending | State::Paused | State::Waiting)));
+            if let Some(item) = open.filter(|_| !rows.iter().any(|row| row.0 == *id)) {
+                rows.push((*id, step(*id), item.description.as_str(), "pending"));
+            }
+        }
+    }
+    let ready: Vec<_> = ready.iter().filter(|entry| !rows.iter().any(|row| row.0 == entry.id)).take(NEXT_SHOWN).collect();
+    rows.extend(ready.iter().map(|entry| (entry.id, step(entry.id), entry.description.as_str(), "pending")));
+    rows.extend(abandoned.iter().map(|entry| (entry.id, "(abandoned) ".to_string(), entry.description.as_str(), "pending")));
+    Ok(rows.into_iter().enumerate().map(|(at, (id, mark, text, status))| task(at + 1, id, &mark, text, status)).collect())
 }
 
 fn task(number: usize, id: u32, mark: &str, text: &str, status: &str) -> Task {
