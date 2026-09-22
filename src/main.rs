@@ -231,6 +231,7 @@ fn main() -> ExitCode {
                 with_renderer(&home_dir, |r| {
                     r.with_blockers(blockers);
                     r.with_registry(holder::Registry::at(agent::processes_dir(&home_dir)));
+                    r.with_steps(agent::steps(&ekko).unwrap_or_default());
                     // Named before the board, and only when one is active: an
                     // EKKO_PROJECT set and forgotten would otherwise show a
                     // different board with nothing on screen saying so.

@@ -348,6 +348,9 @@ pub struct Renderer<'a> {
     /// Where the conversation each Claude Code process runs is recorded, so a
     /// task held names the one to resume; `None` names the one it recorded.
     registry: Option<crate::holder::Registry>,
+    /// Where each task stands in a sequence of steps, handed in like the
+    /// blockers: see `agent::steps`.
+    steps: std::collections::HashMap<u32, (usize, usize)>,
 }
 
 impl<'a> Renderer<'a> {
@@ -373,6 +376,7 @@ impl<'a> Renderer<'a> {
             fold_width: None,
             blockers: std::collections::HashMap::new(),
             registry: None,
+            steps: std::collections::HashMap::new(),
         }
     }
 
@@ -384,6 +388,11 @@ impl<'a> Renderer<'a> {
     /// Hands the renderer the registry that names what each session runs.
     pub fn with_registry(&mut self, registry: crate::holder::Registry) {
         self.registry = Some(registry);
+    }
+
+    /// Hands the renderer where each task stands in a sequence of steps.
+    pub fn with_steps(&mut self, steps: std::collections::HashMap<u32, (usize, usize)>) {
+        self.steps = steps;
     }
 
     fn today(&self) -> String {
@@ -528,6 +537,15 @@ impl<'a> Renderer<'a> {
         self.painter.grey(&format!("held by {}{gone}", holder.label_in(self.registry.as_ref())))
     }
 
+    /// `step 2/3` on a step of a sequence; empty otherwise, which keeps every
+    /// board without one byte-identical.
+    fn get_step(&self, item: &Item) -> String {
+        match self.steps.get(&item.id) {
+            Some((step, of)) => self.painter.grey(&format!("step {step}/{of}")),
+            None => String::new(),
+        }
+    }
+
     fn get_blocked(&self, item: &Item) -> String {
         let Some(ids) = self.blockers.get(&item.id) else { return String::new() };
         if ids.is_empty() {
@@ -638,6 +656,8 @@ impl<'a> Renderer<'a> {
         let suffix = if blocked.is_empty() { suffix } else { format!("{blocked} {suffix}") };
         let held = self.get_held(item);
         let suffix = if held.is_empty() { suffix } else { format!("{held} {suffix}") };
+        let step = self.get_step(item);
+        let suffix = if step.is_empty() { suffix } else { format!("{step} {suffix}") };
         let prefix = self.build_prefix(item);
         let message = self.build_message(item);
         self.emit(&prefix, Some(&level), &message, &suffix);
@@ -661,6 +681,8 @@ impl<'a> Renderer<'a> {
         let suffix = if blocked.is_empty() { suffix } else { format!("{blocked} {suffix}") };
         let held = self.get_held(item);
         let suffix = if held.is_empty() { suffix } else { format!("{held} {suffix}") };
+        let step = self.get_step(item);
+        let suffix = if step.is_empty() { suffix } else { format!("{step} {suffix}") };
         let prefix = self.build_prefix(item);
         let message = self.build_message(item);
         self.emit(&prefix, Some(&level), &message, &suffix);

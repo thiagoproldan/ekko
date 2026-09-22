@@ -393,6 +393,10 @@ pub struct Entry {
     /// The notes superseding this one: it is history, no longer in force.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub superseded_by: Vec<u32>,
+    /// Where this task stands in a sequence of steps, as (step, of): see
+    /// `Reader::sequence`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<(usize, usize)>,
     pub updated_at: i64,
     /// Notes attached to this task.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -544,7 +548,44 @@ impl<'a> Reader<'a> {
             knowledge: item.knowledge,
             supersedes: item.supersedes.as_deref().and_then(|uid| self.uid(uid)),
             superseded_by: self.superseded_by(item.id),
+            step: {
+                let sequence = self.sequence(item.id);
+                sequence.iter().position(|id| *id == item.id).map(|at| (at + 1, sequence.len()))
+            },
         }
+    }
+
+    /// The sequence of steps task `id` stands in, first step first: tasks
+    /// linked by blocked_by into one line, each link the only one on both
+    /// sides -- a step blocked by the one before and by nothing else, and
+    /// holding up the one after and nothing else. A branch ends the line.
+    /// Empty when `id` stands in no line of two or more.
+    fn sequence(&self, id: u32) -> Vec<u32> {
+        let links = &self.graph.links;
+        let only = |map: &HashMap<u32, Vec<u32>>, id: u32| match map.get(&id).map(Vec::as_slice) {
+            Some([one]) => Some(*one),
+            _ => None,
+        };
+        let step = |id: &u32| self.graph.all.get(id).is_some_and(|item| item.is_task && visible(item));
+        if !step(&id) {
+            return Vec::new();
+        }
+        let mut sequence = vec![id];
+        let mut at = id;
+        while let Some(before) =
+            only(&links.blockers, at).filter(|before| only(&links.dependents, *before) == Some(at) && step(before) && !sequence.contains(before))
+        {
+            sequence.insert(0, before);
+            at = before;
+        }
+        at = id;
+        while let Some(after) =
+            only(&links.dependents, at).filter(|after| only(&links.blockers, *after) == Some(at) && step(after) && !sequence.contains(after))
+        {
+            sequence.push(after);
+            at = after;
+        }
+        if sequence.len() < 2 { Vec::new() } else { sequence }
     }
 
     fn ready(&self, item: &Item) -> bool {
@@ -974,6 +1015,25 @@ pub fn next(ekko: &Ekko, limit: Option<usize>) -> Result<Vec<Entry>, EkkoError> 
     Ok(next_listed(ekko, limit)?.0)
 }
 
+/// Where each task stands in a sequence of steps (see `Reader::sequence`),
+/// for the board view, which reads items rather than entries.
+pub fn steps(ekko: &Ekko) -> Result<HashMap<u32, (usize, usize)>, EkkoError> {
+    let all = ekko.storage.get_shared()?;
+    let phases = ekko.storage.get_phases()?;
+    let reader = Reader::shared(&all, &phases);
+    let mut steps = HashMap::new();
+    for id in all.keys() {
+        if steps.contains_key(id) {
+            continue;
+        }
+        let sequence = reader.sequence(*id);
+        for (at, step) in sequence.iter().enumerate() {
+            steps.insert(*step, (at + 1, sequence.len()));
+        }
+    }
+    Ok(steps)
+}
+
 /// `next`, with how many tasks were candidates in all.
 pub fn next_listed(ekko: &Ekko, limit: Option<usize>) -> Result<(Vec<Entry>, usize), EkkoError> {
     let all = ekko.storage.get_shared()?;
@@ -1019,6 +1079,10 @@ pub struct Context {
     /// On a question: who asked, and the answer once given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question: Option<Asked>,
+    /// The sequence of steps it stands in, first step first; see
+    /// `Reader::sequence`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sequence: Vec<Link>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1086,6 +1150,7 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
     let superseded_by = entry.superseded_by.iter().filter_map(link).collect();
     let revision = all.values().filter_map(|other| other.rev).max().unwrap_or(0);
     let question = item.question.as_ref().map(|question| asked(item, question, reader, revision));
+    let sequence = reader.sequence(id).iter().filter_map(link).collect();
 
     Context {
         item: entry,
@@ -1101,6 +1166,7 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         supersedes,
         superseded_by,
         question,
+        sequence,
     }
 }
 
@@ -1846,6 +1912,9 @@ fn listed_line(entry: &Entry, body: &str, stated: bool, today: &str) -> String {
     if let Some(held) = &entry.held {
         meta.push(held.text());
     }
+    if let Some((step, of)) = entry.step {
+        meta.push(format!("step {step} of {of}"));
+    }
     if let Some(priority @ 2..) = entry.priority {
         meta.push(format!("p{priority}"));
     }
@@ -2418,6 +2487,16 @@ impl Context {
                 }
                 _ => writeln!(out, "      not answered yet{}", moved("since it was asked")),
             };
+        }
+        if let (Some((step, of)), false) = (item.step, self.sequence.is_empty()) {
+            let mark = |state: &str| match state {
+                "done" => "\u{2714}",
+                "in progress" => "\u{25fc}",
+                "cancelled" => "\u{2716}",
+                _ => "\u{25fb}",
+            };
+            let steps: Vec<String> = self.sequence.iter().map(|link| format!("{} {}", mark(link.state), link.id)).collect();
+            let _ = writeln!(out, "      step {step} of {of}: {}", steps.join(" \u{2192} "));
         }
 
         let links = |out: &mut String, title: &str, links: &[Link]| {
@@ -3604,6 +3683,40 @@ mod tests {
         assert!(text.contains("\ndefault on pts/2 \u{b7} c-idle \u{b7} since ") && text.contains("      nothing in progress\n"), "{text}");
         assert!(text.contains("\ndefault on pts/3 \u{b7} c-gone \u{b7} ended\n      in progress    3. left behind\n"), "{text}");
         assert!(text.contains("claude --resume c-gone\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Tasks linked by blocked_by into one line are a sequence of steps, and
+    /// every view says where each stands: 'step 2 of 3' in a listing, the
+    /// whole line in context, '(2/3)' in the task list, 'step 2/3' on the
+    /// board. A branch ends the line. The user's ask of 2026-09-22: a
+    /// sequence of steps, and seeing where it stands.
+    #[test]
+    fn a_line_of_blocked_tasks_is_a_sequence_of_steps() {
+        let (me, _, _) = crate::holder::test_sessions();
+        let (_, dir) = board("sequence");
+        let ekko = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me);
+        for name in ["plan", "build", "ship", "aside"] {
+            ekko.create_task(&words(&[name])).unwrap();
+        }
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        ekko.set_blocked_by(&words(&["@3", "2"])).unwrap();
+        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
+        ekko.set_state(&words(&["@2", "progress"]), false).unwrap();
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.contains("   2. build \u{b7} in progress \u{b7} yours \u{b7} step 2 of 3 \u{b7} unblocks 1\n"), "{text}");
+        let read = contexts(&ekko, &["3".to_string()]).unwrap()[0].text();
+        assert!(read.contains("      step 3 of 3: \u{2714} 1 \u{2192} \u{25fc} 2 \u{2192} \u{25fb} 3\n"), "{read}");
+        let list = crate::tasklist::tasks(&ekko, 0).unwrap();
+        let doing = list.iter().find(|task| task.status == "in_progress").unwrap();
+        assert_eq!(doing.subject, "2. (2/3) build");
+        assert_eq!(steps(&ekko).unwrap().get(&4), None, "a task on no line is no step");
+
+        ekko.set_blocked_by(&words(&["@4", "2"])).unwrap();
+        let steps = steps(&ekko).unwrap();
+        assert_eq!((steps.get(&2), steps.get(&3)), (Some(&(2, 2)), None), "2 holds up two now: the line ends there");
 
         std::fs::remove_dir_all(&dir).ok();
     }

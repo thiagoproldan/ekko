@@ -99,13 +99,15 @@ pub fn tasks(ekko: &Ekko, since: u64) -> Result<Vec<Task>, Box<dyn Error>> {
     let (doing, abandoned): (Vec<_>, Vec<_>) =
         progress.into_iter().partition(|entry| entry.held.as_ref().is_some_and(|held| held.yours));
 
+    // A step of a sequence says which: "(2/3) ".
+    let step = |entry: &agent::Entry| entry.step.map(|(step, of)| format!("({step}/{of}) ")).unwrap_or_default();
     let rows = done
         .iter()
-        .map(|item| (item.id, "", item.description.as_str(), "completed"))
-        .chain(doing.iter().map(|entry| (entry.id, "", entry.description.as_str(), "in_progress")))
-        .chain(ready.iter().take(NEXT_SHOWN).map(|entry| (entry.id, "", entry.description.as_str(), "pending")))
-        .chain(abandoned.iter().map(|entry| (entry.id, "(abandoned) ", entry.description.as_str(), "pending")));
-    Ok(rows.enumerate().map(|(at, (id, mark, text, status))| task(at + 1, id, mark, text, status)).collect())
+        .map(|item| (item.id, String::new(), item.description.as_str(), "completed"))
+        .chain(doing.iter().map(|entry| (entry.id, step(entry), entry.description.as_str(), "in_progress")))
+        .chain(ready.iter().take(NEXT_SHOWN).map(|entry| (entry.id, step(entry), entry.description.as_str(), "pending")))
+        .chain(abandoned.iter().map(|entry| (entry.id, "(abandoned) ".to_string(), entry.description.as_str(), "pending")));
+    Ok(rows.enumerate().map(|(at, (id, mark, text, status))| task(at + 1, id, &mark, text, status)).collect())
 }
 
 fn task(number: usize, id: u32, mark: &str, text: &str, status: &str) -> Task {
@@ -275,7 +277,7 @@ mod tests {
         let list = tasks(&ekko, ekko.storage.get_counters().unwrap().revision).unwrap();
         let expected = [
             ("in_progress", "5. task 5"),
-            ("pending", "8. task 8"),
+            ("pending", "8. (1/2) task 8"),
             ("pending", "1. task 1"),
             ("pending", "3. task 3"),
             ("pending", "4. task 4"),
