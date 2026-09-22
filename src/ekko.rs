@@ -1123,14 +1123,25 @@ impl Ekko {
 
         let mut results = Vec::new();
         for id in ids {
-            if let Some(item) = data.remove(&id) {
-                let archive_id = self.move_to_archive(item, &mut archive);
+            if let Some(mut item) = data.remove(&id) {
+                // A --clear retried after its storage write failed finds the
+                // item archived already: that copy is refreshed, not doubled.
+                let archive_id = match id_of_uid(&archive, item.uid.as_deref()) {
+                    Some(archive_id) => {
+                        item.id = archive_id;
+                        archive.insert(archive_id, item);
+                        archive_id
+                    }
+                    None => self.move_to_archive(item, &mut archive),
+                };
                 results.push(DeleteResult { storage_id: id, archive_id });
             }
         }
 
-        self.save_touching(&mut data)?;
+        // The archive first: a failure between the two writes leaves the item
+        // in both places, which a retry settles, instead of in neither.
         self.storage.set_archive(&archive)?;
+        self.save_touching(&mut data)?;
         Ok(Outcome::Delete(results))
     }
 
@@ -1143,13 +1154,19 @@ impl Ekko {
         let mut results = Vec::new();
         for archive_id in archive_ids {
             if let Some(item) = archive.remove(&archive_id) {
-                let storage_id = self.move_to_storage(item, &mut data);
+                // A --restore retried after its archive write failed finds the
+                // item back in storage already, and leaves it there once.
+                let storage_id = match id_of_uid(&data, item.uid.as_deref()) {
+                    Some(storage_id) => storage_id,
+                    None => self.move_to_storage(item, &mut data),
+                };
                 results.push(RestoreResult { archive_id, storage_id });
             }
         }
 
-        self.storage.set_archive(&archive)?;
+        // Storage first, for the reason --clear writes the archive first.
         self.save_touching(&mut data)?;
+        self.storage.set_archive(&archive)?;
         Ok(Outcome::Restore(results))
     }
 
@@ -2010,6 +2027,12 @@ fn completed(item: &Item) -> bool {
 /// Whether `item` holds up what it blocks: an open task, not in the trash.
 /// Done and cancelled are closed, and a note has no state to finish. A
 /// stashed task still holds -- stashing hides an item without finishing it.
+/// The id under which `map` holds the item with `uid`, if it holds one.
+fn id_of_uid(map: &ItemMap, uid: Option<&str>) -> Option<u32> {
+    let uid = uid?;
+    map.iter().find(|(_, item)| item.uid.as_deref() == Some(uid)).map(|(id, _)| *id)
+}
+
 pub(crate) fn holds(item: &Item) -> bool {
     item.trashed.is_none() && State::of(item).is_some_and(State::is_open)
 }
@@ -2891,6 +2914,75 @@ mod tests {
 
         let after = ekko.storage.get().unwrap().values().next().unwrap().uid.clone();
         assert_eq!(after, before, "the uid is what stays put when the id does not");
+
+        cleanup(&dir);
+    }
+
+    /// The archive is written before storage, so a --clear whose second write
+    /// fails leaves the item where it was instead of in neither file.
+    #[test]
+    fn a_clear_whose_archive_write_fails_keeps_the_item() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: geteuid has no preconditions. Root writes through the
+        // read-only folder this test relies on.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["kept"])).unwrap();
+        ekko.check_tasks(&words(&["1"]), false).unwrap();
+        let archive = dir.join("archive");
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let failed = ekko.clear();
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(failed.is_err());
+        assert_eq!(ekko.storage.get().unwrap().len(), 1, "the item is still in storage");
+
+        cleanup(&dir);
+    }
+
+    /// A --clear retried after its storage write failed finds the item in the
+    /// archive already, and refreshes that copy rather than adding a second.
+    #[test]
+    fn a_retried_clear_archives_one_copy() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["cleared twice"])).unwrap();
+        ekko.check_tasks(&words(&["1"]), false).unwrap();
+        // What a failure between the two writes leaves: the item in both.
+        let item = ekko.storage.get().unwrap()[&1].clone();
+        ekko.storage.set_archive(&BTreeMap::from([(1, item.clone())])).unwrap();
+
+        ekko.clear().unwrap();
+
+        let archive = ekko.storage.get_archive().unwrap();
+        assert_eq!(archive.len(), 1, "one archived copy, not two");
+        assert_eq!(archive[&1].uid, item.uid);
+        assert!(ekko.storage.get().unwrap().is_empty());
+
+        cleanup(&dir);
+    }
+
+    /// A --restore retried after its archive write failed finds the item back
+    /// in storage already: one item holds the uid, and the archive lets go.
+    #[test]
+    fn a_retried_restore_leaves_one_item_per_uid() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["restored twice"])).unwrap();
+        ekko.check_tasks(&words(&["1"]), false).unwrap();
+        ekko.clear().unwrap();
+        // What a failure between the two writes leaves: the item in both.
+        let mut item = ekko.storage.get_archive().unwrap()[&1].clone();
+        item.id = 2;
+        ekko.storage.set(&BTreeMap::from([(2, item.clone())])).unwrap();
+
+        let Outcome::Restore(results) = ekko.restore_items(&words(&["1"])).unwrap() else { panic!() };
+
+        let data = ekko.storage.get().unwrap();
+        assert_eq!(data.values().filter(|kept| kept.uid == item.uid).count(), 1, "one item per uid");
+        assert_eq!(results, vec![RestoreResult { archive_id: 1, storage_id: 2 }]);
+        assert!(ekko.storage.get_archive().unwrap().is_empty());
 
         cleanup(&dir);
     }
