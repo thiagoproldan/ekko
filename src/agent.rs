@@ -759,6 +759,10 @@ pub struct OtherHandoff {
 /// How many other handoffs a prime names before it counts the rest.
 const OTHER_HANDOFFS_SHOWN: usize = 5;
 
+/// The open questions a prime quotes, oldest first: the rest are counted, and
+/// `ekko --sessions` lists them by the session that asked.
+const WAITING_ON_YOU_SHOWN: usize = 10;
+
 /// A handoff as the prime shows it: the note, and the task it hands over.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2003,7 +2007,7 @@ impl Prime {
         // Questions before the work: the user's answers are what unblocks it.
         if !self.waiting_on_you.is_empty() {
             let _ = writeln!(out, "\nWaiting on you ({})", self.waiting_on_you.len());
-            for asked in &self.waiting_on_you {
+            for asked in self.waiting_on_you.iter().take(WAITING_ON_YOU_SHOWN) {
                 let about = asked.about.map(|task| format!(", about {task}")).unwrap_or_default();
                 let moved = match asked.moved {
                     0 => String::new(),
@@ -2011,6 +2015,9 @@ impl Prime {
                     n => format!(", {n} writes ago"),
                 };
                 let _ = writeln!(out, "{:>4}. [asked by {}{about}{moved}] {}", asked.id, asked.by, clip(&asked.text, NOTE_CLIP));
+            }
+            if let Some(more @ 1..) = self.waiting_on_you.len().checked_sub(WAITING_ON_YOU_SHOWN) {
+                let _ = writeln!(out, "      +{more} more: ekko --sessions lists them by who asked");
             }
         }
         if !self.answered.is_empty() {
