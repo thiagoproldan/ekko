@@ -266,6 +266,8 @@ pub struct Draft<'a> {
     /// Tasks this draft set in progress, whether or not they already were:
     /// a claim, which `commit` settles against whoever holds each one.
     claims: Vec<u32>,
+    /// What an operation found worth saying though it wrote nothing wrong.
+    notices: Vec<String>,
 }
 
 /// What a commit wrote, what `force` pushed past to write it, and the tasks
@@ -288,7 +290,7 @@ impl<'a> Draft<'a> {
         let lock = ekko.storage.acquire_lock()?;
         let data = ekko.storage.get()?;
         let phases = ekko.storage.get_phases()?;
-        Ok(Draft { ekko, _lock: lock, before: data.clone(), data, phases, created: Vec::new(), claims: Vec::new() })
+        Ok(Draft { ekko, _lock: lock, before: data.clone(), data, phases, created: Vec::new(), claims: Vec::new(), notices: Vec::new() })
     }
 
     /// How a refusal of this draft should name its items; see `Names`.
@@ -502,6 +504,11 @@ impl<'a> Draft<'a> {
             }
         }
         for id in &ids {
+            // undone reopens only done work, so on a cancelled task it is a
+            // quiet no-op; say so, and name the state that does revive it.
+            if setting == Setting::Undone && State::of(&self.data[id]) == Some(State::Cancelled) {
+                self.notices.push(format!("{id} is cancelled, and undone reopens only done work: nothing changed; unstarted revives it"));
+            }
             setting.apply(self.item(*id));
         }
         if setting == Setting::Become(State::Progress) {
@@ -755,7 +762,8 @@ impl<'a> Draft<'a> {
     /// rule -- or, with `force`, anyway, saying what it pushed past.
     pub fn commit(mut self, force: bool) -> Result<Committed, EkkoError> {
         let (overridden, reopened) = Ekko::refuse_broken_dependencies(&self.before, &self.data, force)?;
-        let notices = self.settle_holders(force)?;
+        let mut notices = std::mem::take(&mut self.notices);
+        notices.extend(self.settle_holders(force)?);
         let (released, blocked) = self.ekko.save_against(&self.before, &mut self.data)?;
         Ok(Committed { data: self.data, overridden, reopened, released, blocked, notices })
     }
@@ -948,6 +956,22 @@ mod tests {
             let updated = batch(&ekko, &[json!({"op": "update", "item": 1, "priority": priority})]);
             assert!(matches!(updated, Err(EkkoError::InvalidPriority)), "{priority}: {:?}", updated.err());
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// undone on a cancelled task changes nothing, by design, and the reply
+    /// says so instead of a bare ok; a done task reopens without a word.
+    #[test]
+    fn undone_on_a_cancelled_task_says_it_changed_nothing() {
+        let (ekko, dir) = board("undone-cancelled");
+        batch(&ekko, &[json!({"op": "create", "text": "dropped"}), json!({"op": "create", "text": "finished"})]).unwrap();
+        batch(&ekko, &[json!({"op": "set_state", "items": [1], "state": "cancelled"})]).unwrap();
+        batch(&ekko, &[json!({"op": "set_state", "items": [2], "state": "done"})]).unwrap();
+
+        let undone = batch(&ekko, &[json!({"op": "set_state", "items": [1, 2], "state": "undone"})]).unwrap();
+        assert_eq!(undone.notices, vec!["1 is cancelled, and undone reopens only done work: nothing changed; unstarted revives it"]);
+        assert_eq!((state_of(&ekko, 1), state_of(&ekko, 2)), (Some(State::Cancelled), Some(State::Pending)));
 
         std::fs::remove_dir_all(&dir).ok();
     }
