@@ -69,8 +69,9 @@ impl Kind {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Create {
-    #[serde(default)]
-    pub kind: Kind,
+    /// A task when absent, or a note when `attached_to` is given: only a
+    /// note is ever attached, so that is the one reading that can be meant.
+    pub kind: Option<Kind>,
     pub text: String,
     #[serde(default)]
     pub boards: Vec<String>,
@@ -300,7 +301,8 @@ impl<'a> Draft<'a> {
         if text.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
-        if spec.kind != Kind::Task {
+        let kind = spec.kind.unwrap_or(if spec.attached_to.is_some() { Kind::Note } else { Kind::Task });
+        if kind != Kind::Task {
             for (field, given) in [
                 ("priority", spec.priority.is_some()),
                 ("due date", spec.due.is_some()),
@@ -311,10 +313,10 @@ impl<'a> Draft<'a> {
                 }
             }
         }
-        if spec.kind == Kind::Handoff && spec.attached_to.is_none() {
+        if kind == Kind::Handoff && spec.attached_to.is_none() {
             return Err(invalid("A handoff is attached_to the task it hands over"));
         }
-        if spec.supersedes.is_some() && spec.kind.knowledge().is_none() {
+        if spec.supersedes.is_some() && kind.knowledge().is_none() {
             return Err(invalid("Only a decision, a gotcha or a procedure supersedes an earlier note"));
         }
         let priority = spec.priority.unwrap_or(1);
@@ -328,7 +330,7 @@ impl<'a> Draft<'a> {
         let phase = self.declared_phase(spec.phase.as_deref())?;
 
         let id = self.ekko.generate_id(&self.data);
-        let mut item = match spec.kind {
+        let mut item = match kind {
             Kind::Task => Item::new_task(id, text.to_string(), boards(&spec.boards), priority),
             Kind::Note | Kind::Handoff | Kind::Decision | Kind::Gotcha | Kind::Procedure => {
                 Item::new_note(id, text.to_string(), boards(&spec.boards))
@@ -337,7 +339,7 @@ impl<'a> Draft<'a> {
         item.due_date = due;
         item.phase = phase;
         item.is_starred = spec.starred;
-        item.knowledge = spec.kind.knowledge();
+        item.knowledge = kind.knowledge();
         self.data.insert(id, item);
 
         // Relations after the item is in the draft: both checks read it there.
@@ -350,7 +352,7 @@ impl<'a> Draft<'a> {
             let target = self.resolve(target)?;
             let attached = Ekko::attach_target(&self.data, id, Some(target))?;
             self.item(id).attached_to = attached.map(|(_, uid)| uid);
-            if spec.kind == Kind::Handoff {
+            if kind == Kind::Handoff {
                 self.hand_over(id, target)?;
             }
         }
@@ -732,6 +734,27 @@ mod tests {
         assert_eq!(item.description, text);
         assert_eq!(item.boards, vec!["@coding", "@reviews"]);
         assert_eq!((item.priority, item.due_date.as_deref()), (Some(2), Some("2026-09-01")));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With attached_to and no kind, a create makes a note: a task is never
+    /// attached, and the refusal this used to get only cost the agent a call.
+    /// A task asked for by name is still refused.
+    #[test]
+    fn attached_with_no_kind_makes_a_note() {
+        let (ekko, dir) = board("attach-default");
+        let written = batch(
+            &ekko,
+            &[json!({"op": "create", "text": "the task"}), json!({"op": "create", "text": "why it waits", "attached_to": "$1"})],
+        )
+        .unwrap();
+
+        let data = &written.data;
+        assert!(!data[&2].is_task, "a note");
+        assert_eq!(data[&2].attached_to, data[&1].uid);
+        let task = batch(&ekko, &[json!({"op": "create", "kind": "task", "text": "no", "attached_to": 1})]);
+        assert!(matches!(task, Err(EkkoError::AttachNotANote(_))));
 
         std::fs::remove_dir_all(&dir).ok();
     }
