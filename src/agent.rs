@@ -658,6 +658,9 @@ fn is_zero_u32(n: &u32) -> bool {
 
 /// Builds the resume view of the board `ekko` has open, labelled `board`.
 pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
+    // The revision before the board: a cursor may lag the board it came
+    // with, and then only repeats a change; it never runs ahead and skips one.
+    let cursor = ekko.storage.get_counters()?.revision as i64;
     let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
     let reader = Reader::shared(&all, &phases);
@@ -768,7 +771,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
 
     Ok(Prime {
         board: board.to_string(),
-        cursor: ekko.storage.get_counters()?.revision as i64,
+        cursor,
         stats: ekko.compute_stats(&all),
         roadmap,
         rootless,
@@ -1221,15 +1224,20 @@ const CLOCK_CURSOR: i64 = 100_000_000_000;
 /// A cursor from before revisions, a clock reading, is answered the old way,
 /// by `updatedAt`, and handed a revision to use from then on.
 pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
+    // The revision first, then the board and the journal: a writer publishes
+    // the revision last, so every write up to `cursor` is already on disk.
+    // A write past it shows in the board but waits for the next call, so no
+    // change is skipped and none is told twice.
+    let cursor = ekko.storage.get_counters()?.revision as i64;
     let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
-    let cursor = ekko.storage.get_counters()?.revision as i64;
     let reader = Reader::shared(&all, &phases);
     let moved = |item: &&Item| {
         if since >= CLOCK_CURSOR {
             updated(item) >= since
         } else {
-            item.rev.unwrap_or(0) as i64 > since
+            let rev = item.rev.unwrap_or(0) as i64;
+            rev > since && rev <= cursor
         }
     };
     let mut items: Vec<(u64, Entry)> =
@@ -1250,7 +1258,7 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
         if since >= CLOCK_CURSOR {
             entry["at"].as_i64().is_some_and(|at| at >= since)
         } else {
-            entry["rev"].as_i64().is_some_and(|rev| rev > since)
+            entry["rev"].as_i64().is_some_and(|rev| rev > since && rev <= cursor)
         }
     };
     let (mut released, mut blocked, mut removed) = (BTreeSet::new(), BTreeSet::new(), Vec::new());
@@ -1279,7 +1287,9 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
         }
     }
     let from = journal.iter().find_map(|entry| entry["from"].as_i64());
-    let complete = from.is_none_or(|from| since < CLOCK_CURSOR && since + 1 >= from);
+    // A cursor ahead of the board's revision means counters.json went back
+    // (lost, or restored from an older copy): what moved cannot be told.
+    let complete = (since >= CLOCK_CURSOR || cursor >= since) && from.is_none_or(|from| since < CLOCK_CURSOR && since + 1 >= from);
 
     Ok(Changes {
         since,

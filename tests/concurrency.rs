@@ -334,3 +334,70 @@ fn destroying_a_project_waits_for_a_writer_to_finish() {
 
     fs::remove_dir_all(&home).ok();
 }
+
+/// A reader following `changes`, always passing the cursor the last reply
+/// returned, sees every write another process makes while it reads. The
+/// revision is published after the board and the journal it covers, and read
+/// before them, so a cursor never runs ahead of what its reply listed. Before
+/// that ordering, a reader polling this fast missed nearly every write.
+#[test]
+fn a_follower_of_changes_never_misses_a_write_made_while_it_reads() {
+    use std::io::{BufRead, BufReader, Write};
+    let dir = temp_ekko_dir();
+    let exe = env!("CARGO_BIN_EXE_ekko");
+    let total = 40;
+
+    let mut server = Command::new(exe)
+        .args(["--mcp"])
+        .env("EKKO_DIR", &dir)
+        .env("HOME", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn ekko --mcp");
+    let mut stdin = server.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.stdout.take().unwrap());
+    let mut next_id = 0;
+    let mut call = |method: &str, params: serde_json::Value| -> serde_json::Value {
+        next_id += 1;
+        let request = serde_json::json!({"jsonrpc": "2.0", "id": next_id, "method": method, "params": params});
+        writeln!(stdin, "{request}").unwrap();
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+    call("initialize", serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}));
+    let text = |reply: serde_json::Value| reply["result"]["content"][0]["text"].as_str().unwrap().to_string();
+    let prime = text(call("tools/call", serde_json::json!({"name": "prime", "arguments": {}})));
+    let mut cursor: i64 = prime.split("cursor ").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
+
+    let writer = {
+        let dir = dir.clone();
+        std::thread::spawn(move || {
+            for i in 0..total {
+                assert!(run_task_create(exe, &dir, &format!("followed {i}")).wait().unwrap().success());
+            }
+        })
+    };
+    let mut seen = HashSet::new();
+    loop {
+        let finished = writer.is_finished();
+        let reply = text(call("tools/call", serde_json::json!({"name": "changes", "arguments": {"since": cursor}})));
+        cursor = reply.split_whitespace().nth(1).unwrap().parse().unwrap();
+        for line in reply.lines() {
+            if let Some(at) = line.find("followed ") {
+                seen.insert(line[at..].to_string());
+            }
+        }
+        if finished {
+            break;
+        }
+    }
+    writer.join().unwrap();
+    drop(stdin);
+    server.wait().ok();
+
+    assert_eq!(seen.len(), total, "the follower missed {} of {total} writes", total - seen.len());
+    fs::remove_dir_all(&dir).ok();
+}

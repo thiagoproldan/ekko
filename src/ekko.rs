@@ -19,7 +19,7 @@ use crate::config;
 use crate::directory::DirectoryError;
 use crate::item::{tally, Change, Item, Knowledge, Setting, State};
 use crate::render::{CalendarMonth, Inversion, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
-use crate::storage::{ItemMap, Storage, StorageError};
+use crate::storage::{Counters, ItemMap, Storage, StorageError};
 
 #[derive(Debug)]
 pub enum EkkoError {
@@ -846,6 +846,15 @@ impl Ekko {
         self.save_against(&before, data)
     }
 
+    /// The revision a write builds on: the counter, or higher when a lost or
+    /// older counters.json fell behind a revision already handed out. An item
+    /// carries the revision of its last change; a removal or a change of
+    /// phases leaves no item to carry it, and the journal's last line does.
+    fn healed_revision(&self, items: &ItemMap, counters: &Counters) -> Result<u64, EkkoError> {
+        let carried = items.values().filter_map(|item| item.rev).max().unwrap_or(0);
+        Ok(counters.revision.max(carried).max(self.storage.last_journal_rev()?))
+    }
+
     /// `save_touching` against the board as the caller read it, under the
     /// lock it still holds: a structured write already has that copy, and
     /// reading storage.json a second time only parses the whole board again.
@@ -871,6 +880,9 @@ impl Ekko {
         let kept = self.storage.get_counters()?;
         let mut counters = kept.clone();
         counters.highest_id = counters.highest_id.max(before.keys().chain(data.keys()).max().copied().unwrap_or(0));
+        // Healed: a lost or older counters.json must never hand out a revision
+        // already handed out, or a cursor holding it would skip the write.
+        counters.revision = self.healed_revision(before, &counters)?;
         // A write that changes nothing leaves the revision where it was, so a
         // retried command does not tell every reader that the board moved.
         if !changed.is_empty() || !gone.is_empty() {
@@ -883,12 +895,9 @@ impl Ekko {
             }
         }
 
-        // Counters first. A crash between the two files leaves a revision no
-        // item carries, which no cursor can miss; the other order would leave
-        // items stamped with a revision the next write hands out again.
-        if counters != kept {
-            self.storage.set_counters(&counters)?;
-        }
+        // Counters last: storage, then the journal, then the revision that
+        // publishes both. A reader takes the revision first, so everything up
+        // to it is already on disk when it reads the rest.
         self.storage.set(data)?;
 
         // What the write did that the items it left cannot show: work it set
@@ -911,6 +920,9 @@ impl Ekko {
                 "blocked": named(&blocked),
                 "removed": removed,
             }))?;
+        }
+        if counters != kept {
+            self.storage.set_counters(&counters)?;
         }
         Ok((released, blocked))
     }
@@ -1831,14 +1843,19 @@ impl Ekko {
         let cleaned = remove_duplicates(
             names.iter().map(|n| n.trim_start_matches('@').to_string()).collect(),
         );
-        if self.storage.get_phases()? != cleaned {
+        let moved = self.storage.get_phases()? != cleaned;
+        self.storage.set_phases(&cleaned)?;
+        if moved {
             // The order work is taken up in moved though no item did: the
-            // revision says so, and `changes` tells its reader to prime again.
+            // revision says so, published after the phases it covers.
             let mut counters = self.storage.get_counters()?;
-            counters.revision += 1;
+            counters.revision = self.healed_revision(&self.storage.get()?, &counters)? + 1;
+            // No item carries this revision, so the journal does: a lost
+            // counters.json heals past it instead of handing it out again.
+            let at = chrono::Local::now().timestamp_millis();
+            self.storage.append_journal(&serde_json::json!({"rev": counters.revision, "at": at, "phases": true}))?;
             self.storage.set_counters(&counters)?;
         }
-        self.storage.set_phases(&cleaned)?;
         Ok(Outcome::Phases(cleaned))
     }
 
@@ -2874,6 +2891,46 @@ mod tests {
 
         let after = ekko.storage.get().unwrap().values().next().unwrap().uid.clone();
         assert_eq!(after, before, "the uid is what stays put when the id does not");
+
+        cleanup(&dir);
+    }
+
+    /// The revision a write takes, after counters.json was lost.
+    fn revision_after_losing_the_counter(ekko: &Ekko, dir: &std::path::Path) -> (u64, u64) {
+        let held = ekko.storage.get_counters().unwrap().revision;
+        fs::remove_file(dir.join("storage").join("counters.json")).unwrap();
+        ekko.create_task(&words(&["written after the loss"])).unwrap();
+        let data = ekko.storage.get().unwrap();
+        (held, data.values().filter_map(|item| item.rev).max().unwrap())
+    }
+
+    /// After a removal the newest revision is on no item, only in the journal:
+    /// a lost counters.json still heals past it, or a cursor holding it would
+    /// never be told of the next write.
+    #[test]
+    fn a_lost_counter_heals_past_a_removal() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["kept"])).unwrap();
+        ekko.create_task(&words(&["cleared"])).unwrap();
+        ekko.check_tasks(&words(&["2"]), false).unwrap();
+        ekko.clear().unwrap();
+
+        let (held, rev) = revision_after_losing_the_counter(&ekko, &dir);
+        assert!(rev > held, "the write took revision {rev}, which a cursor at {held} never lists");
+
+        cleanup(&dir);
+    }
+
+    /// A change of phases moves the revision with no item to carry it, so it
+    /// is journaled, and a lost counters.json heals past it too.
+    #[test]
+    fn a_lost_counter_heals_past_a_change_of_phases() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["first"])).unwrap();
+        ekko.set_phases(&words(&["design", "build"])).unwrap();
+
+        let (held, rev) = revision_after_losing_the_counter(&ekko, &dir);
+        assert!(rev > held, "the write took revision {rev}, which a cursor at {held} never lists");
 
         cleanup(&dir);
     }

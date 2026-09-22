@@ -372,6 +372,41 @@ impl Storage {
         Ok(fs::read_to_string(&path)?.lines().filter_map(|line| serde_json::from_str(line).ok()).collect())
     }
 
+    /// The revision on the journal's last line, the newest it records, or 0
+    /// with no journal. Read from the end, a few kilobytes at a time, so a
+    /// write pays for one line and not for the whole journal.
+    pub fn last_journal_rev(&self) -> Result<u64, StorageError> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let mut file = match File::open(self.journal_file()) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error.into()),
+        };
+        let len = file.metadata()?.len();
+        let mut window = 4096;
+        loop {
+            let start = len.saturating_sub(window);
+            file.seek(SeekFrom::Start(start))?;
+            let mut tail = Vec::new();
+            file.read_to_end(&mut tail)?;
+            // A line is only whole past the first newline, unless the window
+            // reaches back to the start of the file.
+            let whole = if start == 0 { &tail[..] } else { tail.splitn(2, |&b| b == b'\n').nth(1).unwrap_or(&[]) };
+            let rev = whole
+                .split(|&b| b == b'\n')
+                .rev()
+                .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+                .find_map(|entry| entry["rev"].as_u64());
+            if let Some(rev) = rev {
+                return Ok(rev);
+            }
+            if start == 0 {
+                return Ok(0);
+            }
+            window *= 4;
+        }
+    }
+
     /// Appends one entry. Callers hold the lock.
     pub fn append_journal(&self, entry: &serde_json::Value) -> Result<(), StorageError> {
         self.append_journal_within(entry, JOURNAL_BYTES)
@@ -837,6 +872,21 @@ mod tests {
         assert!(matches!(result, Err(StorageError::LockTimeout(_))));
         holder.kill().ok();
         holder.wait().ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The newest revision comes off the journal's last line, even one longer
+    /// than the first window read from the end.
+    #[test]
+    fn the_last_journal_revision_is_read_past_a_long_last_line() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        assert_eq!(storage.last_journal_rev().unwrap(), 0, "no journal yet");
+
+        storage.append_journal(&serde_json::json!({"rev": 3})).unwrap();
+        storage.append_journal(&serde_json::json!({"rev": 4, "removed": [{"text": "x".repeat(20_000)}]})).unwrap();
+
+        assert_eq!(storage.last_journal_rev().unwrap(), 4);
         fs::remove_dir_all(&dir).ok();
     }
 }
