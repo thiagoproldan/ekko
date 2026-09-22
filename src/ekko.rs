@@ -1801,6 +1801,13 @@ impl Ekko {
                 "{note} is a note, and only a task can block: a note has no state to finish, so it would block nothing"
             )));
         }
+        // Nor can a note be blocked: it would be counted as open work waiting
+        // on its blockers, raising their place in next. Clearing stays open.
+        if !blocker_ids.is_empty() && data.get(&id).is_some_and(|item| !item.is_task) {
+            return Err(EkkoError::InvalidInput(format!(
+                "{id} is a note, and only a task can be blocked: a note has no state to finish, so it would wait on nothing"
+            )));
+        }
         for blocker in blocker_ids {
             if *blocker == id || self.reaches(data, *blocker, id) {
                 return Err(EkkoError::BlockingCycle(id, *blocker));
@@ -2789,6 +2796,22 @@ mod tests {
         ekko.set_phases(&words(&["ship", "setup"])).unwrap();
         ekko.set_phases(&words(&["ship"])).unwrap();
         assert_eq!(ekko.storage.get_phases().unwrap(), words(&["ship"]));
+
+        cleanup(&dir);
+    }
+
+    /// A note has no state to finish, so it can neither block nor be
+    /// blocked: blocked, it would count as open work waiting on its
+    /// blockers. Clearing what a note waits on stays open, for old data.
+    #[test]
+    fn a_note_cannot_be_blocked() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["a task"])).unwrap();
+        ekko.create_note(&words(&["a note"])).unwrap();
+
+        let refused = ekko.set_blocked_by(&words(&["@2", "1"]));
+        assert!(matches!(&refused, Err(EkkoError::InvalidInput(m)) if m.contains("only a task can be blocked")), "{refused:?}");
+        ekko.set_blocked_by(&words(&["@2"])).unwrap();
 
         cleanup(&dir);
     }
