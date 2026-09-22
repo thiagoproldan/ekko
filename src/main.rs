@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod directory;
 mod ekko;
+mod holder;
 mod item;
 mod json;
 mod json_output;
@@ -210,8 +211,10 @@ fn main() -> ExitCode {
         (Some(project), false) => format!("project {}", project.name),
         (None, _) => "default board".to_string(),
     };
+    // A command run by an agent through Bash, or by a hook, acts for the
+    // Claude Code session it runs under; one typed at a terminal, for the user.
     let ekko = match Ekko::at(&location.dir) {
-        Ok(ekko) => ekko,
+        Ok(ekko) => ekko.acting_as(holder::Actor::of_this_command()),
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
 

@@ -49,6 +49,9 @@ pub enum EkkoError {
     InvalidInput(String),
     /// An edit made against a version of the item that is no longer current.
     Stale { id: u32, current: i64 },
+    /// State changes to tasks another Claude Code session, still running,
+    /// holds in progress: each task, who holds it, and since when.
+    Held(Vec<(u32, String, i64)>),
     /// A replacement whose text did not occur exactly once in the item.
     EditMatch { id: u32, found: usize },
     PhaseOrder(Inversion),
@@ -92,6 +95,7 @@ impl EkkoError {
             EkkoError::AlreadyDone(_) => "ALREADY_DONE",
             EkkoError::InvalidInput(_) => "INVALID_INPUT",
             EkkoError::Stale { .. } => "STALE",
+            EkkoError::Held(_) => "HELD",
             EkkoError::EditMatch { .. } => "EDIT_MATCH",
             EkkoError::PhaseOrder(_) => "PHASE_ORDER",
             EkkoError::AttachNotANote(_) => "ATTACH_NOT_A_NOTE",
@@ -134,6 +138,7 @@ impl EkkoError {
             | EkkoError::AlreadyDone(_)
             | EkkoError::InvalidInput(_)
             | EkkoError::Stale { .. }
+            | EkkoError::Held(_)
             | EkkoError::EditMatch { .. }
             | EkkoError::PhaseOrder(_)
             | EkkoError::AttachNotANote(_)
@@ -235,6 +240,14 @@ impl std::fmt::Display for EkkoError {
             EkkoError::Stale { id, current } => write!(
                 f,
                 "Item {id} changed since it was read (its updatedAt is now {current}), so the edit was not made. Read it again and redo the edit against what it says now"
+            ),
+            EkkoError::Held(held) => write!(
+                f,
+                "{}, and still running, so nothing was written. Ask the user before touching it; with their word, force_state takes it over",
+                held.iter()
+                    .map(|(id, by, since)| format!("{id} is in progress in another Claude Code session, {by}, since {}", crate::holder::when(*since)))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ),
             EkkoError::EditMatch { id, found: 0 } => write!(
                 f,
@@ -510,11 +523,20 @@ impl Outcome {
 
 pub struct Ekko {
     pub(crate) storage: Storage,
+    /// Who writes through this handle, and so who claims a task set in
+    /// progress; `None` claims nothing.
+    pub(crate) actor: Option<crate::holder::Actor>,
 }
 
 impl Ekko {
     pub fn new(storage: Storage) -> Self {
-        Ekko { storage }
+        Ekko { storage, actor: None }
+    }
+
+    /// This handle, writing for `actor`.
+    pub fn acting_as(mut self, actor: crate::holder::Actor) -> Self {
+        self.actor = Some(actor);
+        self
     }
 
     /// Opens the board in `dir` -- wherever `directory::locate` said this
@@ -879,6 +901,21 @@ impl Ekko {
 
         let changed: Vec<u32> = data.iter().filter(|(id, item)| before.get(*id) != Some(*item)).map(|(id, _)| *id).collect();
         let gone: Vec<&Item> = before.iter().filter(|(id, _)| !data.contains_key(*id)).map(|(_, item)| item).collect();
+
+        // Who holds a task follows its state: one entering progress is claimed
+        // for whoever this write is for, and one leaving progress is let go. A
+        // task already in progress keeps its holder; taking one over is the
+        // structured write's call (`ops::Draft::commit`).
+        for id in &changed {
+            let entering = before.get(id).is_none_or(|old| State::of(old) != Some(State::Progress));
+            if let Some(item) = data.get_mut(id) {
+                if State::of(item) != Some(State::Progress) {
+                    item.held_by = None;
+                } else if entering {
+                    item.held_by = self.actor.as_ref().map(|actor| actor.holder(now));
+                }
+            }
+        }
 
         let kept = self.storage.get_counters()?;
         let mut counters = kept.clone();

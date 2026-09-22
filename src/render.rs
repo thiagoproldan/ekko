@@ -508,6 +508,17 @@ impl<'a> Renderer<'a> {
     /// what is holding the item up *now* -- nothing ever has to be unblocked
     /// by hand. Empty when there is nothing outstanding, which is what keeps
     /// every pre-existing board byte-identical.
+    /// Who holds a task in progress, when someone does: a Claude Code session
+    /// or the user, and whether that session is gone. Empty otherwise, which
+    /// keeps every board nobody claims work on byte-identical.
+    fn get_held(&self, item: &Item) -> String {
+        let Some(holder) = item.held_by.as_ref().filter(|_| State::of(item) == Some(State::Progress)) else {
+            return String::new();
+        };
+        let gone = if holder.alive() { "" } else { ", gone" };
+        self.painter.grey(&format!("held by {}{gone}", holder.label()))
+    }
+
     fn get_blocked(&self, item: &Item) -> String {
         let Some(ids) = self.blockers.get(&item.id) else { return String::new() };
         if ids.is_empty() {
@@ -616,6 +627,8 @@ impl<'a> Renderer<'a> {
             (false, false) => format!("{age} {due} {star}"),
         };
         let suffix = if blocked.is_empty() { suffix } else { format!("{blocked} {suffix}") };
+        let held = self.get_held(item);
+        let suffix = if held.is_empty() { suffix } else { format!("{held} {suffix}") };
         let prefix = self.build_prefix(item);
         let message = self.build_message(item);
         self.emit(&prefix, Some(&level), &message, &suffix);
@@ -637,6 +650,8 @@ impl<'a> Renderer<'a> {
         // did not -- one surface got the feature and its sibling did not.
         let blocked = self.get_blocked(item);
         let suffix = if blocked.is_empty() { suffix } else { format!("{blocked} {suffix}") };
+        let held = self.get_held(item);
+        let suffix = if held.is_empty() { suffix } else { format!("{held} {suffix}") };
         let prefix = self.build_prefix(item);
         let message = self.build_message(item);
         self.emit(&prefix, Some(&level), &message, &suffix);

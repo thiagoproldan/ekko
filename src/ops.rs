@@ -19,7 +19,8 @@ use serde_json::{json, Value};
 use crate::ekko::{
     holds, parse_due_date, phase_inversion, phase_order, remove_duplicates, uid_index, Ekko, EkkoError, Linked,
 };
-use crate::item::{Item, Knowledge, Setting};
+use crate::holder::{Actor, Holder};
+use crate::item::{Item, Knowledge, Setting, State};
 use crate::storage::{ItemMap, LockGuard};
 
 /// An item as a caller names it: a display id, a uid, or `$N` for the item
@@ -223,6 +224,9 @@ pub struct Draft<'a> {
     /// For each operation applied so far, the item it created, if any --
     /// what `$N` resolves through.
     created: Vec<Option<u32>>,
+    /// Tasks this draft set in progress, whether or not they already were:
+    /// a claim, which `commit` settles against whoever holds each one.
+    claims: Vec<u32>,
 }
 
 /// What a commit wrote, what `force` pushed past to write it, and the tasks
@@ -235,6 +239,9 @@ pub struct Committed {
     pub released: Vec<u32>,
     /// Tasks that were free to start before the write and now wait.
     pub blocked: Vec<u32>,
+    /// What the write found about who holds the tasks it set in progress:
+    /// already its own, or taken over from a session that is gone.
+    pub notices: Vec<String>,
 }
 
 impl<'a> Draft<'a> {
@@ -242,7 +249,7 @@ impl<'a> Draft<'a> {
         let lock = ekko.storage.acquire_lock()?;
         let data = ekko.storage.get()?;
         let phases = ekko.storage.get_phases()?;
-        Ok(Draft { ekko, _lock: lock, before: data.clone(), data, phases, created: Vec::new() })
+        Ok(Draft { ekko, _lock: lock, before: data.clone(), data, phases, created: Vec::new(), claims: Vec::new() })
     }
 
     /// How a refusal of this draft should name its items; see `Names`.
@@ -414,6 +421,9 @@ impl<'a> Draft<'a> {
         }
         for id in &ids {
             setting.apply(self.item(*id));
+        }
+        if setting == Setting::Become(State::Progress) {
+            self.claims.extend(&ids);
         }
         Ok(ids)
     }
@@ -601,8 +611,58 @@ impl<'a> Draft<'a> {
     /// rule -- or, with `force`, anyway, saying what it pushed past.
     pub fn commit(mut self, force: bool) -> Result<Committed, EkkoError> {
         let (overridden, reopened) = Ekko::refuse_broken_dependencies(&self.before, &self.data, force)?;
+        let notices = self.settle_holders(force)?;
         let (released, blocked) = self.ekko.save_against(&self.before, &mut self.data)?;
-        Ok(Committed { data: self.data, overridden, reopened, released, blocked })
+        Ok(Committed { data: self.data, overridden, reopened, released, blocked, notices })
+    }
+
+    /// Who holds what, once the draft is whole. A change of state to a task
+    /// another Claude Code session holds in progress, while that session
+    /// runs, is refused as HELD unless `force` -- a second session asks the
+    /// user first; a person at the terminal is never refused. A task set in
+    /// progress again is taken over from a holder that is gone, or forced
+    /// past, and each such claim is told in a notice. Tasks entering progress
+    /// are claimed when the draft is saved (`Ekko::save_against`).
+    fn settle_holders(&mut self, force: bool) -> Result<Vec<String>, EkkoError> {
+        let actor = self.ekko.actor.clone();
+        let is_mine = |holder: &Holder| actor.as_ref().is_some_and(|actor| actor.is(holder));
+        let mut held = Vec::new();
+        for (id, old) in &self.before {
+            let Some(holder) = old.held_by.as_ref().filter(|_| State::of(old) == Some(State::Progress)) else { continue };
+            let touched = self.claims.contains(id) || self.data.get(id).is_none_or(|new| State::of(new) != State::of(old));
+            let person = actor.as_ref().is_some_and(Actor::is_person);
+            if touched && !force && !person && !is_mine(holder) && holder.alive() {
+                held.push((*id, holder.label(), holder.since));
+            }
+        }
+        if !held.is_empty() {
+            return Err(EkkoError::Held(held));
+        }
+
+        let now = chrono::Local::now().timestamp_millis();
+        let mut claims = std::mem::take(&mut self.claims);
+        claims.sort_unstable();
+        claims.dedup();
+        let mut notices = Vec::new();
+        for id in claims {
+            // Only a task that already was in progress: one entering it now
+            // is claimed as it is saved.
+            let Some(old) = self.before.get(&id).filter(|old| State::of(old) == Some(State::Progress)) else { continue };
+            let Some(actor) = &actor else { continue };
+            let notice = match &old.held_by {
+                Some(holder) if actor.is(holder) => {
+                    format!("{id} was already in progress, yours since {}", crate::holder::when(holder.since))
+                }
+                Some(holder) if holder.alive() => format!("{id} was in progress under {}, still running: taken over", holder.label()),
+                Some(holder) => format!("{id} was in progress under {}, which is gone: now yours", holder.label()),
+                None => format!("{id} was already in progress, held by no one: now yours"),
+            };
+            if !old.held_by.as_ref().is_some_and(|holder| actor.is(holder)) {
+                self.item(id).held_by = Some(actor.holder(now));
+            }
+            notices.push(notice);
+        }
+        Ok(notices)
     }
 }
 
@@ -734,6 +794,67 @@ mod tests {
         assert_eq!(item.description, text);
         assert_eq!(item.boards, vec!["@coding", "@reviews"]);
         assert_eq!((item.priority, item.due_date.as_deref()), (Some(2), Some("2026-09-01")));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn state_of(ekko: &Ekko, id: u32) -> Option<State> {
+        State::of(&ekko.storage.get().unwrap()[&id])
+    }
+
+    /// A session that sets a task in progress holds it; another, while the
+    /// first runs, is refused as HELD on any change of its state, and takes
+    /// it over only by force; leaving progress lets it go.
+    #[test]
+    fn a_task_in_progress_is_held_by_the_session_that_started_it() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let (board, dir) = board("held");
+        let mine = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me.clone());
+        let theirs = Ekko::new(Storage::new(&dir).unwrap()).acting_as(other.clone());
+        batch(&mine, &[json!({"op": "create", "text": "the work"})]).unwrap();
+        batch(&mine, &[json!({"op": "set_state", "items": [1], "state": "progress"})]).unwrap();
+        let holder = board.storage.get().unwrap()[&1].held_by.clone().expect("held once in progress");
+        assert!(me.is(&holder));
+
+        for state in ["progress", "done", "paused"] {
+            let refused = batch(&theirs, &[json!({"op": "set_state", "items": [1], "state": state})]);
+            assert!(matches!(&refused, Err(EkkoError::Held(held)) if held[0].0 == 1 && held[0].1 == "default on pts/1"), "{state}: {:?}", refused.err());
+        }
+        assert_eq!(state_of(&board, 1), Some(State::Progress), "nothing was written");
+
+        let mut draft = Draft::open(&theirs).unwrap();
+        draft.set_state(&[Ref::Id(1)], "progress").unwrap();
+        let forced = draft.commit(true).unwrap();
+        assert_eq!(forced.notices, vec!["1 was in progress under default on pts/1, still running: taken over"]);
+        assert!(other.is(board.storage.get().unwrap()[&1].held_by.as_ref().unwrap()));
+
+        batch(&theirs, &[json!({"op": "set_state", "items": [1], "state": "done"})]).unwrap();
+        assert_eq!(board.storage.get().unwrap()[&1].held_by, None, "done lets it go");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A task whose session is gone is free: setting it in progress takes it
+    /// over and says so; the same session setting it again is told it is
+    /// already its own; and a person at the terminal is never refused.
+    #[test]
+    fn a_gone_session_leaves_its_task_free_and_a_person_is_never_refused() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let (board, dir) = board("held-gone");
+        let dead = Ekko::new(Storage::new(&dir).unwrap()).acting_as(gone);
+        let mine = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me.clone());
+        batch(&dead, &[json!({"op": "create", "text": "left behind"}), json!({"op": "set_state", "items": ["$1"], "state": "progress"})]).unwrap();
+
+        let taken = batch(&mine, &[json!({"op": "set_state", "items": [1], "state": "progress"})]).unwrap();
+        assert_eq!(taken.notices, vec!["1 was in progress under default on pts/3, which is gone: now yours"]);
+        let again = batch(&mine, &[json!({"op": "set_state", "items": [1], "state": "progress"})]).unwrap();
+        assert!(again.notices[0].starts_with("1 was already in progress, yours since "), "{:?}", again.notices);
+
+        let person = Ekko::new(Storage::new(&dir).unwrap()).acting_as(Actor::person());
+        let theirs = Ekko::new(Storage::new(&dir).unwrap()).acting_as(other);
+        assert!(batch(&theirs, &[json!({"op": "set_state", "items": [1], "state": "paused"})]).is_err());
+        batch(&person, &[json!({"op": "set_state", "items": [1], "state": "paused"})]).unwrap();
+        assert_eq!(state_of(&board, 1), Some(State::Paused), "the user decides");
 
         std::fs::remove_dir_all(&dir).ok();
     }

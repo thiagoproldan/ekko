@@ -82,8 +82,11 @@ pub fn tasks(ekko: &Ekko, since: u64) -> Result<Vec<Task>, Box<dyn Error>> {
     done.sort_by_key(|item| (item.updated_at.unwrap_or(item.timestamp), item.id));
     let done = done.split_off(done.len().saturating_sub(DONE_SHOWN));
 
-    let (doing, ready): (Vec<_>, Vec<_>) =
-        agent::next(ekko, None)?.into_iter().partition(|entry| entry.state == Some(State::Progress));
+    // Work another running session holds is that session's, not this one's.
+    let (doing, ready): (Vec<_>, Vec<_>) = agent::next(ekko, None)?
+        .into_iter()
+        .filter(|entry| !entry.held.as_ref().is_some_and(agent::Held::elsewhere))
+        .partition(|entry| entry.state == Some(State::Progress));
 
     let rows = done
         .iter()
@@ -267,6 +270,25 @@ mod tests {
         assert_eq!(drawn(&list), expected.map(|(s, t)| (s.to_string(), t.to_string())));
         assert_eq!(list.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3", "4", "5", "6"]);
         assert_eq!(list[0].active_form, "5. task 5");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Another running session's task in progress is not this session's
+    /// work: its list leaves it out, in progress or not.
+    #[test]
+    fn another_sessions_task_is_not_on_the_list() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let dir = scratch("held");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir.join("board")).unwrap()).acting_as(actor.clone());
+        for name in ["theirs", "mine"] {
+            as_(&me).create_task(&words(&[name])).unwrap();
+        }
+        as_(&other).set_state(&words(&["@1", "progress"]), false).unwrap();
+        as_(&me).set_state(&words(&["@2", "progress"]), false).unwrap();
+
+        let list = tasks(&as_(&me), 0).unwrap();
+        assert_eq!(drawn(&list), [("in_progress".to_string(), "2. mine".to_string())]);
 
         fs::remove_dir_all(&dir).ok();
     }

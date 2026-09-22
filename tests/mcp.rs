@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{self, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -550,5 +550,87 @@ fn the_prefix_every_session_pays_for_changes_only_on_purpose() {
         "the instructions or an always-loaded definition changed: if that is meant, batch it with the other changes to them in one release, and set PREFIX_FINGERPRINT to {fingerprint:#018x}"
     );
 
+    fs::remove_dir_all(&home).ok();
+}
+
+/// A server kept open between calls, under a shell of its own that stays its
+/// parent: another client process, the way each Claude Code session is.
+struct Session {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: BufReader<std::process::ChildStdout>,
+    sent: u64,
+}
+
+impl Session {
+    fn start(home: &PathBuf) -> Session {
+        // Not exec'd: the shell stays, as the server's parent, until the
+        // server exits.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!("'{}' --mcp; true", env!("CARGO_BIN_EXE_ekko")))
+            .env("HOME", home)
+            .env("EKKO_DIR", home)
+            .env_remove("EKKO_PROJECT")
+            .current_dir(home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn sh");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut session = Session { child, stdin, stdout, sent: 0 };
+        session.request("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}));
+        session
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        self.sent += 1;
+        writeln!(self.stdin, "{}", request(self.sent, method, params)).unwrap();
+        let mut line = String::new();
+        self.stdout.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn call(&mut self, tool: &str, arguments: Value) -> String {
+        text(&self.request("tools/call", json!({"name": tool, "arguments": arguments}))).to_string()
+    }
+
+    fn close(self) {
+        drop(self.stdin);
+        let mut child = self.child;
+        child.wait().unwrap();
+    }
+}
+
+/// Two sessions on one board: the second cannot take the task the first
+/// holds while the first runs, is not steered into it by next, reads in the
+/// prime who holds it, and takes it over once the first is gone.
+#[test]
+fn a_second_session_does_not_take_the_first_ones_task() {
+    let home = temp_home();
+    let mut first = Session::start(&home);
+    let mut second = Session::start(&home);
+    first.call("create", json!({"text": "the first session's work"}));
+    first.call("set_state", json!({"items": [1], "state": "progress"}));
+    second.call("create", json!({"text": "other work"}));
+
+    let refused = second.call("set_state", json!({"items": [1], "state": "done"}));
+    assert!(refused.starts_with("HELD: 1 is in progress in another Claude Code session"), "{refused}");
+    let next = second.call("next", json!({}));
+    assert!(next.starts_with("   2. other work\n"), "{next}");
+    assert!(next.contains("In progress in other sessions, not to take up: 1 ("), "{next}");
+    let prime = second.call("prime", json!({}));
+    assert!(prime.contains("   1. the first session's work \u{b7} in progress \u{b7} held by "), "{prime}");
+    let again = first.call("set_state", json!({"items": [1], "state": "progress"}));
+    assert!(again.contains("\"notices\":[\"1 was already in progress, yours since "), "{again}");
+
+    first.close();
+    let taken = second.call("set_state", json!({"items": [1], "state": "progress"}));
+    assert!(taken.contains("which is gone: now yours"), "{taken}");
+    assert!(second.call("prime", json!({})).contains("   1. the first session's work \u{b7} in progress \u{b7} yours\n"));
+
+    second.close();
     fs::remove_dir_all(&home).ok();
 }

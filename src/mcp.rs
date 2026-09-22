@@ -36,6 +36,7 @@ use serde_json::{json, Map, Value};
 
 use crate::agent;
 use crate::config;
+use crate::holder;
 use crate::directory;
 use crate::ekko::{Ekko, EkkoError, Outcome};
 use crate::item::Setting;
@@ -99,6 +100,9 @@ pub struct Server {
     /// How this process was started -- its program name and PATH -- and the
     /// binary that led to, to tell when an upgrade has replaced it.
     launched: Option<(OsString, Option<OsString>, Binary)>,
+    /// Who writes through this server: the Claude Code process that started
+    /// it, which claims the tasks it sets in progress.
+    actor: holder::Actor,
 }
 
 /// A binary as a file: where its name resolves, every link followed, and
@@ -248,6 +252,7 @@ impl Server {
             answered: Mutex::new(HashMap::new()),
             started,
             launched,
+            actor: holder::Actor::client_of_this_server(),
         }
     }
 
@@ -462,7 +467,7 @@ impl Server {
     fn open(&self, project: Option<&str>) -> Result<(Ekko, directory::Location), EkkoError> {
         let name = project.or(self.project_env.as_deref());
         let location = directory::locate(&self.home, &self.cwd, None, self.ekko_dir_env.as_deref(), name)?;
-        Ok((Ekko::at(&location.dir)?, location))
+        Ok((Ekko::at(&location.dir)?.acting_as(self.actor.clone()), location))
     }
 
     fn label(location: &directory::Location) -> String {
@@ -505,9 +510,21 @@ impl Server {
                 }
                 let (entries, total) = agent::next_listed(&ekko, Some(limit.unwrap_or(agent::SEARCH_LIMIT)))?;
                 self.answered_today("next");
+                // Work another session still runs is not work to take up, so
+                // a second session is not steered into the first one's task.
+                let (elsewhere, entries): (Vec<agent::Entry>, Vec<agent::Entry>) =
+                    entries.into_iter().partition(|entry| entry.held.as_ref().is_some_and(agent::Held::elsewhere));
                 let mut text = agent::list_text(&entries, "Nothing is in progress or ready.");
+                let total = total - elsewhere.len();
                 if total > entries.len() {
                     text.push_str(&format!("{} of {total} shown: raise limit for more.\n", entries.len()));
+                }
+                if !elsewhere.is_empty() {
+                    let held: Vec<String> = elsewhere
+                        .iter()
+                        .filter_map(|entry| Some(format!("{} ({})", entry.id, entry.held.as_ref()?.by)))
+                        .collect();
+                    text.push_str(&format!("In progress in other sessions, not to take up: {}\n", held.join(", ")));
                 }
                 Ok(text)
             }
@@ -652,6 +669,9 @@ fn batch(ekko: &Ekko, ops: Value) -> Result<String, ToolError> {
         .collect();
     let mut reply = json!({"ok": true, "results": results});
     name_readiness(&mut reply, &committed);
+    if !committed.notices.is_empty() {
+        reply["notices"] = json!(committed.notices);
+    }
     Ok(reply.to_string())
 }
 
@@ -707,6 +727,9 @@ fn write(
         reply["reopenedOver"] = pairs(&committed.reopened, "dependents");
     }
     name_readiness(&mut reply, &committed);
+    if !committed.notices.is_empty() {
+        reply["notices"] = json!(committed.notices);
+    }
     Ok(reply.to_string())
 }
 

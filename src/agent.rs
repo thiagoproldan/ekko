@@ -380,6 +380,9 @@ pub struct Entry {
     /// A note that is its task's handoff; see `Item::handoff`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub handoff: bool,
+    /// Who holds a task in progress, as the reader sees it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held: Option<Held>,
     /// A note's lasting kind -- decision, gotcha or procedure; see
     /// `Item::knowledge`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -427,6 +430,9 @@ fn is_zero(n: &usize) -> bool {
 /// Everything the views share, read off one load of the board.
 struct Reader<'a> {
     graph: Graph<'a>,
+    /// Who reads, to tell a claim that is theirs from one another session
+    /// holds; `None` reads every claim as another's.
+    me: Option<crate::holder::Actor>,
     /// Visible notes, by the uid of the task each is attached to.
     order: HashMap<&'a str, usize>,
     today: String,
@@ -436,6 +442,7 @@ impl<'a> Reader<'a> {
     fn new(all: &'a ItemMap, links: Arc<Links>, phases: &'a [String]) -> Self {
         Reader {
             graph: Graph::new(all, links),
+            me: None,
             order: phase_order(phases),
             today: chrono::Local::now().format("%Y-%m-%d").to_string(),
         }
@@ -444,6 +451,23 @@ impl<'a> Reader<'a> {
     /// A reader over a shared board, on the links its version already has.
     fn shared(all: &'a Arc<ItemMap>, phases: &'a [String]) -> Self {
         Reader::new(all, links_of(all), phases)
+    }
+
+    /// This reader, reading for `ekko`'s actor.
+    fn seen_by(mut self, ekko: &Ekko) -> Self {
+        self.me = ekko.actor.clone();
+        self
+    }
+
+    /// Who holds `item`, if it is a task in progress that someone holds.
+    fn held(&self, item: &Item) -> Option<Held> {
+        let holder = item.held_by.as_ref().filter(|_| State::of(item) == Some(State::Progress))?;
+        Some(Held {
+            by: holder.label(),
+            since: holder.since,
+            yours: self.me.as_ref().is_some_and(|me| me.is(holder)),
+            gone: !holder.alive(),
+        })
     }
 
     /// The display id holding `uid`.
@@ -508,6 +532,7 @@ impl<'a> Reader<'a> {
             inherits: None,
             finish_by: None,
             handoff: item.handoff,
+            held: self.held(item),
             knowledge: item.knowledge,
             supersedes: item.supersedes.as_deref().and_then(|uid| self.uid(uid)),
             superseded_by: self.superseded_by(item.id),
@@ -638,9 +663,14 @@ pub struct Prime {
     /// needed will never happen.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub freed_by_cancelling: Vec<(u32, u32)>,
-    /// The newest handoff on open work: where the last session stopped.
+    /// Where the last session stopped: the newest handoff on open work,
+    /// this reader's own first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<Handoff>,
+    /// The other handoffs on open work written in the last hour, newest
+    /// first: other sessions stopping on the same board.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub other_handoffs: Vec<OtherHandoff>,
     /// The newest gotchas and procedures in force; `knowledge_total` counts
     /// them all.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -651,6 +681,50 @@ pub struct Prime {
     #[serde(skip_serializing_if = "is_zero")]
     pub decisions: usize,
 }
+
+/// Who holds a task in progress, as one reader sees it: by whom and since
+/// when, whether it is the reader, and whether the holder is gone -- a
+/// Claude Code process that no longer runs, whose task is free to take up.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Held {
+    pub by: String,
+    pub since: i64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub yours: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub gone: bool,
+}
+
+impl Held {
+    /// Held by another session that still runs: not work to take up.
+    pub fn elsewhere(&self) -> bool {
+        !self.yours && !self.gone
+    }
+
+    fn text(&self) -> String {
+        match (self.yours, self.gone) {
+            (true, _) => "yours".to_string(),
+            (false, true) => format!("held by {}, gone", self.by),
+            (false, false) => format!("held by {}", self.by),
+        }
+    }
+}
+
+/// A handoff the prime names under the one it shows: the note, its task,
+/// when it was written, and who holds the task, as the reader sees it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtherHandoff {
+    pub id: u32,
+    pub task: u32,
+    pub updated_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
+}
+
+/// How many other handoffs a prime names before it counts the rest.
+const OTHER_HANDOFFS_SHOWN: usize = 5;
 
 /// A handoff as the prime shows it: the note, and the task it hands over.
 #[derive(Debug, Serialize)]
@@ -675,7 +749,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     let cursor = ekko.storage.get_counters()?.revision as i64;
     let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
-    let reader = Reader::shared(&all, &phases);
+    let reader = Reader::shared(&all, &phases).seen_by(ekko);
 
     let (next, _) = reader.next(None);
     let (mut doing, mut ready): (Vec<Entry>, Vec<Entry>) =
@@ -701,24 +775,46 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     let waiting_total = waiting.len();
     let mut waiting: Vec<Entry> = waiting.into_iter().take(BLOCKED_SHOWN).map(|item| reader.entry(item)).collect();
 
-    // The newest handoff on open work, shown once in its own section rather
-    // than clipped again among the notes of its task.
-    let handoff = all
+    // Where the last session stopped, shown once in its own section rather
+    // than clipped again among the notes of its task. With several sessions
+    // on the board, the newest handoff on a task this reader holds, then on
+    // one no other running session holds, then the newest of all; the rest
+    // written in the last hour are named under it, so a session cleared in
+    // one terminal does not resume the work another still holds.
+    let mut handoffs: Vec<(&Item, &Item)> = all
         .values()
         .filter(|note| note.handoff && visible(note))
         .filter_map(|note| {
             let task = &all[&reader.uid(note.attached_to.as_deref()?)?];
             (visible(task) && holds(task)).then_some((note, task))
         })
-        .max_by_key(|(note, _)| (updated(note), note.id))
-        .map(|(note, task)| Handoff {
+        .collect();
+    let rank = |task: &Item| match reader.held(task) {
+        Some(held) if held.yours => 0,
+        Some(held) if held.elsewhere() => 2,
+        _ => 1,
+    };
+    handoffs.sort_by_key(|(note, task)| (rank(task), std::cmp::Reverse((updated(note), note.id))));
+    let hour_ago = chrono::Local::now().timestamp_millis() - 3_600_000;
+    let other_handoffs: Vec<OtherHandoff> = handoffs
+        .iter()
+        .skip(1)
+        .filter(|(note, _)| updated(note) >= hour_ago)
+        .map(|(note, task)| OtherHandoff {
             id: note.id,
-            uid: note.uid.clone(),
             task: task.id,
-            task_state: state_word(task),
             updated_at: updated(note),
-            description: note.description.clone(),
-        });
+            held: reader.held(task).map(|held| held.text()),
+        })
+        .collect();
+    let handoff = handoffs.first().map(|(note, task)| Handoff {
+        id: note.id,
+        uid: note.uid.clone(),
+        task: task.id,
+        task_state: state_word(task),
+        updated_at: updated(note),
+        description: note.description.clone(),
+    });
     if let Some(shown) = &handoff {
         for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()).chain(waiting.iter_mut()) {
             entry.notes.retain(|note| note.id != shown.id);
@@ -799,6 +895,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         overdue,
         freed_by_cancelling,
         handoff,
+        other_handoffs,
         knowledge,
         knowledge_total,
         decisions,
@@ -814,7 +911,7 @@ pub fn next(ekko: &Ekko, limit: Option<usize>) -> Result<Vec<Entry>, EkkoError> 
 pub fn next_listed(ekko: &Ekko, limit: Option<usize>) -> Result<(Vec<Entry>, usize), EkkoError> {
     let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
-    Ok(Reader::shared(&all, &phases).next(limit))
+    Ok(Reader::shared(&all, &phases).seen_by(ekko).next(limit))
 }
 
 /// An item and its neighbourhood: one hop along every relation, plus how
@@ -876,7 +973,7 @@ pub fn contexts(ekko: &Ekko, targets: &[String]) -> Result<Vec<Context>, EkkoErr
     let phases = ekko.storage.get_phases()?;
     let raw: Vec<String> = targets.iter().map(|target| target.trim_start_matches('@').to_string()).collect();
     let ids = ekko.validate_ids(&raw, &all)?;
-    let reader = Reader::shared(&all, &phases);
+    let reader = Reader::shared(&all, &phases).seen_by(ekko);
     Ok(ids.into_iter().map(|id| neighbourhood(&all, &reader, id)).collect())
 }
 
@@ -962,7 +1059,7 @@ pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String], limit: usize)
         _ => Vec::new(),
     };
     let phases = ekko.storage.get_phases()?;
-    let reader = Reader::shared(&all, &phases);
+    let reader = Reader::shared(&all, &phases).seen_by(ekko);
 
     let mut seen = HashSet::new();
     let mut candidates: Vec<&Item> = groups
@@ -1000,7 +1097,7 @@ pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String], limit: usize)
 pub fn away(ekko: &Ekko, stash: bool, trash: bool, limit: usize) -> Result<String, EkkoError> {
     let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
-    let reader = Reader::shared(&all, &phases);
+    let reader = Reader::shared(&all, &phases).seen_by(ekko);
     let now = chrono::Local::now().timestamp_millis();
     let mut out = String::new();
     let mut section = |title: &str, items: Vec<&Item>, empty: &str| {
@@ -1045,7 +1142,7 @@ pub fn away(ekko: &Ekko, stash: bool, trash: bool, limit: usize) -> Result<Strin
 pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoError> {
     let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
-    let reader = Reader::shared(&all, &phases);
+    let reader = Reader::shared(&all, &phases).seen_by(ekko);
     let tasks: Vec<&Item> = match task {
         Some(target) => {
             let ids = ekko.validate_ids(&[target.trim_start_matches('@').to_string()], &all)?;
@@ -1094,7 +1191,7 @@ pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoErr
          - Files and lines touched or about to be, as path:line.\n\
          - The next step, concrete enough to start on without asking. When it needs the user's word first (it spends their quota, publishes, deletes, or is their choice), write only that the next session asks them whether to do it, and leave out how: a plan on the page reads as leave to start.\n\
          - Open questions for the user.\n\
-         Leave out what the board or the code already says, and name by id any note the next session must read: the prime leaves out loose notes older than the handoff. A handoff replaces the task's earlier one, which stays on the task as an ordinary note. Then tell the user it is safe to /clear, and that after it any message, even just \"continue\", starts the next session: Claude Code never starts a turn on its own.\n"
+         Leave out what the board or the code already says, and name by id any note the next session must read: the prime leaves out loose notes older than the handoff. A handoff replaces the task's earlier one, which stays on the task as an ordinary note. Then tell the user it is safe to /clear, and that after it any message, even just \"continue\", starts the next session -- \"continue <task id>\" when other sessions hand off on this board too: Claude Code never starts a turn on its own.\n"
     );
     // A handoff written minutes ago is most likely this session's own, and a
     // second one would demote it, or land on a task the session never
@@ -1260,7 +1357,7 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
     let cursor = ekko.storage.get_counters()?.revision as i64;
     let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
-    let reader = Reader::shared(&all, &phases);
+    let reader = Reader::shared(&all, &phases).seen_by(ekko);
     let moved = |item: &&Item| {
         if since >= CLOCK_CURSOR {
             updated(item) >= since
@@ -1493,6 +1590,9 @@ fn listed_line(entry: &Entry, body: &str, stated: bool, today: &str) -> String {
     if let Some(state @ (State::Paused | State::Progress)) = entry.state.filter(|_| !stated) {
         meta.push(state.word().to_string());
     }
+    if let Some(held) = &entry.held {
+        meta.push(held.text());
+    }
     if let Some(priority @ 2..) = entry.priority {
         meta.push(format!("p{priority}"));
     }
@@ -1632,6 +1732,23 @@ impl Prime {
         let mut room = Room(budget.saturating_sub(fixed));
         if let Some(handoff) = &self.handoff {
             out.push_str(&handoff.text());
+        }
+        if !self.other_handoffs.is_empty() {
+            let named: Vec<String> = self
+                .other_handoffs
+                .iter()
+                .take(OTHER_HANDOFFS_SHOWN)
+                .map(|other| {
+                    let at = crate::holder::when(other.updated_at);
+                    match &other.held {
+                        Some(held) => format!("{} on task {} ({at}, {held})", other.id, other.task),
+                        None => format!("{} on task {} ({at})", other.id, other.task),
+                    }
+                })
+                .collect();
+            let more = self.other_handoffs.len().saturating_sub(OTHER_HANDOFFS_SHOWN);
+            let more = if more > 0 { format!("; +{more} more") } else { String::new() };
+            let _ = writeln!(out, "    Other handoffs in the last hour: {}{more}", named.join("; "));
         }
 
         let sections = [
@@ -1967,6 +2084,9 @@ impl Context {
             (None, false, None) => "note".to_string(),
             (Some(state), _, _) => format!("task, {}", state.word()),
         }];
+        if let Some(held) = &item.held {
+            facts[0] = format!("{}, {} since {}", facts[0], held.text(), crate::holder::when(held.since));
+        }
         if let Some(priority) = item.priority {
             facts.push(format!("priority {priority}"));
         }
@@ -2934,6 +3054,61 @@ mod tests {
         let root = context(&ekko, "1").unwrap();
         assert!(root.roots.is_empty() && root.waits_on == 0);
         assert!(root.text().contains("2 open tasks wait on this"), "{}", root.text());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Work in progress says who holds it, as the reader sees it: its own,
+    /// another session's while that one runs, or one that is gone.
+    #[test]
+    fn work_in_progress_says_who_holds_it() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let (_, dir) = board("held-view");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        for (actor, name) in [(&me, "mine"), (&other, "theirs"), (&gone, "abandoned")] {
+            as_(actor).create_task(&words(&[name])).unwrap();
+        }
+        for (actor, id) in [(&me, "@1"), (&other, "@2"), (&gone, "@3")] {
+            as_(actor).set_state(&words(&[id, "progress"]), false).unwrap();
+        }
+
+        let text = prime(&as_(&me), "default board").unwrap().text();
+        assert!(text.contains("   1. mine \u{b7} in progress \u{b7} yours\n"), "{text}");
+        assert!(text.contains("   2. theirs \u{b7} in progress \u{b7} held by default on pts/2\n"), "{text}");
+        assert!(text.contains("   3. abandoned \u{b7} in progress \u{b7} held by default on pts/3, gone\n"), "{text}");
+        let held = next(&as_(&me), None).unwrap().into_iter().filter_map(|entry| entry.held).collect::<Vec<_>>();
+        assert_eq!(held.iter().map(Held::elsewhere).collect::<Vec<_>>(), vec![false, true, false]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With two sessions handing off on one board, each prime resumes from
+    /// its own session's handoff, newer or not, and names the other's.
+    #[test]
+    fn each_session_resumes_from_its_own_handoff() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let (_, dir) = board("handoffs");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        let write = |ekko: &Ekko, op: serde_json::Value| {
+            let mut draft = crate::ops::Draft::open(ekko).unwrap();
+            draft.apply(&serde_json::from_value(op).unwrap()).unwrap();
+            draft.commit(false).unwrap();
+        };
+        for (actor, name) in [(&me, "mine"), (&other, "theirs")] {
+            as_(actor).create_task(&words(&[name])).unwrap();
+        }
+        as_(&me).set_state(&words(&["@1", "progress"]), false).unwrap();
+        as_(&other).set_state(&words(&["@2", "progress"]), false).unwrap();
+        write(&as_(&me), serde_json::json!({"op": "create", "kind": "handoff", "text": "my stop", "attached_to": 1}));
+        write(&as_(&other), serde_json::json!({"op": "create", "kind": "handoff", "text": "their stop", "attached_to": 2}));
+
+        let mine = prime(&as_(&me), "default board").unwrap().text();
+        assert!(mine.contains("Where the last session stopped: handoff 3 on task 1 [in progress]"), "{mine}");
+        assert!(mine.contains("Other handoffs in the last hour: 4 on task 2 ("), "{mine}");
+        assert!(mine.contains(", held by default on pts/2)"), "{mine}");
+        let theirs = prime(&as_(&other), "default board").unwrap().text();
+        assert!(theirs.contains("Where the last session stopped: handoff 4 on task 2 [in progress]"), "{theirs}");
+        assert!(theirs.contains("Other handoffs in the last hour: 3 on task 1 ("), "{theirs}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

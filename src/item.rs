@@ -100,6 +100,13 @@ pub struct Item {
     /// byte-identical to before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<bool>,
+    /// Who works a task in progress: the Claude Code process that set it in
+    /// progress, or the person, so another session can tell it is taken.
+    /// Only a task in progress holds one, and leaving progress lets it go;
+    /// see `crate::holder`. Absent unless set, so a board nobody claims work
+    /// on is stored exactly as before.
+    #[serde(rename = "heldBy", default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<crate::holder::Holder>,
     /// Which phase of a project this belongs to, when it belongs to one.
     ///
     /// `None` means the project root -- outside the roadmap, and the only shape
@@ -244,6 +251,7 @@ impl Item {
             handoff: false,
             knowledge: None,
             supersedes: None,
+            held_by: None,
             stashed: None,
             trashed: None,
             priority: Some(priority),
@@ -277,6 +285,7 @@ impl Item {
             handoff: false,
             knowledge: None,
             supersedes: None,
+            held_by: None,
             stashed: None,
             trashed: None,
             unknown: BTreeMap::new(),
