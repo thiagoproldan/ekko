@@ -1509,6 +1509,10 @@ pub struct Changes {
     pub removed: Vec<Removed>,
     /// Whether the journal still reaches back to `since`.
     pub complete: bool,
+    /// Whether `since` is a revision past the board's own: counters.json went
+    /// back, and it is that, not the journal, that keeps the list from being told.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ahead: bool,
 }
 
 /// An item gone from storage, as the journal remembers it.
@@ -1598,6 +1602,7 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
     // A cursor ahead of the board's revision means counters.json went back
     // (lost, or restored from an older copy): what moved cannot be told.
     let complete = (since >= CLOCK_CURSOR || cursor >= since) && from.is_none_or(|from| since < CLOCK_CURSOR && since + 1 >= from);
+    let ahead = since < CLOCK_CURSOR && cursor < since;
 
     Ok(Changes {
         since,
@@ -1607,6 +1612,7 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
         blocked: blocked.into_iter().collect(),
         removed,
         complete,
+        ahead,
     })
 }
 
@@ -1908,8 +1914,15 @@ impl Changes {
         for gone in &self.removed {
             let _ = writeln!(out, "{:>4}. [removed] {}", gone.id, gone.text);
         }
-        // Said only when it is so: the journal no longer reaches the cursor.
-        if !self.complete {
+        // Said only when it is so, naming what fell short: the board's revision
+        // behind the cursor, or the journal no longer reaching it.
+        if self.ahead {
+            let _ = writeln!(
+                out,
+                "This cursor is ahead of the board, whose revision is {}: counters.json went back, lost or restored from an older copy, so what moved cannot be told; prime again for the whole board.",
+                self.cursor
+            );
+        } else if !self.complete {
             out.push_str("The journal no longer reaches this cursor, so some of what moved is not listed; prime again for the whole board.\n");
         }
         out
@@ -2872,6 +2885,23 @@ mod tests {
 
         assert_eq!(context(&ekko, "@3").unwrap().attached_to.map(|link| link.id), Some(2));
         assert!(matches!(context(&ekko, "9"), Err(EkkoError::InvalidId(_))));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A cursor past the board's revision -- counters.json went back -- is
+    /// named as such, not blamed on a journal that still reaches it.
+    #[test]
+    fn changes_past_the_boards_revision_say_the_cursor_is_ahead() {
+        let (ekko, dir) = board("ahead");
+        ekko.create_task(&words(&["a task"])).unwrap();
+        let cursor = prime(&ekko, "default board").unwrap().cursor;
+
+        let seen = changes(&ekko, cursor + 5).unwrap();
+        let text = seen.text();
+        assert!(seen.ahead && !seen.complete, "{text}");
+        assert!(text.contains(&format!("ahead of the board, whose revision is {cursor}")) && !text.contains("journal"), "{text}");
+        assert!(!changes(&ekko, cursor).unwrap().ahead);
 
         std::fs::remove_dir_all(&dir).ok();
     }
