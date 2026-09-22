@@ -92,7 +92,9 @@ def priority_inversion():
         ],
     )
     order = line_ids(call(m, "next")[0])
-    check("1.5", "next puts the prerequisite of urgent work first", order, [1, 5, 3, 4], order == [1, 5, 3, 4])
+    # The prerequisite first; then priority before work others wait on, which
+    # only orders tasks of one priority (the blocking weight, task 284).
+    check("1.5", "next puts the prerequisite of urgent work first", order, [1, 3, 4, 5], order == [1, 3, 4, 5])
     m.close()
 
 

@@ -45,9 +45,16 @@ const BLOCKED_SHOWN: usize = 20;
 const COUNTED: usize = 50;
 
 // Taskwarrior's default urgency coefficients (taskwarrior.org/docs/urgency,
-// Task::urgency_due in src/Task.cpp), applied by `urgency`.
+// Task::urgency_due in src/Task.cpp), applied by `urgency` -- all but one.
 const URGENCY_DUE: f64 = 12.0;
-const URGENCY_BLOCKING: f64 = 8.0;
+/// Taskwarrior's default is 8, which outweighs the whole gap between p3 and
+/// p2 (2.1): any p2 task holding up p2 work ranked above every p3 task on its
+/// own. `man taskrc` advises 0 where urgency is inherited, since the blocker
+/// already takes on what it holds up, and here it inherits the highest
+/// priority and the latest finish of that work. 1 keeps "more work waiting on
+/// it" as what orders tasks of one priority, below priority itself, which is
+/// the order `next` describes (decision on task 284).
+const URGENCY_BLOCKING: f64 = 1.0;
 const URGENCY_AGE: f64 = 2.0;
 const URGENCY_AGE_DAYS: f64 = 365.0;
 /// The most a prime says, in characters. Claude Code puts at most 10,000
@@ -303,9 +310,9 @@ fn day_date(day: i32) -> Option<String> {
 }
 
 /// Taskwarrior's urgency for a task, on what it inherits: 12 for a date on a
-/// 21-day ramp, 8 for holding up open work, 6 or 3.9 for priority 3 or 2, and
-/// up to 2 for age. The weights are Taskwarrior's defaults; see note 166 for
-/// where they place this board's own work.
+/// 21-day ramp, 6 or 3.9 for priority 3 or 2, 1 for holding up open work, and
+/// up to 2 for age. The weights are Taskwarrior's defaults but the one for
+/// holding up work; see `URGENCY_BLOCKING`.
 fn urgency(item: &Item, inherited: Option<Inherited>, today: i32, now: i64) -> f64 {
     let inherited =
         inherited.unwrap_or(Inherited { priority: item.priority.unwrap_or(1), finish_by: due_day(item), waited_on: false });
@@ -2072,8 +2079,8 @@ mod tests {
         text.lines().filter_map(|line| line.trim_start().split_once(". ")?.0.parse().ok()).collect()
     }
 
-    /// Work under way first, then urgency: an overdue p3 (12 + 6), work that
-    /// others wait on (8), a p3 alone (6), then the rest. Blocked work is not
+    /// Work under way first, then urgency: an overdue p3 (12 + 6), a p3 alone
+    /// (6), work that others wait on (1), then the rest. Blocked work is not
     /// a candidate at all.
     #[test]
     fn next_orders_by_progress_then_urgency() {
@@ -2090,16 +2097,18 @@ mod tests {
         ekko.set_state(&words(&["@7", "progress"]), false).unwrap();
 
         let order = next(&ekko, None).unwrap();
-        assert_eq!(ids(&order), vec![7, 3, 4, 2, 1]);
-        assert_eq!(order[2].unblocks, 2, "4 lets 5 move, and 6 after it");
+        assert_eq!(ids(&order), vec![7, 3, 2, 4, 1]);
+        assert_eq!(order[3].unblocks, 2, "4 lets 5 move, and 6 after it");
         assert_eq!(ids(&next(&ekko, Some(2)).unwrap()), vec![7, 3]);
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A low-priority prerequisite of urgent work inherits that urgency, and a
-    /// date two years out does not outrank work others wait on -- the order
-    /// the lexicographic ranking got backwards (3, 4, 5, 1).
+    /// A low-priority prerequisite of urgent work inherits that urgency and
+    /// leads -- the lexicographic ranking put it last (3, 4, 5, 1). Below it,
+    /// priority comes before work that others wait on, which only orders tasks
+    /// of one priority: a p1 holding up p1 work ranks after a p2, and after a
+    /// p1 with any date, since a date two years out still weighs 0.2 x 12.
     #[test]
     fn next_ranks_a_prerequisite_by_the_urgency_it_inherits() {
         let (ekko, dir) = board("inherits");
@@ -2118,7 +2127,7 @@ mod tests {
         ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
 
         let order = next(&ekko, None).unwrap();
-        assert_eq!(ids(&order), vec![1, 5, 3, 4]);
+        assert_eq!(ids(&order), vec![1, 3, 4, 5]);
         assert_eq!(order[0].inherits, Some(3));
         assert!(order[0].finish_by.is_some(), "{:?}", order[0]);
 
