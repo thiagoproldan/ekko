@@ -21,6 +21,7 @@
 //! Logs, if any, go to stderr: stdout carries protocol messages and nothing
 //! else. The server exits when stdin closes.
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -87,6 +88,11 @@ pub struct Server {
     /// never did has nothing to be told has changed. Behind a mutex because
     /// the resources server also checks it from a thread of its own.
     listed: Mutex<Option<(u64, Vec<Value>)>>,
+    /// The day prime and next last answered in full, by tool, or the day the
+    /// server started, which is when the SessionStart hook handed the session
+    /// its prime: `if_rev` is answered as unchanged only on that same day.
+    answered: Mutex<HashMap<&'static str, chrono::NaiveDate>>,
+    started: chrono::NaiveDate,
 }
 
 /// What a server offers. Two servers rather than one because Claude Code
@@ -187,7 +193,22 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
 
 impl Server {
     pub fn new(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>, mode: Mode) -> Self {
-        Server { home, cwd, ekko_dir_env, project_env, mode, listed: Mutex::new(None) }
+        let started = chrono::Local::now().date_naive();
+        Server { home, cwd, ekko_dir_env, project_env, mode, listed: Mutex::new(None), answered: Mutex::new(HashMap::new()), started }
+    }
+
+    /// One line in place of `tool`'s answer when the cursor held is still
+    /// current (see `still_current`).
+    fn unchanged(&self, tool: &'static str, ekko: &Ekko, if_rev: Option<i64>) -> Result<Option<String>, ToolError> {
+        let Some(held) = if_rev else { return Ok(None) };
+        let revision = ekko.storage.get_counters().map_err(EkkoError::from)?.revision as i64;
+        let read_on = self.answered.lock().unwrap_or_else(PoisonError::into_inner).get(tool).copied().unwrap_or(self.started);
+        let today = chrono::Local::now().date_naive();
+        Ok(still_current(held, revision, read_on, today).then(|| format!("unchanged since cursor {revision}\n")))
+    }
+
+    fn answered_today(&self, tool: &'static str) {
+        self.answered.lock().unwrap_or_else(PoisonError::into_inner).insert(tool, chrono::Local::now().date_naive());
     }
 
     /// The notification that the resource list changed, when it has since
@@ -405,19 +426,22 @@ impl Server {
             "prime" => {
                 let if_rev = take(args, "if_rev", Value::as_i64, "an integer")?;
                 finish(args)?;
-                if let Some(line) = unchanged(&ekko, if_rev)? {
+                if let Some(line) = self.unchanged("prime", &ekko, if_rev)? {
                     return Ok(line);
                 }
-                Ok(agent::prime(&ekko, &Self::label(&location))?.text())
+                let text = agent::prime(&ekko, &Self::label(&location))?.text();
+                self.answered_today("prime");
+                Ok(text)
             }
             "next" => {
                 let limit = positive(take(args, "limit", Value::as_u64, "a positive integer")?)?;
                 let if_rev = take(args, "if_rev", Value::as_i64, "an integer")?;
                 finish(args)?;
-                if let Some(line) = unchanged(&ekko, if_rev)? {
+                if let Some(line) = self.unchanged("next", &ekko, if_rev)? {
                     return Ok(line);
                 }
                 let (entries, total) = agent::next_listed(&ekko, Some(limit.unwrap_or(agent::SEARCH_LIMIT)))?;
+                self.answered_today("next");
                 let mut text = agent::list_text(&entries, "Nothing is in progress or ready.");
                 if total > entries.len() {
                     text.push_str(&format!("{} of {total} shown: raise limit for more.\n", entries.len()));
@@ -763,10 +787,12 @@ fn take_strings(args: &mut Map<String, Value>, key: &str) -> Result<Vec<String>,
 /// A read conditioned on the cursor a caller already holds: one line saying
 /// nothing moved, when nothing did, in place of the whole answer again -- the
 /// way an HTTP 304 answers a request that names the version it has.
-fn unchanged(ekko: &Ekko, if_rev: Option<i64>) -> Result<Option<String>, ToolError> {
-    let Some(held) = if_rev else { return Ok(None) };
-    let revision = ekko.storage.get_counters().map_err(EkkoError::from)?.revision as i64;
-    Ok((held == revision).then(|| format!("unchanged since cursor {revision}\n")))
+/// Whether a cursor still describes what `tool` would answer: the board has
+/// not moved, and the day has not changed since that answer was read. The
+/// day matters with no write at all -- the prime's overdue list and next's
+/// order both read today -- so an answer read yesterday is answered in full.
+fn still_current(held: i64, revision: i64, read_on: chrono::NaiveDate, today: chrono::NaiveDate) -> bool {
+    held == revision && read_on == today
 }
 
 /// A limit, refused at zero: asking for no items would otherwise be answered
@@ -1011,4 +1037,20 @@ fn tool_definitions() -> Value {
         }
     }
     tools
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cursor read yesterday is not current today, even if nothing was
+    /// written: a task can have become overdue at midnight.
+    #[test]
+    fn a_cursor_read_on_another_day_is_not_current() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 22).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        assert!(still_current(7, 7, today, today));
+        assert!(!still_current(7, 7, yesterday, today), "the day turned over");
+        assert!(!still_current(6, 7, today, today), "the board moved");
+    }
 }
