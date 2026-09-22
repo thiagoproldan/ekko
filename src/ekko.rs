@@ -1631,8 +1631,10 @@ impl Ekko {
         let _lock = self.storage.acquire_lock()?;
         let mut data = self.storage.get()?;
 
+        // An id is marked with @, as in every command, or is a bare number,
+        // as --check and --begin read it: no state is a number.
         let (id_tokens, state_tokens): (Vec<&String>, Vec<&String>) =
-            input.iter().partition(|token| token.starts_with('@'));
+            input.iter().partition(|token| token.starts_with('@') || token.parse::<u32>().is_ok());
 
         if id_tokens.is_empty() {
             return Err(EkkoError::MissingId);
@@ -3173,6 +3175,24 @@ mod tests {
             assert!(data[&id].is_starred, "item {id}");
             assert_eq!(data[&id].is_complete, Some(false), "starting work un-completes it");
         }
+
+        cleanup(&dir);
+    }
+
+    /// A bare number is an id to --set too, as it is to --check and --begin:
+    /// no state is a number, so nothing is misread. Seen on 2026-09-22, when
+    /// `ekko --set 359 paused` answered that no id was given.
+    #[test]
+    fn set_takes_an_id_with_or_without_its_at() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["one"])).unwrap();
+        ekko.create_task(&words(&["two"])).unwrap();
+
+        ekko.set_state(&words(&["1", "@2", "paused"]), false).unwrap();
+
+        let data = ekko.storage.get().unwrap();
+        assert_eq!((data[&1].paused, data[&2].paused), (Some(true), Some(true)));
+        assert!(matches!(ekko.set_state(&words(&["7", "done"]), false), Err(EkkoError::InvalidId(ref id)) if id == "7"));
 
         cleanup(&dir);
     }

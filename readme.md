@@ -780,7 +780,7 @@ Two limits worth knowing. A write that changes nothing does not bump `updatedAt`
 
 `--check`, `--begin` and `--star` all **toggle**, which is right at a terminal and wrong for anything that might retry: run `ekko -c 3` twice after a timed-out first attempt and the task ends up unchecked again.
 
-`--set` takes the states an item should end up *in*, so running it twice does the same thing as running it once. Ids are marked with `@`, exactly as in `--priority` and `--move`, which leaves bare words free to name states.
+`--set` takes the states an item should end up *in*, so running it twice does the same thing as running it once. Ids are marked with `@`, exactly as in `--priority` and `--move`, which leaves bare words free to name states. A bare number is an id too, as it is to `--check`, since no state is a number.
 
 ```
 $ ekko --set @3 done
