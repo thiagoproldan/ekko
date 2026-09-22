@@ -1588,7 +1588,7 @@ pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Pat
     // ones it made before, which it takes back.
     let mut taken = Vec::new();
     if let (Some(actor), Some(conversation)) = (&ekko.actor, &event.session_id) {
-        actor.record(conversation);
+        actor.record(conversation, ekko.storage.storage_path());
         taken = ekko.take_back(conversation).unwrap_or_else(|error| {
             eprintln!("ekko: what this conversation held before was not taken back: {error}");
             Vec::new()
@@ -1656,6 +1656,145 @@ fn remember(state: &Path, session: &str, board: &str, cursor: i64) {
         }
     }
     let _ = std::fs::write(file, serde_json::json!({"board": board, "cursor": cursor}).to_string());
+}
+
+/// The Claude Code sessions on a board, as `ekko --sessions` shows them to
+/// the user: each running one that started on it, and each, running or
+/// ended, that holds work on it, finished some today or asked what still
+/// waits -- with the command that resumes its conversation.
+#[derive(Debug, Serialize)]
+pub struct Sessions {
+    pub board: String,
+    pub sessions: Vec<SessionView>,
+}
+
+/// One session as `Sessions` lists it; the user at the terminal is one too,
+/// when they hold work.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionView {
+    pub name: String,
+    pub running: bool,
+    /// When the conversation it runs began in it, where the registry knows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
+    pub holding: Vec<SessionItem>,
+    pub finished: Vec<SessionItem>,
+    pub asking: Vec<SessionItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionItem {
+    pub id: u32,
+    pub text: String,
+}
+
+pub fn sessions(ekko: &Ekko, board: &str) -> Result<Sessions, EkkoError> {
+    let all = ekko.storage.get_shared()?;
+    let registry = ekko.actor.as_ref().and_then(|actor| actor.registry.as_ref());
+    let recorded = registry.map(crate::holder::Registry::all).unwrap_or_default();
+    let view = |running: &crate::holder::Running| SessionView {
+        name: running.label(),
+        running: running.process().alive(),
+        since: Some(running.since),
+        resume: Some(running.resume()),
+        holding: Vec::new(),
+        finished: Vec::new(),
+        asking: Vec::new(),
+    };
+    let here = ekko.storage.storage_path();
+    let mut found: Vec<(Option<crate::holder::Process>, SessionView)> = recorded
+        .iter()
+        .filter(|running| running.board.as_deref() == Some(here) && running.process().alive())
+        .map(|running| (Some(running.process()), view(running)))
+        .collect();
+    // The session behind a claim, a signature or a question: listed once,
+    // from the registry where it is recorded, else from the claim itself.
+    let mut session_of = |holder: &crate::holder::Holder| {
+        let process = holder.process();
+        if let Some(at) = found.iter().position(|(known, _)| *known == process) {
+            return at;
+        }
+        let recorded = process.as_ref().and_then(|process| recorded.iter().find(|running| running.process() == *process));
+        let session = recorded.map(view).unwrap_or_else(|| SessionView {
+            name: holder.label_in(registry),
+            running: holder.alive(),
+            since: None,
+            resume: holder.conversation.as_ref().map(|conversation| format!("claude --resume {conversation}")),
+            holding: Vec::new(),
+            finished: Vec::new(),
+            asking: Vec::new(),
+        });
+        found.push((process, session));
+        found.len() - 1
+    };
+
+    let today = chrono::Local::now().date_naive();
+    let done_today = |item: &Item| {
+        use chrono::TimeZone as _;
+        let at = item.updated_at.and_then(|at| chrono::Local.timestamp_millis_opt(at).single());
+        at.is_some_and(|at| at.date_naive() == today)
+    };
+    let mut items: Vec<&Item> = all.values().filter(|item| item.stashed.is_none() && item.trashed.is_none()).collect();
+    items.sort_by_key(|item| item.id);
+    let mut listed: Vec<(usize, u8, SessionItem)> = Vec::new();
+    for item in items {
+        let line = || SessionItem { id: item.id, text: clip(&item.description, TASK_CLIP) };
+        match (State::of(item), &item.held_by, &item.done_by) {
+            (Some(State::Progress), Some(holder), _) => listed.push((session_of(holder), 0, line())),
+            (Some(State::Done), _, Some(by)) if done_today(item) => listed.push((session_of(by), 1, line())),
+            _ => {}
+        }
+        if let Some(asker) = item.question.as_ref().filter(|question| question.answer.is_none()).and_then(|question| question.asked_by.as_ref()) {
+            listed.push((session_of(asker), 2, line()));
+        }
+    }
+    for (at, kind, line) in listed {
+        let session = &mut found[at].1;
+        match kind {
+            0 => session.holding.push(line),
+            1 => session.finished.push(line),
+            _ => session.asking.push(line),
+        }
+    }
+    found.sort_by(|(_, a), (_, b)| b.running.cmp(&a.running).then_with(|| a.name.cmp(&b.name)));
+    Ok(Sessions { board: board.to_string(), sessions: found.into_iter().map(|(_, session)| session).collect() })
+}
+
+impl Sessions {
+    pub fn text(&self) -> String {
+        let running = self.sessions.iter().filter(|session| session.running).count();
+        let ended = match self.sessions.len() - running {
+            0 => String::new(),
+            n => format!(" \u{b7} {n} ended with work here"),
+        };
+        let mut out = format!("ekko \u{b7} {} \u{b7} {running} running{ended}\n", self.board);
+        if self.sessions.is_empty() {
+            out.push_str("No Claude Code session has started on this board or holds work on it.\n");
+        }
+        for session in &self.sessions {
+            let state = match (session.running, session.since) {
+                (true, Some(since)) => format!("since {}", crate::holder::when(since)),
+                (true, None) => "running".to_string(),
+                (false, _) => "ended".to_string(),
+            };
+            let _ = writeln!(out, "\n{} \u{b7} {state}", session.name);
+            if session.holding.is_empty() && session.finished.is_empty() && session.asking.is_empty() {
+                let _ = writeln!(out, "      nothing in progress");
+            }
+            for (what, lines) in [("in progress", &session.holding), ("done today", &session.finished), ("asking", &session.asking)] {
+                for line in lines {
+                    let _ = writeln!(out, "      {what:<11} {:>4}. {}", line.id, line.text);
+                }
+            }
+            if let Some(resume) = &session.resume {
+                let _ = writeln!(out, "      resume with {resume}");
+            }
+        }
+        out
+    }
 }
 
 impl Changes {
@@ -3419,6 +3558,45 @@ mod tests {
         let read = contexts(&as_(&me), &[asked.to_string()]).unwrap()[0].text();
         assert!(read.contains("note, a question asked by default on pts/3 \u{b7} c-asker"), "{read}");
         assert!(read.contains("answered, recorded by the user, 1 write after it was asked: yes, after the rebase"), "{read}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `ekko --sessions` shows the user each session running on the board,
+    /// an idle one too, and each that ended while it still holds work here,
+    /// with what it holds, finished today and asked, and how to resume it.
+    /// The user's ask of 2026-09-22 (task 370): every session shows the same
+    /// board, and nothing said which work was whose.
+    #[test]
+    fn sessions_shows_each_session_on_the_board_and_its_work() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let (_, dir) = board("sessions");
+        let registry = crate::holder::Registry::at(dir.join("processes"));
+        let as_ = |actor: &crate::holder::Actor| {
+            Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
+        };
+        for (actor, conversation) in [(&me, "c-mine"), (&other, "c-idle"), (&gone, "c-gone")] {
+            let event = SessionEvent { source: "startup".to_string(), session_id: Some(conversation.to_string()) };
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
+        }
+        for name in ["mine", "finished", "left behind"] {
+            as_(&me).create_task(&words(&[name])).unwrap();
+        }
+        as_(&me).set_state(&words(&["@1", "progress"]), false).unwrap();
+        as_(&me).set_state(&words(&["@2", "done"]), false).unwrap();
+        as_(&gone).set_state(&words(&["@3", "progress"]), false).unwrap();
+        let mine = as_(&me);
+        let mut draft = crate::ops::Draft::open(&mine).unwrap();
+        draft.ask("Merge now?", Some(&crate::ops::Ref::Id(1))).unwrap();
+        draft.commit(false).unwrap();
+
+        let text = sessions(&mine, "default board").unwrap().text();
+        assert!(text.starts_with("ekko \u{b7} default board \u{b7} 2 running \u{b7} 1 ended with work here\n"), "{text}");
+        let own = "      in progress    1. mine\n      done today     2. finished\n      asking         4. Merge now?\n";
+        assert!(text.contains("\ndefault on pts/1 \u{b7} c-mine \u{b7} since ") && text.contains(own), "{text}");
+        assert!(text.contains("\ndefault on pts/2 \u{b7} c-idle \u{b7} since ") && text.contains("      nothing in progress\n"), "{text}");
+        assert!(text.contains("\ndefault on pts/3 \u{b7} c-gone \u{b7} ended\n      in progress    3. left behind\n"), "{text}");
+        assert!(text.contains("claude --resume c-gone\n"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

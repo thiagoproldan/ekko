@@ -405,6 +405,7 @@ pub enum Outcome {
     /// The agent views -- see `agent`. Boxed because they are much larger
     /// than every other outcome and would otherwise size the whole enum.
     Prime(Box<crate::agent::Prime>),
+    Sessions(Box<crate::agent::Sessions>),
     /// What the SessionStart hook puts in context, already worded.
     Hook(String),
     Next(Vec<crate::agent::Entry>),
@@ -450,6 +451,7 @@ impl Outcome {
             Outcome::Roadmap { .. } => "roadmap",
             Outcome::Stats(_) => "stats",
             Outcome::Prime(_) | Outcome::Hook(_) => "prime",
+            Outcome::Sessions(_) => "sessions",
             Outcome::Next(_) => "next",
             Outcome::Context(_) => "context",
         }
@@ -525,6 +527,7 @@ impl Outcome {
             }
             Outcome::Stats(stats) => out.display_stats(stats),
             Outcome::Prime(prime) => out.raw(&prime.text()),
+            Outcome::Sessions(sessions) => out.raw(&sessions.text()),
             Outcome::Hook(text) => out.raw(text),
             Outcome::Next(entries) => out.raw(&crate::agent::list_text(entries, "Nothing is in progress or ready.")),
             Outcome::Context(context) => out.raw(&context.text()),

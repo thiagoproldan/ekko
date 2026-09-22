@@ -150,6 +150,10 @@ pub struct Cli {
     /// for an agent picking a board back up; see `agent`.
     #[arg(long)]
     pub prime: bool,
+    /// Each Claude Code session on this board: what it holds, what it
+    /// finished today, what it asked that waits, and how to resume it.
+    #[arg(long)]
+    pub sessions: bool,
 
     /// With --prime or --tasklist: answer a Claude Code hook, whose event
     /// arrives as JSON on stdin. For --prime, a session that resumes or forks

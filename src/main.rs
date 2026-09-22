@@ -66,6 +66,7 @@ const HELP: &str = r#"
       --projects          List the projects that exist
       --restore, -r       Restore items from archive
       --roadmap           Show the project's roadmap through its phases
+      --sessions          Show each Claude Code session on this board and its work
       --set               Set item state idempotently (retry-safe)
       --since <MILLIS>    Only items changed at or after a timestamp
       --star, -s          Star/unstar item
@@ -238,9 +239,10 @@ fn main() -> ExitCode {
                     // just removed -- a header above that would announce a
                     // board nobody can open any more. And for a hook's reply,
                     // which Claude Code reads as JSON only when it is nothing
-                    // else: --tasklist's watchPaths would become context.
+                    // else: --tasklist's watchPaths would become context. And
+                    // for --sessions, whose first line names the board.
                     if let Some(project) = &location.project {
-                        if !cli.projects && !cli.destroy && !cli.prime && !cli.tasklist {
+                        if !cli.projects && !cli.destroy && !cli.prime && !cli.tasklist && !cli.sessions {
                             r.display_project(&project.name);
                         }
                     }
@@ -371,6 +373,9 @@ fn dispatch(
     }
     if cli.tasklist {
         return Ok(vec![Outcome::Hook(tasklist::hook(ekko, &read_hook_input(), home_dir))]);
+    }
+    if cli.sessions {
+        return Ok(vec![Outcome::Sessions(Box::new(agent::sessions(ekko, board_label)?))]);
     }
     if cli.prime {
         if cli.hook {

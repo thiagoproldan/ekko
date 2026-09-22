@@ -102,6 +102,7 @@ fn success_value(outcome: &Outcome) -> Value {
         }
         Outcome::Stats(stats) => json!({"ok": true, "command": command, "stats": stats}),
         Outcome::Prime(prime) => json!({"ok": true, "command": command, "prime": prime}),
+        Outcome::Sessions(sessions) => json!({"ok": true, "command": command, "sessions": sessions}),
         Outcome::Hook(text) => json!({"ok": true, "command": command, "text": text}),
         Outcome::Next(entries) => json!({"ok": true, "command": command, "items": entries}),
         Outcome::Context(context) => json!({"ok": true, "command": command, "context": context}),

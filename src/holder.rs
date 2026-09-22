@@ -103,11 +103,24 @@ impl Actor {
         self.registry.as_ref()?.conversation_of(self.process.as_ref()?)
     }
 
-    /// Records that this actor's process now runs `conversation`. Best
-    /// effort: the hook that records it answers whether or not it could.
-    pub fn record(&self, conversation: &str) {
+    /// Records that this actor's process now runs `conversation`, started on
+    /// the board whose storage is `board`. Best effort: the hook that
+    /// records it answers whether or not it could.
+    pub fn record(&self, conversation: &str, board: &Path) {
         let (Some(registry), Some(process)) = (&self.registry, &self.process) else { return };
-        if let Err(error) = registry.record(process, self.profile.as_deref(), self.tty.as_deref(), conversation) {
+        let now = Running {
+            pid: process.pid,
+            start: process.start,
+            boot: process.boot.clone(),
+            profile: self.profile.clone(),
+            tty: self.tty.clone(),
+            config_dir: std::env::var("CLAUDE_CONFIG_DIR").ok().filter(|dir| !dir.is_empty()),
+            board: Some(board.to_path_buf()),
+            conversation: conversation.to_string(),
+            earlier: Vec::new(),
+            since: chrono::Local::now().timestamp_millis(),
+        };
+        if let Err(error) = registry.record(now) {
             eprintln!("ekko: the conversation this session runs was not recorded: {error}");
         }
     }
@@ -221,6 +234,12 @@ pub struct Running {
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tty: Option<String>,
+    /// Its `CLAUDE_CONFIG_DIR`, which resuming its conversation needs.
+    #[serde(rename = "configDir", default, skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<String>,
+    /// The board its session started on, by its storage file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<PathBuf>,
     /// The conversation it runs now, or ran last.
     pub conversation: String,
     /// The ones it ran before, oldest first: each /clear adds one.
@@ -233,6 +252,26 @@ pub struct Running {
 impl Running {
     pub fn process(&self) -> Process {
         Process { pid: self.pid, start: self.start, boot: self.boot.clone() }
+    }
+
+    /// As a claim would name it: see `Holder::label_in`.
+    pub fn label(&self) -> String {
+        let holder = Holder {
+            pid: Some(self.pid),
+            start: Some(self.start),
+            boot: Some(self.boot.clone()),
+            profile: self.profile.clone(),
+            tty: self.tty.clone(),
+            conversation: Some(self.conversation.clone()),
+            since: self.since,
+        };
+        holder.label()
+    }
+
+    /// The command that resumes its conversation, under its profile.
+    pub fn resume(&self) -> String {
+        let profile = self.config_dir.as_deref().map(|dir| format!("CLAUDE_CONFIG_DIR={dir} ")).unwrap_or_default();
+        format!("{profile}claude --resume {}", self.conversation)
     }
 }
 
@@ -260,31 +299,28 @@ impl Registry {
         self.of(process).map(|running| running.conversation)
     }
 
-    /// Records that `process` now runs `conversation`, keeping the ones it
-    /// ran before, and forgets on the way the processes that ended more than
-    /// `ENDED_KEPT` ago.
-    pub fn record(&self, process: &Process, profile: Option<&str>, tty: Option<&str>, conversation: &str) -> std::io::Result<()> {
-        let now = chrono::Local::now().timestamp_millis();
-        let mut running = self.of(process).unwrap_or_else(|| Running {
-            pid: process.pid,
-            start: process.start,
-            boot: process.boot.clone(),
-            profile: None,
-            tty: None,
-            conversation: conversation.to_string(),
-            earlier: Vec::new(),
-            since: now,
-        });
-        if running.conversation != conversation {
-            let before = std::mem::replace(&mut running.conversation, conversation.to_string());
-            running.earlier.push(before);
-            running.since = now;
+    /// Every process recorded, running or ended.
+    pub fn all(&self) -> Vec<Running> {
+        let Ok(entries) = fs::read_dir(&self.dir) else { return Vec::new() };
+        entries.flatten().filter_map(|entry| serde_json::from_str(&fs::read_to_string(entry.path()).ok()?).ok()).collect()
+    }
+
+    /// Records `now`, what a process runs and where, keeping the
+    /// conversations it ran before and when the one it runs began; and
+    /// forgets on the way the processes that ended more than `ENDED_KEPT` ago.
+    pub fn record(&self, mut now: Running) -> std::io::Result<()> {
+        let process = now.process();
+        if let Some(before) = self.of(&process) {
+            now.earlier = before.earlier;
+            if before.conversation == now.conversation {
+                now.since = before.since;
+            } else {
+                now.earlier.push(before.conversation);
+            }
         }
-        running.profile = profile.map(str::to_string);
-        running.tty = tty.map(str::to_string);
         fs::create_dir_all(&self.dir)?;
         self.forget_ended();
-        fs::write(self.file(process), serde_json::to_string(&running)?)
+        fs::write(self.file(&process), serde_json::to_string(&now)?)
     }
 
     fn forget_ended(&self) {
@@ -425,12 +461,12 @@ mod tests {
         };
         assert_eq!(actor.holder(1).conversation, None, "nothing recorded yet");
 
-        actor.record("a6b026e6-85d5-4e5c-ae3b-e5a4a676878a");
+        actor.record("a6b026e6-85d5-4e5c-ae3b-e5a4a676878a", Path::new("/board"));
         let claim = actor.holder(1);
         assert_eq!(claim.conversation.as_deref(), Some("a6b026e6-85d5-4e5c-ae3b-e5a4a676878a"));
         assert_eq!(claim.label(), "trabalho on pts/5 \u{b7} a6b026e6");
 
-        actor.record("e3011485-0b75-46ea-b411-2cdf3193e1d1");
+        actor.record("e3011485-0b75-46ea-b411-2cdf3193e1d1", Path::new("/board"));
         assert_eq!(actor.name(&claim), "trabalho on pts/5 \u{b7} e3011485", "after a /clear, the one to resume");
         assert_eq!(claim.label(), "trabalho on pts/5 \u{b7} a6b026e6", "the claim keeps the one it was made in");
         let running = registry.of(&me).unwrap();
