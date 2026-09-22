@@ -1495,9 +1495,15 @@ pub fn processes_dir(home: &Path) -> PathBuf {
 /// session this hook never served is pointed at the prime it already holds.
 pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Path) -> Result<String, EkkoError> {
     // The conversation now running in this session's process: what its
-    // claims name, and how a conversation resumed after a restart knows them.
+    // claims name, and how a conversation resumed after a restart knows the
+    // ones it made before, which it takes back.
+    let mut taken = Vec::new();
     if let (Some(actor), Some(conversation)) = (&ekko.actor, &event.session_id) {
         actor.record(conversation);
+        taken = ekko.take_back(conversation).unwrap_or_else(|error| {
+            eprintln!("ekko: what this conversation held before was not taken back: {error}");
+            Vec::new()
+        });
     }
     let revision = ekko.storage.get_counters()?.revision as i64;
     let served = event.session_id.as_deref().and_then(|session| served_cursor(state, session, board));
@@ -1521,7 +1527,8 @@ pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Pat
     if let Some(session) = &event.session_id {
         remember(state, session, board, revision);
     }
-    Ok(text)
+    let taken: String = taken.iter().map(|notice| format!("{notice}\n")).collect();
+    Ok(format!("{taken}{text}"))
 }
 
 /// A session id as a file name: its letters, digits, dashes and underscores.
@@ -3195,6 +3202,43 @@ mod tests {
         assert!(theirs.contains("held by default on pts/1 \u{b7} c3-after\n"), "{theirs}");
         let refused = as_(&other).set_state(&words(&["@1", "paused"]), false).unwrap_err().to_string();
         assert!(refused.contains("default on pts/1 \u{b7} c3-after, since"), "{refused}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A conversation resumed in a new process takes back, at SessionStart,
+    /// what it held in the process that ended, and says so. Another
+    /// conversation does not, and a holder that still runs keeps its task.
+    #[test]
+    fn a_resumed_conversation_takes_back_what_it_held() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let (_, dir) = board("take-back");
+        let registry = crate::holder::Registry::at(dir.join("processes"));
+        let as_ = |actor: &crate::holder::Actor| {
+            Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
+        };
+        let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
+            let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()) };
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap()
+        };
+        start(&gone, "startup", "c-before-the-restart");
+        start(&other, "startup", "c-other");
+        for (actor, name, id) in [(&gone, "held before the restart", "@1"), (&other, "held elsewhere", "@2")] {
+            as_(actor).create_task(&words(&[name])).unwrap();
+            as_(actor).set_state(&words(&[id, "progress"]), false).unwrap();
+        }
+
+        let unrelated = start(&me, "resume", "c-unrelated");
+        assert!(!unrelated.contains("yours again"), "{unrelated}");
+        let resumed = start(&me, "resume", "c-before-the-restart");
+        assert!(
+            resumed.starts_with("1 was held by this conversation until its process ended (default on pts/3 \u{b7} c-before): yours again\n"),
+            "{resumed}"
+        );
+        let data = as_(&me).storage.get().unwrap();
+        let claim = data[&1].held_by.as_ref().unwrap();
+        assert!(me.is(claim) && claim.conversation.as_deref() == Some("c-before-the-restart"));
+        assert!(other.is(data[&2].held_by.as_ref().unwrap()), "a holder that still runs keeps its task");
 
         std::fs::remove_dir_all(&dir).ok();
     }

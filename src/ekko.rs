@@ -918,6 +918,33 @@ impl Ekko {
             .collect()
     }
 
+    /// Takes back for this session the tasks in progress that a Claude Code
+    /// process which has ended held while it ran `conversation`: the one this
+    /// session has just resumed, after a restart. Each is told in a notice.
+    /// A restart for an upgrade ends every session, and without this left
+    /// each claim 'gone', for the first session to set the task in progress.
+    pub fn take_back(&self, conversation: &str) -> Result<Vec<String>, EkkoError> {
+        let Some(actor) = self.actor.as_ref().filter(|actor| !actor.is_person()) else { return Ok(Vec::new()) };
+        let _lock = self.storage.acquire_lock()?;
+        let before = self.storage.get()?;
+        let mut data = before.clone();
+        let now = chrono::Local::now().timestamp_millis();
+        let mut notices = Vec::new();
+        for (id, item) in data.iter_mut() {
+            let Some(holder) = item.held_by.as_ref().filter(|_| State::of(item) == Some(State::Progress)) else { continue };
+            let held_here = holder.conversation_in(actor.registry.as_ref()).as_deref() == Some(conversation);
+            if !held_here || holder.alive() || actor.is(holder) {
+                continue;
+            }
+            notices.push(format!("{id} was held by this conversation until its process ended ({}): yours again", actor.name(holder)));
+            item.held_by = Some(actor.holder(now));
+        }
+        if !notices.is_empty() {
+            self.save_against(&before, &mut data)?;
+        }
+        Ok(notices)
+    }
+
     /// The revision a write builds on: the counter, or higher when a lost or
     /// older counters.json fell behind a revision already handed out. An item
     /// carries the revision of its last change; a removal or a change of
