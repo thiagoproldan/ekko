@@ -831,6 +831,11 @@ pub struct Context {
     /// otherwise finds by reading one blocker after another.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub roots: Vec<Link>,
+    /// Roots that are not free to start -- in progress, waiting or stashed --
+    /// but still hold this up: listed apart, so none is offered as work to
+    /// take up that `next` would not offer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub held_roots: Vec<Link>,
     pub dependents: Vec<Link>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<Link>,
@@ -890,7 +895,18 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         .and_then(|uid| reader.uid(uid))
         .and_then(|task| link(&task));
     let (waits_on, root_ids) = reader.graph.upstream(id);
-    let roots = root_ids.iter().filter_map(link).collect();
+    let free = |root: &&u32| {
+        reader.graph.all.get(*root).is_some_and(|item| reader.ready(item) && State::of(item) != Some(State::Progress))
+    };
+    let (free, held): (Vec<&u32>, Vec<&u32>) = root_ids.iter().partition(free);
+    let roots = free.into_iter().filter_map(link).collect();
+    let held_roots = held
+        .into_iter()
+        .filter_map(|root| {
+            let stashed = reader.graph.all.get(root).is_some_and(|item| item.stashed.is_some());
+            link(root).map(|found| Link { state: if stashed { "stashed" } else { found.state }, ..found })
+        })
+        .collect();
     let entry = reader.entry(item);
     let supersedes = entry.supersedes.as_ref().and_then(link);
     let superseded_by = entry.superseded_by.iter().filter_map(link).collect();
@@ -903,6 +919,7 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         blockers,
         waits_on,
         roots,
+        held_roots,
         dependents,
         attached_to,
         supersedes,
@@ -1991,9 +2008,12 @@ impl Context {
         if self.waits_on > 0 {
             let _ = writeln!(out, "      waits on {}, directly or through others", open_tasks(self.waits_on));
         }
-        if !self.roots.is_empty() {
-            let _ = writeln!(out, "\nRoots, free to start");
-            for root in &self.roots {
+        for (heading, roots) in [("Roots, free to start", &self.roots), ("Roots, under way or held", &self.held_roots)] {
+            if roots.is_empty() {
+                continue;
+            }
+            let _ = writeln!(out, "\n{heading}");
+            for root in roots {
                 if self.blockers.iter().any(|blocker| blocker.id == root.id) {
                     let _ = writeln!(out, "{:>4}. [{}] listed above", root.id, root.state);
                 } else {
@@ -2905,6 +2925,30 @@ mod tests {
         let root = context(&ekko, "1").unwrap();
         assert!(root.roots.is_empty() && root.waits_on == 0);
         assert!(root.text().contains("2 open tasks wait on this"), "{}", root.text());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A root that `next` would not offer -- in progress, waiting or stashed
+    /// -- is not called free to start: it is listed apart, as what still
+    /// holds the item up.
+    #[test]
+    fn context_lists_roots_that_cannot_be_started_apart() {
+        let (ekko, dir) = board("held-roots");
+        for name in ["stashed root", "waiting root", "root under way", "free root", "tip"] {
+            ekko.create_task(&words(&[name])).unwrap();
+        }
+        ekko.set_blocked_by(&words(&["@5", "1", "2", "3", "4"])).unwrap();
+        ekko.set_stashed(&words(&["1"]), true).unwrap();
+        ekko.set_state(&words(&["@2", "waiting"]), false).unwrap();
+        ekko.set_state(&words(&["@3", "progress"]), false).unwrap();
+
+        let tip = context(&ekko, "5").unwrap();
+        assert_eq!(tip.roots.iter().map(|root| root.id).collect::<Vec<_>>(), vec![4]);
+        assert_eq!(tip.held_roots.iter().map(|root| (root.id, root.state)).collect::<Vec<_>>(), vec![(1, "stashed"), (2, "waiting"), (3, "in progress")]);
+        let text = tip.text();
+        assert!(text.contains("\nRoots, free to start\n   4. [pending] listed above\n"), "{text}");
+        assert!(text.contains("\nRoots, under way or held\n   1. [stashed] listed above\n"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
