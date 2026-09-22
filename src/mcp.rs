@@ -1147,11 +1147,16 @@ mod tests {
         symlink(new.join("ekko"), bin.join("ekko")).unwrap();
         assert_ne!(Binary::resolve(OsStr::new("ekko"), Some(&path_var)).as_ref(), Some(&started));
 
-        // A rebuild in place: the same path, a new file.
+        // A rebuild in place: the same path, a new file. The running server
+        // keeps its own binary's inode alive, so the new file cannot be given
+        // that number again -- held open here as the running process holds
+        // it, since ext4 hands a freed inode number straight back out.
         let direct = Binary::resolve(new.join("ekko").as_os_str(), None).unwrap();
+        let running = fs::File::open(new.join("ekko")).unwrap();
         fs::remove_file(new.join("ekko")).unwrap();
         executable(&new.join("ekko"));
         assert_ne!(Binary::resolve(new.join("ekko").as_os_str(), None).as_ref(), Some(&direct));
+        drop(running);
 
         fs::remove_dir_all(&dir).ok();
     }
