@@ -126,6 +126,15 @@ pub struct Update {
     /// Retypes a note: decision, gotcha or procedure, or `note` for an
     /// ordinary one.
     pub kind: Option<Kind>,
+    /// Boards put on the item, and taken off it, beside the ones it has:
+    /// unlike `boards`, which replaces them, two sessions changing them at
+    /// once both land.
+    #[serde(default)]
+    pub add_boards: Vec<String>,
+    #[serde(default)]
+    pub remove_boards: Vec<String>,
+    /// The item's updatedAt as the caller read it: STALE if it has changed.
+    pub if_updated_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +150,15 @@ pub struct Link {
     /// makes it replace nothing.
     #[serde(default, deserialize_with = "present")]
     pub supersedes: Option<Option<Ref>>,
+    /// Blockers put on the item, and taken off it, beside the ones it has:
+    /// unlike `blocked_by`, which replaces them, two sessions linking at
+    /// once both land.
+    #[serde(default)]
+    pub add_blocked_by: Vec<Ref>,
+    #[serde(default)]
+    pub remove_blocked_by: Vec<Ref>,
+    /// The item's updatedAt as the caller read it: STALE if it has changed.
+    pub if_updated_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,22 +486,42 @@ impl<'a> Draft<'a> {
 
     pub fn update(&mut self, spec: &Update) -> Result<Vec<u32>, EkkoError> {
         let id = self.resolve(&spec.item)?;
+        let changes_boards = !spec.add_boards.is_empty() || !spec.remove_boards.is_empty();
         if spec.boards.is_none()
+            && !changes_boards
             && spec.priority.is_none()
             && spec.due.is_none()
             && spec.phase.is_none()
             && spec.starred.is_none()
             && spec.kind.is_none()
         {
-            return Err(invalid("An update needs at least one of boards, priority, due, phase, starred or kind"));
+            return Err(invalid(
+                "An update needs at least one of boards, add_boards, remove_boards, priority, due, phase, starred or kind",
+            ));
         }
+        self.fresh(id, spec.if_updated_at)?;
         let is_task = self.data[&id].is_task;
 
         if let Some(names) = &spec.boards {
+            if changes_boards {
+                return Err(invalid("boards replaces the item's boards; add_boards and remove_boards change them: give one or the other"));
+            }
             if names.iter().all(|name| name.trim().is_empty()) {
                 return Err(EkkoError::MissingBoards);
             }
             self.item(id).boards = boards(names);
+        }
+        if changes_boards {
+            let removed = boards(&spec.remove_boards);
+            let mut kept: Vec<String> = self.data[&id].boards.iter().filter(|name| !removed.contains(name)).cloned().collect();
+            for name in boards(&spec.add_boards) {
+                if !spec.add_boards.iter().all(|given| given.trim().is_empty()) && !kept.contains(&name) {
+                    kept.push(name);
+                }
+            }
+            // Taking the last board off leaves the item on the default one,
+            // the board an item with none is on.
+            self.item(id).boards = boards(&kept);
         }
         if let Some(priority) = spec.priority {
             if !is_task {
@@ -580,7 +618,26 @@ impl<'a> Draft<'a> {
 
     pub fn link(&mut self, spec: &Link) -> Result<Vec<u32>, EkkoError> {
         let id = self.resolve(&spec.item)?;
+        self.fresh(id, spec.if_updated_at)?;
+        let changes_blockers = !spec.add_blocked_by.is_empty() || !spec.remove_blocked_by.is_empty();
         match (&spec.blocked_by, &spec.attached_to, &spec.supersedes) {
+            (None, None, None) if changes_blockers => {
+                let added = self.resolve_all(&spec.add_blocked_by)?;
+                let removed = self.resolve_all(&spec.remove_blocked_by)?;
+                let mut blockers: Vec<u32> = self.blocker_ids(id).into_iter().filter(|b| !removed.contains(b)).collect();
+                for blocker in added {
+                    if !blockers.contains(&blocker) {
+                        blockers.push(blocker);
+                    }
+                }
+                let uids = self.ekko.blocker_uids(&self.data, &self.phases, id, &blockers)?;
+                self.item(id).blocked_by = if uids.is_empty() { None } else { Some(uids) };
+            }
+            _ if changes_blockers => {
+                return Err(invalid(
+                    "add_blocked_by and remove_blocked_by change what the item is blocked by, on their own: not beside blocked_by, attached_to or supersedes",
+                ))
+            }
             (Some(blockers), None, None) => {
                 let blockers = self.resolve_all(blockers)?;
                 let uids = self.ekko.blocker_uids(&self.data, &self.phases, id, &blockers)?;
@@ -602,9 +659,32 @@ impl<'a> Draft<'a> {
                 let names = self.names();
                 supersede(&mut self.data, id, older, &|id| names.name(id))?;
             }
-            _ => return Err(invalid("A link takes exactly one of blocked_by, attached_to or supersedes")),
+            _ => {
+                return Err(invalid(
+                    "A link takes exactly one of blocked_by, add_blocked_by and remove_blocked_by, attached_to or supersedes",
+                ))
+            }
         }
         Ok(vec![id])
+    }
+
+    /// Refuses a write against a version of `id` that is no longer current,
+    /// when the caller says which one it read: its updatedAt before this
+    /// batch, since the stamp only moves when the batch is written.
+    fn fresh(&self, id: u32, if_updated_at: Option<i64>) -> Result<(), EkkoError> {
+        let item = &self.data[&id];
+        match if_updated_at {
+            Some(expected) if item.updated_at.unwrap_or(item.timestamp) != expected => {
+                Err(EkkoError::Stale { id, current: item.updated_at.unwrap_or(item.timestamp) })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// What `id` is blocked by now, by display id, in the order it has them.
+    fn blocker_ids(&self, id: u32) -> Vec<u32> {
+        let uids = self.data[&id].blocked_by.clone().unwrap_or_default();
+        uids.iter().filter_map(|uid| self.data.values().find(|item| item.uid.as_deref() == Some(uid)).map(|item| item.id)).collect()
     }
 
     /// Writes the draft, once, if the board it leaves keeps the dependency
@@ -855,6 +935,39 @@ mod tests {
         assert!(batch(&theirs, &[json!({"op": "set_state", "items": [1], "state": "paused"})]).is_err());
         batch(&person, &[json!({"op": "set_state", "items": [1], "state": "paused"})]).unwrap();
         assert_eq!(state_of(&board, 1), Some(State::Paused), "the user decides");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two sessions adding a blocker each, or a board each, both land: the
+    /// add and remove forms change what is there instead of replacing it.
+    /// And if_updated_at refuses an update or a link made against an older
+    /// read, as it does an edit.
+    #[test]
+    fn adding_and_removing_commute_and_a_stale_read_is_refused() {
+        let (ekko, dir) = board("commute");
+        let ops = [json!({"op": "create", "text": "the task"}), json!({"op": "create", "text": "a"}), json!({"op": "create", "text": "b"})];
+        batch(&ekko, &ops).unwrap();
+        batch(&ekko, &[json!({"op": "link", "item": 1, "add_blocked_by": [2]})]).unwrap();
+        batch(&ekko, &[json!({"op": "link", "item": 1, "add_blocked_by": [3]})]).unwrap();
+        let data = ekko.storage.get().unwrap();
+        let uid = |id: u32| data[&id].uid.clone().unwrap();
+        assert_eq!(data[&1].blocked_by, Some(vec![uid(2), uid(3)]), "the second link kept the first");
+        batch(&ekko, &[json!({"op": "link", "item": 1, "remove_blocked_by": [2]})]).unwrap();
+        assert_eq!(ekko.storage.get().unwrap()[&1].blocked_by, Some(vec![uid(3)]));
+
+        batch(&ekko, &[json!({"op": "update", "item": 1, "add_boards": ["x"]})]).unwrap();
+        batch(&ekko, &[json!({"op": "update", "item": 1, "add_boards": ["y"], "remove_boards": ["My Board"]})]).unwrap();
+        assert_eq!(ekko.storage.get().unwrap()[&1].boards, vec!["@x", "@y"]);
+        let mixed = batch(&ekko, &[json!({"op": "update", "item": 1, "boards": ["z"], "add_boards": ["w"]})]);
+        assert!(matches!(mixed, Err(EkkoError::InvalidInput(_))));
+
+        let read = ekko.storage.get().unwrap()[&1].updated_at.unwrap();
+        batch(&ekko, &[json!({"op": "update", "item": 1, "add_boards": ["z"]})]).unwrap();
+        let stale = batch(&ekko, &[json!({"op": "update", "item": 1, "remove_boards": ["x"], "if_updated_at": read})]);
+        assert!(matches!(stale, Err(EkkoError::Stale { id: 1, .. })));
+        let stale = batch(&ekko, &[json!({"op": "link", "item": 1, "add_blocked_by": [2], "if_updated_at": read})]);
+        assert!(matches!(stale, Err(EkkoError::Stale { id: 1, .. })));
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -1058,11 +1058,14 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "update",
-            "description": "Change an item's boards (replaced), priority, due date (null clears), phase (null moves it to the project root), star, or a note's kind.",
+            "description": "Change an item's boards (replaced), priority, due date (null clears), phase (null moves it to the project root), star, or a note's kind. add_boards and remove_boards change the boards without replacing them, so another session's change is kept; if_updated_at refuses the update (STALE) if the item changed since that read.",
             "inputSchema": object(json!({
                 "project": project,
                 "item": item,
                 "boards": {"type": "array", "items": {"type": "string"}},
+                "add_boards": {"type": "array", "items": {"type": "string"}},
+                "remove_boards": {"type": "array", "items": {"type": "string"}},
+                "if_updated_at": {"type": "integer"},
                 "priority": {"type": "integer", "minimum": 1, "maximum": 3},
                 "due": {"type": ["string", "null"]},
                 "phase": {"type": ["string", "null"]},
@@ -1073,11 +1076,14 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "link",
-            "description": "Exactly one of: blocked_by, replacing what the item is blocked by (empty clears it); attached_to, attaching a note to the task it explains (null detaches); or supersedes, the earlier note of the same kind a decision, gotcha or procedure replaces (null clears).",
+            "description": "Exactly one of: blocked_by, replacing what the item is blocked by (empty clears it); add_blocked_by and remove_blocked_by, changing it without replacing it, so another session's link is kept; attached_to, attaching a note to the task it explains (null detaches); or supersedes, the earlier note of the same kind a decision, gotcha or procedure replaces (null clears). if_updated_at refuses the link (STALE) if the item changed since that read.",
             "inputSchema": object(json!({
                 "project": project,
                 "item": item,
                 "blocked_by": {"type": "array", "items": item},
+                "add_blocked_by": {"type": "array", "items": item},
+                "remove_blocked_by": {"type": "array", "items": item},
+                "if_updated_at": {"type": "integer"},
                 "attached_to": {"type": ["integer", "string", "null"]},
                 "supersedes": {"type": ["integer", "string", "null"]}
             }), &["item"]),
