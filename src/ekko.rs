@@ -934,13 +934,24 @@ impl Ekko {
     /// one land at the project root, outside the roadmap -- never in a guessed
     /// current phase, because putting work somewhere nobody chose is exactly
     /// the plausible-wrong-answer this codebase keeps refusing.
+    /// `phase` goes in with the item, in its one write: a second write would
+    /// leave the item at the project root for a moment, and move the revision
+    /// twice for one command.
     pub fn create_task_in(
         &self,
         input: &[String],
         phase: Option<&str>,
     ) -> Result<Outcome, EkkoError> {
-        let outcome = self.create_task(input)?;
-        self.assign_phase(&outcome, phase)
+        let _lock = self.storage.acquire_lock()?;
+        let (boards, description, priority, due_date) = self.parse_create_options(input)?;
+        let mut data = self.storage.get()?;
+        let id = self.generate_id(&data);
+        let mut item = Item::new_task(id, description, boards, priority);
+        item.due_date = due_date;
+        item.phase = phase.map(str::to_string);
+        data.insert(id, item.clone());
+        self.save_touching(&mut data)?;
+        Ok(Outcome::Task(item))
     }
 
     /// `kind` and `supersedes` are `--kind` and `--supersedes`: without them,
@@ -952,21 +963,21 @@ impl Ekko {
         kind: Option<&str>,
         supersedes: Option<&str>,
     ) -> Result<Outcome, EkkoError> {
-        let outcome = match (kind, supersedes) {
-            (None, None) => self.create_note(input)?,
-            _ => self.create_typed_note(input, kind, supersedes)?,
-        };
-        self.assign_phase(&outcome, phase)
+        match (kind, supersedes) {
+            (None, None) => self.create_plain_note(input, phase),
+            _ => self.typed_note(input, kind, supersedes, phase),
+        }
     }
 
     /// `--note --kind`: a decision, a gotcha or a procedure, and with
     /// `--supersedes` the earlier note of its kind it replaces -- under the
     /// rules a structured write keeps, checked by the same function.
-    pub fn create_typed_note(
+    fn typed_note(
         &self,
         input: &[String],
         kind: Option<&str>,
         supersedes: Option<&str>,
+        phase: Option<&str>,
     ) -> Result<Outcome, EkkoError> {
         let kind = match kind {
             Some(word) => Knowledge::from_word(word).ok_or_else(|| {
@@ -984,6 +995,7 @@ impl Ekko {
         let id = self.generate_id(&data);
         let mut item = Item::new_note(id, description, boards);
         item.knowledge = Some(kind);
+        item.phase = phase.map(str::to_string);
         data.insert(id, item);
         if let Some(older) = supersedes {
             let older = self.validate_ids(&[older.trim_start_matches('@').to_string()], &data)?[0];
@@ -994,40 +1006,18 @@ impl Ekko {
         Ok(Outcome::Note(item))
     }
 
-    fn assign_phase(&self, outcome: &Outcome, phase: Option<&str>) -> Result<Outcome, EkkoError> {
-        let (Some(name), Outcome::Task(item) | Outcome::Note(item)) = (phase, outcome) else {
-            return Ok(match outcome {
-                Outcome::Task(i) => Outcome::Task(i.clone()),
-                other => Outcome::Note(match other {
-                    Outcome::Note(i) => i.clone(),
-                    _ => unreachable!("assign_phase only ever sees a created item"),
-                }),
-            });
-        };
-
-        let _lock = self.storage.acquire_lock()?;
-        let mut data = self.storage.get()?;
-        let mut updated = item.clone();
-        updated.phase = Some(name.to_string());
-        data.insert(updated.id, updated.clone());
-        self.save_touching(&mut data)?;
-
-        Ok(if updated.is_task { Outcome::Task(updated) } else { Outcome::Note(updated) })
-    }
-
+    /// The CLI creates through the `_in` forms; tests mostly need no phase.
+    #[cfg(test)]
     pub fn create_task(&self, input: &[String]) -> Result<Outcome, EkkoError> {
-        let _lock = self.storage.acquire_lock()?;
-        let (boards, description, priority, due_date) = self.parse_create_options(input)?;
-        let mut data = self.storage.get()?;
-        let id = self.generate_id(&data);
-        let mut item = Item::new_task(id, description, boards, priority);
-        item.due_date = due_date;
-        data.insert(id, item.clone());
-        self.save_touching(&mut data)?;
-        Ok(Outcome::Task(item))
+        self.create_task_in(input, None)
     }
 
+    #[cfg(test)]
     pub fn create_note(&self, input: &[String]) -> Result<Outcome, EkkoError> {
+        self.create_plain_note(input, None)
+    }
+
+    fn create_plain_note(&self, input: &[String], phase: Option<&str>) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         // Notes carry no deadline, same as they carry no priority: a `d:`
         // token on a note is parsed (so a malformed one still errors) and
@@ -1035,7 +1025,8 @@ impl Ekko {
         let (boards, description, _priority, _due) = self.parse_create_options(input)?;
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
-        let item = Item::new_note(id, description, boards);
+        let mut item = Item::new_note(id, description, boards);
+        item.phase = phase.map(str::to_string);
         data.insert(id, item.clone());
         self.save_touching(&mut data)?;
         Ok(Outcome::Note(item))
@@ -2986,6 +2977,25 @@ mod tests {
         assert_eq!(data.values().filter(|kept| kept.uid == item.uid).count(), 1, "one item per uid");
         assert_eq!(results, vec![RestoreResult { archive_id: 1, storage_id: 2 }]);
         assert!(ekko.storage.get_archive().unwrap().is_empty());
+
+        cleanup(&dir);
+    }
+
+    /// A task created into a phase is written once, phase and all: the
+    /// revision moves by one, and no reader sees it at the root first.
+    #[test]
+    fn creating_into_a_phase_is_one_write() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.set_phases(&words(&["design"])).unwrap();
+        let before = ekko.storage.get_counters().unwrap().revision;
+
+        let Outcome::Task(task) = ekko.create_task_in(&words(&["in a phase"]), Some("design")).unwrap() else { panic!() };
+        let Outcome::Note(note) = ekko.create_note_in(&words(&["a note there"]), Some("design"), None, None).unwrap() else { panic!() };
+
+        assert_eq!(ekko.storage.get_counters().unwrap().revision, before + 2, "one revision per create");
+        let data = ekko.storage.get().unwrap();
+        assert_eq!(data[&task.id].phase.as_deref(), Some("design"));
+        assert_eq!(data[&note.id].phase.as_deref(), Some("design"));
 
         cleanup(&dir);
     }
