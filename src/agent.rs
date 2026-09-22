@@ -1943,7 +1943,9 @@ struct Section {
 
 impl Section {
     /// A section of entries best first, quoting the notes of the first
-    /// `with_notes`, titled with `total`.
+    /// `with_notes`, titled with `total`. The notes of work another running
+    /// session holds are named, not quoted: they are that session's to read,
+    /// and quoting them costs every other session the same characters.
     fn of_entries(
         title: &str,
         entries: &[Entry],
@@ -1957,10 +1959,13 @@ impl Section {
             .iter()
             .enumerate()
             .map(|(at, entry)| {
-                let notes = if at < with_notes {
-                    entry.notes.iter().map(|note| note_line(note, NOTE_CLIP)).collect()
-                } else {
+                let notes = if at >= with_notes || entry.notes.is_empty() {
                     Vec::new()
+                } else if entry.held.as_ref().is_some_and(Held::elsewhere) {
+                    let ids: Vec<String> = entry.notes.iter().map(|note| note.id.to_string()).collect();
+                    vec![format!("{:>10}notes {}: context {}", "", ids.join(", "), entry.id)]
+                } else {
+                    entry.notes.iter().map(|note| note_line(note, NOTE_CLIP)).collect()
                 };
                 (entry_line(entry, today), notes)
             })
@@ -3109,6 +3114,39 @@ mod tests {
         let theirs = prime(&as_(&other), "default board").unwrap().text();
         assert!(theirs.contains("Where the last session stopped: handoff 4 on task 2 [in progress]"), "{theirs}");
         assert!(theirs.contains("Other handoffs in the last hour: 3 on task 1 ("), "{theirs}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The notes of work another running session holds are named, not
+    /// quoted: that session reads them, and every other session would pay for
+    /// them in its prime. Seen on 2026-09-22, where a second session's prime
+    /// quoted the first one's handoff under its task, besides naming it among
+    /// the other handoffs.
+    #[test]
+    fn the_prime_names_the_notes_of_work_another_session_holds() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let (_, dir) = board("held-notes");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        let write = |ekko: &Ekko, op: serde_json::Value| {
+            let mut draft = crate::ops::Draft::open(ekko).unwrap();
+            draft.apply(&serde_json::from_value(op).unwrap()).unwrap();
+            draft.commit(false).unwrap();
+        };
+        for (actor, name) in [(&me, "mine"), (&other, "theirs")] {
+            as_(actor).create_task(&words(&[name])).unwrap();
+        }
+        as_(&me).set_state(&words(&["@1", "progress"]), false).unwrap();
+        as_(&other).set_state(&words(&["@2", "progress"]), false).unwrap();
+        for (task, text) in [(1, "why mine"), (2, "why theirs"), (2, "and more")] {
+            write(&as_(&me), serde_json::json!({"op": "create", "kind": "note", "text": text, "attached_to": task}));
+        }
+
+        let mine = prime(&as_(&me), "default board").unwrap().text();
+        assert!(mine.contains("3. why mine\n"), "{mine}");
+        assert!(mine.contains("\n          notes 4, 5: context 2\n") && !mine.contains("why theirs"), "{mine}");
+        let theirs = prime(&as_(&other), "default board").unwrap().text();
+        assert!(theirs.contains("4. why theirs\n") && theirs.contains("\n          notes 3: context 1\n"), "{theirs}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
