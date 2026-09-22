@@ -451,7 +451,7 @@ impl Server {
             "changes" => {
                 let since = take(args, "since", Value::as_i64, "an integer")?.ok_or_else(|| invalid("changes needs since"))?;
                 finish(args)?;
-                Ok(agent::changes(&ekko, since)?.text())
+                Ok(agent::changes_within(&ekko, since, &Self::label(&location))?)
             }
             "roadmap" => {
                 finish(args)?;

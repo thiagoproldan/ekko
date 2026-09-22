@@ -1307,6 +1307,23 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
     })
 }
 
+/// What moved since `since`, or the prime once the list would run longer than
+/// the prime's budget and the prime is the shorter read: on a board that moved
+/// a lot, the list is unbounded -- 429 KB for changes(0) over 5,000 items --
+/// and the resume view says where things stand in a few thousand characters.
+/// Either way the answer carries a cursor to go on from.
+pub fn changes_within(ekko: &Ekko, since: i64, board: &str) -> Result<String, EkkoError> {
+    let moved = changes(ekko, since)?.text();
+    if moved.chars().count() <= PRIME_BUDGET {
+        return Ok(moved);
+    }
+    let view = prime(ekko, board)?.text();
+    if view.chars().count() >= moved.chars().count() {
+        return Ok(moved);
+    }
+    Ok(format!("More moved since {since} than a list should hold, so this is the resume view instead; go on from its cursor.\n{view}"))
+}
+
 /// How a Claude Code session began, read off the SessionStart hook's input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionEvent {
@@ -2385,6 +2402,31 @@ mod tests {
         assert!(text.chars().count() <= PRIME_BUDGET, "{} characters:\n{text}", text.chars().count());
         assert!(text.contains("Ready, best first (80)") && text.contains("more: next lists them"), "{text}");
         assert!(text.ends_with("context <id>.\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A cursor far behind gets the resume view rather than a list longer than
+    /// it, and a cursor that little moved past gets the list.
+    #[test]
+    fn changes_past_the_budget_answer_with_the_prime() {
+        let (ekko, dir) = board("changes-limit");
+        let data: ItemMap = (1..=300)
+            .map(|id| {
+                let mut item = Item::new_task(id, format!("task {id}, with a description of the length tasks run to on a board"), vec!["My Board".to_string()], 1);
+                item.rev = Some(u64::from(id));
+                (id, item)
+            })
+            .collect();
+        ekko.storage.set(&data).unwrap();
+        let counters = crate::storage::Counters { revision: 300, highest_id: 300, ..Default::default() };
+        ekko.storage.set_counters(&counters).unwrap();
+
+        let far = changes_within(&ekko, 0, "default board").unwrap();
+        assert!(far.starts_with("More moved since 0 than a list should hold"), "{far}");
+        assert!(far.chars().count() <= PRIME_BUDGET + 200, "{} characters", far.chars().count());
+        let near = changes_within(&ekko, 298, "default board").unwrap();
+        assert!(near.starts_with("cursor 300 \u{b7} 2 changed since 298"), "{near}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
