@@ -85,27 +85,36 @@ pub fn tasks(ekko: &Ekko, since: u64) -> Result<Vec<Task>, Box<dyn Error>> {
     done.sort_by_key(|item| (item.updated_at.unwrap_or(item.timestamp), item.id));
     let done = done.split_off(done.len().saturating_sub(DONE_SHOWN));
 
-    // Work another running session holds is that session's, not this one's.
-    let (doing, ready): (Vec<_>, Vec<_>) = agent::next(ekko, None)?
+    // Work another running session holds is that session's, not this one's;
+    // and only this session's own is in progress on its list, as its
+    // spinner's line. Work in progress that no running session holds -- its
+    // session ended, or none ever claimed it -- comes last, marked
+    // abandoned: free to take up, and nobody's spinner. Seen on 2026-09-22,
+    // when one session's spinner showed a task another had held before a
+    // restart.
+    let (progress, ready): (Vec<_>, Vec<_>) = agent::next(ekko, None)?
         .into_iter()
         .filter(|entry| !entry.held.as_ref().is_some_and(agent::Held::elsewhere))
         .partition(|entry| entry.state == Some(State::Progress));
+    let (doing, abandoned): (Vec<_>, Vec<_>) =
+        progress.into_iter().partition(|entry| entry.held.as_ref().is_some_and(|held| held.yours));
 
     let rows = done
         .iter()
-        .map(|item| (item.id, item.description.as_str(), "completed"))
-        .chain(doing.iter().map(|entry| (entry.id, entry.description.as_str(), "in_progress")))
-        .chain(ready.iter().take(NEXT_SHOWN).map(|entry| (entry.id, entry.description.as_str(), "pending")));
-    Ok(rows.enumerate().map(|(at, (id, text, status))| task(at + 1, id, text, status)).collect())
+        .map(|item| (item.id, "", item.description.as_str(), "completed"))
+        .chain(doing.iter().map(|entry| (entry.id, "", entry.description.as_str(), "in_progress")))
+        .chain(ready.iter().take(NEXT_SHOWN).map(|entry| (entry.id, "", entry.description.as_str(), "pending")))
+        .chain(abandoned.iter().map(|entry| (entry.id, "(abandoned) ", entry.description.as_str(), "pending")));
+    Ok(rows.enumerate().map(|(at, (id, mark, text, status))| task(at + 1, id, mark, text, status)).collect())
 }
 
-fn task(number: usize, id: u32, text: &str, status: &str) -> Task {
+fn task(number: usize, id: u32, mark: &str, text: &str, status: &str) -> Task {
     let first = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
     Task {
         id: number.to_string(),
-        subject: format!("{id}. {}", shorten(first, SUBJECT_CLIP)),
+        subject: format!("{id}. {mark}{}", shorten(first, SUBJECT_CLIP)),
         description: text.to_string(),
-        active_form: format!("{id}. {}", shorten(first, ACTIVE_CLIP)),
+        active_form: format!("{id}. {mark}{}", shorten(first, ACTIVE_CLIP)),
         status: status.to_string(),
         blocks: Vec::new(),
         blocked_by: Vec::new(),
@@ -254,7 +263,9 @@ mod tests {
     /// so it is not on the list.
     #[test]
     fn the_list_is_the_work_in_progress_then_the_next_five_ready() {
+        let (me, _, _) = crate::holder::test_sessions();
         let (ekko, dir) = board("order");
+        let ekko = ekko.acting_as(me);
         for k in 1..=8 {
             ekko.create_task(&words(&[format!("task {k}").as_str()])).unwrap();
         }
@@ -278,20 +289,25 @@ mod tests {
     }
 
     /// Another running session's task in progress is not this session's
-    /// work: its list leaves it out, in progress or not.
+    /// work: its list leaves it out, in progress or not. Work in progress
+    /// whose session ended is nobody's: last, marked abandoned, and never
+    /// this session's spinner -- seen on 2026-09-22, when a task held before
+    /// a restart was the spinner line of a session that never worked it.
     #[test]
     fn another_sessions_task_is_not_on_the_list() {
-        let (me, other, _) = crate::holder::test_sessions();
+        let (me, other, gone) = crate::holder::test_sessions();
         let dir = scratch("held");
         let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir.join("board")).unwrap()).acting_as(actor.clone());
-        for name in ["theirs", "mine"] {
+        for name in ["theirs", "left behind", "mine"] {
             as_(&me).create_task(&words(&[name])).unwrap();
         }
         as_(&other).set_state(&words(&["@1", "progress"]), false).unwrap();
-        as_(&me).set_state(&words(&["@2", "progress"]), false).unwrap();
+        as_(&gone).set_state(&words(&["@2", "progress"]), false).unwrap();
+        as_(&me).set_state(&words(&["@3", "progress"]), false).unwrap();
 
         let list = tasks(&as_(&me), 0).unwrap();
-        assert_eq!(drawn(&list), [("in_progress".to_string(), "2. mine".to_string())]);
+        let expected = [("in_progress", "3. mine"), ("pending", "2. (abandoned) left behind")];
+        assert_eq!(drawn(&list), expected.map(|(s, t)| (s.to_string(), t.to_string())));
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -336,7 +352,7 @@ mod tests {
     #[test]
     fn a_long_task_is_cut_to_a_line() {
         let long = "a task whose first line runs on well past what one line of a list can hold, and then some more";
-        let entry = task(1, 42, &format!("{long}\nsecond line"), "pending");
+        let entry = task(1, 42, "", &format!("{long}\nsecond line"), "pending");
         assert_eq!(entry.subject.chars().count(), "42. ".len() + SUBJECT_CLIP);
         assert!(entry.subject.ends_with('\u{2026}') && entry.active_form.ends_with('\u{2026}'));
         assert!(entry.active_form.chars().count() < entry.subject.chars().count());
@@ -350,7 +366,7 @@ mod tests {
     fn writing_makes_the_list_exactly_the_boards() {
         let dir = scratch("write");
         let list = dir.join("tasks").join("session");
-        let first = [task(1, 7, "seven", "in_progress"), task(2, 9, "nine", "pending")];
+        let first = [task(1, 7, "", "seven", "in_progress"), task(2, 9, "", "nine", "pending")];
         assert!(write(&list, &first).unwrap());
         assert!(!write(&list, &first).unwrap(), "an unchanged list writes nothing");
 
