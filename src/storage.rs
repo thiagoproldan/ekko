@@ -30,7 +30,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +38,6 @@ use crate::item::Item;
 use crate::json;
 
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(5000);
-const LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// How old a leftover file in the temp directory has to be before
 /// `clean_temp_dir` treats it as debris from a crashed write rather than
@@ -237,35 +236,32 @@ impl Storage {
 /// storage lock is one use; the project registry's is the other, and they
 /// must behave alike, which is why this is the one place the loop lives.
 pub fn lock_path(path: &Path) -> Result<File, StorageError> {
-    let deadline = Instant::now() + LOCK_ACQUIRE_TIMEOUT;
-
-    // Opened once, outside the loop: a `flock` belongs to the open file
-    // description, not to the path or the process, so re-opening per
-    // attempt would be both wasteful and easy to get subtly wrong.
     // `truncate(false)` because the file's *contents* are irrelevant now
     // -- it exists purely as something to lock.
     let file = OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
-
-    loop {
-        // SAFETY: `file` owns this descriptor and outlives the call.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result == 0 {
-            return Ok(file);
-        }
-
-        let error = io::Error::last_os_error();
-        // EWOULDBLOCK is the only "someone else is holding it" answer.
-        // Anything else is a genuine failure and shouldn't be retried
-        // silently until the timeout.
-        if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
-            return Err(error.into());
-        }
-
-        if Instant::now() >= deadline {
-            return Err(StorageError::LockTimeout(path.to_path_buf()));
-        }
-
-        std::thread::sleep(LOCK_RETRY_DELAY);
+    // SAFETY: `file` owns this descriptor and outlives the call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(file);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+        return Err(error.into());
+    }
+    // Held: wait in the kernel's queue rather than polling, so the lock goes
+    // to a waiter the moment it is released instead of to whoever happens to
+    // ask first. The wait runs on a thread that owns the descriptor and hands
+    // it back; if the timeout passes first, the thread still takes the lock
+    // when it comes free, finds nobody to hand it to, and drops it.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // SAFETY: the thread owns `file`, which outlives the call.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        let _ = sender.send(if result == 0 { Ok(file) } else { Err(io::Error::last_os_error()) });
+    });
+    match receiver.recv_timeout(LOCK_ACQUIRE_TIMEOUT) {
+        Ok(Ok(file)) => Ok(file),
+        Ok(Err(error)) => Err(error.into()),
+        Err(_) => Err(StorageError::LockTimeout(path.to_path_buf())),
     }
 }
 
@@ -555,6 +551,7 @@ fn temp_file_path(target: &Path, temp_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::process::Command;
+    use std::time::Instant;
 
     fn temp_ekko_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
