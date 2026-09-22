@@ -75,7 +75,7 @@ pub struct Create {
     pub text: String,
     #[serde(default)]
     pub boards: Vec<String>,
-    pub priority: Option<u8>,
+    pub priority: Option<i64>,
     pub due: Option<String>,
     pub phase: Option<String>,
     #[serde(default)]
@@ -114,7 +114,7 @@ pub struct Replace {
 pub struct Update {
     pub item: Ref,
     pub boards: Option<Vec<String>>,
-    pub priority: Option<u8>,
+    pub priority: Option<i64>,
     /// A date sets it, `null` clears it, absent leaves it.
     #[serde(default, deserialize_with = "present")]
     pub due: Option<Option<String>>,
@@ -206,6 +206,12 @@ where
 
 fn invalid(message: impl Into<String>) -> EkkoError {
     EkkoError::InvalidInput(message.into())
+}
+
+/// A priority as given, read wide so that -1 or 300 is refused as a priority
+/// out of range, as 0 and 4 are, rather than as JSON that is not a u8.
+fn priority_of(priority: i64) -> Result<u8, EkkoError> {
+    u8::try_from(priority).ok().filter(|p| (1..=3).contains(p)).ok_or(EkkoError::InvalidPriority)
 }
 
 /// `["coding", "@reviews"]` to `["@coding", "@reviews"]`, the default board
@@ -359,10 +365,7 @@ impl<'a> Draft<'a> {
         if spec.supersedes.is_some() && kind.knowledge().is_none() {
             return Err(invalid("Only a decision, a gotcha or a procedure supersedes an earlier note"));
         }
-        let priority = spec.priority.unwrap_or(1);
-        if !(1..=3).contains(&priority) {
-            return Err(EkkoError::InvalidPriority);
-        }
+        let priority = priority_of(spec.priority.unwrap_or(1))?;
         let due = match &spec.due {
             Some(date) => Some(parse_due_date(&format!("d:{date}")).ok_or_else(|| EkkoError::InvalidDueDate(date.clone()))?),
             None => None,
@@ -588,10 +591,7 @@ impl<'a> Draft<'a> {
             if !is_task {
                 return Err(invalid("A note has no priority; only a task does"));
             }
-            if !(1..=3).contains(&priority) {
-                return Err(EkkoError::InvalidPriority);
-            }
-            self.item(id).priority = Some(priority);
+            self.item(id).priority = Some(priority_of(priority)?);
         }
         if let Some(due) = &spec.due {
             let parsed = match due {
@@ -928,6 +928,23 @@ mod tests {
         assert_eq!(item.description, text);
         assert_eq!(item.boards, vec!["@coding", "@reviews"]);
         assert_eq!((item.priority, item.due_date.as_deref()), (Some(2), Some("2026-09-01")));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A priority outside 1 to 3 is refused as one, whether it would fit a
+    /// u8 or not: -1 used to fail as JSON, with serde's 'expected u8'.
+    #[test]
+    fn a_priority_out_of_range_is_refused_as_a_priority() {
+        let (ekko, dir) = board("priority-range");
+        batch(&ekko, &[json!({"op": "create", "text": "a task"})]).unwrap();
+
+        for priority in [-1, 0, 4, 300] {
+            let created = batch(&ekko, &[json!({"op": "create", "text": "x", "priority": priority})]);
+            assert!(matches!(created, Err(EkkoError::InvalidPriority)), "{priority}: {:?}", created.err());
+            let updated = batch(&ekko, &[json!({"op": "update", "item": 1, "priority": priority})]);
+            assert!(matches!(updated, Err(EkkoError::InvalidPriority)), "{priority}: {:?}", updated.err());
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
