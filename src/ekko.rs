@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::config;
 use crate::directory::DirectoryError;
 use crate::item::{tally, Change, Item, Knowledge, Setting, State};
-use crate::render::{CalendarMonth, Inversion, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
+use crate::render::{Inversion, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
 use crate::storage::{Counters, ItemMap, Storage, StorageError};
 
 #[derive(Debug)]
@@ -395,7 +395,6 @@ pub enum Outcome {
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
     Attached { item: Item, target: Option<u32> },
-    Calendar(CalendarMonth),
     Stashed { ids: Vec<u32>, away: bool },
     Trashed { ids: Vec<u32>, away: bool },
     Stash(Vec<(String, Vec<Item>)>),
@@ -443,7 +442,6 @@ impl Outcome {
             Outcome::Phases(_) => "phases",
             Outcome::Blocked { .. } => "blocked",
             Outcome::Attached { .. } => "attached",
-            Outcome::Calendar(_) => "calendar",
             Outcome::Stashed { away, .. } => if *away { "stash" } else { "unstash" },
             Outcome::Trashed { away, .. } => if *away { "trash" } else { "untrash" },
             Outcome::Stash(_) => "stash",
@@ -516,7 +514,6 @@ impl Outcome {
             Outcome::Phases(names) => out.display_phases(names),
             Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
             Outcome::Attached { item, target } => out.success_attached(item.id, *target),
-            Outcome::Calendar(month) => out.display_calendar(month),
             Outcome::Stashed { ids, away } => out.success_stashed(ids, *away),
             Outcome::Trashed { ids, away } => out.success_trashed(ids, *away),
             Outcome::Stash(groups) => out.display_stash(groups),
@@ -1574,22 +1571,6 @@ impl Ekko {
         let mut items: Vec<Item> = data.into_values().collect();
         items.sort_by_key(|item| item.trashed);
         Ok(Outcome::Trash(items))
-    }
-
-    /// The current month, drawn.
-    ///
-    /// Reads nothing: no lock, no storage, no board. That is the whole of
-    /// this first cut on purpose -- drawing a month and deciding what a day
-    /// should show are separate questions, and the second one is not
-    /// answered yet. See the board for which way it goes.
-    pub fn display_calendar(&self) -> Result<Outcome, EkkoError> {
-        use chrono::Datelike;
-
-        let now = chrono::Local::now();
-        let month = CalendarMonth::of(now.year(), now.month(), Some(now.day()))
-            .expect("today is always a real date in a real month");
-
-        Ok(Outcome::Calendar(month))
     }
 
     /// Attaches a note to the task it explains.

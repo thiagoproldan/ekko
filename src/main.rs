@@ -36,7 +36,6 @@ const HELP: &str = r#"
       --attached-to <IDS> Attach a note to the task it explains
       --begin, -b         Start/pause task
       --blocked-by <IDS>  Record what an item is blocked by
-      --calendar          Show the current month
       --check, -c         Check/uncheck task
       --clear             Delete all checked items
       --context <ID>      Show one item with its dependencies and notes
@@ -85,7 +84,6 @@ const HELP: &str = r#"
       $ ekko --archive
       $ ekko --attached-to @16 12
       $ ekko --begin 2 3
-      $ ekko --calendar
       $ ekko --check 1 2
       $ ekko --check 2 --force
       $ ekko --clear
@@ -407,9 +405,6 @@ fn dispatch(
     }
     if let Some(args) = cli.untrash.as_deref() {
         return Ok(vec![ekko.set_trashed(args, false)?]);
-    }
-    if cli.calendar {
-        return Ok(vec![ekko.display_calendar()?]);
     }
     if cli.destroy {
         // Ahead of every view and every write: whatever else the line said,

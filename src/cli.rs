@@ -54,10 +54,6 @@ pub struct Cli {
     #[arg(long, num_args = 1.., value_name = "IDS")]
     pub untrash: Option<Vec<String>>,
 
-    /// The current month, drawn. Nothing from the board is on it yet.
-    #[arg(long)]
-    pub calendar: bool,
-
     /// Removed along with the interactive mode it opened. Hidden, and kept
     /// only so that a typed `--ui` is told it was removed, rather than clap's
     /// bare "unexpected argument", which reads as a typo.

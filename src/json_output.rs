@@ -77,7 +77,6 @@ fn success_value(outcome: &Outcome) -> Value {
             "excluded": init.excluded,
         }),
         Outcome::Phases(names) => json!({"ok": true, "command": command, "phases": names}),
-        Outcome::Calendar(month) => json!({"ok": true, "command": command, "month": month}),
         Outcome::Stashed { ids, away } | Outcome::Trashed { ids, away } => {
             json!({"ok": true, "command": command, "ids": ids, "away": away})
         }
