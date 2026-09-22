@@ -106,7 +106,10 @@ def real_storage(project=None):
 
 
 def copy_real(name, project=None):
-    """A scratch board holding a copy of a real board's storage and phases."""
+    """A scratch board holding a copy of a real board's storage, phases,
+    counters and journal. Without counters.json the copy's revision starts
+    again at 0, every cursor then reads as ahead of the board, and changes
+    measured on the copy mean nothing."""
     label, source = real_storage(project)
     if not os.path.exists(source):
         raise SystemExit(f"{label}: no storage at {source}")
@@ -114,9 +117,10 @@ def copy_real(name, project=None):
     target = storage_file(path)
     os.makedirs(os.path.dirname(target))
     shutil.copy(source, target)
-    phases = os.path.join(os.path.dirname(source), "phases.json")
-    if os.path.exists(phases):
-        shutil.copy(phases, os.path.join(os.path.dirname(target), "phases.json"))
+    for kept in ("phases.json", "counters.json", "journal.jsonl"):
+        found = os.path.join(os.path.dirname(source), kept)
+        if os.path.exists(found):
+            shutil.copy(found, os.path.join(os.path.dirname(target), kept))
     return path, label
 
 

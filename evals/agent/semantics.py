@@ -277,6 +277,9 @@ def main():
     with open(out, "w") as f:
         json.dump({"provenance": provenance(), "rows": rows}, f, indent=2, ensure_ascii=False, default=str)
     print(f"results: {out}")
+    # A row back to OPEN is a regression: fail, so CI says so.
+    if not all(row["fixed"] for row in rows):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

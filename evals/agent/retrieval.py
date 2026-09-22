@@ -28,8 +28,8 @@ import unicodedata
 
 from ekko_mcp import Mcp, cli, copy_real, cursor_of, line_ids, load, provenance, registered_projects, results_file, size, tokens
 
-OPEN = ("pending", "in progress", "paused")
-STATE_IN_LINE = re.compile(r"\[(pending|in progress|paused|done|cancelled|note)[\],]")
+OPEN = ("pending", "in progress", "paused", "waiting")
+STATE_IN_LINE = re.compile(r"\[(pending|in progress|paused|waiting|done|cancelled|note)[\],]")
 BLOCKER_LINE = re.compile(r"^\s*(\d+)\.\s\[([^\],]+)")
 
 
@@ -47,6 +47,8 @@ def state(item):
         return "in progress"
     if item.get("paused"):
         return "paused"
+    if item.get("waiting"):
+        return "waiting"
     return "pending"
 
 
