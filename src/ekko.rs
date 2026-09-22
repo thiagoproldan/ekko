@@ -61,7 +61,8 @@ pub enum EkkoError {
     RemovedFlag { old: &'static str, instead: &'static str },
     InvalidCustomAppDir(String),
     MissingEkkoDirFlagValue,
-    LockTimeout(String),
+    /// The lock's path, and who held it when the wait gave up.
+    LockTimeout(String, Option<String>),
     Storage(StorageError),
     Directory(DirectoryError),
     Config(config::ConfigError),
@@ -100,7 +101,7 @@ impl EkkoError {
             EkkoError::RemovedFlag { .. } => "REMOVED_FLAG",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
             EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
-            EkkoError::LockTimeout(_) => "LOCK_TIMEOUT",
+            EkkoError::LockTimeout(..) => "LOCK_TIMEOUT",
             EkkoError::Storage(_) => "STORAGE_ERROR",
             EkkoError::Directory(_) => "DIRECTORY_ERROR",
             EkkoError::Config(_) => "CONFIG_ERROR",
@@ -142,7 +143,7 @@ impl EkkoError {
             | EkkoError::RemovedFlag { .. } => out.generic_error(&self.to_string()),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
             EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
-            EkkoError::LockTimeout(path) => out.lock_timeout(path),
+            EkkoError::LockTimeout(path, holder) => out.lock_timeout(path, holder.as_deref()),
             EkkoError::Storage(e) => out.generic_error(&e.to_string()),
             EkkoError::Directory(e) => out.generic_error(&e.to_string()),
             EkkoError::Config(e) => out.generic_error(&e.to_string()),
@@ -271,7 +272,9 @@ impl std::fmt::Display for EkkoError {
             EkkoError::MissingEkkoDirFlagValue => {
                 write!(f, "Please provide a value for --ekko-dir or remove the flag.")
             }
-            EkkoError::LockTimeout(path) => write!(f, "Timed out waiting for the ekko storage lock: {path}"),
+            EkkoError::LockTimeout(path, holder) => {
+                write!(f, "{} {path}", crate::storage::lock_timeout_advice(holder.as_deref()))
+            }
             EkkoError::Storage(e) => write!(f, "{e}"),
             EkkoError::Directory(e) => write!(f, "{e}"),
             EkkoError::Config(e) => write!(f, "{e}"),
@@ -285,7 +288,7 @@ impl std::error::Error for EkkoError {}
 impl From<StorageError> for EkkoError {
     fn from(error: StorageError) -> Self {
         match error {
-            StorageError::LockTimeout(path) => EkkoError::LockTimeout(path.display().to_string()),
+            StorageError::LockTimeout(path, holder) => EkkoError::LockTimeout(path.display().to_string(), holder),
             other => EkkoError::Storage(other),
         }
     }

@@ -1097,13 +1097,9 @@ impl<'a> Renderer<'a> {
         self.error("\n", "Priority can only be 1, 2 or 3", "");
     }
 
-    pub fn lock_timeout(&mut self, path: &str) {
+    pub fn lock_timeout(&mut self, path: &str, holder: Option<&str>) {
         let suffix = self.painter.red(path);
-        self.error(
-            "\n",
-            "Timed out waiting for the ekko storage lock. If no other ekko process is running, delete this file and try again:",
-            &suffix,
-        );
+        self.error("\n", &crate::storage::lock_timeout_advice(holder), &suffix);
     }
 
     pub fn missing_boards(&mut self) {

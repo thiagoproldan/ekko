@@ -113,7 +113,7 @@ fn error_value(error: &EkkoError) -> Value {
     let extra = match error {
         EkkoError::InvalidId(id) => Some(("id", json!(id))),
         EkkoError::InvalidCustomAppDir(path) => Some(("path", json!(path))),
-        EkkoError::LockTimeout(path) => Some(("path", json!(path))),
+        EkkoError::LockTimeout(path, _) => Some(("path", json!(path))),
         EkkoError::RenamedFlag { new, .. } => Some(("renamedTo", json!(new))),
         EkkoError::Blocked(blocked) => Some(("blocked", pairs_value(blocked, "blockers"))),
         EkkoError::CompletedDependents(found) => Some(("dependents", pairs_value(found, "dependents"))),

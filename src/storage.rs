@@ -57,7 +57,8 @@ pub type ItemMap = BTreeMap<u32, Item>;
 pub enum StorageError {
     Io(io::Error),
     Json(serde_json::Error),
-    LockTimeout(PathBuf),
+    /// The lock, and who held it as /proc/locks told when the wait gave up.
+    LockTimeout(PathBuf, Option<String>),
 }
 
 impl std::fmt::Display for StorageError {
@@ -65,11 +66,9 @@ impl std::fmt::Display for StorageError {
         match self {
             StorageError::Io(e) => write!(f, "{e}"),
             StorageError::Json(e) => write!(f, "{e}"),
-            StorageError::LockTimeout(path) => write!(
-                f,
-                "Timed out waiting for the ekko storage lock. If no other ekko process is running, delete this file and try again: {}",
-                path.display()
-            ),
+            StorageError::LockTimeout(path, holder) => {
+                write!(f, "{} {}", lock_timeout_advice(holder.as_deref()), path.display())
+            }
         }
     }
 }
@@ -231,6 +230,55 @@ impl Storage {
     }
 }
 
+/// What a timed-out wait tells the person or agent waiting. Never to delete
+/// the lock file: the holder keeps its lock on the old inode, the next process
+/// locks a new one, and two writers are in at once -- the lost update
+/// `tests/concurrency.rs` exists for.
+pub fn lock_timeout_advice(holder: Option<&str>) -> String {
+    format!(
+        "Timed out after {} s waiting for the ekko storage lock, held by {}. Let it finish, or end it if it is stuck; do not delete the lock file, which lets a second writer in while the first still holds it:",
+        LOCK_ACQUIRE_TIMEOUT.as_secs(),
+        holder.unwrap_or("another ekko process")
+    )
+}
+
+/// Who holds the `flock` on `path`, as /proc/locks says: the process and its
+/// command, the program by its file name. `None` once nothing holds it, or
+/// where /proc does not say.
+///
+/// /proc/locks names the file by inode and by its superblock's device, which
+/// on btrfs is not the device `stat` reports for a subvolume, so the device
+/// is not compared: a process is named only if it also has the file open.
+fn lock_holder(path: &Path) -> Option<String> {
+    let meta = fs::metadata(path).ok()?;
+    let same_file = |other: &fs::Metadata| other.dev() == meta.dev() && other.ino() == meta.ino();
+    let inode = format!(":{}", meta.ino());
+    // "1: FLOCK  ADVISORY  WRITE 4242 00:23:81 0 EOF"; a waiter's line has
+    // "->" after the number, so its fields do not line up and it is skipped.
+    let pid = fs::read_to_string("/proc/locks").ok()?.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.get(1) != Some(&"FLOCK") || !fields.get(5).is_some_and(|file| file.ends_with(&inode)) {
+            return None;
+        }
+        let pid = fields[4];
+        let open = fs::read_dir(format!("/proc/{pid}/fd")).ok()?.flatten().any(|fd| fs::metadata(fd.path()).is_ok_and(|m| same_file(&m)));
+        open.then(|| pid.to_string())
+    })?;
+    let args: Vec<String> = fs::read(format!("/proc/{pid}/cmdline"))
+        .unwrap_or_default()
+        .split(|&b| b == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    Some(match args.split_first() {
+        Some((program, rest)) => {
+            let program = Path::new(program).file_name().map_or(program.clone(), |name| name.to_string_lossy().into_owned());
+            format!("process {pid} ({})", std::iter::once(program).chain(rest.iter().cloned()).collect::<Vec<_>>().join(" "))
+        }
+        None => format!("process {pid}"),
+    })
+}
+
 /// Takes an exclusive `flock` on `path`, creating the file if needed, and
 /// returns the open file that holds it -- closing it is the release. The
 /// storage lock is one use; the project registry's is the other, and they
@@ -261,7 +309,7 @@ pub fn lock_path(path: &Path) -> Result<File, StorageError> {
     match receiver.recv_timeout(LOCK_ACQUIRE_TIMEOUT) {
         Ok(Ok(file)) => Ok(file),
         Ok(Err(error)) => Err(error.into()),
-        Err(_) => Err(StorageError::LockTimeout(path.to_path_buf())),
+        Err(_) => Err(StorageError::LockTimeout(path.to_path_buf(), lock_holder(path))),
     }
 }
 
@@ -727,7 +775,7 @@ mod tests {
         let _held = storage.acquire_lock().unwrap();
         let second = storage.acquire_lock();
 
-        assert!(matches!(second, Err(StorageError::LockTimeout(_))));
+        assert!(matches!(second, Err(StorageError::LockTimeout(..))));
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -866,7 +914,10 @@ mod tests {
 
         let result = storage.acquire_lock();
 
-        assert!(matches!(result, Err(StorageError::LockTimeout(_))));
+        // The message names the flock(1) process, never "delete this file".
+        let Err(StorageError::LockTimeout(_, named)) = &result else { panic!("expected a timeout") };
+        assert_eq!(named.as_deref(), Some(format!("process {} (flock -x {} sleep 8)", holder.id(), dir.join(".lock").display()).as_str()));
+        assert!(!result.err().unwrap().to_string().contains("delete this file"));
         holder.kill().ok();
         holder.wait().ok();
         fs::remove_dir_all(&dir).ok();
