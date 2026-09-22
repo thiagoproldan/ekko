@@ -214,6 +214,22 @@ fn priority_of(priority: i64) -> Result<u8, EkkoError> {
     u8::try_from(priority).ok().filter(|p| (1..=3).contains(p)).ok_or(EkkoError::InvalidPriority)
 }
 
+/// Refuses a board name the CLI could not address: empty, or @ alone, or
+/// holding a space, which the terminal would read as two words. The default
+/// board keeps its name, space and all.
+fn addressable(names: &[String]) -> Result<(), EkkoError> {
+    for name in names {
+        let bare = name.trim().trim_start_matches('@');
+        if bare == "My Board" {
+            continue;
+        }
+        if bare.is_empty() || bare.contains(char::is_whitespace) {
+            return Err(invalid(format!("{name:?} cannot be a board name: a board is one word, as @name, so the terminal can address it")));
+        }
+    }
+    Ok(())
+}
+
 /// `["coding", "@reviews"]` to `["@coding", "@reviews"]`, the default board
 /// by either of its names, and the default board when there are none.
 fn boards(names: &[String]) -> Vec<String> {
@@ -374,6 +390,7 @@ impl<'a> Draft<'a> {
         };
         let phase = self.declared_phase(spec.phase.as_deref())?;
 
+        addressable(&spec.boards)?;
         let id = self.ekko.generate_id(&self.data);
         let mut item = match kind {
             Kind::Task => Item::new_task(id, text.to_string(), boards(&spec.boards), priority),
@@ -583,8 +600,10 @@ impl<'a> Draft<'a> {
             if names.iter().all(|name| name.trim().is_empty()) {
                 return Err(EkkoError::MissingBoards);
             }
+            addressable(names)?;
             self.item(id).boards = boards(names);
         }
+        addressable(&spec.add_boards)?;
         if changes_boards {
             let removed = boards(&spec.remove_boards);
             let mut kept: Vec<String> = self.data[&id].boards.iter().filter(|name| !removed.contains(name)).cloned().collect();
@@ -956,6 +975,29 @@ mod tests {
             let updated = batch(&ekko, &[json!({"op": "update", "item": 1, "priority": priority})]);
             assert!(matches!(updated, Err(EkkoError::InvalidPriority)), "{priority}: {:?}", updated.err());
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A board the terminal could not address -- empty, a bare @, or two
+    /// words -- is refused wherever a name is put on an item; the default
+    /// board's own name, space and all, still is one.
+    #[test]
+    fn a_board_name_is_one_word() {
+        let (ekko, dir) = board("board-names");
+        batch(&ekko, &[json!({"op": "create", "text": "a task", "boards": ["My Board", "@ok"]})]).unwrap();
+
+        for name in ["", "  ", "@", "two words", "@tab\there"] {
+            let refusals = [
+                batch(&ekko, &[json!({"op": "create", "text": "x", "boards": [name]})]),
+                batch(&ekko, &[json!({"op": "update", "item": 1, "boards": ["ok", name]})]),
+                batch(&ekko, &[json!({"op": "update", "item": 1, "add_boards": [name]})]),
+            ];
+            for refused in refusals {
+                assert!(matches!(&refused, Err(EkkoError::InvalidInput(m)) if m.contains("cannot be a board name")), "{name:?}: {:?}", refused.err());
+            }
+        }
+        batch(&ekko, &[json!({"op": "update", "item": 1, "remove_boards": ["two words"]})]).unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
     }
