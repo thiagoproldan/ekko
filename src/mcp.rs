@@ -47,9 +47,12 @@ const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"
 /// The tools Claude Code loads at session start instead of behind ToolSearch.
 /// A deferred tool costs a session one ToolSearch round trip before its first
 /// use: a median of 2.9 s over 20 loads on 2026-09-21, and up to 20 s. These
-/// five are the ones nearly every session calls. Their definitions cost about
-/// 1,500 tokens in every session, in every project, since the plugin is
-/// loaded everywhere, so the rest stay deferred.
+/// five are the ones nearly every session calls. Their definitions, about
+/// 5,600 characters or 2,200 tokens (measured 2026-09-21), are read in every
+/// session, in every project, since the plugin is loaded everywhere, so the
+/// rest stay deferred -- and a byte changed in them rewrites the context of
+/// every session resumed after an upgrade, which the prefix fingerprint in
+/// tests/mcp.rs guards.
 const ALWAYS_LOADED: &[&str] = &["context", "search", "create", "set_state", "edit"];
 
 const TOOLS: &[&str] = &[

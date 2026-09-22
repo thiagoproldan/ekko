@@ -515,3 +515,40 @@ fn the_board_is_served_as_resources_by_a_server_of_their_own() {
     live.stop();
     fs::remove_dir_all(&home).ok();
 }
+
+/// What Claude Code puts ahead of every conversation from this server: its
+/// instructions and the always-loaded tool definitions. A byte changed there
+/// makes every session resumed after an upgrade write its whole context again
+/// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
+/// -- so it changes on purpose, batched into a release that changes it anyway,
+/// with this fingerprint moved alongside.
+const PREFIX_FINGERPRINT: u64 = 0x5eccc9e04fef4ce2;
+
+#[test]
+fn the_prefix_every_session_pays_for_changes_only_on_purpose() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})),
+            request(2, "tools/list", json!({})),
+        ],
+    );
+    let instructions = replies["1"]["result"]["instructions"].as_str().unwrap();
+    // Claude Code keeps the first 2,048 characters of a server's instructions (note 167).
+    assert!(instructions.chars().count() <= 2048, "{} characters of instructions", instructions.chars().count());
+    let mut prefix = instructions.to_string();
+    for tool in replies["2"]["result"]["tools"].as_array().unwrap() {
+        if tool["_meta"]["anthropic/alwaysLoad"] == true {
+            prefix.push_str(&tool.to_string());
+        }
+    }
+    // FNV-1a: stable across Rust versions, which std's hasher is not.
+    let fingerprint = prefix.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+    assert_eq!(
+        fingerprint, PREFIX_FINGERPRINT,
+        "the instructions or an always-loaded definition changed: if that is meant, batch it with the other changes to them in one release, and set PREFIX_FINGERPRINT to {fingerprint:#018x}"
+    );
+
+    fs::remove_dir_all(&home).ok();
+}
