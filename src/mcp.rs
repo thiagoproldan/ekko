@@ -71,11 +71,11 @@ Ekko is a task board shared with the user: they read and change the same board f
 Each session starts with the board's prime already in context -- in progress, ready in order, blocked, and the notes that explain them. Call prime again after a long pause or when the user may have changed things -- with if_rev set to the cursor you hold, it answers in one line when nothing moved -- and changes with that cursor lists what did.
 
 - next is the order to take work up. context gives items, several per call: blockers and the roots free to start, what they block, notes clipped unless detail is full.
-- Display ids are never reused, but a restore from the archive renumbers an item: hold the uid a write returns to follow it.
+- Display ids are never reused; a restore from the archive renumbers an item, so hold its uid.
 - set_state is idempotent. A task blocked by open work cannot be completed (BLOCKED), and a task that completed work depends on cannot be reopened (COMPLETED_DEPENDENTS): finish the other side, or clear a wrong dependency with link. force_state overrides the rule and is only for when the user has said so.
 - Leave reasoning on the board: create a note with attached_to set to the task it explains; what stays true is kind decision, gotcha or procedure. Before a long session is cleared, create kind handoff on the task in progress: where you stopped, why, the next step. Change text with edit's replace or append instead of resending it, with if_updated_at from your last read when the user may have edited it.
 - A write's reply names the tasks it set free (nowReady) or left waiting (nowBlocked): no next or prime is needed to find them.
-- batch applies several operations in one write, all or nothing; $1, $2 name the items created by the batch's first and second operations.
+- batch applies several operations in one write, all or nothing; $1, $2 name the items its first and second operations create.
 - trash is recoverable for 30 days and still needs the user's consent. For work decided against, set_state cancelled keeps the record.
 - Ask the user through ask; answer records the reply.
 - Refusals come back as CODE: message. Branch on the code; nothing was written.";
