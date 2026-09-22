@@ -536,6 +536,9 @@ impl<'a> Draft<'a> {
                 item.description.replacen(&replace.old, &replace.new, 1)
             }
             (None, None, Some(more)) => {
+                if more.trim().is_empty() {
+                    return Err(invalid("append is empty, so there is nothing to add"));
+                }
                 let joins = item.description.ends_with(char::is_whitespace) || more.starts_with(char::is_whitespace);
                 if joins { format!("{}{more}", item.description) } else { format!("{} {more}", item.description) }
             }
@@ -1449,6 +1452,10 @@ mod tests {
 
         let appended = batch(&ekko, &[json!({"op": "edit", "item": 1, "append": "omega"})]).unwrap();
         assert_eq!(appended.data[&1].description, "alpha gamma alpha omega");
+        for empty in ["", "  "] {
+            let nothing = batch(&ekko, &[json!({"op": "edit", "item": 1, "append": empty})]);
+            assert!(matches!(&nothing, Err(EkkoError::InvalidInput(m)) if m.contains("append is empty")), "{:?}", nothing.err());
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
