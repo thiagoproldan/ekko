@@ -1123,6 +1123,13 @@ pub fn contexts(ekko: &Ekko, targets: &[String]) -> Result<Vec<Context>, EkkoErr
     Ok(ids.into_iter().map(|id| neighbourhood(&all, &reader, id)).collect())
 }
 
+/// Several neighbourhoods as one reply, each item described once: one that
+/// has a block of its own is pointed to from the others, not repeated.
+pub fn contexts_text(read: &[Context], detail: Detail) -> String {
+    let order: Vec<u32> = read.iter().map(|context| context.item.id).collect();
+    read.iter().map(|context| context.text_among(detail, &order)).collect::<Vec<_>>().join("\n")
+}
+
 fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
     let item = &all[&id];
 
@@ -2444,7 +2451,20 @@ impl Context {
     }
 
     pub fn text_with(&self, detail: Detail) -> String {
+        self.text_among(detail, &[])
+    }
+
+    /// This item's block in a reply whose blocks are `order`, by id and in
+    /// the order printed: a related item with a block of its own is pointed
+    /// to rather than described again -- above all a note asked for beside
+    /// its task, which a full read would otherwise print whole twice.
+    fn text_among(&self, detail: Detail, order: &[u32]) -> String {
         let item = &self.item;
+        let here = order.iter().position(|&id| id == item.id);
+        let elsewhere = |id: u32| {
+            let there = order.iter().position(|&other| other == id)?;
+            (id != item.id).then_some(if Some(there) < here { "listed above" } else { "listed below" })
+        };
         let mut out = String::new();
         let _ = writeln!(out, "{:>4}. {}", item.id, item.description);
 
@@ -2517,7 +2537,8 @@ impl Context {
             }
             let _ = writeln!(out, "\n{title}");
             for link in links {
-                let _ = writeln!(out, "{:>4}. [{}] {}", link.id, link.state, link.description);
+                let told = elsewhere(link.id).unwrap_or(link.description.as_str());
+                let _ = writeln!(out, "{:>4}. [{}] {told}", link.id, link.state);
             }
         };
         if let Some(task) = &self.attached_to {
@@ -2537,11 +2558,12 @@ impl Context {
             }
             let _ = writeln!(out, "\n{heading}");
             for root in roots {
-                if self.blockers.iter().any(|blocker| blocker.id == root.id) {
-                    let _ = writeln!(out, "{:>4}. [{}] listed above", root.id, root.state);
+                let told = if self.blockers.iter().any(|blocker| blocker.id == root.id) {
+                    "listed above"
                 } else {
-                    let _ = writeln!(out, "{:>4}. [{}] {}", root.id, root.state, root.description);
-                }
+                    elsewhere(root.id).unwrap_or(root.description.as_str())
+                };
+                let _ = writeln!(out, "{:>4}. [{}] {told}", root.id, root.state);
             }
         }
         links(&mut out, "Blocks", &self.dependents);
@@ -2552,9 +2574,10 @@ impl Context {
         if !item.notes.is_empty() {
             let _ = writeln!(out, "\nNotes attached");
             for note in &item.notes {
-                let body = match detail {
-                    Detail::Full => note.description.clone(),
-                    Detail::Concise => clip(&note.description, NOTE_CLIP),
+                let body = match (elsewhere(note.id), detail) {
+                    (Some(place), _) => place.to_string(),
+                    (None, Detail::Full) => note.description.clone(),
+                    (None, Detail::Concise) => clip(&note.description, NOTE_CLIP),
                 };
                 let _ = writeln!(out, "{:>4}. {}{body}", note.id, note.mark());
             }
@@ -2924,6 +2947,34 @@ mod tests {
         assert!(concise.contains("\u{2026} (+") && concise.chars().count() < full.chars().count(), "{concise}");
         assert!(full.contains(long.trim()), "{full}");
         assert!(concise.starts_with("   1. the task\n"), "{concise}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A note read beside the task it explains has a block of its own, so
+    /// the other block points to it rather than printing it whole a second
+    /// time, and says which way to look.
+    #[test]
+    fn contexts_describe_each_item_once_in_a_reply() {
+        let (ekko, dir) = board("once");
+        let long = "a handoff long enough to cost something when printed twice ".repeat(10);
+        ekko.create_task(&words(&["the task"])).unwrap();
+        ekko.create_note(&words(&[long.as_str()])).unwrap();
+        ekko.set_attached_to(&words(&["@2", "1"])).unwrap();
+        let reply = |ids: &[&str]| contexts_text(&contexts(&ekko, &words(ids)).unwrap(), Detail::Full);
+
+        let task_first = reply(&["1", "2"]);
+        assert_eq!(task_first.matches(long.trim()).count(), 1, "{task_first}");
+        assert!(task_first.contains("   2. listed below\n"), "{task_first}");
+        assert!(task_first.contains("   1. [pending] listed above\n"), "{task_first}");
+
+        let note_first = reply(&["2", "1"]);
+        assert_eq!(note_first.matches(long.trim()).count(), 1, "{note_first}");
+        assert!(note_first.contains("   1. [pending] listed below\n"), "{note_first}");
+        assert!(note_first.contains("   2. listed above\n"), "{note_first}");
+
+        let alone = reply(&["1"]);
+        assert!(alone.contains(long.trim()), "a single read still prints its notes: {alone}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

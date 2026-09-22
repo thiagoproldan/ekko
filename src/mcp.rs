@@ -547,8 +547,7 @@ impl Server {
                     }
                     _ => return Err(invalid("context takes exactly one of item or items")),
                 };
-                let read = agent::contexts(&ekko, &targets)?;
-                Ok(read.iter().map(|context| context.text_with(detail)).collect::<Vec<_>>().join("\n"))
+                Ok(agent::contexts_text(&agent::contexts(&ekko, &targets)?, detail))
             }
             "search" => {
                 let text = take(args, "text", |v| v.as_str().map(str::to_string), "a string")?;
