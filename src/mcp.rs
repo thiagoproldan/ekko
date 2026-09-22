@@ -22,8 +22,11 @@
 //! else. The server exits when stdin closes.
 
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -93,7 +96,43 @@ pub struct Server {
     /// its prime: `if_rev` is answered as unchanged only on that same day.
     answered: Mutex<HashMap<&'static str, chrono::NaiveDate>>,
     started: chrono::NaiveDate,
+    /// How this process was started -- its program name and PATH -- and the
+    /// binary that led to, to tell when an upgrade has replaced it.
+    launched: Option<(OsString, Option<OsString>, Binary)>,
 }
+
+/// A binary as a file: where its name resolves, every link followed, and
+/// its inode there. A nix switch changes the path; a rebuild in place, the
+/// inode.
+#[derive(Debug, PartialEq)]
+struct Binary {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+impl Binary {
+    /// The file `program` runs: itself when it names a path, else the first
+    /// executable of that name in `path_var`, as a shell would find it.
+    fn resolve(program: &OsStr, path_var: Option<&OsStr>) -> Option<Binary> {
+        let program = Path::new(program);
+        let found = if program.components().count() > 1 {
+            program.to_path_buf()
+        } else {
+            std::env::split_paths(path_var?).map(|dir| dir.join(program)).find(|candidate| {
+                fs::metadata(candidate).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            })?
+        };
+        let path = fs::canonicalize(found).ok()?;
+        let meta = fs::metadata(&path).ok()?;
+        Some(Binary { path, dev: meta.dev(), ino: meta.ino() })
+    }
+}
+
+/// Said under every reply of a server whose binary an upgrade replaced: it
+/// keeps answering by its own version's rules until Claude Code restarts it
+/// (gotcha 194), and only the user can do that.
+const REPLACED: &str = "Note: ekko was rebuilt or upgraded after this server started, and this server still runs the old binary. Ask the user to restart Claude Code to load the new one.";
 
 /// What a server offers. Two servers rather than one because Claude Code
 /// cannot resolve an @ mention of a plugin server's resources -- it splits
@@ -194,7 +233,29 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
 impl Server {
     pub fn new(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>, mode: Mode) -> Self {
         let started = chrono::Local::now().date_naive();
-        Server { home, cwd, ekko_dir_env, project_env, mode, listed: Mutex::new(None), answered: Mutex::new(HashMap::new()), started }
+        let launched = std::env::args_os().next().and_then(|program| {
+            let path_var = std::env::var_os("PATH");
+            let binary = Binary::resolve(&program, path_var.as_deref())?;
+            Some((program, path_var, binary))
+        });
+        Server {
+            home,
+            cwd,
+            ekko_dir_env,
+            project_env,
+            mode,
+            listed: Mutex::new(None),
+            answered: Mutex::new(HashMap::new()),
+            started,
+            launched,
+        }
+    }
+
+    /// Whether the name this server was started by now leads to another
+    /// binary. A name that no longer resolves is not taken for an upgrade.
+    fn replaced(&self) -> bool {
+        let Some((program, path_var, binary)) = &self.launched else { return false };
+        Binary::resolve(program, path_var.as_deref()).is_some_and(|now| now != *binary)
     }
 
     /// One line in place of `tool`'s answer when the cursor held is still
@@ -384,13 +445,15 @@ impl Server {
             Some(Value::Object(map)) => map.clone(),
             Some(_) => return Err(RpcError::new(-32602, "Invalid params: arguments must be an object")),
         };
-        Ok(match self.tool(name, &mut args) {
-            Ok(text) => json!({"content": [{"type": "text", "text": text}], "isError": false}),
-            Err(error) => json!({
-                "content": [{"type": "text", "text": format!("{}: {}", error.code, error.message)}],
-                "isError": true,
-            }),
-        })
+        let (mut text, failed) = match self.tool(name, &mut args) {
+            Ok(text) => (text, false),
+            Err(error) => (format!("{}: {}", error.code, error.message), true),
+        };
+        // After the answer, so a refusal still opens with its code.
+        if self.replaced() {
+            text = format!("{}\n\n{REPLACED}\n", text.trim_end());
+        }
+        Ok(json!({"content": [{"type": "text", "text": text}], "isError": failed}))
     }
 
     /// The board one call works on, resolved afresh each time: the same
@@ -1052,5 +1115,44 @@ mod tests {
         assert!(still_current(7, 7, today, today));
         assert!(!still_current(7, 7, yesterday, today), "the day turned over");
         assert!(!still_current(6, 7, today, today), "the board moved");
+    }
+
+    /// An upgrade shows as another binary behind the same name: a nix switch
+    /// points the profile's link at another store path, and a rebuild in
+    /// place gives the file a new inode.
+    #[test]
+    fn a_binary_replaced_behind_its_name_is_told_apart() {
+        use std::os::unix::fs::symlink;
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("ekko-binary-{}-{nanos}", std::process::id()));
+        let (old, new, bin) = (dir.join("store-old"), dir.join("store-new"), dir.join("bin"));
+        for folder in [&old, &new, &bin] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let executable = |path: &Path| {
+            fs::write(path, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        executable(&old.join("ekko"));
+        executable(&new.join("ekko"));
+        symlink(old.join("ekko"), bin.join("ekko")).unwrap();
+        let path_var = std::env::join_paths([dir.join("nothing-here"), bin.clone()]).unwrap();
+
+        let started = Binary::resolve(OsStr::new("ekko"), Some(&path_var)).expect("found on PATH");
+        assert_eq!(started.path, fs::canonicalize(old.join("ekko")).unwrap());
+        assert_eq!(Binary::resolve(OsStr::new("ekko"), Some(&path_var)).as_ref(), Some(&started), "nothing changed");
+
+        // A switch: the name now leads to another store path.
+        fs::remove_file(bin.join("ekko")).unwrap();
+        symlink(new.join("ekko"), bin.join("ekko")).unwrap();
+        assert_ne!(Binary::resolve(OsStr::new("ekko"), Some(&path_var)).as_ref(), Some(&started));
+
+        // A rebuild in place: the same path, a new file.
+        let direct = Binary::resolve(new.join("ekko").as_os_str(), None).unwrap();
+        fs::remove_file(new.join("ekko")).unwrap();
+        executable(&new.join("ekko"));
+        assert_ne!(Binary::resolve(new.join("ekko").as_os_str(), None).as_ref(), Some(&direct));
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
