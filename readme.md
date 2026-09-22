@@ -114,7 +114,7 @@ $ ekko --help
       --destroy           Move a project's board to the trash
       --edit, -e          Edit item description
       --find, -f          Search for items
-      --force             Override the blocked-by rule: complete or reopen anyway
+      --force             Override the blocked-by rule or a running session's hold
       --help, -h          Display help message
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes
@@ -253,7 +253,7 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 | `changes` | what was written since a cursor, including items stashed or trashed since |
 | `roadmap`, `projects` | as the flags of the same name |
 | `create` | a task, a note, a handoff, or a decision, gotcha or procedure, with every field apart from the text, relations included |
-| `set_state`, `force_state` | idempotent state changes; `force_state` overrides the dependency rule, and is a tool of its own so it can be permissioned apart |
+| `set_state`, `force_state` | idempotent state changes; `force_state` overrides the dependency rule and a running session's hold, and is a tool of its own so it can be permissioned apart |
 | `edit` | the whole text, one exact replacement, or an append -- optionally conditioned on the `updatedAt` last read |
 | `update` | boards, priority, due date, phase, star, a note's kind |
 | `link` | `blocked_by`, `attached_to`, or `supersedes` |

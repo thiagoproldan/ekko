@@ -44,7 +44,7 @@ const HELP: &str = r#"
       --destroy           Move a project's board to the trash
       --edit, -e          Edit item description
       --find, -f          Search for items
-      --force             Override the blocked-by rule: complete or reopen anyway
+      --force             Override the blocked-by rule or a running session's hold
       --help, -h          Display help message
       --json, -j          Output machine-readable JSON instead of formatted text
       --list, -l          List items by attributes

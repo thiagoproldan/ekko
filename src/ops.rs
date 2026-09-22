@@ -19,7 +19,6 @@ use serde_json::{json, Value};
 use crate::ekko::{
     holds, parse_due_date, phase_inversion, phase_order, remove_duplicates, uid_index, Ekko, EkkoError, Linked,
 };
-use crate::holder::{Actor, Holder};
 use crate::item::{Item, Knowledge, Setting, State};
 use crate::storage::{ItemMap, LockGuard};
 
@@ -699,26 +698,18 @@ impl<'a> Draft<'a> {
     /// Who holds what, once the draft is whole. A change of state to a task
     /// another Claude Code session holds in progress, while that session
     /// runs, is refused as HELD unless `force` -- a second session asks the
-    /// user first; a person at the terminal is never refused. A task set in
+    /// user first; a person at the terminal is never refused. The terminal's
+    /// writes are judged the same way (`Ekko::held_elsewhere`). A task set in
     /// progress again is taken over from a holder that is gone, or forced
     /// past, and each such claim is told in a notice. Tasks entering progress
     /// are claimed when the draft is saved (`Ekko::save_against`).
     fn settle_holders(&mut self, force: bool) -> Result<Vec<String>, EkkoError> {
-        let actor = self.ekko.actor.clone();
-        let is_mine = |holder: &Holder| actor.as_ref().is_some_and(|actor| actor.is(holder));
-        let mut held = Vec::new();
-        for (id, old) in &self.before {
-            let Some(holder) = old.held_by.as_ref().filter(|_| State::of(old) == Some(State::Progress)) else { continue };
-            let touched = self.claims.contains(id) || self.data.get(id).is_none_or(|new| State::of(new) != State::of(old));
-            let person = actor.as_ref().is_some_and(Actor::is_person);
-            if touched && !force && !person && !is_mine(holder) && holder.alive() {
-                held.push((*id, holder.label(), holder.since));
-            }
-        }
+        let held = if force { Vec::new() } else { self.ekko.held_elsewhere(&self.before, &self.data, &self.claims) };
         if !held.is_empty() {
             return Err(EkkoError::Held(held));
         }
 
+        let actor = self.ekko.actor.clone();
         let now = chrono::Local::now().timestamp_millis();
         let mut claims = std::mem::take(&mut self.claims);
         claims.sort_unstable();
@@ -834,6 +825,7 @@ pub fn written(data: &ItemMap, id: u32) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::holder::Actor;
     use crate::item::State;
     use crate::storage::Storage;
     use std::path::PathBuf;

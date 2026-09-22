@@ -243,11 +243,8 @@ impl std::fmt::Display for EkkoError {
             ),
             EkkoError::Held(held) => write!(
                 f,
-                "{}, and still running, so nothing was written. Ask the user before touching it; with their word, force_state takes it over",
-                held.iter()
-                    .map(|(id, by, since)| format!("{id} is in progress in another Claude Code session, {by}, since {}", crate::holder::when(*since)))
-                    .collect::<Vec<_>>()
-                    .join("; ")
+                "{}, and still running, so nothing was written. Ask the user before touching it; with their word, --set or --check with --force changes it anyway",
+                held_elsewhere_text(held, &|id| id.to_string())
             ),
             EkkoError::EditMatch { id, found: 0 } => write!(
                 f,
@@ -297,6 +294,17 @@ impl std::fmt::Display for EkkoError {
 }
 
 impl std::error::Error for EkkoError {}
+
+/// The tasks a HELD refusal names, each with the session holding it and
+/// since when; `name` says how an id is spoken of, as `agent_message` does.
+pub(crate) fn held_elsewhere_text(held: &[(u32, String, i64)], name: &dyn Fn(u32) -> String) -> String {
+    held.iter()
+        .map(|(id, by, since)| {
+            format!("{} is in progress in another Claude Code session, {by}, since {}", name(*id), crate::holder::when(*since))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
 
 impl From<StorageError> for EkkoError {
     fn from(error: StorageError) -> Self {
@@ -866,9 +874,48 @@ impl Ekko {
     /// to stamp. Comparing catches every field, including ones added later.
     ///
     /// Re-reading here is safe because every caller already holds the lock.
+    ///
+    /// The same diff decides whether the write takes a task out of another
+    /// running session's hands (`held_elsewhere`), so a session that runs
+    /// ekko through its shell meets the hold whichever command it runs.
     pub(crate) fn save_touching(&self, data: &mut ItemMap) -> Result<(Vec<u32>, Vec<u32>), EkkoError> {
+        self.save_touching_forced(data, false)
+    }
+
+    /// `save_touching` for --check and --set, whose `--force` pushes past
+    /// another session's hold as it does past the dependency rule.
+    pub(crate) fn save_touching_forced(&self, data: &mut ItemMap, force: bool) -> Result<(Vec<u32>, Vec<u32>), EkkoError> {
         let before = self.storage.get()?;
+        let held = if force { Vec::new() } else { self.held_elsewhere(&before, data, &[]) };
+        if !held.is_empty() {
+            return Err(EkkoError::Held(held));
+        }
         self.save_against(&before, data)
+    }
+
+    /// The tasks a write would take out of the hands of another Claude Code
+    /// session that still runs: in progress under it in `before`, and in
+    /// `after` in another state, removed, put away in the stash or the
+    /// trash, or among `claims` -- set in progress again by a structured
+    /// write. Empty for a person at the terminal, who is never refused.
+    pub(crate) fn held_elsewhere(&self, before: &ItemMap, after: &ItemMap, claims: &[u32]) -> Vec<(u32, String, i64)> {
+        let actor = self.actor.as_ref();
+        if actor.is_some_and(crate::holder::Actor::is_person) {
+            return Vec::new();
+        }
+        let put_away = |old: &Item, new: &Item| {
+            (new.stashed.is_some() && old.stashed.is_none()) || (new.trashed.is_some() && old.trashed.is_none())
+        };
+        before
+            .iter()
+            .filter_map(|(id, old)| {
+                let holder = old.held_by.as_ref().filter(|_| State::of(old) == Some(State::Progress))?;
+                let touched = claims.contains(id)
+                    || after.get(id).is_none_or(|new| State::of(new) != State::of(old) || put_away(old, new));
+                let mine = actor.is_some_and(|actor| actor.is(holder));
+                (touched && !mine && holder.alive()).then(|| (*id, holder.label(), holder.since))
+            })
+            .collect()
     }
 
     /// The revision a write builds on: the counter, or higher when a lost or
@@ -1088,7 +1135,7 @@ impl Ekko {
             }
         }
         let (overridden, reopened) = Self::refuse_broken_dependencies(&before, &data, force)?;
-        self.save_touching(&mut data)?;
+        self.save_touching_forced(&mut data, force)?;
         Ok(Outcome::Check { checked, unchecked, overridden, reopened })
     }
 
@@ -1616,7 +1663,7 @@ impl Ekko {
         }
         let (overridden, reopened) = Self::refuse_broken_dependencies(&before, &data, force)?;
 
-        self.save_touching(&mut data)?;
+        self.save_touching_forced(&mut data, force)?;
         Ok(Outcome::Set { ids, settings, overridden, reopened })
     }
 
@@ -3717,6 +3764,47 @@ mod tests {
         assert_eq!(overridden, vec![(2, vec![1])]);
         assert!(ekko.storage.get().unwrap()[&2].is_complete.unwrap_or(false));
         assert_eq!(ekko.blocker_map().unwrap().get(&2), Some(&vec![1]), "the trace was erased");
+
+        cleanup(&dir);
+    }
+
+    /// The terminal meets the hold the structured writes do: a Claude Code
+    /// session running ekko through its shell is refused as HELD on a task
+    /// another running session holds, by --set, --begin, --check, --delete or
+    /// --stash, and nothing is written; --force pushes past it; a person at
+    /// the terminal is never refused. Seen on 2026-09-22: `ekko --set @359
+    /// paused` from one session's shell paused the task another held.
+    #[test]
+    fn a_session_using_the_terminal_is_refused_a_task_another_session_holds() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let (_, dir) = fresh_ekko();
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        let theirs = as_(&other);
+        theirs.create_task(&words(&["their work"])).unwrap();
+        theirs.set_state(&words(&["@1", "progress"]), false).unwrap();
+
+        let mine = as_(&me);
+        let refusals = [
+            ("--set", mine.set_state(&words(&["@1", "paused"]), false)),
+            ("--begin", mine.begin_tasks(&words(&["1"]))),
+            ("--check", mine.check_tasks(&words(&["1"]), false)),
+            ("--delete", mine.delete_items(&words(&["1"]))),
+            ("--stash", mine.set_stashed(&words(&["1"]), true)),
+        ];
+        for (command, refused) in refusals {
+            let Err(EkkoError::Held(held)) = &refused else { panic!("{command}: {:?}", refused.map(|_| ())) };
+            assert_eq!((held[0].0, held[0].1.as_str()), (1, "default on pts/2"), "{command}");
+        }
+        let item = mine.storage.get().unwrap()[&1].clone();
+        assert_eq!((State::of(&item), item.trashed, item.stashed), (Some(State::Progress), None, None), "nothing was written");
+        assert!(other.is(item.held_by.as_ref().unwrap()));
+
+        mine.set_state(&words(&["@1", "paused"]), true).unwrap();
+        assert_eq!(State::of(&mine.storage.get().unwrap()[&1]), Some(State::Paused), "--force changes it anyway");
+
+        theirs.set_state(&words(&["@1", "progress"]), false).unwrap();
+        as_(&crate::holder::Actor::person()).check_tasks(&words(&["1"]), false).unwrap();
+        assert_eq!(State::of(&mine.storage.get().unwrap()[&1]), Some(State::Done), "the user decides");
 
         cleanup(&dir);
     }

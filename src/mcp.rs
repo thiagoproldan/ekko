@@ -745,6 +745,10 @@ fn agent_message(error: &EkkoError, name: &dyn Fn(u32) -> String) -> String {
     let list = |ids: &[u32]| ids.iter().map(|id| name(*id)).collect::<Vec<_>>().join(", ");
     let verb = |ids: &[u32]| if ids.len() == 1 { "is" } else { "are" };
     match error {
+        EkkoError::Held(held) => format!(
+            "{}, and still running, so nothing was written. Ask the user before touching it; with their word, force_state takes it over",
+            crate::ekko::held_elsewhere_text(held, name),
+        ),
         EkkoError::Blocked(found) => format!(
             "Cannot complete: {}, still open. Finish or cancel what blocks it, clear a dependency that is wrong with link, or use force_state if the user has said the dependency was dealt with",
             found

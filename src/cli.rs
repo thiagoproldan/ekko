@@ -89,7 +89,9 @@ pub struct Cli {
     #[arg(long, short = 'c')]
     pub check: bool,
     /// Override the blocked-by rule from either side: complete a task that is
-    /// still blocked, or reopen one that completed work depends on. Only means
+    /// still blocked, or reopen one that completed work depends on. And
+    /// change a task another running Claude Code session holds, which a
+    /// session's own shell is otherwise refused. Only means
     /// something beside `--check` or `--set`, and deliberately has no short
     /// form: `-f` is `--find`, and overriding a rule should take typing the
     /// word.
