@@ -654,6 +654,7 @@ impl Ekko {
         if description.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
+        fits(&description)?;
         if boards.is_empty() {
             boards.push("My Board".to_string());
         }
@@ -1318,6 +1319,7 @@ impl Ekko {
         if new_description.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
+        fits(&new_description)?;
 
         data.get_mut(&id).expect("id just validated against data").description = new_description;
         self.save_touching(&mut data)?;
@@ -2235,6 +2237,22 @@ pub(crate) fn phase_inversion(order: &HashMap<&str, usize>, blocked: &Item, bloc
         blocker: blocker.id,
         blocker_phase: blocker_phase.to_string(),
     })
+}
+
+/// The longest description an item takes, in characters: over twice the
+/// longest a board had when it was set (9,125), since context prints a
+/// description whole on every read of it.
+pub const MAX_DESCRIPTION: usize = 20_000;
+
+/// Refuses a description past `MAX_DESCRIPTION`, saying by how much.
+pub fn fits(description: &str) -> Result<(), EkkoError> {
+    let length = description.chars().count();
+    if length > MAX_DESCRIPTION {
+        return Err(EkkoError::InvalidInput(format!(
+            "The description runs {length} characters, past the {MAX_DESCRIPTION} an item takes: keep the item short and put the rest in a note or a file it names"
+        )));
+    }
+    Ok(())
 }
 
 /// `-` standing alone for the description reads it from stdin, so text with

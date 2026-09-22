@@ -365,6 +365,7 @@ impl<'a> Draft<'a> {
         if text.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
+        crate::ekko::fits(text)?;
         let kind = spec.kind.unwrap_or(if spec.attached_to.is_some() { Kind::Note } else { Kind::Task });
         if kind != Kind::Task {
             for (field, given) in [
@@ -571,6 +572,7 @@ impl<'a> Draft<'a> {
         if description.trim().is_empty() {
             return Err(EkkoError::MissingDesc);
         }
+        crate::ekko::fits(&description)?;
         item.description = description;
         Ok(vec![id])
     }
@@ -975,6 +977,25 @@ mod tests {
             let updated = batch(&ekko, &[json!({"op": "update", "item": 1, "priority": priority})]);
             assert!(matches!(updated, Err(EkkoError::InvalidPriority)), "{priority}: {:?}", updated.err());
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A description takes up to MAX_DESCRIPTION characters, counted as
+    /// characters, not bytes, however it gets there: created whole, or grown
+    /// past it by an append.
+    #[test]
+    fn a_description_is_capped() {
+        let (ekko, dir) = board("capped");
+        let full = "é".repeat(crate::ekko::MAX_DESCRIPTION);
+        batch(&ekko, &[json!({"op": "create", "text": full})]).unwrap();
+
+        let over = batch(&ekko, &[json!({"op": "create", "text": format!("{full}x")})]);
+        assert!(matches!(&over, Err(EkkoError::InvalidInput(m)) if m.contains("runs 20001 characters")), "{:?}", over.err());
+        let grown = batch(&ekko, &[json!({"op": "edit", "item": 1, "append": "more"})]);
+        assert!(matches!(&grown, Err(EkkoError::InvalidInput(m)) if m.contains("past the 20000")), "{:?}", grown.err());
+        let cli = ekko.edit_description(&["@1".to_string(), full.clone(), "x".to_string()]);
+        assert!(matches!(&cli, Err(EkkoError::InvalidInput(m)) if m.contains("past the 20000")), "the terminal too: {:?}", cli.err());
 
         std::fs::remove_dir_all(&dir).ok();
     }
