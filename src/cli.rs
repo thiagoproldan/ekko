@@ -105,6 +105,9 @@ pub struct Cli {
     pub delete: bool,
     #[arg(long, short = 'e')]
     pub edit: bool,
+    /// Answer a question asked on the board: its id, then the answer.
+    #[arg(long)]
+    pub answer: bool,
     #[arg(long, short = 'f')]
     pub find: bool,
     #[arg(long, short = 'j')]

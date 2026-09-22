@@ -97,7 +97,7 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
     assert!(init["instructions"].as_str().is_some_and(|s| s.contains("shared with the user")));
 
     let tools = replies["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 18);
+    assert_eq!(tools.len(), 20);
     // The five nearly every session calls load at session start; the rest stay behind ToolSearch.
     let loaded: Vec<&str> =
         tools.iter().filter(|tool| tool["_meta"]["anthropic/alwaysLoad"] == true).map(|tool| tool["name"].as_str().unwrap()).collect();
@@ -516,13 +516,43 @@ fn the_board_is_served_as_resources_by_a_server_of_their_own() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// ask records a question on the board, and the prime lists it under
+/// 'Waiting on you' until answer records the reply; a second answer is
+/// refused, and context reads the one given.
+#[test]
+fn a_question_is_asked_and_answered_through_the_tools() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            call(1, "create", json!({"text": "the merge"})),
+            call(2, "ask", json!({"text": "Merge auditoria now?", "about": 1})),
+            call(3, "prime", json!({})),
+            call(4, "answer", json!({"question": 2, "text": "yes, after the rebase"})),
+            call(5, "answer", json!({"question": 2, "text": "no"})),
+            call(6, "context", json!({"item": 2})),
+            call(7, "prime", json!({})),
+        ],
+    );
+    assert!(text(&replies["2"]).contains("\"id\":2"), "{}", replies["2"]);
+    assert!(text(&replies["3"]).contains("\nWaiting on you (1)\n   2. [asked by "), "{}", text(&replies["3"]));
+    assert!(text(&replies["3"]).contains(", about 1] Merge auditoria now?\n"), "{}", text(&replies["3"]));
+    assert!(text(&replies["4"]).contains("\"ok\":true"), "{}", replies["4"]);
+    assert_eq!(replies["5"]["result"]["isError"], true, "{}", replies["5"]);
+    assert!(text(&replies["5"]).contains("2 was already answered: yes, after the rebase"), "{}", replies["5"]);
+    assert!(text(&replies["6"]).contains(": yes, after the rebase\n"), "{}", text(&replies["6"]));
+    assert!(!text(&replies["7"]).contains("Waiting on you"), "{}", text(&replies["7"]));
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// What Claude Code puts ahead of every conversation from this server: its
 /// instructions and the always-loaded tool definitions. A byte changed there
 /// makes every session resumed after an upgrade write its whole context again
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0x5eccc9e04fef4ce2;
+const PREFIX_FINGERPRINT: u64 = 0x553ab57380825c7a;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {

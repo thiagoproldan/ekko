@@ -101,6 +101,7 @@ $ ekko --help
 
     Options
         none              Display board view
+      --answer <ID>       Answer a question asked on the board
       --archive, -a       Display archived items
       --attached-to <IDS> Attach a note to the task it explains
       --begin, -b         Start/pause task

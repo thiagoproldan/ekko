@@ -409,12 +409,19 @@ pub struct NoteRef {
     pub knowledge: Option<Knowledge>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub superseded_by: Vec<u32>,
+    /// On a question: whether it has been answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answered: Option<bool>,
 }
 
 impl NoteRef {
     /// What a listing puts before a typed note's text -- "[gotcha] ", or
-    /// "[decision, superseded by 9] " -- and nothing before an ordinary one.
+    /// "[decision, superseded by 9] ", "[question] " -- and nothing before an
+    /// ordinary one.
     fn mark(&self) -> String {
+        if let Some(answered) = self.answered {
+            return if answered { "[answered] " } else { "[question] " }.to_string();
+        }
         match (self.knowledge, self.superseded_by.as_slice()) {
             (None, _) => String::new(),
             (Some(kind), []) => format!("[{}] ", kind.word()),
@@ -491,6 +498,7 @@ impl<'a> Reader<'a> {
             description: note.description.clone(),
             knowledge: note.knowledge,
             superseded_by: self.superseded_by(note.id),
+            answered: note.question.as_ref().map(|question| question.answer.is_some()),
         }
     }
 
@@ -680,6 +688,31 @@ pub struct Prime {
     /// Decisions in force, counted: search with the decision filter reads them.
     #[serde(skip_serializing_if = "is_zero")]
     pub decisions: usize,
+    /// The questions no one has answered yet, oldest first: what the user
+    /// is waiting to be asked, or asked and has not answered.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waiting_on_you: Vec<Asked>,
+    /// The questions this session asked, answered in the last day.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub answered: Vec<Asked>,
+}
+
+/// A question as the prime lists it: the note, the task it is about, who
+/// asked and how far the board has moved since, and the answer once given.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Asked {
+    pub id: u32,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub about: Option<u32>,
+    pub by: String,
+    /// Writes to the board since it was asked.
+    pub moved: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answered_by: Option<String>,
 }
 
 /// Who holds a task in progress, as one reader sees it: by whom and since
@@ -849,8 +882,36 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         .filter(|item| visible(item) && !item.is_task && item.attached_to.is_none() && item.knowledge.is_none())
         .filter(|item| updated(item) > since)
         .collect();
+    notes.retain(|note| note.question.as_ref().is_none_or(|question| question.answer.is_some()));
     notes.sort_by_key(|item| (std::cmp::Reverse(updated(item)), std::cmp::Reverse(item.id)));
     let recent_notes = notes.into_iter().take(RECENT_NOTES).map(|note| reader.note_ref(note)).collect();
+
+    // Questions in their own sections: the open ones for the user, whoever
+    // asked, and the answers this session is waiting for -- its own, or its
+    // conversation's from before a restart. An open one is not quoted again
+    // under its task.
+    let registry = reader.me.as_ref().and_then(|me| me.registry.as_ref());
+    let mine = |asker: &crate::holder::Holder| {
+        reader.me.as_ref().is_some_and(|me| {
+            me.is(asker) || (!asker.alive() && me.conversation().is_some_and(|now| asker.conversation_in(registry).as_deref() == Some(now.as_str())))
+        })
+    };
+    let day_ago = chrono::Local::now().timestamp_millis() - 86_400_000;
+    let mut questions: Vec<&Item> = all.values().filter(|item| visible(item) && item.question.is_some()).collect();
+    questions.sort_by_key(|item| (item.timestamp, item.id));
+    let (mut waiting_on_you, mut answered) = (Vec::new(), Vec::new());
+    for note in questions {
+        let Some(question) = &note.question else { continue };
+        let asked = asked(note, question, &reader, cursor as u64);
+        match &question.answer {
+            None => waiting_on_you.push(asked),
+            Some(answer) if answer.at >= day_ago && question.asked_by.as_ref().is_some_and(mine) => answered.push(asked),
+            Some(_) => {}
+        }
+    }
+    for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()).chain(waiting.iter_mut()) {
+        entry.notes.retain(|note| !waiting_on_you.iter().any(|asked| asked.id == note.id));
+    }
 
     let (roadmap, rootless, inversions) = match (phases.is_empty(), ekko.display_roadmap()?) {
         (false, Outcome::Roadmap { steps, rootless, inversions }) => (steps, rootless, inversions),
@@ -899,6 +960,8 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         knowledge,
         knowledge_total,
         decisions,
+        waiting_on_you,
+        answered,
     })
 }
 
@@ -949,6 +1012,9 @@ pub struct Context {
     /// The notes replacing this one: while any is there, it is not in force.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub superseded_by: Vec<Link>,
+    /// On a question: who asked, and the answer once given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<Asked>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1014,6 +1080,8 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
     let entry = reader.entry(item);
     let supersedes = entry.supersedes.as_ref().and_then(link);
     let superseded_by = entry.superseded_by.iter().filter_map(link).collect();
+    let revision = all.values().filter_map(|other| other.rev).max().unwrap_or(0);
+    let question = item.question.as_ref().map(|question| asked(item, question, reader, revision));
 
     Context {
         item: entry,
@@ -1028,6 +1096,27 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         attached_to,
         supersedes,
         superseded_by,
+        question,
+    }
+}
+
+/// A question as the views show it, the board being at `revision`: who
+/// asked and who answered as the reader names them, and how far the board
+/// moved before the answer came, or since it was asked while none has.
+fn asked(note: &Item, question: &crate::item::Question, reader: &Reader<'_>, revision: u64) -> Asked {
+    let registry = reader.me.as_ref().and_then(|me| me.registry.as_ref());
+    let name = |holder: Option<&crate::holder::Holder>| holder.map_or_else(|| "the user".to_string(), |holder| holder.label_in(registry));
+    Asked {
+        id: note.id,
+        text: note.description.clone(),
+        about: note.attached_to.as_deref().and_then(|uid| reader.uid(uid)),
+        by: name(question.asked_by.as_ref()),
+        moved: match &question.answer {
+            Some(answer) => answer.rev.saturating_sub(question.rev + 1),
+            None => revision.saturating_sub(question.rev),
+        },
+        answer: question.answer.as_ref().map(|answer| answer.text.clone()),
+        answered_by: question.answer.as_ref().map(|answer| name(answer.by.as_ref())),
     }
 }
 
@@ -1772,6 +1861,34 @@ impl Prime {
             let _ = writeln!(out, "    Other handoffs in the last hour: {}{more}", named.join("; "));
         }
 
+        // Questions before the work: the user's answers are what unblocks it.
+        if !self.waiting_on_you.is_empty() {
+            let _ = writeln!(out, "\nWaiting on you ({})", self.waiting_on_you.len());
+            for asked in &self.waiting_on_you {
+                let about = asked.about.map(|task| format!(", about {task}")).unwrap_or_default();
+                let moved = match asked.moved {
+                    0 => String::new(),
+                    1 => ", 1 write ago".to_string(),
+                    n => format!(", {n} writes ago"),
+                };
+                let _ = writeln!(out, "{:>4}. [asked by {}{about}{moved}] {}", asked.id, asked.by, clip(&asked.text, NOTE_CLIP));
+            }
+        }
+        if !self.answered.is_empty() {
+            let _ = writeln!(out, "\nAnswered, for this session ({})", self.answered.len());
+            for asked in &self.answered {
+                let (answer, by) = (asked.answer.as_deref().unwrap_or_default(), asked.answered_by.as_deref().unwrap_or("the user"));
+                // The board moving in between is what makes an answer stale.
+                let moved = match asked.moved {
+                    0 => String::new(),
+                    1 => ", 1 write after it was asked".to_string(),
+                    n => format!(", {n} writes after it was asked"),
+                };
+                let _ =
+                    writeln!(out, "{:>4}. {}\n      -> {} (recorded by {by}{moved})", asked.id, clip(&asked.text, TASK_CLIP), clip(answer, NOTE_CLIP));
+            }
+        }
+
         let sections = [
             Section::of_entries("In progress", &self.doing, usize::MAX, self.doing.len(), "context <id> reads one", usize::MAX, &today),
             Section::of_entries("Ready, best first", &self.ready, READY_WITH_NOTES, self.ready.len(), "next lists them", READY_KEPT, &today),
@@ -2113,6 +2230,9 @@ impl Context {
         if let Some(held) = &item.held {
             facts[0] = format!("{}, {} since {}", facts[0], held.text(), crate::holder::when(held.since));
         }
+        if let Some(asked) = &self.question {
+            facts[0] = format!("note, a question asked by {}", asked.by);
+        }
         if let Some(priority) = item.priority {
             facts.push(format!("priority {priority}"));
         }
@@ -2140,6 +2260,19 @@ impl Context {
             self.created,
             item.updated_at
         );
+        if let Some(asked) = &self.question {
+            let moved = |after: &str| match asked.moved {
+                0 => String::new(),
+                1 => format!(", 1 write {after}"),
+                n => format!(", {n} writes {after}"),
+            };
+            let _ = match (&asked.answer, &asked.answered_by) {
+                (Some(answer), Some(by)) => {
+                    writeln!(out, "      answered, recorded by {by}{}: {answer}", moved("after it was asked"))
+                }
+                _ => writeln!(out, "      not answered yet{}", moved("since it was asked")),
+            };
+        }
 
         let links = |out: &mut String, title: &str, links: &[Link]| {
             if links.is_empty() {
@@ -3239,6 +3372,53 @@ mod tests {
         let claim = data[&1].held_by.as_ref().unwrap();
         assert!(me.is(claim) && claim.conversation.as_deref() == Some("c-before-the-restart"));
         assert!(other.is(data[&2].held_by.as_ref().unwrap()), "a holder that still runs keeps its task");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A question waits on the board, in every prime, until the user answers
+    /// it -- here from the terminal -- and the answer then reaches the
+    /// conversation that asked, resumed in a new process after a restart.
+    /// Seen on 2026-09-22: four questions held only in a prompt were lost at
+    /// a restart, one of them already stale.
+    #[test]
+    fn a_question_waits_on_the_board_and_its_answer_reaches_who_asked() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let (_, dir) = board("prime-questions");
+        let registry = crate::holder::Registry::at(dir.join("processes"));
+        let as_ = |actor: &crate::holder::Actor| {
+            Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
+        };
+        let start = |actor: &crate::holder::Actor, conversation: &str| {
+            let event = SessionEvent { source: "resume".to_string(), session_id: Some(conversation.to_string()) };
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
+        };
+        start(&gone, "c-asker");
+        as_(&gone).create_task(&words(&["the merge"])).unwrap();
+        let asker = as_(&gone);
+        let mut draft = crate::ops::Draft::open(&asker).unwrap();
+        let asked = draft.ask("Merge auditoria now?", Some(&crate::ops::Ref::Id(1))).unwrap();
+        draft.commit(false).unwrap();
+        as_(&other).create_task(&words(&["later work"])).unwrap();
+
+        let theirs = prime(&as_(&other), "default board").unwrap().text();
+        let waiting = format!("\nWaiting on you (1)\n   {asked}. [asked by default on pts/3 \u{b7} c-asker, about 1, 1 write ago] Merge auditoria now?\n");
+        assert!(theirs.contains(&waiting), "{theirs}");
+        assert!(!theirs.contains("[question]"), "an open question is not quoted again under its task: {theirs}");
+
+        as_(&crate::holder::Actor::person()).answer_question(&words(&[&asked.to_string(), "yes,", "after", "the", "rebase"])).unwrap();
+        start(&me, "c-asker");
+        let mine = prime(&as_(&me), "default board").unwrap().text();
+        let answered = format!(
+            "\nAnswered, for this session (1)\n   {asked}. Merge auditoria now?\n      -> yes, after the rebase (recorded by the user, 1 write after it was asked)\n"
+        );
+        assert!(mine.contains(&answered) && !mine.contains("Waiting on you"), "{mine}");
+        let theirs = prime(&as_(&other), "default board").unwrap().text();
+        assert!(!theirs.contains("Answered, for this session") && theirs.contains("[answered] Merge auditoria now?"), "{theirs}");
+
+        let read = contexts(&as_(&me), &[asked.to_string()]).unwrap()[0].text();
+        assert!(read.contains("note, a question asked by default on pts/3 \u{b7} c-asker"), "{read}");
+        assert!(read.contains("answered, recorded by the user, 1 write after it was asked: yes, after the rebase"), "{read}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

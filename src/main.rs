@@ -31,6 +31,7 @@ const HELP: &str = r#"
 
     Options
         none              Display board view
+      --answer <ID>       Answer a question asked on the board
       --archive, -a       Display archived items
       --attached-to <IDS> Attach a note to the task it explains
       --begin, -b         Start/pause task
@@ -463,6 +464,9 @@ fn dispatch(
     }
     if cli.edit {
         return Ok(vec![ekko.edit_description(&described(&cli.input)?)?]);
+    }
+    if cli.answer {
+        return Ok(vec![ekko.answer_question(&described(&cli.input)?)?]);
     }
     if cli.r#move {
         return Ok(vec![ekko.move_boards(&cli.input)?]);

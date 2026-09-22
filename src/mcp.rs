@@ -62,7 +62,7 @@ const ALWAYS_LOADED: &[&str] = &["context", "search", "create", "set_state", "ed
 
 const TOOLS: &[&str] = &[
     "prime", "next", "context", "search", "changes", "roadmap", "projects", "create", "set_state",
-    "force_state", "edit", "update", "link", "batch", "stash", "trash", "away", "phases",
+    "force_state", "edit", "update", "link", "ask", "answer", "batch", "stash", "trash", "away", "phases",
 ];
 
 const INSTRUCTIONS: &str = "\
@@ -77,6 +77,7 @@ Each session starts with the board's prime already in context -- in progress, re
 - A write's reply names the tasks it set free (nowReady) or left waiting (nowBlocked): no next or prime is needed to find them.
 - batch applies several operations in one write, all or nothing; $1, $2 name the items created by the batch's first and second operations.
 - trash is recoverable for 30 days and still needs the user's consent. For work decided against, set_state cancelled keeps the record.
+- Ask the user through ask; answer records the reply.
 - Refusals come back as CODE: message. Branch on the code; nothing was written.";
 
 /// Where calls find their board: the folder the server was started in, and
@@ -585,6 +586,14 @@ impl Server {
                 let spec: ops::Link = parse(args)?;
                 write(&ekko, false, |draft| draft.link(&spec))
             }
+            "ask" => {
+                let spec: ops::Ask = parse(args)?;
+                write(&ekko, false, |draft| draft.ask(&spec.text, spec.about.as_ref()).map(|id| vec![id]))
+            }
+            "answer" => {
+                let spec: ops::Reply = parse(args)?;
+                write(&ekko, false, |draft| draft.answer(&spec.question, &spec.text).map(|id| vec![id]))
+            }
             "batch" => {
                 let ops = args.remove("ops").ok_or_else(|| invalid("batch needs ops"))?;
                 finish(args)?;
@@ -1092,6 +1101,18 @@ fn tool_definitions() -> Value {
                 "attached_to": {"type": ["integer", "string", "null"]},
                 "supersedes": {"type": ["integer", "string", "null"]}
             }), &["item"]),
+            "annotations": write,
+        },
+        {
+            "name": "ask",
+            "description": "Ask the user something that waits for an answer, as a note on the board about a task: unlike a question held in your prompt, it outlives this session's /clear or restart, every session's prime lists it under 'Waiting on you', and the answer reaches you whichever session hears it. Record it here, then ask the user; record the reply with answer.",
+            "inputSchema": object(json!({"project": project, "text": {"type": "string"}, "about": item}), &["text"]),
+            "annotations": write,
+        },
+        {
+            "name": "answer",
+            "description": "Record the user's answer to an open question, in their words: it closes the question, and the session that asked sees the answer in its prime, even after a /clear or restart. A question is answered once; for a newer answer, ask again.",
+            "inputSchema": object(json!({"project": project, "question": item, "text": {"type": "string"}}), &["question", "text"]),
             "annotations": write,
         },
         {

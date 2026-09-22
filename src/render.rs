@@ -1264,6 +1264,11 @@ impl<'a> Renderer<'a> {
         self.success("\n", "Updated description of item:", &suffix);
     }
 
+    pub fn success_answered(&mut self, id: u32) {
+        let suffix = self.painter.grey(&id.to_string());
+        self.success("\n", "Answered question:", &suffix);
+    }
+
     pub fn success_delete(&mut self, ids: &[u32]) {
         let word = if ids.len() > 1 { "items" } else { "item" };
         let message = format!("Deleted {word}:");

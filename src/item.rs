@@ -210,6 +210,13 @@ pub struct Item {
     /// trashed blocker stops blocking. By uid, for the reason `blocked_by` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,
+    /// On a note that asks the user something: who asked, when, and the
+    /// answer once given. A question held only in a session's prompt is lost
+    /// when the session clears or restarts, and the user's answer given in
+    /// another session never reaches it; on the board it does. Absent unless
+    /// set, so a board that asks nothing is stored exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<Question>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -259,6 +266,7 @@ impl Item {
             handoff: false,
             knowledge: None,
             supersedes: None,
+            question: None,
             held_by: None,
             done_by: None,
             stashed: None,
@@ -294,6 +302,7 @@ impl Item {
             handoff: false,
             knowledge: None,
             supersedes: None,
+            question: None,
             held_by: None,
             done_by: None,
             stashed: None,
@@ -315,6 +324,37 @@ impl Item {
             self.knowledge.map(Knowledge::word)
         }
     }
+}
+
+/// A question asked of the user, which waits for an answer; see
+/// `Item::question`. The note's text is the question.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Question {
+    /// The Claude Code session that asked, with the conversation it ran:
+    /// the answer is for it, after a /clear or a restart too. `None` when
+    /// the user wrote the question down themselves.
+    #[serde(rename = "askedBy", default, skip_serializing_if = "Option::is_none")]
+    pub asked_by: Option<crate::holder::Holder>,
+    /// The revision of the write that asked it, stamped as that write is
+    /// saved. How far the board has moved since tells an answer that may
+    /// have come too late for its question.
+    pub rev: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<Answer>,
+}
+
+/// The user's answer to a question, and who recorded it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Answer {
+    pub text: String,
+    /// The session that heard it and recorded it, or, with no process, the
+    /// user at the terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<crate::holder::Holder>,
+    /// When, in milliseconds, and the revision of the write that recorded
+    /// it, stamped as the question's is.
+    pub at: i64,
+    pub rev: u64,
 }
 
 /// The kinds of lasting knowledge a note can hold; see `Item::knowledge`.

@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use crate::ekko::{
     holds, parse_due_date, phase_inversion, phase_order, remove_duplicates, uid_index, Ekko, EkkoError, Linked,
 };
-use crate::item::{Item, Knowledge, Setting, State};
+use crate::item::{Answer, Item, Knowledge, Question, Setting, State};
 use crate::storage::{ItemMap, LockGuard};
 
 /// An item as a caller names it: a display id, a uid, or `$N` for the item
@@ -165,6 +165,22 @@ pub struct Link {
 pub struct SetState {
     pub items: Vec<Ref>,
     pub state: String,
+}
+
+/// A question for the user, and the task it is about.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ask {
+    pub text: String,
+    pub about: Option<Ref>,
+}
+
+/// The user's answer to a question.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reply {
+    pub question: Ref,
+    pub text: String,
 }
 
 /// One operation of a batch, tagged by `op`.
@@ -385,6 +401,52 @@ impl<'a> Draft<'a> {
             let names = self.names();
             supersede(&mut self.data, id, Some(older), &|id| names.name(id))?;
         }
+        Ok(id)
+    }
+
+    /// Asks the user `text`: a note that waits for an answer, attached to the
+    /// task it is about, if any, and carrying the session that asked and the
+    /// board's revision.
+    pub fn ask(&mut self, text: &str, about: Option<&Ref>) -> Result<u32, EkkoError> {
+        let spec = Create {
+            kind: Some(Kind::Note),
+            text: text.to_string(),
+            boards: Vec::new(),
+            priority: None,
+            due: None,
+            phase: None,
+            blocked_by: Vec::new(),
+            attached_to: about.cloned(),
+            supersedes: None,
+            starred: false,
+        };
+        let id = self.create(&spec)?;
+        let now = chrono::Local::now().timestamp_millis();
+        let asked_by = self.ekko.actor.as_ref().filter(|actor| !actor.is_person()).map(|actor| actor.holder(now));
+        // The revision is the write's own, stamped as it is saved.
+        self.item(id).question = Some(Question { asked_by, rev: 0, answer: None });
+        Ok(id)
+    }
+
+    /// Records `text` as the answer to `question`, with who recorded it and
+    /// when, which closes it. A question is answered once: asking again is
+    /// how a newer answer is sought, so the first is never lost.
+    pub fn answer(&mut self, question: &Ref, text: &str) -> Result<u32, EkkoError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(invalid("An answer needs its text"));
+        }
+        let id = self.resolve(question)?;
+        let Some(asked) = self.data[&id].question.clone() else {
+            return Err(invalid(format!("{id} is not a question; ask records one")));
+        };
+        if let Some(given) = &asked.answer {
+            return Err(invalid(format!("{id} was already answered: {}", given.text)));
+        }
+        let now = chrono::Local::now().timestamp_millis();
+        let by = self.ekko.actor.as_ref().map(|actor| actor.holder(now));
+        let answer = Answer { text: text.to_string(), by, at: now, rev: 0 };
+        self.item(id).question = Some(Question { answer: Some(answer), ..asked });
         Ok(id)
     }
 
@@ -927,6 +989,40 @@ mod tests {
         assert!(batch(&theirs, &[json!({"op": "set_state", "items": [1], "state": "paused"})]).is_err());
         batch(&person, &[json!({"op": "set_state", "items": [1], "state": "paused"})]).unwrap();
         assert_eq!(state_of(&board, 1), Some(State::Paused), "the user decides");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A question asked on the board carries the session that asked and the
+    /// revision; an answer closes it with who recorded it, once: a second is
+    /// refused, and so is an answer to a note that asks nothing.
+    #[test]
+    fn a_question_waits_for_one_answer() {
+        let (me, _, _) = crate::holder::test_sessions();
+        let (board, dir) = board("questions");
+        let mine = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me.clone());
+        batch(&mine, &[json!({"op": "create", "text": "the merge"})]).unwrap();
+        let mut draft = Draft::open(&mine).unwrap();
+        let asked = draft.ask("Merge auditoria now?", Some(&Ref::Id(1))).unwrap();
+        draft.commit(false).unwrap();
+
+        let note = board.storage.get().unwrap()[&asked].clone();
+        let question = note.question.clone().expect("a question");
+        assert!(me.is(question.asked_by.as_ref().unwrap()) && question.answer.is_none());
+        assert_eq!(Some(question.rev), note.rev, "the revision of the write that asked it");
+        assert_eq!(note.attached_to, board.storage.get().unwrap()[&1].uid);
+
+        let person = Ekko::new(Storage::new(&dir).unwrap()).acting_as(Actor::person());
+        let mut draft = Draft::open(&person).unwrap();
+        draft.answer(&Ref::Id(asked), "  yes, after the rebase ").unwrap();
+        draft.commit(false).unwrap();
+        let answer = board.storage.get().unwrap()[&asked].question.clone().unwrap().answer.expect("answered");
+        assert_eq!((answer.text.as_str(), answer.by.unwrap().label()), ("yes, after the rebase", "the user".to_string()));
+
+        let mut draft = Draft::open(&mine).unwrap();
+        let again = draft.answer(&Ref::Id(asked), "no").unwrap_err().to_string();
+        assert!(again.contains("already answered: yes, after the rebase"), "{again}");
+        assert!(draft.answer(&Ref::Id(1), "yes").unwrap_err().to_string().contains("1 is not a question"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

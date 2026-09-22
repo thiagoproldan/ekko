@@ -380,6 +380,7 @@ pub enum Outcome {
     Delete(Vec<DeleteResult>),
     Restore(Vec<RestoreResult>),
     Edit(Item),
+    Answered(Item),
     Move(Item),
     Priority(Item),
     Copy { ids: Vec<u32>, descriptions: Vec<String> },
@@ -426,6 +427,7 @@ impl Outcome {
             Outcome::Delete(_) => "delete",
             Outcome::Restore(_) => "restore",
             Outcome::Edit(_) => "edit",
+            Outcome::Answered(_) => "answer",
             Outcome::Move(_) => "move",
             Outcome::Priority(_) => "priority",
             Outcome::Copy { .. } => "copy",
@@ -498,6 +500,7 @@ impl Outcome {
                 out.success_restore(&ids);
             }
             Outcome::Edit(item) => out.success_edit(item.id),
+            Outcome::Answered(item) => out.success_answered(item.id),
             Outcome::Move(item) => out.success_move(item.id, &item.boards),
             Outcome::Priority(item) => out.success_priority(item.id, item.priority.unwrap_or(1)),
             Outcome::Copy { ids, .. } => out.success_copy_to_clipboard(ids),
@@ -1016,6 +1019,15 @@ impl Ekko {
             if let Some(item) = data.get_mut(id) {
                 item.updated_at = Some(now);
                 item.rev = Some(counters.revision);
+                // A question asked or answered in this write is stamped with it.
+                if let Some(question) = item.question.as_mut() {
+                    if question.rev == 0 {
+                        question.rev = counters.revision;
+                    }
+                    if let Some(answer) = question.answer.as_mut().filter(|answer| answer.rev == 0) {
+                        answer.rev = counters.revision;
+                    }
+                }
             }
         }
 
@@ -1283,6 +1295,17 @@ impl Ekko {
         self.save_touching(&mut data)?;
         self.storage.set_archive(&archive)?;
         Ok(Outcome::Restore(results))
+    }
+
+    /// `--answer ID TEXT`: the user's answer to a question asked on the
+    /// board, recorded as the structured `answer` records it, which closes
+    /// the question for whichever session asked.
+    pub fn answer_question(&self, input: &[String]) -> Result<Outcome, EkkoError> {
+        let (id, words) = input.split_first().ok_or(EkkoError::MissingId)?;
+        let mut draft = crate::ops::Draft::open(self)?;
+        let answered = draft.answer(&crate::ops::Ref::Text(id.clone()), &words.join(" "))?;
+        let committed = draft.commit(false)?;
+        Ok(Outcome::Answered(committed.data[&answered].clone()))
     }
 
     pub fn edit_description(&self, input: &[String]) -> Result<Outcome, EkkoError> {
