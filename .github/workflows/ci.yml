@@ -10,10 +10,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Linux only, deliberately: `storage.rs` reads /proc/<pid>/stat to tell a
-  # dead lock holder from a live one, with no cfg fallback, so the lock
-  # tests only mean anything on Linux. Adding macOS/Windows runners here
-  # would buy red builds, not coverage.
+  # Linux only, deliberately: `storage.rs` locks with flock(2) and reads
+  # /proc to name a lock's holder, with no cfg fallback, so the lock tests
+  # only mean anything on Linux. Adding macOS/Windows runners here would
+  # buy red builds, not coverage.
   test:
     name: build, test & clippy
     runs-on: ubuntu-latest
@@ -46,6 +46,12 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      # The semantics eval drives the built binary over MCP through every
+      # behaviour the rigor plan called wrong, on scratch boards only, and
+      # exits non-zero when one of them is wrong again.
+      - name: Semantics eval
+        run: EKKO_BIN="$PWD/target/debug/ekko" python3 evals/agent/semantics.py
 
       # Nothing else pins the declared MSRV, so it would quietly rot: CI
       # builds on stable, which keeps working long after `rust-version`
