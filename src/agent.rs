@@ -1137,7 +1137,11 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         all.get(id).map(|other| Link {
             id: other.id,
             uid: other.uid.clone(),
-            state: other.knowledge.map_or_else(|| state_word(other), Knowledge::word),
+            // A trashed blocker holds nothing up, so its state would mislead.
+            state: match other.trashed {
+                Some(_) => "in the trash",
+                None => other.knowledge.map_or_else(|| state_word(other), Knowledge::word),
+            },
             description: clip(&other.description, TASK_CLIP),
         })
     };
@@ -2975,6 +2979,23 @@ mod tests {
 
         let alone = reply(&["1"]);
         assert!(alone.contains(long.trim()), "a single read still prints its notes: {alone}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A blocker in the trash holds nothing up -- the task it blocked can
+    /// be completed -- so context says where it is instead of its state.
+    #[test]
+    fn context_names_a_trashed_blocker_as_in_the_trash() {
+        let (ekko, dir) = board("trashed-blocker");
+        ekko.create_task(&words(&["the blocker"])).unwrap();
+        ekko.create_task(&words(&["the blocked"])).unwrap();
+        ekko.set_blocked_by(&words(&["@2", "1"])).unwrap();
+        ekko.set_trashed(&words(&["1"]), true).unwrap();
+
+        let text = context(&ekko, "2").unwrap().text();
+        assert!(text.contains("   1. [in the trash] the blocker\n"), "{text}");
+        assert!(!text.contains("waits on"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
