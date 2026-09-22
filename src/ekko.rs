@@ -952,10 +952,20 @@ impl Ekko {
         // Who holds a task follows its state: one entering progress is claimed
         // for whoever this write is for, and one leaving progress is let go. A
         // task already in progress keeps its holder; taking one over is the
-        // structured write's call (`ops::Draft::commit`).
+        // structured write's call (`ops::Draft::commit`). A task done now
+        // records whose work it was: the session holding it, or else the
+        // session doing it.
         for id in &changed {
-            let entering = before.get(id).is_none_or(|old| State::of(old) != Some(State::Progress));
+            let old = before.get(id);
+            let entering = old.is_none_or(|old| State::of(old) != Some(State::Progress));
             if let Some(item) = data.get_mut(id) {
+                if State::of(item) != Some(State::Done) {
+                    item.done_by = None;
+                } else if old.is_none_or(|old| State::of(old) != Some(State::Done)) {
+                    let held = old.and_then(|old| old.held_by.clone().filter(|_| State::of(old) == Some(State::Progress)));
+                    let doer = self.actor.as_ref().filter(|actor| !actor.is_person()).map(|actor| actor.holder(now));
+                    item.done_by = held.filter(|holder| holder.pid.is_some()).or(doer);
+                }
                 if State::of(item) != Some(State::Progress) {
                     item.held_by = None;
                 } else if entering {

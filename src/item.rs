@@ -107,6 +107,14 @@ pub struct Item {
     /// on is stored exactly as before.
     #[serde(rename = "heldBy", default, skip_serializing_if = "Option::is_none")]
     pub held_by: Option<crate::holder::Holder>,
+    /// Whose work a done task was: the Claude Code session that held it when
+    /// it was done, or else the session that did it -- so a session's task
+    /// list checks off what it finished, not what another session finished
+    /// meanwhile. Set as the task is done and cleared if it is reopened; a
+    /// person's own work records none, so a board nobody claims work on is
+    /// stored exactly as before.
+    #[serde(rename = "doneBy", default, skip_serializing_if = "Option::is_none")]
+    pub done_by: Option<crate::holder::Holder>,
     /// Which phase of a project this belongs to, when it belongs to one.
     ///
     /// `None` means the project root -- outside the roadmap, and the only shape
@@ -252,6 +260,7 @@ impl Item {
             knowledge: None,
             supersedes: None,
             held_by: None,
+            done_by: None,
             stashed: None,
             trashed: None,
             priority: Some(priority),
@@ -286,6 +295,7 @@ impl Item {
             knowledge: None,
             supersedes: None,
             held_by: None,
+            done_by: None,
             stashed: None,
             trashed: None,
             unknown: BTreeMap::new(),

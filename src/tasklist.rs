@@ -62,8 +62,7 @@ pub struct Task {
 #[derive(Debug, Serialize, Deserialize)]
 struct Session {
     /// The board revision when the session began. A task done at a later
-    /// revision is one the session finished -- or touched after finishing,
-    /// which a write to a done task rarely is.
+    /// revision, as this session's work (`Item::done_by`), is one it finished.
     since: u64,
 }
 
@@ -74,10 +73,14 @@ struct Session {
 /// task's id on the board.
 pub fn tasks(ekko: &Ekko, since: u64) -> Result<Vec<Task>, Box<dyn Error>> {
     let all = ekko.storage.get_shared()?;
+    // Done since the session began, and its own work: what another session
+    // finished meanwhile is that session's to check off.
+    let me = ekko.actor.as_ref();
     let mut done: Vec<_> = all
         .values()
         .filter(|item| item.stashed.is_none() && item.trashed.is_none())
         .filter(|item| State::of(item) == Some(State::Done) && item.rev.unwrap_or(0) > since)
+        .filter(|item| item.done_by.as_ref().is_some_and(|holder| me.is_some_and(|me| me.is(holder))))
         .collect();
     done.sort_by_key(|item| (item.updated_at.unwrap_or(item.timestamp), item.id));
     let done = done.split_off(done.len().saturating_sub(DONE_SHOWN));
@@ -293,19 +296,37 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// What the session finished stays on the list, checked off; what was
-    /// done before it began does not show.
+    /// What the session finished stays on the list, checked off: its own
+    /// work, done since it began. Not what was done before, nor what another
+    /// session finished meanwhile -- seen on 2026-09-22, when a second
+    /// session's list checked off six tasks the first had done. A task the
+    /// session held stays its own when the user checks it off, and a task
+    /// reopened is nobody's.
     #[test]
     fn what_the_session_finished_is_checked_off() {
-        let (ekko, dir) = board("done");
-        ekko.create_task(&words(&["done before the session"])).unwrap();
-        ekko.create_task(&words(&["done during it"])).unwrap();
-        ekko.set_state(&words(&["@1", "done"]), false).unwrap();
-        let since = ekko.storage.get_counters().unwrap().revision;
-        ekko.set_state(&words(&["@2", "done"]), false).unwrap();
+        let (me, other, _) = crate::holder::test_sessions();
+        let dir = scratch("done");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir.join("board")).unwrap()).acting_as(actor.clone());
+        let mine = as_(&me);
+        for name in ["done before", "done during", "done by the other", "held, done by the user", "done, then reopened"] {
+            mine.create_task(&words(&[name])).unwrap();
+        }
+        mine.set_state(&words(&["@1", "done"]), false).unwrap();
+        let since = mine.storage.get_counters().unwrap().revision;
+        mine.set_state(&words(&["@2", "done"]), false).unwrap();
+        as_(&other).set_state(&words(&["@3", "done"]), false).unwrap();
+        mine.set_state(&words(&["@4", "progress"]), false).unwrap();
+        as_(&crate::holder::Actor::person()).check_tasks(&words(&["4"]), false).unwrap();
+        mine.set_state(&words(&["@5", "done"]), false).unwrap();
+        mine.set_state(&words(&["@5", "undone"]), false).unwrap();
 
-        let list = tasks(&ekko, since).unwrap();
-        assert_eq!(drawn(&list), [("completed".to_string(), "2. done during it".to_string())]);
+        let completed = |ekko: &Ekko| -> Vec<String> {
+            let list = tasks(ekko, since).unwrap();
+            drawn(&list).into_iter().filter(|(status, _)| status == "completed").map(|(_, subject)| subject).collect()
+        };
+        assert_eq!(completed(&mine), ["2. done during", "4. held, done by the user"]);
+        assert_eq!(completed(&as_(&other)), ["3. done by the other"]);
+        assert_eq!(mine.storage.get().unwrap()[&5].done_by, None, "reopened");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -351,7 +372,9 @@ mod tests {
     /// watch; an event without a session draws nothing.
     #[test]
     fn the_hook_draws_the_sessions_list_and_names_the_board_to_watch() {
+        let (me, _, _) = crate::holder::test_sessions();
         let (ekko, dir) = board("hook");
+        let ekko = ekko.acting_as(me);
         ekko.create_task(&words(&["the work"])).unwrap();
         let config = dir.join("claude");
 
