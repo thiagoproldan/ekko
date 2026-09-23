@@ -229,7 +229,7 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 | `prime` | the resume view: in progress, ready in order, blocked, recent notes, gotchas and procedures, what needs attention, and a cursor |
 | `next` | what to take up next, best first |
 | `context` | one item with its blockers, what it blocks and its notes, in full |
-| `search` | items matching a text and/or the `--list` filters |
+| `search` | items matching a text and/or the `--list` filters, with a count of the stashed ones that match as well |
 | `changes` | what was written since a cursor, including items stashed or trashed since |
 | `roadmap`, `projects` | as the flags of the same name |
 | `create` | a task, a note, a handoff, or a decision, gotcha or procedure, with every field apart from the text, relations included |
@@ -834,6 +834,8 @@ A note stashed with the tasks it explains comes back beside them: the stash is g
 
 `@board` stashes what is on that board *now*. It does not close the board: something created there tomorrow shows up normally.
 
+The stash is reached by name: `stashed` is a `--list` filter, and one of `search`'s, and it combines with the others -- `ekko --list stashed done` is the finished work put away. A search without it still counts what it left out: when stashed items match as well as what it found, or better, its last line says how many, so an empty answer is not read as the board not knowing.
+
 **Trash** is for removal, and it expires.
 
 ```
@@ -927,6 +929,7 @@ The by default supported listing attributes, together with their respective alia
 - `ready` - Open tasks with nothing outstanding blocking them, waiting ones left out.
 - `blocked` - Items blocked by something still open.
 - `with:NAME` - Tasks with someone, by name, case and accents aside.
+- `stashed` - Items in [the stash](#stash-and-trash), which every other listing leaves out; the trash stays out of it too.
 - `decision`, `decisions` - Notes recording what was settled, and why.
 - `gotcha`, `gotchas` - Notes recording a trap, and how to avoid it.
 - `procedure`, `procedures` - Notes recording steps that work.

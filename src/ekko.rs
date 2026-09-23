@@ -840,6 +840,9 @@ impl Ekko {
                     data.retain(|_, item| State::of(item) == Some(State::Cancelled));
                 }
                 "due" => data.retain(|_, item| item.due_date.is_some()),
+                // `data` holds the stash only when `list_by_attributes` was
+                // given this term: every other view leaves it out.
+                STASHED => data.retain(|_, item| item.stashed.is_some()),
                 with if with.starts_with(WITH) => {
                     let name = &with[WITH.len()..];
                     data.retain(|_, item| is_with(item, name));
@@ -2124,7 +2127,16 @@ impl Ekko {
     }
 
     pub fn list_by_attributes(&self, terms: &[String]) -> Result<Outcome, EkkoError> {
-        let data = self.visible()?;
+        // `stashed` is the one way into the stash, which every view leaves
+        // out: with it the listing starts from all but the trash, so a board
+        // that only the stash still holds is a board here too.
+        let data = if terms.iter().any(|term| term == STASHED) {
+            let mut data = self.storage.get()?;
+            data.retain(|_, item| item.trashed.is_none());
+            data
+        } else {
+            self.visible()?
+        };
         let stored_boards = self.get_boards(&data);
 
         let (mut boards, mut attributes) = (Vec::new(), Vec::new());
@@ -2368,6 +2380,10 @@ pub(crate) fn parse_due_date(token: &str) -> Option<String> {
 /// `--list` as a filter.
 pub(crate) const WITH: &str = "with:";
 
+/// The `--list` filter, and search's, that reaches into the stash: the one
+/// way a view shows what was put away.
+pub(crate) const STASHED: &str = "stashed";
+
 fn is_with_opt(token: &str) -> bool {
     token.starts_with(WITH)
 }
@@ -2442,6 +2458,7 @@ pub(crate) fn is_known_attribute(term: &str) -> bool {
             | "overdue"
     ) || Knowledge::from_word(term).is_some()
         || term.starts_with(WITH)
+        || term == STASHED
 }
 
 #[cfg(test)]
@@ -3568,6 +3585,34 @@ mod tests {
 
         assert_eq!(ids(&["due"]), vec![2]);
         assert_eq!(ids(&["@due"]), vec![1]);
+
+        cleanup(&dir);
+    }
+
+    /// `stashed` is the one term that reaches into the stash, and the trash
+    /// stays out of it: a board only the stash still holds is a board, and a
+    /// stashed done task is still done under it (task 397).
+    #[test]
+    fn the_stashed_filter_lists_the_stash_and_leaves_the_trash_out() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["on the board"])).unwrap();
+        ekko.create_task(&words(&["@old", "put away"])).unwrap();
+        ekko.create_task(&words(&["put away, then thrown away"])).unwrap();
+        ekko.create_task(&words(&["done, then put away"])).unwrap();
+        ekko.set_state(&words(&["@4", "done"]), false).unwrap();
+        ekko.set_stashed(&words(&["2", "3", "4"]), true).unwrap();
+        ekko.delete_items(&words(&["3"])).unwrap();
+        let ids = |terms: &[&str]| -> Vec<u32> {
+            let Outcome::List(groups) = ekko.list_by_attributes(&words(terms)).unwrap() else { panic!() };
+            let mut ids: Vec<u32> = groups.iter().flat_map(|(_, items)| items.iter().map(|item| item.id)).collect();
+            ids.sort_unstable();
+            ids
+        };
+
+        assert_eq!(ids(&["stashed"]), vec![2, 4]);
+        assert_eq!(ids(&["stashed", "done"]), vec![4]);
+        assert_eq!(ids(&["stashed", "@old"]), vec![2]);
+        assert_eq!(ids(&["task"]), vec![1], "the stash is reached only by name");
 
         cleanup(&dir);
     }

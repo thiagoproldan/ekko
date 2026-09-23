@@ -594,7 +594,7 @@ fn a_question_is_asked_and_answered_through_the_tools() {
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0x2a628aefab507d38;
+const PREFIX_FINGERPRINT: u64 = 0xc892af84e2cacc16;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {

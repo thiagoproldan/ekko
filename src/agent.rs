@@ -21,7 +21,7 @@ use std::time::Duration;
 use chrono::Datelike;
 use serde::Serialize;
 
-use crate::ekko::{broken_dependencies, holds, phase_order, Ekko, EkkoError, Outcome};
+use crate::ekko::{broken_dependencies, holds, phase_order, Ekko, EkkoError, Outcome, STASHED};
 use crate::item::{Item, Knowledge, State};
 use crate::lexical::{self, Query};
 use crate::render::{Inversion, ProjectSummary, RoadmapStep, Stats};
@@ -1316,42 +1316,47 @@ pub struct Found {
     pub every_word: bool,
     pub hits: Vec<(Entry, String)>,
     pub summary: Option<String>,
+    /// Stashed items the filters left out that match as well as the hits or
+    /// better, counted so that a thin answer is not read as the board not
+    /// knowing.
+    pub stashed: usize,
+    /// Whether those stashed items hold every word of the text.
+    pub stashed_every_word: bool,
 }
 
 /// Visible items passing every filter `--list` knows and, when given, holding
 /// the words of a text as `lexical` matches and ranks them: best first with
 /// the part of each text that matched, or in id order when there is no text.
 /// At most `limit` are shown, with the total. Each item once, however many
-/// boards it is on.
+/// boards it is on. The stash is searched only with the `stashed` filter;
+/// without it, what matches there as well as the hits is counted.
 pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String], limit: usize) -> Result<Found, EkkoError> {
     let query = Query::new(text.unwrap_or_default());
     let all = ekko.storage.get_shared()?;
     if query.is_empty() && filters.is_empty() {
         return Ok(Found { summary: Some(summary(&all)), ..Found::default() });
     }
-    let groups = match ekko.list_by_attributes(filters)? {
-        Outcome::List(groups) => groups,
-        _ => Vec::new(),
+    let candidates = passing(ekko, filters, &all)?;
+    // A search once answered that no item held every word of a text that a
+    // stashed task held whole (task 397): the stash is searched the same way,
+    // to be counted.
+    let stashed = if filters.iter().any(|filter| filter == STASHED) {
+        Vec::new()
+    } else {
+        passing(ekko, &[filters, &[STASHED.to_string()]].concat(), &all)?
     };
     let phases = ekko.storage.get_phases()?;
     let reader = Reader::shared(&all, &phases).seen_by(ekko);
 
-    let mut seen = HashSet::new();
-    let mut candidates: Vec<&Item> = groups
-        .iter()
-        .flat_map(|(_, items)| items)
-        .filter(|item| seen.insert(item.id))
-        .filter_map(|item| all.get(&item.id))
-        .collect();
-    candidates.sort_by_key(|item| item.id);
-
     if query.is_empty() {
         let hits =
             candidates.iter().take(limit).map(|item| (reader.entry(item), clip(&item.description, TASK_CLIP))).collect();
-        return Ok(Found { total: candidates.len(), every_word: true, hits, summary: None });
+        return Ok(Found { total: candidates.len(), every_word: true, hits, stashed: stashed.len(), ..Found::default() });
     }
     let texts: Vec<&str> = candidates.iter().map(|item| item.description.as_str()).collect();
     let ranked = lexical::rank(&query, &texts);
+    let texts: Vec<&str> = stashed.iter().map(|item| item.description.as_str()).collect();
+    let in_stash = lexical::rank(&query, &texts);
     let hits = ranked
         .hits
         .iter()
@@ -1361,7 +1366,34 @@ pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String], limit: usize)
             (reader.entry(item), lexical::snippet(&item.description, &query, SNIPPET))
         })
         .collect();
-    Ok(Found { total: ranked.hits.len(), every_word: ranked.every_word, hits, summary: None })
+    Ok(Found {
+        total: ranked.hits.len(),
+        every_word: ranked.every_word,
+        hits,
+        summary: None,
+        // Beside hits holding every word, stashed items holding only some
+        // of them are not worth a line.
+        stashed: if ranked.every_word && !in_stash.every_word { 0 } else { in_stash.hits.len() },
+        stashed_every_word: in_stash.every_word,
+    })
+}
+
+/// The items `--list` gives for `filters`, each once however many boards it
+/// is on, in id order.
+fn passing<'a>(ekko: &Ekko, filters: &[String], all: &'a ItemMap) -> Result<Vec<&'a Item>, EkkoError> {
+    let groups = match ekko.list_by_attributes(filters)? {
+        Outcome::List(groups) => groups,
+        _ => Vec::new(),
+    };
+    let mut seen = HashSet::new();
+    let mut items: Vec<&Item> = groups
+        .iter()
+        .flat_map(|(_, items)| items)
+        .filter(|item| seen.insert(item.id))
+        .filter_map(|item| all.get(&item.id))
+        .collect();
+    items.sort_by_key(|item| item.id);
+    Ok(items)
 }
 
 /// What is put away, the way `search` lists what it finds: the stash in id
@@ -1574,9 +1606,14 @@ fn summary(all: &ItemMap) -> String {
     }
     boards.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     let boards: Vec<String> = boards.iter().map(|(name, n)| format!("{name} {n}")).collect();
+    let stashed = all.values().filter(|item| item.stashed.is_some() && item.trashed.is_none()).count();
+    let stash = match stashed {
+        0 => String::new(),
+        n => format!("Stash: {}, which the stashed filter lists.\n", count(n, "item", "items")),
+    };
 
     format!(
-        "{}: {tasks_part} and {}.\nBoards: {}.\nGive text or filters to list items.\n",
+        "{}: {tasks_part} and {}.\nBoards: {}.\n{stash}Give text or filters to list items.\n",
         count(shown.len(), "item", "items"),
         count(notes, "note", "notes"),
         boards.join(" \u{b7} ")
@@ -2556,12 +2593,20 @@ pub fn list_text(entries: &[Entry], empty: &str) -> String {
 
 impl Found {
     /// Hits one per line, each with its state and the text that matched, then
-    /// a total when more matched than are shown -- or the summary.
+    /// a total when more matched than are shown, and a count of the stashed
+    /// items left out that match as well -- or the summary.
     pub fn text(&self) -> String {
         if let Some(summary) = &self.summary {
             return summary.clone();
         }
+        let stashed = |one: &str, many: &str| match self.stashed {
+            1 => format!("1 stashed item {one}: add the stashed filter.\n"),
+            n => format!("{n} stashed items {many}: add the stashed filter.\n"),
+        };
         if self.hits.is_empty() {
+            if self.stashed > 0 {
+                return format!("Nothing matches, but {}", stashed("does", "do"));
+            }
             return "Nothing matches.\n".to_string();
         }
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -2570,10 +2615,18 @@ impl Found {
             out.push_str("No item has every word; these have some.\n");
         }
         for (entry, body) in &self.hits {
-            let _ = writeln!(out, "{}", listed_line(entry, &format!("[{}] {body}", listed_state(entry)), true, &today));
+            let away = entry.away.map(|away| format!(", {away}")).unwrap_or_default();
+            let _ = writeln!(out, "{}", listed_line(entry, &format!("[{}{away}] {body}", listed_state(entry)), true, &today));
         }
         if self.total > self.hits.len() {
             let _ = writeln!(out, "{} of {} shown: narrow the text or filters, or raise limit.", self.hits.len(), self.total);
+        }
+        if self.stashed > 0 {
+            out.push_str(&if self.stashed_every_word && !self.every_word {
+                stashed("has every word", "have every word")
+            } else {
+                stashed("matches too", "match too")
+            });
         }
         out
     }
@@ -3706,6 +3759,40 @@ mod tests {
 
         let summary = search(&ekko, None, &[], SEARCH_LIMIT).unwrap().text();
         assert!(summary.starts_with("3 items: 2 tasks (1 pending, 1 done) and 1 note.\n"), "{summary}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The stash is searched only with the `stashed` filter. Without it, the
+    /// stashed items that match as well as the hits or better are counted in
+    /// a line, so a search no longer answers that no item has every word a
+    /// stashed task has (task 397). The trash stays out of both.
+    #[test]
+    fn search_counts_the_stash_it_leaves_out_and_reaches_it_by_a_filter() {
+        let (ekko, dir) = board("stashed-search");
+        ekko.create_task(&words(&["tab completion for ids"])).unwrap();
+        ekko.create_task(&words(&["tab completion for projects and phases"])).unwrap();
+        ekko.create_note(&words(&["phases are declared in order"])).unwrap();
+        ekko.create_task(&words(&["tab completion for phases, thrown away"])).unwrap();
+        ekko.set_stashed(&words(&["2", "3", "4"]), true).unwrap();
+        ekko.delete_items(&words(&["4"])).unwrap();
+        let text = |query: Option<&str>, filters: &[&str]| search(&ekko, query, &words(filters), SEARCH_LIMIT).unwrap().text();
+
+        let better = text(Some("completion phases"), &[]);
+        assert!(better.starts_with("No item has every word; these have some.\n   1. [pending] tab completion for ids\n"), "{better}");
+        assert!(better.ends_with("\n1 stashed item has every word: add the stashed filter.\n"), "{better}");
+        let reached = text(Some("completion phases"), &["stashed"]);
+        assert_eq!(reached, "   2. [pending, stashed] tab completion for projects and phases\n");
+        assert_eq!(text(Some("phases"), &[]), "Nothing matches, but 2 stashed items do: add the stashed filter.\n");
+        let too = text(Some("tab completion"), &[]);
+        assert!(too.ends_with("\n1 stashed item matches too: add the stashed filter.\n"), "{too}");
+        let worse = text(Some("tab ids"), &[]);
+        assert!(!worse.contains("stashed"), "some of the words, beside a hit with all of them: {worse}");
+
+        assert_eq!(text(None, &["note"]), "Nothing matches, but 1 stashed item does: add the stashed filter.\n");
+        assert_eq!(text(None, &["note", "stashed"]), "   3. [note, stashed] phases are declared in order\n");
+        let summary = text(None, &[]);
+        assert!(summary.contains("\nStash: 2 items, which the stashed filter lists.\n"), "{summary}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

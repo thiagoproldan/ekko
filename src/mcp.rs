@@ -1008,7 +1008,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "search",
-            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, waiting, done, cancelled, ready, blocked, due, overdue, star, task, note, decision, gotcha, procedure, with:NAME, or a board name -- as @name when a filter has the same one. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
+            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, waiting, done, cancelled, ready, blocked, due, overdue, star, task, note, decision, gotcha, procedure, with:NAME, stashed (otherwise left out), or a board name -- as @name when a filter has the same one. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
             "inputSchema": object(json!({"project": project, "text": {"type": "string"}, "filters": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1}}), &[]),
             "annotations": read,
         },
