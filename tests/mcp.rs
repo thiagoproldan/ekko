@@ -10,9 +10,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+/// A counter beside the clock: tests run in parallel, and two can read the
+/// same clock value (task 393).
 fn temp_home() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("ekko-e2e-mcp-{}-{nanos}", process::id()));
+    let next = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("ekko-e2e-mcp-{}-{nanos}-{next}", process::id()));
     fs::create_dir_all(dir.join(".ekko").join("storage")).unwrap();
     dir
 }

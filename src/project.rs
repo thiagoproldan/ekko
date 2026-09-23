@@ -506,14 +506,12 @@ fn count_items(storage_file: &Path) -> (u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     const NOW: i64 = 1787600000000;
 
     /// A scratch home, canonical so paths compare the way init records them.
     fn temp(tag: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("ekko-project-{tag}-{}-{nanos}", std::process::id()));
+        let dir = crate::paths::test_dir(&format!("ekko-project-{tag}"));
         fs::create_dir_all(&dir).unwrap();
         fs::canonicalize(&dir).unwrap()
     }

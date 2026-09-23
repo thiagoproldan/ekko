@@ -90,15 +90,9 @@ fn ensure_config_file(path: &Path) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_home_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ekko-config-test-{}-{}",
-            process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let dir = crate::paths::test_dir("ekko-config-test");
         fs::create_dir_all(&dir).unwrap();
         dir
     }

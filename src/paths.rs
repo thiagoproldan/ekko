@@ -52,6 +52,22 @@ fn normalize_lexically(path: &Path) -> PathBuf {
     result
 }
 
+/// A path under the system's temp dir for one test's files, given to no
+/// other test of this run. Tests run in parallel in one process, so the
+/// process and the clock alone do not tell two apart: on 2026-09-22 a
+/// storage test's directory vanished mid-run in CI, most likely handed to
+/// another test that read the same clock value and deleted it on finishing
+/// (task 393). The counter keeps tests apart; the clock keeps a run apart
+/// from a crashed one's leftovers under a reused pid.
+#[cfg(test)]
+pub(crate) fn test_dir(prefix: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let next = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{next}", std::process::id()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +108,18 @@ mod tests {
     fn resolve_path_expands_tilde_before_resolving() {
         let resolved = resolve_path(Path::new("/home/x"), Path::new("/cwd"), "~/work");
         assert_eq!(resolved, Path::new("/home/x/work"));
+    }
+
+    /// Tests asking for a directory all at once never share one, however
+    /// coarse the clock: the name carries a counter (task 393).
+    #[test]
+    fn test_dirs_asked_for_at_once_are_all_different() {
+        let names: Vec<PathBuf> = std::thread::scope(|scope| {
+            let askers: Vec<_> =
+                (0..8).map(|_| scope.spawn(|| (0..200).map(|_| test_dir("ekko-paths")).collect::<Vec<_>>())).collect();
+            askers.into_iter().flat_map(|asker| asker.join().unwrap()).collect()
+        });
+        let distinct: std::collections::HashSet<&PathBuf> = names.iter().collect();
+        assert_eq!(distinct.len(), names.len());
     }
 }

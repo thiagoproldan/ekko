@@ -27,11 +27,16 @@ use std::path::PathBuf;
 use std::process::{self, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// A counter beside the clock: tests run in parallel, and two can read the
+/// same clock value (task 393).
 fn temp_ekko_dir() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "ekko-e2e-concurrency-{}-{}",
+        "ekko-e2e-concurrency-{}-{}-{}",
         process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&dir).unwrap();
     dir

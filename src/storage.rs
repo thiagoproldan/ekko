@@ -659,11 +659,7 @@ mod tests {
     use std::time::Instant;
 
     fn temp_ekko_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ekko-test-{}-{}",
-            process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let dir = crate::paths::test_dir("ekko-test");
         fs::create_dir_all(&dir).unwrap();
         dir
     }

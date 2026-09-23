@@ -926,8 +926,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn board(tag: &str) -> (Ekko, PathBuf) {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("ekko-ops-{tag}-{}-{nanos}", std::process::id()));
+        let dir = crate::paths::test_dir(&format!("ekko-ops-{tag}"));
         std::fs::create_dir_all(&dir).unwrap();
         (Ekko::new(Storage::new(&dir).unwrap()), dir)
     }

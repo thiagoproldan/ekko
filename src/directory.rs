@@ -276,15 +276,9 @@ fn assert_directory_exists(dir: &Path, display: &str) -> Result<(), DirectoryErr
 mod tests {
     use super::*;
     use std::fs;
-    use std::process;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ekko-directory-test-{}-{}",
-            process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let dir = crate::paths::test_dir("ekko-directory-test");
         fs::create_dir_all(&dir).unwrap();
         dir
     }

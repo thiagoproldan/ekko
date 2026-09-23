@@ -2373,19 +2373,13 @@ mod tests {
     use crate::render::Painter;
     use std::fs;
     use std::path::PathBuf;
-    use std::process;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn words(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
     }
 
     fn fresh_ekko() -> (Ekko, PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "ekko-core-test-{}-{}",
-            process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let dir = crate::paths::test_dir("ekko-core-test");
         fs::create_dir_all(&dir).unwrap();
         let ekko = Ekko::new(Storage::new(&dir).unwrap());
         (ekko, dir)
@@ -4131,11 +4125,7 @@ mod tests {
     /// the project itself said 88%.
     #[test]
     fn the_project_listing_counts_the_way_the_project_does() {
-        let home = std::env::temp_dir().join(format!(
-            "ekko-core-listing-{}-{}",
-            process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let home = crate::paths::test_dir("ekko-core-listing");
         let folder = home.join("work").join("p");
         fs::create_dir_all(&folder).unwrap();
         crate::project::init(&home, &folder, None, None, 0).unwrap();

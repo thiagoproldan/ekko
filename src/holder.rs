@@ -449,8 +449,7 @@ mod tests {
     /// /clear was resumed instead of the one after it.
     #[test]
     fn a_claim_names_the_conversation_its_process_runs() {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("ekko-registry-{}-{nanos}", std::process::id()));
+        let dir = crate::paths::test_dir("ekko-registry");
         let registry = Registry::at(dir.clone());
         let me = Process::of(std::process::id()).expect("/proc reads this process");
         let actor = Actor {

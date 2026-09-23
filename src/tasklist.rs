@@ -257,8 +257,7 @@ mod tests {
     use crate::storage::Storage;
 
     fn scratch(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("ekko-tasklist-{tag}-{}-{nanos}", std::process::id()));
+        let dir = crate::paths::test_dir(&format!("ekko-tasklist-{tag}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

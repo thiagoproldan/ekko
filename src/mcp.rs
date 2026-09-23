@@ -1177,8 +1177,7 @@ mod tests {
     #[test]
     fn a_binary_replaced_behind_its_name_is_told_apart() {
         use std::os::unix::fs::symlink;
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("ekko-binary-{}-{nanos}", std::process::id()));
+        let dir = crate::paths::test_dir("ekko-binary");
         let (old, new, bin) = (dir.join("store-old"), dir.join("store-new"), dir.join("bin"));
         for folder in [&old, &new, &bin] {
             fs::create_dir_all(folder).unwrap();
