@@ -654,7 +654,7 @@ impl Ekko {
         if description.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
-        fits(&description)?;
+        fits("description", &description)?;
         if boards.is_empty() {
             boards.push("My Board".to_string());
         }
@@ -1319,7 +1319,7 @@ impl Ekko {
         if new_description.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
-        fits(&new_description)?;
+        fits("description", &new_description)?;
 
         data.get_mut(&id).expect("id just validated against data").description = new_description;
         self.save_touching(&mut data)?;
@@ -2239,17 +2239,18 @@ pub(crate) fn phase_inversion(order: &HashMap<&str, usize>, blocked: &Item, bloc
     })
 }
 
-/// The longest description an item takes, in characters: over twice the
-/// longest a board had when it was set (9,125), since context prints a
-/// description whole on every read of it.
+/// The longest description an item takes, in characters, and the longest
+/// answer to a question: over twice the longest description a board had when
+/// it was set (9,125), since context prints either whole on every read.
 pub const MAX_DESCRIPTION: usize = 20_000;
 
-/// Refuses a description past `MAX_DESCRIPTION`, saying by how much.
-pub fn fits(description: &str) -> Result<(), EkkoError> {
-    let length = description.chars().count();
+/// Refuses a text past `MAX_DESCRIPTION`, saying by how much: `what` names
+/// it in the refusal, a description or an answer.
+pub fn fits(what: &str, text: &str) -> Result<(), EkkoError> {
+    let length = text.chars().count();
     if length > MAX_DESCRIPTION {
         return Err(EkkoError::InvalidInput(format!(
-            "The description runs {length} characters, past the {MAX_DESCRIPTION} an item takes: keep the item short and put the rest in a note or a file it names"
+            "The {what} runs {length} characters, past the {MAX_DESCRIPTION} an item takes: keep it short and put the rest in a note or a file it names"
         )));
     }
     Ok(())

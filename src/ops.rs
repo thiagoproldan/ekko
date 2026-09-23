@@ -365,7 +365,7 @@ impl<'a> Draft<'a> {
         if text.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
-        crate::ekko::fits(text)?;
+        crate::ekko::fits("description", text)?;
         let kind = spec.kind.unwrap_or(if spec.attached_to.is_some() { Kind::Note } else { Kind::Task });
         if kind != Kind::Task {
             for (field, given) in [
@@ -459,6 +459,7 @@ impl<'a> Draft<'a> {
         if text.is_empty() {
             return Err(invalid("An answer needs its text"));
         }
+        crate::ekko::fits("answer", text)?;
         let id = self.resolve(question)?;
         let Some(asked) = self.data[&id].question.clone() else {
             return Err(invalid(format!("{id} is not a question; ask records one")));
@@ -572,7 +573,7 @@ impl<'a> Draft<'a> {
         if description.trim().is_empty() {
             return Err(EkkoError::MissingDesc);
         }
-        crate::ekko::fits(&description)?;
+        crate::ekko::fits("description", &description)?;
         item.description = description;
         Ok(vec![id])
     }
@@ -996,6 +997,15 @@ mod tests {
         assert!(matches!(&grown, Err(EkkoError::InvalidInput(m)) if m.contains("past the 20000")), "{:?}", grown.err());
         let cli = ekko.edit_description(&["@1".to_string(), full.clone(), "x".to_string()]);
         assert!(matches!(&cli, Err(EkkoError::InvalidInput(m)) if m.contains("past the 20000")), "the terminal too: {:?}", cli.err());
+
+        // An answer is held to the same length, and named as an answer.
+        let mut draft = Draft::open(&ekko).unwrap();
+        let asked = draft.ask("How long may an answer run?", None).unwrap();
+        draft.commit(false).unwrap();
+        let mut draft = Draft::open(&ekko).unwrap();
+        let long = draft.answer(&Ref::Id(asked), &format!("{full}x"));
+        assert!(matches!(&long, Err(EkkoError::InvalidInput(m)) if m.starts_with("The answer runs 20001 characters")), "{:?}", long.err());
+        draft.answer(&Ref::Id(asked), &full).unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
     }
