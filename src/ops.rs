@@ -808,8 +808,61 @@ impl<'a> Draft<'a> {
         let (overridden, reopened) = Ekko::refuse_broken_dependencies(&self.before, &self.data, force)?;
         let mut notices = std::mem::take(&mut self.notices);
         notices.extend(self.settle_holders(force)?);
+        notices.extend(self.loose_notes_of_the_done());
         let (released, blocked) = self.ekko.save_against(&self.before, &mut self.data)?;
         Ok(Committed { data: self.data, overridden, reopened, released, blocked, notices })
+    }
+
+    /// The notes still attached to each task this draft completes, told in a
+    /// notice: they leave the prime with the task, and one that proposes
+    /// something, or holds a lesson, would leave unsettled with nobody told
+    /// (task 398). Only notes without a kind: a decision, a gotcha or a
+    /// procedure stays in force on its own, a handoff is history once its
+    /// task is done, and a question waits on the user wherever it is.
+    /// Nothing is written on its own.
+    fn loose_notes_of_the_done(&self) -> Vec<String> {
+        let done = |item: &Item| State::of(item) == Some(State::Done);
+        let replaced: std::collections::HashSet<&str> =
+            self.data.values().filter(|note| note.trashed.is_none()).filter_map(|note| note.supersedes.as_deref()).collect();
+        let mut finished: Vec<&Item> = self
+            .data
+            .values()
+            .filter(|task| task.is_task && done(task) && !self.before.get(&task.id).is_some_and(done))
+            .collect();
+        finished.sort_by_key(|task| task.id);
+        let mut notices = Vec::new();
+        for task in finished {
+            let Some(uid) = task.uid.as_deref() else { continue };
+            let mut loose: Vec<u32> = self
+                .data
+                .values()
+                .filter(|note| !note.is_task && note.attached_to.as_deref() == Some(uid))
+                .filter(|note| note.trashed.is_none() && note.stashed.is_none())
+                .filter(|note| note.knowledge.is_none() && !note.handoff && note.question.is_none())
+                .filter(|note| !note.uid.as_deref().is_some_and(|uid| replaced.contains(uid)))
+                .map(|note| note.id)
+                .collect();
+            if loose.is_empty() {
+                continue;
+            }
+            loose.sort_unstable();
+            let id = task.id;
+            notices.push(match loose.as_slice() {
+                [only] => format!(
+                    "{id} is done; note {only} stays attached to it and leaves the prime with it. If it still \
+                     proposes something, make that a task of its own or append why not; a lesson it holds goes \
+                     into a decision, gotcha or procedure"
+                ),
+                [rest @ .., last] => format!(
+                    "{id} is done; notes {} and {last} stay attached to it and leave the prime with it. One that \
+                     still proposes something becomes a task of its own or gets a line saying why not; a lesson \
+                     one holds goes into a decision, gotcha or procedure",
+                    rest.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                ),
+                [] => unreachable!("an empty list was skipped"),
+            });
+        }
+        notices
     }
 
     /// Who holds what, once the draft is whole. A change of state to a task
@@ -1265,6 +1318,52 @@ mod tests {
         assert!(!data[&2].handoff, "the earlier handoff is demoted");
         assert_eq!(data[&2].attached_to, data[&1].uid, "and kept on the task");
         assert_eq!(data[&3].supersedes, data[&2].uid, "which the new one supersedes");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Completing a task names the notes without a kind still attached to it,
+    /// which leave the prime with it; a typed note, a handoff and a question
+    /// are left out, and nothing is written for any of them (task 398).
+    #[test]
+    fn completing_a_task_names_the_notes_it_leaves_behind() {
+        let (ekko, dir) = board("loose-notes");
+        batch(
+            &ekko,
+            &[
+                json!({"op": "create", "text": "the work"}),
+                json!({"op": "create", "text": "an idea for later", "attached_to": "$1"}),
+                json!({"op": "create", "kind": "gotcha", "text": "a trap", "attached_to": "$1"}),
+                json!({"op": "create", "kind": "handoff", "text": "where it stopped", "attached_to": "$1"}),
+                json!({"op": "create", "text": "BUILT in abc123", "attached_to": "$1"}),
+                json!({"op": "create", "text": "small work"}),
+                json!({"op": "create", "text": "its one note", "attached_to": "$6"}),
+                json!({"op": "create", "text": "bare work"}),
+            ],
+        )
+        .unwrap();
+        let mut draft = Draft::open(&ekko).unwrap();
+        draft.ask("Which way?", Some(&Ref::Id(1))).unwrap();
+        draft.commit(false).unwrap();
+        let before = ekko.storage.get().unwrap();
+
+        let done = batch(&ekko, &[json!({"op": "set_state", "items": [1, 6, 8], "state": "done"})]).unwrap();
+        assert_eq!(
+            done.notices,
+            vec![
+                "1 is done; notes 2 and 5 stay attached to it and leave the prime with it. One that still proposes \
+                 something becomes a task of its own or gets a line saying why not; a lesson one holds goes into a \
+                 decision, gotcha or procedure",
+                "6 is done; note 7 stays attached to it and leaves the prime with it. If it still proposes something, \
+                 make that a task of its own or append why not; a lesson it holds goes into a decision, gotcha or \
+                 procedure",
+            ]
+        );
+        for note in [2, 3, 4, 5, 7, 9] {
+            assert_eq!(done.data[&note], before[&note], "note {note} is left as it was");
+        }
+        let again = batch(&ekko, &[json!({"op": "set_state", "items": [1], "state": "done"})]).unwrap();
+        assert!(again.notices.is_empty(), "only the write that completes it says so: {:?}", again.notices);
 
         std::fs::remove_dir_all(&dir).ok();
     }
