@@ -1513,6 +1513,11 @@ pub struct Changes {
     /// back, and it is that, not the journal, that keeps the list from being told.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub ahead: bool,
+    /// The questions among the items, each with its answer once given: a
+    /// session resumed after its question was answered reads the answer
+    /// here, in what moved, and not only in a prime it may not read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<(u32, Option<String>)>,
 }
 
 /// An item gone from storage, as the journal remembers it.
@@ -1603,6 +1608,10 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
     // (lost, or restored from an older copy): what moved cannot be told.
     let complete = (since >= CLOCK_CURSOR || cursor >= since) && from.is_none_or(|from| since < CLOCK_CURSOR && since + 1 >= from);
     let ahead = since < CLOCK_CURSOR && cursor < since;
+    let questions = items
+        .iter()
+        .filter_map(|entry| Some((entry.id, all.get(&entry.id)?.question.as_ref()?.answer.as_ref().map(|answer| answer.text.clone()))))
+        .collect();
 
     Ok(Changes {
         since,
@@ -1613,6 +1622,7 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
         removed,
         complete,
         ahead,
+        questions,
     })
 }
 
@@ -1909,7 +1919,12 @@ impl Changes {
             } else {
                 ""
             };
-            let _ = writeln!(out, "{:>4}. [{}{away}] {}{now}", entry.id, listed_state(entry), clip(&entry.description, TASK_CLIP));
+            let (state, answer) = match self.questions.iter().find(|(id, _)| *id == entry.id) {
+                Some((_, None)) => ("question".to_string(), String::new()),
+                Some((_, Some(answer))) => ("answered".to_string(), format!(" -> {}", clip(answer, NOTE_CLIP))),
+                None => (listed_state(entry), String::new()),
+            };
+            let _ = writeln!(out, "{:>4}. [{state}{away}] {}{answer}{now}", entry.id, clip(&entry.description, TASK_CLIP));
         }
         for gone in &self.removed {
             let _ = writeln!(out, "{:>4}. [removed] {}", gone.id, gone.text);
@@ -3730,9 +3745,9 @@ mod tests {
         };
         let start = |actor: &crate::holder::Actor, conversation: &str| {
             let event = SessionEvent { source: "resume".to_string(), session_id: Some(conversation.to_string()) };
-            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap()
         };
-        start(&gone, "c-asker");
+        let _ = start(&gone, "c-asker");
         as_(&gone).create_task(&words(&["the merge"])).unwrap();
         let asker = as_(&gone);
         let mut draft = crate::ops::Draft::open(&asker).unwrap();
@@ -3746,7 +3761,8 @@ mod tests {
         assert!(!theirs.contains("[question]"), "an open question is not quoted again under its task: {theirs}");
 
         as_(&crate::holder::Actor::person()).answer_question(&words(&[&asked.to_string(), "yes,", "after", "the", "rebase"])).unwrap();
-        start(&me, "c-asker");
+        let resumed = start(&me, "c-asker");
+        assert!(resumed.contains(&format!("{asked}. [answered] Merge auditoria now? -> yes, after the rebase\n")), "what moved names the answer: {resumed}");
         let mine = prime(&as_(&me), "default board").unwrap().text();
         let answered = format!(
             "\nAnswered, for this session (1)\n   {asked}. Merge auditoria now?\n      -> yes, after the rebase (recorded by the user, 1 write after it was asked)\n"
