@@ -237,7 +237,7 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 | `edit` | the whole text, one exact replacement, or an append -- optionally conditioned on the `updatedAt` last read |
 | `update` | boards, priority, due date, who a task is with, phase, star, a note's kind |
 | `link` | `blocked_by`, `attached_to`, or `supersedes` |
-| `batch` | several of the writes above in one write, all or nothing, with `$1`, `$2` naming the items earlier operations created |
+| `batch` | several of the writes above in one write, all or nothing, with `$1`, `$2` naming the items earlier operations created, in the fields that take an item; a text keeps them as written, and the reply names the item each one is |
 | `ask`, `answer` | a question for the user, kept on the board until the reply is recorded; see Questions below |
 | `stash`, `trash` | put items away, or bring them back |
 | `away` | what is put away: the stash, and the trash with the days each item has left, one line per item |

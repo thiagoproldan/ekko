@@ -1122,7 +1122,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "batch",
-            "description": "Several operations in one write, all or nothing. Each is an object with op (create, set_state, edit, update or link) and that tool's arguments, without project. $1, $2 refer to the items created by the first and second operations.",
+            "description": "Several operations in one write, all or nothing. Each is an object with op (create, set_state, edit, update or link) and that tool's arguments, without project. $1, $2 refer to the items created by the first and second operations, in the fields that take an item; a text keeps them as written, and the reply names the item each one is.",
             "inputSchema": object(json!({
                 "project": project,
                 "ops": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"op": {"type": "string", "enum": ["create", "set_state", "edit", "update", "link"]}}, "required": ["op"]}}

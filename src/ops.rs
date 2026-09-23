@@ -200,6 +200,46 @@ pub enum Op {
     Link(Link),
 }
 
+impl Op {
+    /// What the operation writes into a description: a create's text, and an
+    /// edit's whole text, replacement or append.
+    fn texts(&self) -> Vec<&str> {
+        match self {
+            Op::Create(spec) => vec![spec.text.as_str()],
+            Op::Edit(spec) => spec
+                .text
+                .iter()
+                .chain(spec.replace.iter().map(|replace| &replace.new))
+                .chain(spec.append.iter())
+                .map(String::as_str)
+                .collect(),
+            Op::SetState(_) | Op::Update(_) | Op::Link(_) => Vec::new(),
+        }
+    }
+}
+
+/// The numbers a text writes as `$N`: a dollar sign, then digits that end the
+/// word -- `$2`, `$2,` and `$2.` but not `$2.50` or `$2nd`.
+fn dollar_numbers(text: &str) -> Vec<usize> {
+    let mut numbers = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = text[from..].find('$') {
+        let start = from + offset + 1;
+        let end = start + text[start..].bytes().take_while(u8::is_ascii_digit).count();
+        from = end;
+        let mut after = text[end..].chars();
+        let next = after.next();
+        let decimal = matches!(next, Some('.' | ',')) && after.next().is_some_and(|c| c.is_ascii_digit());
+        let word = next.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if end > start && !decimal && !word {
+            if let Ok(n) = text[start..end].parse() {
+                numbers.push(n);
+            }
+        }
+    }
+    numbers
+}
+
 /// Tells a field given as `null` from a field left out: `Some(None)` for the
 /// first, and `None`, through `default`, for the second.
 fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -288,6 +328,9 @@ pub struct Draft<'a> {
     /// For each operation applied so far, the item it created, if any --
     /// what `$N` resolves through.
     created: Vec<Option<u32>>,
+    /// For each operation applied so far, what it wrote into a description,
+    /// which `commit` reads for a `$N` left as written.
+    texts: Vec<Vec<String>>,
     /// Tasks this draft set in progress, whether or not they already were:
     /// a claim, which `commit` settles against whoever holds each one.
     claims: Vec<u32>,
@@ -315,7 +358,17 @@ impl<'a> Draft<'a> {
         let lock = ekko.storage.acquire_lock()?;
         let data = ekko.storage.get()?;
         let phases = ekko.storage.get_phases()?;
-        Ok(Draft { ekko, _lock: lock, before: data.clone(), data, phases, created: Vec::new(), claims: Vec::new(), notices: Vec::new() })
+        Ok(Draft {
+            ekko,
+            _lock: lock,
+            before: data.clone(),
+            data,
+            phases,
+            created: Vec::new(),
+            texts: Vec::new(),
+            claims: Vec::new(),
+            notices: Vec::new(),
+        })
     }
 
     /// How a refusal of this draft should name its items; see `Names`.
@@ -366,6 +419,7 @@ impl<'a> Draft<'a> {
             _ => None,
         };
         self.created.push(created);
+        self.texts.push(op.texts().into_iter().map(str::to_string).collect());
         result
     }
 
@@ -831,10 +885,36 @@ impl<'a> Draft<'a> {
     pub fn commit(mut self, force: bool) -> Result<Committed, EkkoError> {
         let (overridden, reopened) = Ekko::refuse_broken_dependencies(&self.before, &self.data, force)?;
         let mut notices = std::mem::take(&mut self.notices);
+        notices.extend(self.kept_references());
         notices.extend(self.settle_holders(force)?);
         notices.extend(self.loose_notes_of_the_done());
         let (released, blocked) = self.ekko.save_against(&self.before, &mut self.data)?;
         Ok(Committed { data: self.data, overridden, reopened, released, blocked, notices })
+    }
+
+    /// Each `$N` a batch's text holds for another operation N that created an
+    /// item, told in a notice naming that item. A text is left as written,
+    /// since prose may mean a dollar sign, and so it once kept 'task $2'
+    /// where the batch's second operation had created the task meant (task
+    /// 394). Only the fields that take an item read `$N` as one. An item's
+    /// own number is not told: its text has no need of it, and a batch of
+    /// one create would be told that 'costs $1' names what it wrote.
+    fn kept_references(&self) -> Vec<String> {
+        let mut notices = Vec::new();
+        for (at, texts) in self.texts.iter().enumerate() {
+            let mut told = Vec::new();
+            for n in texts.iter().flat_map(|text| dollar_numbers(text)).filter(|&n| n != at + 1) {
+                let Some(id) = n.checked_sub(1).and_then(|op| self.created.get(op).copied().flatten()) else { continue };
+                if !told.contains(&n) {
+                    told.push(n);
+                    notices.push(format!(
+                        "operation {}'s text holds ${n}, which batch does not replace: that item is {id}",
+                        at + 1
+                    ));
+                }
+            }
+        }
+        notices
     }
 
     /// The notes still attached to each task this draft completes, told in a
@@ -1659,6 +1739,50 @@ mod tests {
         drop(draft);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A text keeps `$N` as written, since prose may mean a dollar sign, and
+    /// the reply names the item it would be: an edit once appended 'task $2'
+    /// for the task the second operation created, and nothing said so (task
+    /// 394). Only an N whose operation created another item is named, earlier
+    /// or later than the text, once per operation.
+    #[test]
+    fn a_text_keeps_dollar_n_as_written_and_the_reply_names_the_item() {
+        let (ekko, dir) = board("kept-references");
+        let text = "why $1 waits on $5 and $1, not $2, at $0 or $1.50, on the $1st";
+        let written = batch(
+            &ekko,
+            &[
+                json!({"op": "create", "text": "the task"}),
+                json!({"op": "create", "text": text}),
+                json!({"op": "update", "item": "$1", "priority": 2}),
+                json!({"op": "edit", "item": "$2", "append": " (see $3 and $4)"}),
+                json!({"op": "create", "text": "a later one", "attached_to": "$1"}),
+                json!({"op": "edit", "item": "$1", "replace": {"old": "task", "new": "task before $5"}}),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            written.notices,
+            vec![
+                "operation 2's text holds $1, which batch does not replace: that item is 1",
+                "operation 2's text holds $5, which batch does not replace: that item is 3",
+                "operation 6's text holds $5, which batch does not replace: that item is 3",
+            ]
+        );
+        assert_eq!(written.data[&2].description, format!("{text} (see $3 and $4)"));
+        assert_eq!(written.data[&1].description, "the task before $5");
+        let alone = batch(&ekko, &[json!({"op": "create", "text": "costs $1"})]).unwrap();
+        assert!(alone.notices.is_empty(), "{:?}", alone.notices);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_dollar_n_is_digits_that_end_the_word() {
+        assert_eq!(dollar_numbers("$1, $2. ($3) $10 $4.50 $5,00 $6th $7_ $ 8 $"), vec![1, 2, 3, 10]);
+        assert_eq!(dollar_numbers("é$2é $3é"), Vec::<usize>::new());
     }
 
     /// A commit names the tasks its write set free and the ones it left
