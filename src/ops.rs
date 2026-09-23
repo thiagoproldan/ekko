@@ -476,7 +476,9 @@ impl<'a> Draft<'a> {
 
     /// Makes note `id` the handoff of `task`: an open task only, since a
     /// finished one has nothing left to hand over, and the only one there --
-    /// the handoff it replaces stays on the task as an ordinary note.
+    /// the handoff it replaces stays on the task as an ordinary note, which
+    /// the new one supersedes, so a read can tell it from the notes around
+    /// it and show it as history.
     fn hand_over(&mut self, id: u32, task: u32) -> Result<(), EkkoError> {
         if !holds(&self.data[&task]) {
             return Err(invalid(format!("{task} is finished, and a finished task has nothing to hand over")));
@@ -488,10 +490,17 @@ impl<'a> Draft<'a> {
             .filter(|note| note.handoff && note.id != id && note.attached_to.is_some() && note.attached_to == uid)
             .map(|note| note.id)
             .collect();
+        let mut replaced = None;
         for note in earlier {
-            self.item(note).handoff = false;
+            let demoted = self.item(note);
+            demoted.handoff = false;
+            if demoted.trashed.is_none() {
+                replaced = demoted.uid.clone();
+            }
         }
-        self.item(id).handoff = true;
+        let handoff = self.item(id);
+        handoff.handoff = true;
+        handoff.supersedes = replaced;
         Ok(())
     }
 
@@ -675,6 +684,13 @@ impl<'a> Draft<'a> {
         let replaced = item.uid.as_deref().is_some_and(|uid| {
             self.data.values().any(|note| note.trashed.is_none() && note.supersedes.as_deref() == Some(uid))
         });
+        // A note without a kind is in a line of supersession only as a handoff
+        // a later one replaced (see `hand_over`).
+        if item.knowledge.is_none() && (item.supersedes.is_some() || replaced) {
+            return Err(invalid(format!(
+                "{named} is a handoff a later one replaced; write what stays true as a note of its own"
+            )));
+        }
         if item.supersedes.is_some() || replaced {
             return Err(invalid(format!(
                 "{named} supersedes a note or is superseded by one, and a line of them keeps one kind: clear supersedes with link first"
@@ -742,9 +758,15 @@ impl<'a> Draft<'a> {
                 let moved = self.data[&id].attached_to != attached.as_ref().map(|(_, uid)| uid.clone());
                 self.item(id).attached_to = attached.map(|(_, uid)| uid);
                 // A handoff hands over the task it was written on; moved or
-                // detached, it is an ordinary note about that work.
+                // detached, it is an ordinary note about that work, and the
+                // handoff it replaced there is no longer replaced by it. (A
+                // note without a kind supersedes only as a handoff.)
                 if moved {
-                    self.item(id).handoff = false;
+                    let note = self.item(id);
+                    note.handoff = false;
+                    if note.knowledge.is_none() {
+                        note.supersedes = None;
+                    }
                 }
             }
             (None, None, Some(older)) => {
@@ -1242,6 +1264,35 @@ mod tests {
         assert_eq!(data[&3].attached_to, data[&1].uid);
         assert!(!data[&2].handoff, "the earlier handoff is demoted");
         assert_eq!(data[&2].attached_to, data[&1].uid, "and kept on the task");
+        assert_eq!(data[&3].supersedes, data[&2].uid, "which the new one supersedes");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A handoff a later one replaced keeps no kind: what it holds that stays
+    /// true goes into a note of its own, as with the handoff in force. Moved
+    /// to another task, the later one is an ordinary note there, and the one
+    /// it replaced is no longer replaced by it.
+    #[test]
+    fn a_replaced_handoff_takes_no_kind_and_a_moved_one_lets_go_of_it() {
+        let (ekko, dir) = board("handoff-line");
+        batch(
+            &ekko,
+            &[
+                json!({"op": "create", "text": "the work"}),
+                json!({"op": "create", "kind": "handoff", "text": "stopped at the parser", "attached_to": "$1"}),
+                json!({"op": "create", "kind": "handoff", "text": "parser done, tests next", "attached_to": "$1"}),
+                json!({"op": "create", "text": "other work"}),
+            ],
+        )
+        .unwrap();
+
+        let retyped = refusal(batch(&ekko, &[json!({"op": "update", "item": 2, "kind": "decision"})]));
+        assert!(retyped.contains("a later one replaced") && retyped.contains("a note of its own"), "{retyped}");
+
+        let moved = batch(&ekko, &[json!({"op": "link", "item": 3, "attached_to": 4})]).unwrap();
+        assert!(!moved.data[&3].handoff && moved.data[&3].supersedes.is_none(), "{:?}", moved.data[&3]);
+        batch(&ekko, &[json!({"op": "update", "item": 2, "kind": "decision"})]).unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
     }

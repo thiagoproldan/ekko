@@ -201,10 +201,14 @@ pub struct Item {
     /// stored exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge: Option<Knowledge>,
-    /// The earlier note of the same kind this one replaces, by `uid`.
+    /// The earlier note of the same kind this one replaces, by `uid`. A
+    /// decision, gotcha or procedure names it when written; a handoff gets it
+    /// when it demotes the one before on its task, so a note without a kind
+    /// is superseded only as a handoff a later one replaced.
     ///
-    /// Stored on the newer note only: the one it replaces is never rewritten,
-    /// and stays on the board as history. Whether a note is superseded is
+    /// Stored on the newer note only: the one it replaces is never rewritten
+    /// for it (a demoted handoff loses its flag, which `handoff` owns), and
+    /// stays on the board as history. Whether a note is superseded is
     /// worked out from the notes pointing at it, so trashing the newer one
     /// makes the older one current again with nothing to undo -- the way a
     /// trashed blocker stops blocking. By uid, for the reason `blocked_by` is.

@@ -420,17 +420,25 @@ pub struct NoteRef {
 
 impl NoteRef {
     /// What a listing puts before a typed note's text -- "[gotcha] ", or
-    /// "[decision, superseded by 9] ", "[question] " -- and nothing before an
-    /// ordinary one.
+    /// "[decision, superseded by 9] ", "[question] ", "[handoff, replaced by
+    /// 12] " -- and nothing before an ordinary one.
     fn mark(&self) -> String {
         if let Some(answered) = self.answered {
             return if answered { "[answered] " } else { "[question] " }.to_string();
         }
         match (self.knowledge, self.superseded_by.as_slice()) {
-            (None, _) => String::new(),
+            (None, []) => String::new(),
+            (None, newer) => format!("[handoff, replaced by {}] ", join(newer)),
             (Some(kind), []) => format!("[{}] ", kind.word()),
             (Some(kind), newer) => format!("[{}, superseded by {}] ", kind.word(), join(newer)),
         }
+    }
+
+    /// A handoff a later one replaced (see `Item::supersedes`): history the
+    /// newer handoff had the chance to take in, so a read clips it however
+    /// much detail it asks for, and its own id still gives it whole.
+    fn replaced_handoff(&self) -> bool {
+        self.knowledge.is_none() && !self.superseded_by.is_empty()
     }
 }
 
@@ -1138,9 +1146,13 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
             id: other.id,
             uid: other.uid.clone(),
             // A trashed blocker holds nothing up, so its state would mislead.
-            state: match other.trashed {
-                Some(_) => "in the trash",
-                None => other.knowledge.map_or_else(|| state_word(other), Knowledge::word),
+            state: match (other.trashed, other.knowledge) {
+                (Some(_), _) => "in the trash",
+                (None, Some(kind)) => kind.word(),
+                (None, None) if other.handoff => "handoff",
+                // A note without a kind is superseded only as a handoff.
+                (None, None) if reader.graph.links.superseded_by.contains_key(&other.id) => "handoff, replaced",
+                (None, None) => state_word(other),
             },
             description: clip(&other.description, TASK_CLIP),
         })
@@ -2013,12 +2025,14 @@ fn knowledge_line(note: &NoteRef) -> String {
 }
 
 /// What a listing says an item is, in brackets: a task's state or a note's
-/// kind, and for a superseded note, what supersedes it.
+/// kind, and for a superseded note, what supersedes it -- for a note without
+/// a kind, the later handoff that replaced it.
 fn listed_state(entry: &Entry) -> String {
     let word = entry.knowledge.map_or_else(|| word_or_note(entry.state), Knowledge::word);
-    match entry.superseded_by.as_slice() {
-        [] => word.to_string(),
-        newer => format!("{word}, superseded by {}", join(newer)),
+    match (entry.knowledge, entry.superseded_by.as_slice()) {
+        (_, []) => word.to_string(),
+        (None, newer) => format!("handoff, replaced by {}", join(newer)),
+        (Some(_), newer) => format!("{word}, superseded by {}", join(newer)),
     }
 }
 
@@ -2503,6 +2517,7 @@ impl Context {
         let mut facts = vec![match (item.state, item.handoff, item.knowledge) {
             (None, true, _) => "note, the handoff of the task it is attached to".to_string(),
             (None, false, Some(kind)) => format!("note, a {}", kind.word()),
+            (None, false, None) if !self.superseded_by.is_empty() => "note, a handoff a later one replaced".to_string(),
             (None, false, None) => "note".to_string(),
             (Some(state), _, _) => format!("task, {}", state.word()),
         }];
@@ -2576,9 +2591,14 @@ impl Context {
         if let Some(task) = &self.attached_to {
             links(&mut out, "Attached to", std::slice::from_ref(task));
         }
-        links(&mut out, "Superseded by, so no longer in force", &self.superseded_by);
-        if let Some(older) = &self.supersedes {
-            links(&mut out, "Supersedes", std::slice::from_ref(older));
+        // A note without a kind is in a line of supersession only as a handoff.
+        let (newer, older) = match item.knowledge {
+            Some(_) => ("Superseded by, so no longer in force", "Supersedes"),
+            None => ("Replaced by, a later handoff", "Replaces, an earlier handoff"),
+        };
+        links(&mut out, newer, &self.superseded_by);
+        if let Some(replaced) = &self.supersedes {
+            links(&mut out, older, std::slice::from_ref(replaced));
         }
         links(&mut out, "Blocked by", &self.blockers);
         if self.waits_on > 0 {
@@ -2608,8 +2628,8 @@ impl Context {
             for note in &item.notes {
                 let body = match (elsewhere(note.id), detail) {
                     (Some(place), _) => place.to_string(),
-                    (None, Detail::Full) => note.description.clone(),
-                    (None, Detail::Concise) => clip(&note.description, NOTE_CLIP),
+                    (None, Detail::Full) if !note.replaced_handoff() => note.description.clone(),
+                    (None, _) => clip(&note.description, NOTE_CLIP),
                 };
                 let _ = writeln!(out, "{:>4}. {}{body}", note.id, note.mark());
             }
@@ -3429,6 +3449,40 @@ mod tests {
         let older = context(&ekko, "1").unwrap().text();
         assert!(!older.contains("Superseded by"), "{older}");
         assert!(prime(&ekko, "default board").unwrap().text().contains("Decisions (1)"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A handoff a later one replaced is history: a read of its task marks
+    /// it and clips it even in full, as the prime treats the notes older than
+    /// a handoff, and its own id still gives it whole.
+    #[test]
+    fn context_marks_and_clips_a_replaced_handoff_even_in_full() {
+        let (ekko, dir) = board("handoff-replaced");
+        let older = "stopped at the parser, with every reason spelled out ".repeat(10);
+        let newer = "parser done and tests next, with the reasons for both ".repeat(10);
+        write(
+            &ekko,
+            &[
+                serde_json::json!({"op": "create", "text": "the work"}),
+                serde_json::json!({"op": "create", "kind": "handoff", "text": older, "attached_to": "$1"}),
+                serde_json::json!({"op": "create", "kind": "handoff", "text": newer, "attached_to": "$1"}),
+            ],
+        );
+
+        let task = context(&ekko, "1").unwrap().text_with(Detail::Full);
+        assert!(task.contains("   2. [handoff, replaced by 3] stopped at the parser"), "{task}");
+        assert!(!task.contains(older.trim()), "the replaced handoff is clipped: {task}");
+        assert!(task.contains(newer.trim()), "the current one is whole: {task}");
+
+        let replaced = context(&ekko, "2").unwrap().text();
+        assert!(replaced.contains(older.trim()), "its own id gives it whole: {replaced}");
+        assert!(replaced.contains("      note, a handoff a later one replaced \u{b7} "), "{replaced}");
+        assert!(replaced.contains("\nReplaced by, a later handoff\n   3. [handoff] parser done"), "{replaced}");
+        let current = context(&ekko, "3").unwrap().text();
+        assert!(current.contains("\nReplaces, an earlier handoff\n   2. [handoff, replaced] stopped"), "{current}");
+        let found = search(&ekko, Some("parser"), &[], 20).unwrap().text();
+        assert!(found.contains("   2. [handoff, replaced by 3] "), "{found}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
