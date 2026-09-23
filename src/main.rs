@@ -77,6 +77,7 @@ const HELP: &str = r#"
       --task, -t          Create task
       --timeline, -i      Display timeline view
       --version, -v       Display installed version
+      --with              Say who a task is with; no name, nobody
 
     Examples
       $ ekko
@@ -95,6 +96,7 @@ const HELP: &str = r#"
       $ ekko --project old --destroy
       $ ekko --json --task @coding Review PR #42
       $ ekko --list pending coding
+      $ ekko --list with:rodrigo
       $ ekko --move @1 cooking
       $ ekko --next 5
       $ ekko --note @coding Mergesort worse-case O(nlogn)
@@ -110,7 +112,9 @@ const HELP: &str = r#"
       $ ekko --task @coding @reviews Review PR #42
       $ ekko --task @coding Improve documentation
       $ ekko --task Make some buttercream
+      $ ekko --task Send the contract with:rodrigo
       $ ekko --timeline
+      $ ekko --with @3 rodrigo
 "#;
 
 /// Argument that re-invokes this same binary as a detached clipboard
@@ -447,6 +451,9 @@ fn dispatch(
     }
     if cli.priority {
         return Ok(vec![ekko.update_priority(&cli.input)?]);
+    }
+    if cli.with {
+        return Ok(vec![ekko.set_with(&cli.input)?]);
     }
     if cli.copy {
         return Ok(vec![ekko.copy_to_clipboard(&cli.input, write_clipboard)?]);

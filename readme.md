@@ -35,6 +35,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Due dates** via `d:YYYY-MM-DD`, coloured by urgency and filterable with `--list due|overdue`
 - **A real paused state**, so "set aside" stops looking like "never started"
 - **A waiting state**, for work held by something outside the board, which `--list ready` and `--next` stop offering
+- **Who a task is with**: `with:NAME` and `--with`, so work that is yours, a colleague's or a client's leaves an agent's queue and is listed by name
 - **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
 - **Projects**: a board per folder or repository, made with `ekko init` and found from inside it the way git finds a repository
 - **Phases and `--roadmap`**: a project's roadmap, read backwards as history and forwards as a plan
@@ -234,7 +235,7 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 | `create` | a task, a note, a handoff, or a decision, gotcha or procedure, with every field apart from the text, relations included |
 | `set_state`, `force_state` | idempotent state changes; `force_state` overrides the dependency rule and a running session's hold, and is a tool of its own so it can be permissioned apart |
 | `edit` | the whole text, one exact replacement, or an append -- optionally conditioned on the `updatedAt` last read |
-| `update` | boards, priority, due date, phase, star, a note's kind |
+| `update` | boards, priority, due date, who a task is with, phase, star, a note's kind |
 | `link` | `blocked_by`, `attached_to`, or `supersedes` |
 | `batch` | several of the writes above in one write, all or nothing, with `$1`, `$2` naming the items earlier operations created |
 | `ask`, `answer` | a question for the user, kept on the board until the reply is recorded; see Questions below |
@@ -277,7 +278,7 @@ None of this is documented by Claude Code: the file format and the rules come fr
 The same views are flags, for scripts, for the hook, and for a person curious what an agent sees:
 
 - `--prime` is the resume view of the board `ekko` would show where it runs -- inside a project's folder, the project -- and its first line says which board it read and why. The MCP server resolves its board the same way, from the folder the session started in.
-- `--next [N]` is the order to take work up in: work in progress first, then earlier phases (the project root after every phase), higher priority, the nearer deadline, more open work waiting downstream, and the older item. Each key only breaks the ties the ones before it leave.
+- `--next [N]` is the order to take work up in: work in progress first, then earlier phases (the project root after every phase), higher priority, the nearer deadline, more open work waiting downstream, and the older item. Each key only breaks the ties the ones before it leave. A ready task with someone is not in it: it is theirs.
 - `--context <id|uid>` is one item and everything one hop away from it.
 
 Every line of these views starts with the item's id, and each note sits directly under the task it explains. [`evals/resume/run.sh`](evals/resume/run.sh) measures how much of a resume each way of reading a board delivers, against ground truth computed independently with `jq`: on the boards it was run against, `--prime` delivered every task in progress, every ready task and every attached reason in 2-6 KB, where the board view took 77-99 KB and `--list ready` delivered none of the reasons.
@@ -733,6 +734,24 @@ Waiting is not paused. A paused task was set aside by choice and can be taken up
 
 This is an Ekko addition. `waiting` is stored only on a task that is waiting, so a board that never uses it stays byte-identical, and taskbook reads a waiting task as pending.
 
+### With Someone
+
+Some work is not an agent's to take up though nothing blocks it: a call only you can make, a decision that is a colleague's, an answer the client owes. A task can say who it is with:
+
+```
+$ ekko -t Send the signed contract with:rodrigo
+$ ekko --with @3 gleidisom
+$ ekko --with @3
+```
+
+`with:NAME` goes in the description, the way `p:x` and `d:YYYY-MM-DD` do, and `--with` changes it later, with the task's id prefixed by `@`; `--with` with no name leaves the task with nobody again. A name is one word, stored in lower case and compared with case and accents aside, so `--list with:joao` finds a task with `joão`. Only a task is with someone. Over MCP, `create` and `update` take `with`, and `update` with `null` clears it.
+
+A task with nobody is anyone's -- on a board an agent works, the agent's -- so nothing needs marking for a board to work as it did. A ready task with someone is theirs: `--next`, the prime's ready work and the task list Claude Code draws leave it out, and the prime lists it apart, by name, under `With someone, not to take up`, where a session sees what not to start and you see what each person has. It is still ready work, so `--list ready` keeps it; `--list with:rodrigo` is everything with Rodrigo, and composes with the other terms, as in `--list with:rodrigo ready`. The board view, `--context` and every listing say who a task is with, so a waiting task says whom it waits on.
+
+Who a task is with is said ahead of the work and stays until someone changes it. Who holds a task in progress, under [Several sessions](#the-mcp-server), is taken by starting the work and ends when it leaves progress.
+
+This is an Ekko addition. `with` is stored only on a task that is with someone, so a board that names nobody stays byte-identical, and taskbook reads such a task as any other.
+
 ### Stable ids
 
 The next display id is `max + 1`, so deleting the highest-numbered item and creating another hands that number straight back out. For someone typing at a terminal that is fine -- the id you use is the one on screen in front of you. For anything holding a reference between one command and the next, it is a trap.
@@ -907,6 +926,7 @@ The by default supported listing attributes, together with their respective alia
 - `cancelled`, `canceled` - Tasks that were dropped rather than finished.
 - `ready` - Open tasks with nothing outstanding blocking them, waiting ones left out.
 - `blocked` - Items blocked by something still open.
+- `with:NAME` - Tasks with someone, by name, case and accents aside.
 - `decision`, `decisions` - Notes recording what was settled, and why.
 - `gotcha`, `gotchas` - Notes recording a trap, and how to avoid it.
 - `procedure`, `procedures` - Notes recording steps that work.

@@ -197,6 +197,11 @@ pub struct Cli {
     pub projects: bool,
     #[arg(long, short = 'p')]
     pub priority: bool,
+    /// Say who a task is with: its id prefixed with `@`, then a name of one
+    /// word, as `--with @3 rodrigo`. No name leaves it with nobody. A task
+    /// with someone is left out of the work an agent takes up.
+    #[arg(long)]
+    pub with: bool,
     /// Idempotent counterpart to the `--check`/`--begin`/`--star` toggles:
     /// states the item should end up in, rather than flipping whatever it
     /// is now. Retry-safe, which the toggles are not.

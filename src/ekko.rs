@@ -383,6 +383,7 @@ pub enum Outcome {
     Answered(Item),
     Move(Item),
     Priority(Item),
+    With(Item),
     Copy { ids: Vec<u32>, descriptions: Vec<String> },
     Board(Vec<(String, Vec<Item>)>),
     Timeline(Vec<(String, Vec<Item>)>),
@@ -430,6 +431,7 @@ impl Outcome {
             Outcome::Answered(_) => "answer",
             Outcome::Move(_) => "move",
             Outcome::Priority(_) => "priority",
+            Outcome::With(_) => "with",
             Outcome::Copy { .. } => "copy",
             Outcome::Board(_) => "board",
             Outcome::Timeline(_) => "timeline",
@@ -503,6 +505,7 @@ impl Outcome {
             Outcome::Answered(item) => out.success_answered(item.id),
             Outcome::Move(item) => out.success_move(item.id, &item.boards),
             Outcome::Priority(item) => out.success_priority(item.id, item.priority.unwrap_or(1)),
+            Outcome::With(item) => out.success_with(item.id, item.with.as_deref()),
             Outcome::Copy { ids, .. } => out.success_copy_to_clipboard(ids),
             Outcome::Board(groups) | Outcome::Find(groups) | Outcome::List(groups) => out.display_by_board(groups),
             Outcome::Timeline(groups) | Outcome::Archive(groups) => out.display_by_date(groups),
@@ -537,6 +540,17 @@ pub struct Ekko {
     /// Who writes through this handle, and so who claims a task set in
     /// progress; `None` claims nothing.
     pub(crate) actor: Option<crate::holder::Actor>,
+}
+
+/// What the words given to `--task` or `--note` say: the `@boards`, the
+/// description, and the `p:`, `d:` and `with:` markers. A note keeps the
+/// boards and the description only.
+struct Created {
+    boards: Vec<String>,
+    description: String,
+    priority: u8,
+    due_date: Option<String>,
+    with: Option<String>,
 }
 
 impl Ekko {
@@ -616,10 +630,7 @@ impl Ekko {
         Ok((id, rest))
     }
 
-    fn parse_create_options(
-        &self,
-        input: &[String],
-    ) -> Result<(Vec<String>, String, u8, Option<String>), EkkoError> {
+    fn parse_create_options(&self, input: &[String]) -> Result<Created, EkkoError> {
         if input.is_empty() {
             return Err(EkkoError::MissingDesc);
         }
@@ -633,6 +644,10 @@ impl Ekko {
                 None => return Err(EkkoError::InvalidDueDate(token.clone())),
             }
         }
+        let mut with = None;
+        for token in input.iter().filter(|t| is_with_opt(t)) {
+            with = Some(person(&token[WITH.len()..])?);
+        }
         let mut boards = Vec::new();
         let mut words = Vec::new();
         for token in input {
@@ -640,7 +655,7 @@ impl Ekko {
                 words.push(text.to_string());
                 continue;
             }
-            if is_priority_opt(token) || is_due_opt(token) {
+            if is_priority_opt(token) || is_due_opt(token) || is_with_opt(token) {
                 continue;
             }
             if token.starts_with('@') && token.len() > 1 {
@@ -659,7 +674,7 @@ impl Ekko {
             boards.push("My Board".to_string());
         }
 
-        Ok((boards, description, priority, due_date))
+        Ok(Created { boards, description, priority, due_date, with })
     }
 
     // ---- grouping / stats / search -------------------------------------
@@ -825,6 +840,10 @@ impl Ekko {
                     data.retain(|_, item| State::of(item) == Some(State::Cancelled));
                 }
                 "due" => data.retain(|_, item| item.due_date.is_some()),
+                with if with.starts_with(WITH) => {
+                    let name = &with[WITH.len()..];
+                    data.retain(|_, item| is_with(item, name));
+                }
                 // Only tasks that are still open: a finished task is not
                 // late, however long its deadline has been past.
                 "overdue" => {
@@ -1077,11 +1096,12 @@ impl Ekko {
         phase: Option<&str>,
     ) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
-        let (boards, description, priority, due_date) = self.parse_create_options(input)?;
+        let created = self.parse_create_options(input)?;
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
-        let mut item = Item::new_task(id, description, boards, priority);
-        item.due_date = due_date;
+        let mut item = Item::new_task(id, created.description, created.boards, created.priority);
+        item.due_date = created.due_date;
+        item.with = created.with;
         item.phase = phase.map(str::to_string);
         data.insert(id, item.clone());
         self.save_touching(&mut data)?;
@@ -1124,10 +1144,10 @@ impl Ekko {
             }
         };
         let _lock = self.storage.acquire_lock()?;
-        let (boards, description, _priority, _due) = self.parse_create_options(input)?;
+        let created = self.parse_create_options(input)?;
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
-        let mut item = Item::new_note(id, description, boards);
+        let mut item = Item::new_note(id, created.description, created.boards);
         item.knowledge = Some(kind);
         item.phase = phase.map(str::to_string);
         data.insert(id, item);
@@ -1153,13 +1173,13 @@ impl Ekko {
 
     fn create_plain_note(&self, input: &[String], phase: Option<&str>) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
-        // Notes carry no deadline, same as they carry no priority: a `d:`
-        // token on a note is parsed (so a malformed one still errors) and
-        // then dropped.
-        let (boards, description, _priority, _due) = self.parse_create_options(input)?;
+        // Notes carry no deadline, same as they carry no priority and are
+        // with nobody: a `d:` or `with:` token on a note is parsed (so a
+        // malformed one still errors) and then dropped.
+        let created = self.parse_create_options(input)?;
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
-        let mut item = Item::new_note(id, description, boards);
+        let mut item = Item::new_note(id, created.description, created.boards);
         item.phase = phase.map(str::to_string);
         data.insert(id, item.clone());
         self.save_touching(&mut data)?;
@@ -1362,6 +1382,27 @@ impl Ekko {
         data.get_mut(&id).expect("id just validated against data").priority = Some(level);
         self.save_touching(&mut data)?;
         Ok(Outcome::Priority(data[&id].clone()))
+    }
+
+    /// `--with @ID NAME`: who a task is with; with no name, nobody. Only a
+    /// task is with anyone, as only a task has a priority.
+    pub fn set_with(&self, input: &[String]) -> Result<Outcome, EkkoError> {
+        let _lock = self.storage.acquire_lock()?;
+        let (id_str, rest) = self.extract_single_id_target(input)?;
+        let mut data = self.storage.get()?;
+        let id = self.validate_ids(&[id_str], &data)?[0];
+        let with = match rest.as_slice() {
+            [] => None,
+            [name] => Some(person(name)?),
+            _ => return Err(EkkoError::InvalidInput("--with takes one name after the id, as --with @3 rodrigo".into())),
+        };
+        let item = data.get_mut(&id).expect("id just validated against data");
+        if !item.is_task {
+            return Err(EkkoError::InvalidInput(format!("{id} is a note, and only a task is with someone")));
+        }
+        item.with = with;
+        self.save_touching(&mut data)?;
+        Ok(Outcome::With(data[&id].clone()))
     }
 
     pub fn clear(&self) -> Result<Outcome, EkkoError> {
@@ -2105,7 +2146,12 @@ impl Ekko {
             // `@due` made the due filter unreachable by either spelling; this
             // way `@due` is the board and `due` the filter, and both are
             // reachable.
-            if !term.starts_with('@') && is_known_attribute(term) {
+            if let Some(name) = term.strip_prefix(WITH) {
+                // A name that could never be stored matches nothing, which
+                // would read as nobody having anything: said instead.
+                person(name)?;
+                attributes.push(term.clone());
+            } else if !term.starts_with('@') && is_known_attribute(term) {
                 attributes.push(term.clone());
             } else if stored_boards.contains(&at_board) {
                 boards.push(at_board);
@@ -2266,7 +2312,11 @@ pub const STDIN_WORD: &str = "-";
 pub fn reads_stdin(input: &[String]) -> bool {
     input.iter().filter(|t| *t == STDIN_WORD).count() == 1
         && input.iter().all(|t| {
-            t == STDIN_WORD || (t.starts_with('@') && t.len() > 1) || is_priority_opt(t) || is_due_opt(t)
+            t == STDIN_WORD
+                || (t.starts_with('@') && t.len() > 1)
+                || is_priority_opt(t)
+                || is_due_opt(t)
+                || is_with_opt(t)
         })
 }
 
@@ -2312,6 +2362,33 @@ pub(crate) fn parse_due_date(token: &str) -> Option<String> {
     // `d:2026-9-1` and `d:2026-09-01` land as the same string, which keeps
     // the plain string comparisons in `due_state` honest.
     Some(parsed.format("%Y-%m-%d").to_string())
+}
+
+/// What marks who a task is with, in a description as `with:rodrigo` and in
+/// `--list` as a filter.
+pub(crate) const WITH: &str = "with:";
+
+fn is_with_opt(token: &str) -> bool {
+    token.starts_with(WITH)
+}
+
+/// Who a task is with, as stored: one word, in lower case. Refused when it is
+/// empty, more than one word, or a board's `@name` -- a name the terminal
+/// could not address as `with:NAME`, or one easily taken for a board.
+pub(crate) fn person(name: &str) -> Result<String, EkkoError> {
+    let name = name.trim();
+    if name.is_empty() || name.contains(char::is_whitespace) || name.starts_with('@') {
+        return Err(EkkoError::InvalidInput(format!(
+            "{name:?} cannot be who a task is with: a name is one word, as with:rodrigo"
+        )));
+    }
+    Ok(name.to_lowercase())
+}
+
+/// Whether `item` is with `name`, case and accents aside: `with:joao` finds a
+/// task with joão.
+pub(crate) fn is_with(item: &Item, name: &str) -> bool {
+    item.with.as_deref().is_some_and(|with| crate::lexical::folded(with) == crate::lexical::folded(name.trim()))
 }
 
 fn has_terms(text: &str, terms: &[String]) -> bool {
@@ -2364,6 +2441,7 @@ pub(crate) fn is_known_attribute(term: &str) -> bool {
             | "due"
             | "overdue"
     ) || Knowledge::from_word(term).is_some()
+        || term.starts_with(WITH)
 }
 
 #[cfg(test)]
@@ -2717,6 +2795,53 @@ mod tests {
         ekko.begin_tasks(&words(&["2"])).unwrap();
         assert_eq!(State::of(&ekko.storage.get().unwrap()[&2]), Some(State::Progress));
         assert!(listed(&ekko, "waiting").is_empty());
+
+        cleanup(&dir);
+    }
+
+    /// Who a task is with goes in at creation as `with:NAME`, the way `d:`
+    /// and `p:` do, and changes after with `--with`, where no name clears it
+    /// -- from the first day, unlike `--blocked-by` once. One word, stored in
+    /// lower case, and only on a task.
+    #[test]
+    fn with_says_who_a_task_is_with_at_creation_and_after() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["Send", "the", "contract", "with:Rodrigo"])).unwrap();
+        ekko.create_note(&words(&["a", "note", "with:rodrigo"])).unwrap();
+        let data = ekko.storage.get().unwrap();
+        assert_eq!((data[&1].description.as_str(), data[&1].with.as_deref()), ("Send the contract", Some("rodrigo")));
+        assert_eq!((data[&2].description.as_str(), data[&2].with.as_deref()), ("a note", None), "a note is with nobody");
+        for bad in ["with:", "with:@rodrigo"] {
+            assert!(ekko.create_task(&words(&["x", bad])).is_err(), "{bad} was accepted");
+        }
+
+        let Outcome::With(item) = ekko.set_with(&words(&["@1", "Gleidisom"])).unwrap() else { panic!() };
+        assert_eq!(item.with.as_deref(), Some("gleidisom"));
+        let Outcome::With(item) = ekko.set_with(&words(&["@1"])).unwrap() else { panic!() };
+        assert_eq!(item.with, None, "no name clears it");
+        assert!(ekko.set_with(&words(&["@2", "rodrigo"])).is_err(), "a note was given someone");
+        assert!(ekko.set_with(&words(&["@1", "two", "words"])).is_err());
+        assert!(ekko.set_with(&words(&["1", "rodrigo"])).is_err(), "the id is marked with @");
+        assert!(reads_stdin(&words(&["with:rodrigo", "-"])));
+
+        cleanup(&dir);
+    }
+
+    /// `--list with:NAME` finds a person's tasks, case and accents aside; a
+    /// task with someone is still ready -- for them.
+    #[test]
+    fn list_with_finds_a_persons_tasks_case_and_accents_aside() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["one", "with:joão"])).unwrap();
+        ekko.create_task(&words(&["two", "with:rodrigo"])).unwrap();
+        ekko.create_task(&words(&["three"])).unwrap();
+
+        assert_eq!(listed(&ekko, "with:joao"), vec![1]);
+        assert_eq!(listed(&ekko, "with:JOÃO"), vec![1]);
+        assert_eq!(listed(&ekko, "with:rodrigo"), vec![2]);
+        assert_eq!(listed(&ekko, "with:ana"), Vec::<u32>::new());
+        assert_eq!(listed(&ekko, "ready"), vec![1, 2, 3]);
+        assert!(ekko.list_by_attributes(&words(&["with:"])).is_err(), "a name that is no name matched nothing, quietly");
 
         cleanup(&dir);
     }
@@ -4479,7 +4604,7 @@ mod tests {
         let later = format!(
             "{{{}, {}, {}}}",
             item(1, "changed", false, r#""checkBack": "2026-10-01""#),
-            item(2, "left alone", false, r#""with": ["upstream"]"#),
+            item(2, "left alone", false, r#""watchers": ["upstream"]"#),
             item(3, "archived", true, r#""outcome": {"shipped": "v0.11.0"}"#),
         );
         fs::write(dir.join("storage").join("storage.json"), later).unwrap();
@@ -4491,7 +4616,7 @@ mod tests {
         let stored = read("storage/storage.json");
         assert_eq!(stored["1"]["inProgress"], true, "the change itself landed");
         assert_eq!(stored["1"]["checkBack"], "2026-10-01");
-        assert_eq!(stored["2"]["with"], serde_json::json!(["upstream"]));
+        assert_eq!(stored["2"]["watchers"], serde_json::json!(["upstream"]));
         let archive = read("archive/archive.json");
         let archived: Vec<&serde_json::Value> = archive.as_object().unwrap().values().collect();
         assert_eq!(archived.len(), 1, "{archive}");

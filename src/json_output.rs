@@ -41,7 +41,11 @@ fn success_value(outcome: &Outcome) -> Value {
         ),
         Outcome::Delete(items) => json!({"ok": true, "command": command, "items": items}),
         Outcome::Restore(items) => json!({"ok": true, "command": command, "items": items}),
-        Outcome::Edit(item) | Outcome::Answered(item) | Outcome::Move(item) | Outcome::Priority(item) => {
+        Outcome::Edit(item)
+        | Outcome::Answered(item)
+        | Outcome::Move(item)
+        | Outcome::Priority(item)
+        | Outcome::With(item) => {
             json!({"ok": true, "command": command, "item": item})
         }
         Outcome::Copy { ids, descriptions } => {

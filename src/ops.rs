@@ -17,7 +17,8 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use crate::ekko::{
-    holds, parse_due_date, phase_inversion, phase_order, remove_duplicates, uid_index, Ekko, EkkoError, Linked,
+    holds, parse_due_date, person, phase_inversion, phase_order, remove_duplicates, uid_index, Ekko, EkkoError,
+    Linked,
 };
 use crate::item::{Answer, Item, Knowledge, Question, Setting, State};
 use crate::storage::{ItemMap, LockGuard};
@@ -77,6 +78,8 @@ pub struct Create {
     pub boards: Vec<String>,
     pub priority: Option<i64>,
     pub due: Option<String>,
+    /// Who the task is with; see `Item::with`.
+    pub with: Option<String>,
     pub phase: Option<String>,
     #[serde(default)]
     pub blocked_by: Vec<Ref>,
@@ -118,6 +121,9 @@ pub struct Update {
     /// A date sets it, `null` clears it, absent leaves it.
     #[serde(default, deserialize_with = "present")]
     pub due: Option<Option<String>>,
+    /// A name says who the task is with, `null` leaves it with nobody.
+    #[serde(default, deserialize_with = "present")]
+    pub with: Option<Option<String>>,
     /// A declared phase moves the item there, `null` to the project root.
     #[serde(default, deserialize_with = "present")]
     pub phase: Option<Option<String>>,
@@ -207,6 +213,9 @@ where
 fn invalid(message: impl Into<String>) -> EkkoError {
     EkkoError::InvalidInput(message.into())
 }
+
+/// The refusal of a note given someone to be with.
+const NOTE_WITH: &str = "A note is with nobody; only a task is with someone";
 
 /// A priority as given, read wide so that -1 or 300 is refused as a priority
 /// out of range, as 0 and 4 are, rather than as JSON that is not a u8.
@@ -377,6 +386,9 @@ impl<'a> Draft<'a> {
                     return Err(invalid(format!("A note has no {field}; only a task does")));
                 }
             }
+            if spec.with.is_some() {
+                return Err(invalid(NOTE_WITH));
+            }
         }
         if kind == Kind::Handoff && spec.attached_to.is_none() {
             return Err(invalid("A handoff is attached_to the task it hands over"));
@@ -390,6 +402,7 @@ impl<'a> Draft<'a> {
             None => None,
         };
         let phase = self.declared_phase(spec.phase.as_deref())?;
+        let with = spec.with.as_deref().map(person).transpose()?;
 
         addressable(&spec.boards)?;
         let id = self.ekko.generate_id(&self.data);
@@ -400,6 +413,7 @@ impl<'a> Draft<'a> {
             }
         };
         item.due_date = due;
+        item.with = with;
         item.phase = phase;
         item.is_starred = spec.starred;
         item.knowledge = kind.knowledge();
@@ -437,6 +451,7 @@ impl<'a> Draft<'a> {
             boards: Vec::new(),
             priority: None,
             due: None,
+            with: None,
             phase: None,
             blocked_by: Vec::new(),
             attached_to: about.cloned(),
@@ -594,12 +609,13 @@ impl<'a> Draft<'a> {
             && !changes_boards
             && spec.priority.is_none()
             && spec.due.is_none()
+            && spec.with.is_none()
             && spec.phase.is_none()
             && spec.starred.is_none()
             && spec.kind.is_none()
         {
             return Err(invalid(
-                "An update needs at least one of boards, add_boards, remove_boards, priority, due, phase, starred or kind",
+                "An update needs at least one of boards, add_boards, remove_boards, priority, due, with, phase, starred or kind",
             ));
         }
         self.fresh(id, spec.if_updated_at)?;
@@ -641,6 +657,14 @@ impl<'a> Draft<'a> {
                 None => None,
             };
             self.item(id).due_date = parsed;
+        }
+        if let Some(with) = &spec.with {
+            let with = match with {
+                Some(_) if !is_task => return Err(invalid(NOTE_WITH)),
+                Some(name) => Some(person(name)?),
+                None => None,
+            };
+            self.item(id).with = with;
         }
         if let Some(phase) = &spec.phase {
             let phase = self.declared_phase(phase.as_deref())?;
@@ -1035,6 +1059,33 @@ mod tests {
         assert_eq!(item.description, text);
         assert_eq!(item.boards, vec!["@coding", "@reviews"]);
         assert_eq!((item.priority, item.due_date.as_deref()), (Some(2), Some("2026-09-01")));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Who a task is with, given to create and changed by update, where null
+    /// leaves it with nobody: one word, kept in lower case, on a task only.
+    #[test]
+    fn with_is_given_by_create_changed_by_update_and_cleared_by_null() {
+        let (ekko, dir) = board("with");
+        let made = batch(&ekko, &[json!({"op": "create", "text": "call the vendor", "with": " Rodrigo "})]).unwrap();
+        assert_eq!(made.data[&1].with.as_deref(), Some("rodrigo"));
+        batch(&ekko, &[json!({"op": "create", "kind": "note", "text": "a note"})]).unwrap();
+
+        let moved = batch(&ekko, &[json!({"op": "update", "item": 1, "with": "Ana"})]).unwrap();
+        assert_eq!(moved.data[&1].with.as_deref(), Some("ana"));
+        let cleared = batch(&ekko, &[json!({"op": "update", "item": 1, "with": null})]).unwrap();
+        assert_eq!(cleared.data[&1].with, None);
+
+        for refused in [
+            json!({"op": "update", "item": 1, "with": "two words"}),
+            json!({"op": "update", "item": 1, "with": ""}),
+            json!({"op": "update", "item": 2, "with": "ana"}),
+            json!({"op": "create", "kind": "note", "text": "n", "with": "ana"}),
+        ] {
+            let refusal = batch(&ekko, std::slice::from_ref(&refused));
+            assert!(matches!(refusal, Err(EkkoError::InvalidInput(_))), "{refused}: {:?}", refusal.err());
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -478,6 +478,15 @@ impl<'a> Renderer<'a> {
         self.painter.grey(&format!("held by {}{gone}", holder.label_in(self.registry.as_ref())))
     }
 
+    /// `with rodrigo` on a task with someone; empty otherwise, which keeps
+    /// every board that names nobody byte-identical.
+    fn get_with(&self, item: &Item) -> String {
+        match item.with.as_deref() {
+            Some(name) => self.painter.grey(&format!("with {name}")),
+            None => String::new(),
+        }
+    }
+
     /// `step 2/3` on a step of a sequence; empty otherwise, which keeps every
     /// board without one byte-identical.
     fn get_step(&self, item: &Item) -> String {
@@ -595,6 +604,8 @@ impl<'a> Renderer<'a> {
             (false, false) => format!("{age} {due} {star}"),
         };
         let suffix = if blocked.is_empty() { suffix } else { format!("{blocked} {suffix}") };
+        let with = self.get_with(item);
+        let suffix = if with.is_empty() { suffix } else { format!("{with} {suffix}") };
         let held = self.get_held(item);
         let suffix = if held.is_empty() { suffix } else { format!("{held} {suffix}") };
         let step = self.get_step(item);
@@ -620,6 +631,8 @@ impl<'a> Renderer<'a> {
         // did not -- one surface got the feature and its sibling did not.
         let blocked = self.get_blocked(item);
         let suffix = if blocked.is_empty() { suffix } else { format!("{blocked} {suffix}") };
+        let with = self.get_with(item);
+        let suffix = if with.is_empty() { suffix } else { format!("{with} {suffix}") };
         let held = self.get_held(item);
         let suffix = if held.is_empty() { suffix } else { format!("{held} {suffix}") };
         let step = self.get_step(item);
@@ -844,6 +857,17 @@ impl<'a> Renderer<'a> {
                 self.success(" ", &format!("Note {id} is now attached to:"), &suffix);
             }
             None => self.success(" ", &format!("Note {id} is no longer attached to anything"), ""),
+        }
+    }
+
+    /// Reports who a task is now with, or that it is with nobody.
+    pub fn success_with(&mut self, id: u32, with: Option<&str>) {
+        match with {
+            Some(name) => {
+                let suffix = self.painter.grey(name);
+                self.success(" ", &format!("Task {id} is now with:"), &suffix);
+            }
+            None => self.success(" ", &format!("Task {id} is no longer with anyone"), ""),
         }
     }
 

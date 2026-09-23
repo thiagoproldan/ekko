@@ -115,6 +115,19 @@ pub struct Item {
     /// stored exactly as before.
     #[serde(rename = "doneBy", default, skip_serializing_if = "Option::is_none")]
     pub done_by: Option<crate::holder::Holder>,
+    /// Who a task is with: a person or a party outside the sessions -- the
+    /// user, a colleague, a client -- by a name of one word, stored in lower
+    /// case. Unlike `held_by`, which a session takes by starting the work,
+    /// this is said before anyone starts, and stays until someone changes it.
+    ///
+    /// A task with nobody is anyone's, which on a board an agent works is the
+    /// agent's; one with someone leaves the agent's queue -- next, the prime's
+    /// ready work, the task list -- and is listed apart, by name. The other
+    /// way round from marking the agent's work, so a board that never names
+    /// anyone reads as it always did and an agent never has to mark the work
+    /// it gives itself. Absent unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with: Option<String>,
     /// Which phase of a project this belongs to, when it belongs to one.
     ///
     /// `None` means the project root -- outside the roadmap, and the only shape
@@ -273,6 +286,7 @@ impl Item {
             question: None,
             held_by: None,
             done_by: None,
+            with: None,
             stashed: None,
             trashed: None,
             priority: Some(priority),
@@ -309,6 +323,7 @@ impl Item {
             question: None,
             held_by: None,
             done_by: None,
+            with: None,
             stashed: None,
             trashed: None,
             unknown: BTreeMap::new(),
@@ -1118,13 +1133,13 @@ mod tests {
     fn fields_from_a_later_version_survive_a_read_and_a_write() {
         let later = r#"{"_id": 1, "_date": "Mon Sep 21 2026", "_timestamp": 0, "description": "x",
             "isStarred": false, "boards": ["My Board"], "_isTask": true, "isComplete": false,
-            "inProgress": false, "with": ["upstream", {"since": 1789993060230}], "priority": 1,
+            "inProgress": false, "watchers": ["upstream", {"since": 1789993060230}], "priority": 1,
             "checkBack": "2026-10-01"}"#;
 
         let item: Item = serde_json::from_str(later).unwrap();
         let written = serde_json::to_value(&item).unwrap();
 
-        assert_eq!(written["with"], serde_json::json!(["upstream", {"since": 1789993060230_u64}]));
+        assert_eq!(written["watchers"], serde_json::json!(["upstream", {"since": 1789993060230_u64}]));
         assert_eq!(written["checkBack"], "2026-10-01");
         assert_eq!(item.priority, Some(1), "the known fields around them are still read");
         assert_eq!(serde_json::from_value::<Item>(written).unwrap(), item);

@@ -528,6 +528,10 @@ impl Server {
                         .collect();
                     text.push_str(&format!("In progress in other sessions, not to take up: {}\n", held.join(", ")));
                 }
+                // Ready work with someone outside the sessions is theirs.
+                if let Some(line) = agent::with_someone_line(&ekko)? {
+                    text.push_str(&line);
+                }
                 Ok(text)
             }
             "context" => {
@@ -1004,7 +1008,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "search",
-            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, waiting, done, cancelled, ready, blocked, due, overdue, star, task, note, decision, gotcha, procedure, or a board name -- as @name when a filter has the same one. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
+            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, waiting, done, cancelled, ready, blocked, due, overdue, star, task, note, decision, gotcha, procedure, with:NAME, or a board name -- as @name when a filter has the same one. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
             "inputSchema": object(json!({"project": project, "text": {"type": "string"}, "filters": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1}}), &[]),
             "annotations": read,
         },
@@ -1036,6 +1040,7 @@ fn tool_definitions() -> Value {
                 "boards": {"type": "array", "items": {"type": "string"}},
                 "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Tasks only."},
                 "due": {"type": "string", "description": "YYYY-MM-DD. Tasks only."},
+                "with": {"type": "string", "description": "Tasks only: who it is with -- the user, a colleague -- as one word. Such a task is theirs: next and the prime's ready work leave it out."},
                 "phase": {"type": "string", "description": "A declared phase of the project."},
                 "blocked_by": {"type": "array", "items": item, "description": "Tasks only."},
                 "attached_to": {"type": ["integer", "string"], "description": "Notes only: the task this note explains."},
@@ -1071,7 +1076,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "update",
-            "description": "Change an item's boards (replaced), priority, due date (null clears), phase (null moves it to the project root), star, or a note's kind. add_boards and remove_boards change the boards without replacing them, so another session's change is kept; if_updated_at refuses the update (STALE) if the item changed since that read.",
+            "description": "Change an item's boards (replaced), priority, due date (null clears), who a task is with (null: nobody), phase (null moves it to the project root), star, or a note's kind. add_boards and remove_boards change the boards without replacing them, so another session's change is kept; if_updated_at refuses the update (STALE) if the item changed since that read.",
             "inputSchema": object(json!({
                 "project": project,
                 "item": item,
@@ -1081,6 +1086,7 @@ fn tool_definitions() -> Value {
                 "if_updated_at": {"type": "integer"},
                 "priority": {"type": "integer", "minimum": 1, "maximum": 3},
                 "due": {"type": ["string", "null"]},
+                "with": {"type": ["string", "null"]},
                 "phase": {"type": ["string", "null"]},
                 "starred": {"type": "boolean"},
                 "kind": {"type": "string", "enum": ["note", "decision", "gotcha", "procedure"], "description": "Notes only: types a note, or makes it an ordinary one with note. Retype a note the user wrote only with their consent."}

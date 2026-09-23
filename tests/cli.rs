@@ -234,6 +234,45 @@ fn a_blocked_task_needs_force_and_force_needs_a_task_to_complete() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// `with:NAME` and `--with` through the real parser: the token comes off the
+/// description, `--with` changes it and with no name clears it, and `--list
+/// with:NAME` finds the task, case aside.
+#[test]
+fn with_says_who_a_task_is_with_and_the_list_finds_it() {
+    let dir = temp_ekko_dir();
+    let ekko = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
+            .args(args)
+            .output()
+            .expect("failed to run ekko")
+    };
+    let reply = |output: &process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout).expect("a --json reply")
+    };
+
+    let made = ekko(&["--task", "Send", "the", "contract", "with:Rodrigo"]);
+    assert!(made.status.success(), "{}", reply(&made));
+    assert_eq!((&reply(&made)["item"]["description"], &reply(&made)["item"]["with"]), (&"Send the contract".into(), &"rodrigo".into()));
+    assert!(ekko(&["--task", "Something else"]).status.success());
+
+    // The list, then the stats line: one JSON reply per line.
+    let listed = ekko(&["--list", "with:RODRIGO"]);
+    let listed: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&listed.stdout).lines().next().unwrap()).unwrap();
+    let found: Vec<&serde_json::Value> = listed["boards"].as_object().unwrap().values().flat_map(|items| items.as_array().unwrap()).collect();
+    assert_eq!(found.iter().map(|item| item["_id"].as_u64().unwrap()).collect::<Vec<_>>(), vec![1], "{listed}");
+
+    assert_eq!(reply(&ekko(&["--with", "@1", "ana"]))["item"]["with"], "ana");
+    let cleared = reply(&ekko(&["--with", "@1"]));
+    assert!(cleared["item"].get("with").is_none(), "{cleared}");
+    let refused = ekko(&["--with", "@1", "two", "words"]);
+    assert!(!refused.status.success(), "two words were taken for a name");
+    assert_eq!(reply(&refused)["code"], "INVALID_INPUT");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// `--kind` and `--supersedes` only mean something beside `--note`, and the
 /// real parser has to say so rather than accept them and write an ordinary
 /// note -- or a task -- with the kind quietly dropped.

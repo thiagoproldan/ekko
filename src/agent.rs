@@ -79,7 +79,14 @@ const HANDOFF_BUDGET: usize = 3_500;
 const READY_KEPT: usize = 10;
 const BLOCKED_KEPT: usize = 5;
 const WAITING_KEPT: usize = 5;
+const WITH_KEPT: usize = 5;
 const NOTES_KEPT: usize = 3;
+/// The heading of the ready work that is with someone, and where the rest of
+/// it is, in the prime and in `next`.
+const WITH_HEADING: &str = "With someone, not to take up";
+const WITH_REST: &str = "search with a with:NAME filter";
+/// Tasks with someone `next` names before it counts the rest.
+const WITH_NAMED: usize = 20;
 /// Gotchas and procedures a prime lists, newest first, each by its first
 /// line: the traps and the steps a session should have in mind before it
 /// starts. Decisions are only counted -- there are more of them, and search
@@ -358,6 +365,9 @@ pub struct Entry {
     pub priority: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub due: Option<String>,
+    /// Who the task is with; see `Item::with`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub with: Option<String>,
     pub boards: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
@@ -540,6 +550,7 @@ impl<'a> Reader<'a> {
             description: item.description.clone(),
             priority: item.priority.filter(|_| item.is_task),
             due: item.due_date.clone(),
+            with: item.with.clone(),
             boards: item.boards.clone(),
             phase: item.phase.clone(),
             starred: item.is_starred,
@@ -603,10 +614,29 @@ impl<'a> Reader<'a> {
             && self.graph.open_blockers(item.id).is_empty()
     }
 
+    /// Ready tasks that are with someone (see `Item::with`): theirs to take
+    /// up, not a session's. Not those in progress, which are under way with
+    /// whoever holds them. By name, case and accents aside, then priority,
+    /// then the older item.
+    fn with_someone(&self) -> Vec<&'a Item> {
+        let mut with: Vec<&Item> = self
+            .graph
+            .all
+            .values()
+            .filter(|item| item.with.is_some() && State::of(item) != Some(State::Progress) && self.ready(item))
+            .collect();
+        with.sort_by_cached_key(|item| {
+            let name = item.with.as_deref().map(crate::lexical::folded);
+            (name, std::cmp::Reverse(item.priority.unwrap_or(1)), item.id)
+        });
+        with
+    }
+
     /// What to take up next, best first: work already in progress, then
     /// earlier phases before later ones (the root after every phase), then
     /// urgency, then the older item. Returns the entries within `limit` and
-    /// how many tasks were candidates.
+    /// how many tasks were candidates. A ready task with someone is theirs,
+    /// and no candidate; one in progress is, whoever holds it.
     ///
     /// Urgency is worked out on what a task inherits from the work waiting on
     /// it, so a low-priority prerequisite of urgent work ranks as urgent. The
@@ -621,7 +651,10 @@ impl<'a> Reader<'a> {
             .graph
             .all
             .values()
-            .filter(|item| visible(item) && (State::of(item) == Some(State::Progress) || self.ready(item)))
+            .filter(|item| {
+                visible(item)
+                    && (State::of(item) == Some(State::Progress) || (self.ready(item) && item.with.is_none()))
+            })
             .map(|item| (urgency(item, inherited.get(&item.id).copied(), today, now.timestamp_millis()), item))
             .collect();
         let rank = |item: &Item| {
@@ -707,6 +740,13 @@ pub struct Prime {
     pub waiting: Vec<Entry>,
     #[serde(skip_serializing_if = "is_zero")]
     pub waiting_total: usize,
+    /// The first ready tasks that are with someone, by name;
+    /// `with_someone_total` counts them all. Absent on a board that names
+    /// nobody.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub with_someone: Vec<Entry>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub with_someone_total: usize,
     pub recent_notes: Vec<NoteRef>,
     /// Done tasks still waiting on open work, as (task, blocker) pairs.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -828,6 +868,11 @@ fn is_zero_u32(n: &u32) -> bool {
     *n == 0
 }
 
+/// Every entry of the prime's sections of work, one section after another.
+fn listed(sections: [&mut Vec<Entry>; 5]) -> impl Iterator<Item = &mut Entry> {
+    sections.into_iter().flat_map(|section| section.iter_mut())
+}
+
 /// Builds the resume view of the board `ekko` has open, labelled `board`.
 pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     // The revision before the board: a cursor may lag the board it came
@@ -860,6 +905,14 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     waiting.sort_by_key(|item| (std::cmp::Reverse(item.priority.unwrap_or(1)), item.id));
     let waiting_total = waiting.len();
     let mut waiting: Vec<Entry> = waiting.into_iter().take(BLOCKED_SHOWN).map(|item| reader.entry(item)).collect();
+
+    // Ready, and with someone outside the sessions -- the user, a colleague:
+    // listed apart by name, where a session sees what is not its to start
+    // and the user what each person has.
+    let with_someone = reader.with_someone();
+    let with_someone_total = with_someone.len();
+    let mut with_someone: Vec<Entry> =
+        with_someone.into_iter().take(BLOCKED_SHOWN).map(|item| reader.entry(item)).collect();
 
     // Where the last session stopped, shown once in its own section rather
     // than clipped again among the notes of its task. With several sessions
@@ -902,7 +955,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         description: note.description.clone(),
     });
     if let Some(shown) = &handoff {
-        for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()).chain(waiting.iter_mut()) {
+        for entry in listed([&mut doing, &mut ready, &mut blocked, &mut waiting, &mut with_someone]) {
             entry.notes.retain(|note| note.id != shown.id);
         }
     }
@@ -921,7 +974,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     let knowledge_total = lasting.len();
     let knowledge: Vec<NoteRef> = lasting.into_iter().take(KNOWLEDGE_SHOWN).map(|note| reader.note_ref(note)).collect();
     let decisions = all.values().filter(in_force).filter(|note| note.knowledge == Some(Knowledge::Decision)).count();
-    for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()).chain(waiting.iter_mut()) {
+    for entry in listed([&mut doing, &mut ready, &mut blocked, &mut waiting, &mut with_someone]) {
         entry.notes.retain(|note| note.superseded_by.is_empty() && !knowledge.iter().any(|shown| shown.id == note.id));
     }
 
@@ -962,7 +1015,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
             Some(_) => {}
         }
     }
-    for entry in doing.iter_mut().chain(ready.iter_mut()).chain(blocked.iter_mut()).chain(waiting.iter_mut()) {
+    for entry in listed([&mut doing, &mut ready, &mut blocked, &mut waiting, &mut with_someone]) {
         entry.notes.retain(|note| !waiting_on_you.iter().any(|asked| asked.id == note.id));
     }
 
@@ -1003,6 +1056,8 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         blocked_total,
         waiting,
         waiting_total,
+        with_someone,
+        with_someone_total,
         recent_notes,
         broken: broken_dependencies(&all).into_iter().collect(),
         inversions,
@@ -1059,6 +1114,32 @@ pub fn next_listed(ekko: &Ekko, limit: Option<usize>) -> Result<(Vec<Entry>, usi
     let all = ekko.storage.get_shared()?;
     let phases = ekko.storage.get_phases()?;
     Ok(Reader::shared(&all, &phases).seen_by(ekko).next(limit))
+}
+
+/// The ready work that is with someone, named apart from `next` the way work
+/// another session holds is, by name -- "With someone, not to take up: 9, 44
+/// (thiago); 32 (rodrigo)" -- or nothing when nobody has any. The first
+/// `WITH_NAMED` tasks, then a count of the rest.
+pub fn with_someone_line(ekko: &Ekko) -> Result<Option<String>, EkkoError> {
+    let all = ekko.storage.get_shared()?;
+    let phases = ekko.storage.get_phases()?;
+    let with = Reader::shared(&all, &phases).with_someone();
+    if with.is_empty() {
+        return Ok(None);
+    }
+    let mut groups: Vec<(&str, Vec<String>)> = Vec::new();
+    for item in with.iter().take(WITH_NAMED) {
+        let name = item.with.as_deref().unwrap_or_default();
+        match groups.last_mut() {
+            Some((last, ids)) if crate::lexical::folded(last) == crate::lexical::folded(name) => ids.push(item.id.to_string()),
+            _ => groups.push((name, vec![item.id.to_string()])),
+        }
+    }
+    let mut named: Vec<String> = groups.into_iter().map(|(name, ids)| format!("{} ({name})", ids.join(", "))).collect();
+    if let Some(more @ 1..) = with.len().checked_sub(WITH_NAMED) {
+        named.push(format!("+{more} more: {WITH_REST}"));
+    }
+    Ok(Some(format!("{WITH_HEADING}: {}\n", named.join("; "))))
 }
 
 /// An item and its neighbourhood: one hop along every relation, plus how
@@ -1975,6 +2056,9 @@ fn listed_line(entry: &Entry, body: &str, stated: bool, today: &str) -> String {
     if let Some(held) = &entry.held {
         meta.push(held.text());
     }
+    if let Some(with) = &entry.with {
+        meta.push(format!("with {with}"));
+    }
     if let Some((step, of)) = entry.step {
         meta.push(format!("step {step} of {of}"));
     }
@@ -2064,8 +2148,9 @@ impl Prime {
     /// The resume view in at most `budget` characters. The header, what needs
     /// attention and the closing line always fit; the sections fill what is
     /// left in the order an agent needs them -- work in progress, ready work
-    /// best first, blocked work, waiting work, loose notes -- and a section
-    /// cut short says how much it left out and where the rest is.
+    /// best first, blocked work, waiting work, work with someone, loose notes
+    /// -- and a section cut short says how much it left out and where the
+    /// rest is.
     pub fn text_within(&self, budget: usize) -> String {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut out = String::new();
@@ -2107,13 +2192,16 @@ impl Prime {
             format!("      +{} more: {KNOWLEDGE_REST}\n", self.knowledge_total).chars().count()
         };
         // The waiting section's own "+N more" line is only reserved on a board
-        // that has one, which leaves every other prime as it was.
+        // that has one, which leaves every other prime as it was; and so is
+        // the one of work with someone.
         let waiting_more = if self.waiting.is_empty() { 0 } else { MORE_LINE };
+        let with_more = if self.with_someone.is_empty() { 0 } else { MORE_LINE };
         let fixed = out.chars().count()
             + attention.chars().count()
             + close.chars().count()
             + 4 * MORE_LINE
             + waiting_more
+            + with_more
             + knowledge_more
             + decisions.chars().count();
         let mut room = Room(budget.saturating_sub(fixed));
@@ -2174,6 +2262,7 @@ impl Prime {
             Section::of_entries("Ready, best first", &self.ready, READY_WITH_NOTES, self.ready.len(), "next lists them", READY_KEPT, &today),
             Section::of_entries("Blocked", &self.blocked, 0, self.blocked_total, "search with the blocked filter", BLOCKED_KEPT, &today),
             Section::of_entries("Waiting", &self.waiting, 0, self.waiting_total, "search with the waiting filter", WAITING_KEPT, &today),
+            Section::of_entries(WITH_HEADING, &self.with_someone, 0, self.with_someone_total, WITH_REST, WITH_KEPT, &today),
             Section {
                 heading: "\nRecent notes, not attached to a task".to_string(),
                 blocks: self
@@ -2527,6 +2616,9 @@ impl Context {
         if let Some(asked) = &self.question {
             facts[0] = format!("note, a question asked by {}", asked.by);
         }
+        if let Some(with) = &item.with {
+            facts.push(format!("with {with}"));
+        }
         if let Some(priority) = item.priority {
             facts.push(format!("priority {priority}"));
         }
@@ -2879,6 +2971,47 @@ mod tests {
         assert!(text.contains("2 waiting \u{b7} 1 pending"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A ready task with someone is theirs: next leaves it out, and the prime
+    /// lists it apart, by name, then priority. Work in progress stays the
+    /// work in progress, and blocked work stays blocked, saying who it is
+    /// with. A board that names nobody has no such section.
+    #[test]
+    fn work_with_someone_leaves_next_and_is_listed_apart_by_name() {
+        let (ekko, dir) = board("with");
+        ekko.create_task(&words(&["mine to take"])).unwrap();
+        ekko.create_task(&words(&["call the vendor", "p:2", "with:rodrigo"])).unwrap();
+        ekko.create_task(&words(&["sign the form", "with:ana"])).unwrap();
+        ekko.create_task(&words(&["send the minutes", "with:Rodrigo"])).unwrap();
+        ekko.create_task(&words(&["under way", "with:ana"])).unwrap();
+        ekko.create_task(&words(&["after 1", "with:ana"])).unwrap();
+        ekko.set_blocked_by(&words(&["@6", "1"])).unwrap();
+        ekko.set_state(&words(&["@5", "progress"]), false).unwrap();
+
+        assert_eq!(ids(&next(&ekko, None).unwrap()), vec![5, 1]);
+        let view = prime(&ekko, "default board").unwrap();
+        assert_eq!((ids(&view.doing), ids(&view.ready), ids(&view.blocked)), (vec![5], vec![1], vec![6]));
+        assert_eq!((ids(&view.with_someone), view.with_someone_total), (vec![3, 2, 4], 3));
+
+        let text = view.text();
+        let section = text.split("\nWith someone, not to take up (3)\n").nth(1).expect("a section").split("\n\n").next().unwrap();
+        assert_eq!(line_ids(section), vec![3, 2, 4], "{text}");
+        assert!(section.contains("   2. call the vendor \u{b7} with rodrigo \u{b7} p2"), "{text}");
+        assert!(text.contains("   6. after 1 \u{b7} with ana \u{b7} step 2 of 2 \u{b7} \u{21e0} 1"), "blocked work says who it is with: {text}");
+        assert_eq!(
+            with_someone_line(&ekko).unwrap().as_deref(),
+            Some("With someone, not to take up: 3 (ana); 2, 4 (rodrigo)\n")
+        );
+        assert!(context(&ekko, "2").unwrap().text().contains("task, pending \u{b7} with rodrigo"));
+
+        let (plain, plain_dir) = board("with-nobody");
+        plain.create_task(&words(&["anything"])).unwrap();
+        assert!(!prime(&plain, "default board").unwrap().text().contains("With someone"));
+        assert_eq!(with_someone_line(&plain).unwrap(), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&plain_dir).ok();
     }
 
     /// What the board holds against itself is named, not left to be noticed.

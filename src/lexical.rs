@@ -231,6 +231,12 @@ fn words(chars: &[char]) -> Vec<Word> {
     out
 }
 
+/// `text` as a name is compared: lower case, accents aside, so `joao` finds
+/// João.
+pub(crate) fn folded(text: &str) -> String {
+    fold(&text.chars().collect::<Vec<_>>())
+}
+
 /// Lowercase, with the Latin letters that carry diacritics read as their base.
 fn fold(chars: &[char]) -> String {
     let mut out = String::with_capacity(chars.len());

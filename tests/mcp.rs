@@ -404,6 +404,43 @@ fn a_waiting_task_is_set_listed_and_never_offered_as_ready() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// Who a task is with, over stdio: create takes it, next names the task
+/// apart instead of offering it, the prime lists it by name, search finds it
+/// with with:NAME, and update with null makes it work to take up again.
+#[test]
+fn a_task_with_someone_is_named_apart_from_the_work_to_take_up() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            call(1, "batch", json!({"ops": [
+                {"op": "create", "text": "mine to take"},
+                {"op": "create", "text": "call the vendor", "with": "Rodrigo"}
+            ]})),
+            call(2, "next", json!({})),
+            call(3, "prime", json!({})),
+            call(4, "search", json!({"filters": ["with:rodrigo"]})),
+            call(5, "update", json!({"item": 2, "with": null})),
+            call(6, "next", json!({})),
+        ],
+    );
+
+    let next = text(&replies["2"]);
+    assert!(next.contains("   1. mine to take\n") && !next.contains("   2. call the vendor"), "{next}");
+    assert!(next.contains("With someone, not to take up: 2 (rodrigo)\n"), "{next}");
+    assert!(
+        text(&replies["3"]).contains("\nWith someone, not to take up (1)\n   2. call the vendor \u{b7} with rodrigo\n"),
+        "{}",
+        text(&replies["3"])
+    );
+    assert!(text(&replies["4"]).contains("2. [pending] call the vendor \u{b7} with rodrigo"), "{}", text(&replies["4"]));
+    assert!(text(&replies["5"]).contains("\"ok\":true"), "{}", replies["5"]);
+    assert!(text(&replies["6"]).contains("   2. call the vendor\n"), "{}", text(&replies["6"]));
+    assert!(!text(&replies["6"]).contains("With someone"), "{}", text(&replies["6"]));
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// A server kept running while a test talks to it, a message at a time: what
 /// the resources server does on its own, between requests, shows only here.
 struct Live {
@@ -557,7 +594,7 @@ fn a_question_is_asked_and_answered_through_the_tools() {
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0x1f2050d202c15c0b;
+const PREFIX_FINGERPRINT: u64 = 0x2a628aefab507d38;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {
