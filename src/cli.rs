@@ -101,9 +101,13 @@ pub struct Cli {
     pub delete: bool,
     #[arg(long, short = 'e')]
     pub edit: bool,
-    /// Answer a question asked on the board: its id, then the answer.
+    /// Answer a question asked on the board: its id, then the answer; the id
+    /// alone, in a terminal, opens ekko's menu on it.
     #[arg(long)]
     pub answer: bool,
+    /// The menu ask opens: the questions in this file, put to the user.
+    #[arg(long, value_name = "FILE", hide = true)]
+    pub menu: Option<std::path::PathBuf>,
     #[arg(long, short = 'f')]
     pub find: bool,
     #[arg(long, short = 'j')]

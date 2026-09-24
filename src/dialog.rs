@@ -20,11 +20,14 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use crate::ops::Choice;
+use crate::ops::{Choice, Inquiry};
 
 /// The value of "Other answer…" in the choice: no label can take it, since
 /// options are checked against it.
 const OTHER: &str = "ekko:other";
+
+/// The line over the options of a question where several may be chosen.
+pub const MULTIPLE: &str = "\nOptions, any number of them:";
 
 /// The most options one question offers.
 const MOST: usize = 6;
@@ -43,8 +46,9 @@ pub struct Pending {
     /// The id of the tools/call the answer is for.
     pub call: Value,
     pub project: Option<String>,
-    /// The question's uid: a display id could be renumbered before the answer comes.
-    pub question: String,
+    /// The questions' uids: a display id could be renumbered before the
+    /// answers come. The client's dialog puts only the first.
+    pub questions: Vec<String>,
     /// The reply to the write that recorded the question.
     pub recorded: Value,
     pub message: String,
@@ -53,6 +57,9 @@ pub struct Pending {
     /// The token the call came with, for the progress that keeps it alive.
     pub progress: Option<Value>,
     pub beats: u64,
+    /// ekko's own menu, when the questions are there rather than in the
+    /// client's dialog.
+    pub window: Option<crate::menu::Window>,
 }
 
 /// The dialogs of one server: whether its client shows them, and the ones
@@ -77,6 +84,13 @@ impl Dialogs {
         });
         self.pending.insert(id, pending);
         request
+    }
+
+    /// Keeps `pending`, whose question is in ekko's menu, until the answer
+    /// lands on the board or the window closes.
+    pub fn watch(&mut self, pending: Pending) {
+        self.sent += 1;
+        self.pending.insert(format!("ekko-menu-{}", self.sent), pending);
     }
 
     /// The pending dialog a response is for, taken out.
@@ -116,6 +130,17 @@ pub fn shows_forms(capabilities: &Value) -> bool {
     capabilities.get("elicitation").and_then(Value::as_object).is_some_and(|modes| modes.contains_key("form") || !modes.contains_key("url"))
 }
 
+/// Why a question cannot be asked as it is, if it cannot.
+pub fn check(inquiry: &Inquiry) -> Option<String> {
+    if inquiry.text.trim().is_empty() {
+        return Some("each question needs its text".to_string());
+    }
+    if inquiry.multiple && inquiry.options.is_empty() {
+        return Some("multiple needs options to pick among".to_string());
+    }
+    refuse(&inquiry.options)
+}
+
 /// Why options cannot be offered, if they cannot.
 pub fn refuse(options: &[Choice]) -> Option<String> {
     if options.len() == 1 || options.len() > MOST {
@@ -126,6 +151,9 @@ pub fn refuse(options: &[Choice]) -> Option<String> {
         if label.is_empty() || label == OTHER {
             return Some("each option needs a label".to_string());
         }
+        if label.contains(": ") || label.contains('\n') {
+            return Some(format!("a label holds no \": \" and no line break, since the note lists each option as \"label: description\": {label}"));
+        }
         if options[..n].iter().any(|earlier| earlier.label.trim() == label) {
             return Some(format!("two options are labelled {label}"));
         }
@@ -134,11 +162,12 @@ pub fn refuse(options: &[Choice]) -> Option<String> {
 }
 
 /// The question as the board records it: the text, and the options offered
-/// under it, so a session reading it later knows what the user chose among.
-pub fn noted(text: &str, options: &[Choice]) -> String {
+/// under it, so a session reading it later knows what the user chose among,
+/// and whether several could be chosen.
+pub fn noted(text: &str, options: &[Choice], multiple: bool) -> String {
     let mut noted = text.trim_end().to_string();
     if !options.is_empty() {
-        noted.push_str("\nOptions:");
+        noted.push_str(if multiple { MULTIPLE } else { "\nOptions:" });
         for option in options {
             noted.push_str(&format!("\n- {}", title(option)));
         }
@@ -148,7 +177,7 @@ pub fn noted(text: &str, options: &[Choice]) -> String {
 
 fn title(option: &Choice) -> String {
     match option.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-        Some(description) => format!("{}: {description}", option.label.trim()),
+        Some(description) => format!("{}: {}", option.label.trim(), description.split_whitespace().collect::<Vec<_>>().join(" ")),
         None => option.label.trim().to_string(),
     }
 }
@@ -200,7 +229,7 @@ mod tests {
     use super::*;
 
     fn choice(label: &str, description: Option<&str>) -> Choice {
-        Choice { label: label.to_string(), description: description.map(str::to_string) }
+        Choice { label: label.to_string(), description: description.map(str::to_string), preview: None }
     }
 
     #[test]
@@ -252,7 +281,9 @@ mod tests {
 
     #[test]
     fn the_board_records_the_options_under_the_question() {
-        assert_eq!(noted("Mark them?", &[]), "Mark them?");
-        assert_eq!(noted("Mark them?\n", &[choice("Yes", Some("all four")), choice("No", None)]), "Mark them?\nOptions:\n- Yes: all four\n- No");
+        assert_eq!(noted("Mark them?", &[], false), "Mark them?");
+        let options = [choice("Yes", Some("all\nfour")), choice("No", None)];
+        assert_eq!(noted("Mark them?\n", &options, false), "Mark them?\nOptions:\n- Yes: all four\n- No");
+        assert_eq!(noted("Which?", &options, true), "Which?\nOptions, any number of them:\n- Yes: all four\n- No");
     }
 }

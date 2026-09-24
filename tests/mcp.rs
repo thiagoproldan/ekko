@@ -35,6 +35,7 @@ fn transcript(home: &PathBuf, lines: &[String]) -> Vec<Value> {
         .arg("--mcp")
         .env("HOME", home)
         .env("EKKO_DIR", home)
+        .env("EKKO_TERMINAL", "none")
         .env_remove("EKKO_PROJECT")
         .current_dir(home)
         .stdin(Stdio::piped())
@@ -455,6 +456,7 @@ impl Live {
             .args(args)
             .env("HOME", home)
             .env("EKKO_DIR", home)
+            .env("EKKO_TERMINAL", "none")
             .env_remove("EKKO_PROJECT")
             .current_dir(home)
             .stdin(Stdio::piped())
@@ -568,7 +570,7 @@ fn a_question_is_asked_and_answered_through_the_tools() {
         &home,
         &[
             call(1, "create", json!({"text": "the merge"})),
-            call(2, "ask", json!({"text": "Merge auditoria now?", "about": 1})),
+            call(2, "ask", json!({"questions": [{"text": "Merge auditoria now?"}], "about": 1})),
             call(3, "prime", json!({})),
             call(4, "answer", json!({"question": 2, "text": "yes, after the rebase"})),
             call(5, "answer", json!({"question": 2, "text": "no"})),
@@ -608,10 +610,10 @@ fn a_question_is_put_to_the_user_in_a_dialog_and_the_answer_recorded() {
         &home,
         &[
             elicitation_client(),
-            call(2, "ask", json!({"text": "Mark them?", "options": options})),
+            call(2, "ask", json!({"questions": [{"text": "Mark them?", "options": options}]})),
             request(3, "ping", json!({})),
             dialog_answer("ekko-ask-1", json!({"action": "accept", "content": {"answer": "Yes"}})),
-            call(4, "ask", json!({"text": "Why?", "options": options})),
+            call(4, "ask", json!({"questions": [{"text": "Why?", "options": options}]})),
             dialog_answer("ekko-ask-2", json!({"action": "accept", "content": {"answer": "ekko:other"}})),
             dialog_answer("ekko-ask-3", json!({"action": "accept", "content": {"answer": "only the ninth"}})),
             call(5, "context", json!({"items": [1, 2]})),
@@ -631,10 +633,10 @@ fn a_question_is_put_to_the_user_in_a_dialog_and_the_answer_recorded() {
     assert!(at(json!(3)) < at(json!(2)), "{messages:?}");
 
     let first: Value = serde_json::from_str(text(by_id(json!(2)))).unwrap();
-    assert_eq!(first["answer"], "Yes", "{first}");
+    assert_eq!(first["answers"], json!([{"id": 1, "answer": "Yes"}]), "{first}");
     assert_eq!(first["items"][0]["id"], 1);
     let second: Value = serde_json::from_str(text(by_id(json!(4)))).unwrap();
-    assert_eq!(second["answer"], "only the ninth", "{second}");
+    assert_eq!(second["answers"][0]["answer"], "only the ninth", "{second}");
     let read = text(by_id(json!(5)));
     assert!(read.contains("Mark them?\nOptions:\n- Yes: all four\n- No"), "{read}");
     assert!(read.contains(": Yes\n") && read.contains(": only the ninth\n"), "{read}");
@@ -652,27 +654,185 @@ fn a_question_left_unanswered_stays_open_on_the_board() {
         &home,
         &[
             elicitation_client(),
-            call(2, "ask", json!({"text": "Declined?"})),
+            call(2, "ask", json!({"questions": [{"text": "Declined?"}]})),
             dialog_answer("ekko-ask-1", json!({"action": "decline"})),
-            call(3, "ask", json!({"text": "Dismissed?"})),
+            call(3, "ask", json!({"questions": [{"text": "Dismissed?"}]})),
             dialog_answer("ekko-ask-2", json!({"action": "cancel"})),
-            call(4, "ask", json!({"text": "Cancelled?"})),
+            call(4, "ask", json!({"questions": [{"text": "Cancelled?"}]})),
             json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 4}}).to_string(),
-            call(5, "ask", json!({"text": "One option?", "options": [{"label": "Only"}]})),
+            call(5, "ask", json!({"questions": [{"text": "One option?", "options": [{"label": "Only"}]}]})),
             call(6, "prime", json!({})),
         ],
     );
     let reply = |id: u64| messages.iter().find(|m| m["id"] == id).unwrap_or_else(|| panic!("no reply {id}: {messages:?}"));
-    assert!(text(reply(2)).contains("\"unanswered\":\"the user declined the dialog; the question stays open\""), "{}", text(reply(2)));
-    assert!(text(reply(3)).contains("\"unanswered\":\"the user dismissed the dialog; the question stays open\""), "{}", text(reply(3)));
+    assert!(text(reply(2)).contains("\"unanswered\":\"the user declined the dialog; the questions without an answer stay open"), "{}", text(reply(2)));
+    assert!(text(reply(3)).contains("\"unanswered\":\"the user dismissed the dialog; the questions without an answer stay open"), "{}", text(reply(3)));
     assert!(!messages.iter().any(|m| m["id"] == 4), "a cancelled call is not answered: {messages:?}");
     assert!(messages.iter().any(|m| m["method"] == "notifications/cancelled" && m["params"]["requestId"] == "ekko-ask-3"), "{messages:?}");
     assert_eq!(reply(5)["result"]["isError"], true);
     assert!(text(reply(5)).starts_with("INVALID_INPUT: options offers 2 to 6 answers"), "{}", text(reply(5)));
     assert!(text(reply(6)).contains("\nWaiting on you (3)\n"), "{}", text(reply(6)));
 
-    let without = session(&home, &[request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})), call(2, "ask", json!({"text": "No forms?"}))]);
-    assert!(text(&without["2"]).contains("\"unanswered\":\"this client shows no dialog; the question stays open\""), "{}", without["2"]);
+    let without = session(&home, &[request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})), call(2, "ask", json!({"questions": [{"text": "No forms?"}]}))]);
+    assert!(text(&without["2"]).contains("\"unanswered\":\"ekko's menu has nowhere to open here: no tmux, and no display; the questions"), "{}", without["2"]);
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// A server kept running while a test talks to it, as a client does while a
+/// window of ekko's menu is up: the answer comes back from a thread of the
+/// server, after stdin has gone quiet.
+struct Held {
+    child: process::Child,
+    stdin: Option<process::ChildStdin>,
+    messages: std::sync::mpsc::Receiver<Value>,
+    seen: Vec<Value>,
+}
+
+impl Held {
+    /// `ekko --mcp` whose menu opens with `terminal`, a script standing in
+    /// for the terminal: it gets ekko's command line as its arguments.
+    fn start(home: &PathBuf, terminal: &str) -> Held {
+        let script = home.join("terminal.sh");
+        // The arguments end in `<ekko> --menu <file>`: the script finds both,
+        // and the pid file beside the questions, as $exe, $spec and $pid.
+        let prelude = "spec=; exe=; prev=\nfor a in \"$@\"; do\n  [ \"$prev\" = --menu ] && spec=$a\n  [ \"$a\" = --menu ] && exe=$prev\n  prev=$a\ndone\npid=\"${spec%.json}.pid\"\n";
+        let log = home.join("terminal.log");
+        fs::write(&script, format!("#!/bin/sh\necho \"$@\" >> \"{}\"\n{prelude}{terminal}\n", log.display())).unwrap();
+        fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .arg("--mcp")
+            .env("HOME", home)
+            .env("EKKO_DIR", home)
+            .env("EKKO_TERMINAL", &script)
+            // As in a session of its own: the command line is what removes it
+            // from the menu, and the fake terminal skips the command line.
+            .env_remove("CLAUDECODE")
+            .env("XDG_RUNTIME_DIR", home)
+            .env_remove("EKKO_PROJECT")
+            .current_dir(home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn ekko --mcp");
+        let stdout = child.stdout.take().unwrap();
+        let (tx, messages) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(serde_json::from_str(&line).unwrap_or_else(|e| panic!("not JSON: {e}: {line}"))).is_err() {
+                    break;
+                }
+            }
+        });
+        let stdin = child.stdin.take();
+        let mut live = Held { child, stdin, messages, seen: Vec::new() };
+        live.send(&request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})));
+        live.reply(1);
+        live
+    }
+
+    fn send(&mut self, line: &str) {
+        writeln!(self.stdin.as_mut().unwrap(), "{line}").unwrap();
+    }
+
+    /// The reply to request `id`, waiting up to 20 seconds for it.
+    fn reply(&mut self, id: u64) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Some(found) = self.seen.iter().find(|m| m["id"] == id && m.get("method").is_none()) {
+                return found.clone();
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.messages.recv_timeout(left) {
+                Ok(message) => self.seen.push(message),
+                Err(_) => panic!("no reply {id} in 20 seconds: {:?}", self.seen),
+            }
+        }
+    }
+
+    fn stop(mut self) {
+        drop(self.stdin.take());
+        assert!(self.child.wait().unwrap().success(), "the server did not exit cleanly when stdin closed");
+    }
+}
+
+/// ask where a menu can open: the questions go to ekko's own menu, a
+/// terminal running `ekko --menu <file>`, and the answers recorded there come
+/// back as ask's reply. No elicitation is sent, even to a client that shows
+/// forms, and the file -- with the previews the board does not keep -- is
+/// gone once the call is answered.
+#[test]
+fn questions_go_to_ekkos_menu_and_the_answers_come_back() {
+    let home = temp_home();
+    // What the menu does, less the keys: the pid first, then every answer.
+    let answer = format!(
+        "cp \"$spec\" \"{}\"\necho $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" Yes; done",
+        home.join("spec.json").display()
+    );
+    let mut live = Held::start(&home, &answer);
+    let options = json!([{"label": "Yes", "description": "all four", "preview": "fn yes() {}"}, {"label": "No"}]);
+    live.send(&call(2, "ask", json!({"questions": [{"text": "Mark them?", "options": options}, {"text": "And these?", "options": options, "multiple": true}]})));
+    let answered: Value = serde_json::from_str(text(&live.reply(2))).unwrap();
+    assert_eq!(answered["answers"], json!([{"id": 1, "answer": "Yes"}, {"id": 2, "answer": "Yes"}]), "{answered}");
+    assert!(answered.get("unanswered").is_none(), "{answered}");
+    live.send(&call(3, "context", json!({"items": [1, 2]})));
+    let read = text(&live.reply(3)).to_string();
+    assert!(read.contains("Mark them?\nOptions:\n- Yes: all four\n- No"), "{read}");
+    assert!(read.contains("And these?\nOptions, any number of them:\n- Yes: all four"), "{read}");
+    assert!(read.contains("recorded by the user: Yes\n"), "the answers are the user's, not the session's: {read}");
+    assert!(!live.seen.iter().any(|m| m["method"] == "elicitation/create"), "{:?}", live.seen);
+    live.stop();
+    let log = fs::read_to_string(home.join("terminal.log")).unwrap();
+    assert!(log.starts_with("env -u CLAUDECODE ") && log.contains(" --menu "), "{log}");
+    let spec: Value = serde_json::from_str(&fs::read_to_string(home.join("spec.json")).unwrap()).unwrap();
+    assert_eq!(spec["questions"][0]["options"][0]["preview"], "fn yes() {}");
+    assert_eq!(spec["questions"][1]["multiple"], true);
+    let left = fs::read_dir(&home).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("ekko-menu-")).count();
+    assert_eq!(left, 0, "the menu's files are cleaned up");
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// What leaves questions in ekko's menu open: a menu closed without the
+/// answers -- the ones given meanwhile still come back -- a terminal that
+/// cannot open one, and a call the client cancels, which closes its menu.
+#[test]
+fn questions_left_in_ekkos_menu_stay_open() {
+    let home = temp_home();
+    // The first question answered, then the menu closed.
+    let mut closed = Held::start(&home, "echo $$ > \"$pid\"\nuid=$(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | head -1 | cut -d'\"' -f4)\n\"$exe\" --answer \"$uid\" first");
+    closed.send(&call(2, "ask", json!({"questions": [{"text": "One?"}, {"text": "Two?"}]})));
+    let reply: Value = serde_json::from_str(text(&closed.reply(2))).unwrap();
+    assert_eq!(reply["answers"], json!([{"id": 1, "answer": "first"}]), "{reply}");
+    assert!(reply["unanswered"].as_str().unwrap().starts_with("the user closed ekko's menu without answering; the questions without an answer stay open"), "{reply}");
+    closed.stop();
+
+    let mut failed = Held::start(&home, "exit 3");
+    failed.send(&call(2, "ask", json!({"questions": [{"text": "Failed?"}]})));
+    assert!(text(&failed.reply(2)).contains("ekko's menu could not open: the terminal exited with exit status: 3; the questions"), "{:?}", failed.seen);
+    failed.stop();
+
+    let menu_pid = home.join("menu.pid");
+    let mut cancelled = Held::start(&home, &format!("echo $$ > \"$pid\"\necho $$ > \"{}\"\nexec sleep 30", menu_pid.display()));
+    cancelled.send(&call(2, "ask", json!({"questions": [{"text": "Cancelled?"}]})));
+    let up = std::time::Instant::now();
+    while fs::read_to_string(&menu_pid).map_or(true, |p| p.trim().is_empty()) {
+        assert!(up.elapsed().as_secs() < 10, "the menu never came up");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    cancelled.send(&json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}}).to_string());
+    cancelled.send(&call(3, "prime", json!({})));
+    assert!(text(&cancelled.reply(3)).contains("\nWaiting on you (3)\n"), "{:?}", cancelled.seen);
+    let menu = fs::read_to_string(&menu_pid).unwrap().trim().to_string();
+    let gone = (0..40).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        !Command::new("kill").args(["-0", &menu]).stderr(Stdio::null()).status().unwrap().success()
+    });
+    assert!(gone, "the cancelled call's menu is closed");
+    assert!(!cancelled.seen.iter().any(|m| m["id"] == 2), "a cancelled call is not answered: {:?}", cancelled.seen);
+    cancelled.stop();
 
     fs::remove_dir_all(&home).ok();
 }
@@ -683,7 +843,7 @@ fn a_question_left_unanswered_stays_open_on_the_board() {
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0x61092bab98acddaa;
+const PREFIX_FINGERPRINT: u64 = 0xb55f75929256c532;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {
@@ -732,6 +892,7 @@ impl Session {
             .arg(format!("'{}' --mcp; true", env!("CARGO_BIN_EXE_ekko")))
             .env("HOME", home)
             .env("EKKO_DIR", home)
+            .env("EKKO_TERMINAL", "none")
             .env_remove("EKKO_PROJECT")
             .current_dir(home)
             .stdin(Stdio::piped())

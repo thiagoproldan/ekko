@@ -10,6 +10,7 @@ mod json;
 mod json_output;
 mod lexical;
 mod mcp;
+mod menu;
 mod ops;
 mod project;
 mod paths;
@@ -32,7 +33,7 @@ const HELP: &str = r#"
 
     Options
         none              Display board view
-      --answer <ID>       Answer a question asked on the board
+      --answer <ID>       Answer a question asked on the board; the id alone opens a menu
       --archive, -a       Display archived items
       --attached-to <IDS> Attach a note to the task it explains
       --begin, -b         Start/pause task
@@ -474,7 +475,14 @@ fn dispatch(
     if cli.edit {
         return Ok(vec![ekko.edit_description(&described(&cli.input)?)?]);
     }
+    if let Some(file) = &cli.menu {
+        return menu::run_file(ekko, file);
+    }
     if cli.answer {
+        // An id alone, in a terminal: ekko's menu on that question.
+        if cli.input.len() == 1 && std::io::IsTerminal::is_terminal(&std::io::stdin().lock()) {
+            return menu::run_one(ekko, &cli.input[0]);
+        }
         return Ok(vec![ekko.answer_question(&described(&cli.input)?)?]);
     }
     if cli.r#move {

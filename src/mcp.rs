@@ -39,6 +39,7 @@ use crate::config;
 use crate::dialog::{self, Dialogs, Pending, Stage};
 use crate::holder;
 use crate::directory;
+use crate::menu;
 use crate::ekko::{Ekko, EkkoError, Outcome};
 use crate::item::Setting;
 use crate::ops::{self, Committed, Draft, Op, Ref};
@@ -164,6 +165,13 @@ const BEAT: Duration = Duration::from_secs(300);
 /// go through the plugin's server, so this one hears of none of them.
 const POLL: Duration = Duration::from_secs(2);
 
+/// How often an open window of ekko's menu is checked on: for the answer on
+/// the board, or the window closed.
+const WATCH: Duration = Duration::from_secs(1);
+
+/// What ask's reply says of questions left without an answer.
+const OPEN: &str = "the questions without an answer stay open: the user can answer each with `ekko --answer <id>` in a terminal, or ask them in chat and record the replies with answer";
+
 /// The prime as a resource. Not `prime://`: Claude Code 2.1.278 extracts a
 /// mention with a pattern that ends in `\b`, so a URI ending in a symbol is
 /// cut back to its last letter, `@ekko:prime://` is read as `ekko:prime`,
@@ -227,11 +235,19 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
         });
     }
     if mode == Mode::Board {
-        let (server, stdout) = (Arc::clone(&server), Arc::clone(&stdout));
+        let (beating, out) = (Arc::clone(&server), Arc::clone(&stdout));
         thread::spawn(move || loop {
             thread::sleep(BEAT);
-            let beats = server.dialogs().beats();
-            if !beats.is_empty() && send(&stdout, beats).is_err() {
+            let beats = beating.dialogs().beats();
+            if !beats.is_empty() && send(&out, beats).is_err() {
+                break;
+            }
+        });
+        let (server, stdout) = (Arc::clone(&server), Arc::clone(&stdout));
+        thread::spawn(move || loop {
+            thread::sleep(WATCH);
+            let settled = server.watch();
+            if !settled.is_empty() && send(&stdout, settled).is_err() {
                 break;
             }
         });
@@ -345,7 +361,7 @@ impl Server {
             return self.cancelled(&params);
         }
         let Some(id) = id else { return Vec::new() };
-        if method == "tools/call" && self.shows_dialog(&params) {
+        if method == "tools/call" && self.puts_to_user(&params) {
             return self.ask(id, &params);
         }
         vec![match self.handle(method, &params) {
@@ -354,18 +370,19 @@ impl Server {
         }]
     }
 
-    /// Whether a call is ask's, to be put to the user in a dialog: the client
-    /// said at initialize that it shows forms, and a stateless request of the
-    /// modern revision cannot be sent a request back.
-    fn shows_dialog(&self, params: &Value) -> bool {
+    /// Whether a call is ask's, to be put to the user and answered once they
+    /// have: its reply waits, which a stateless request of the modern
+    /// revision cannot.
+    fn puts_to_user(&self, params: &Value) -> bool {
         self.mode == Mode::Board
             && params.get("name").and_then(Value::as_str) == Some("ask")
             && params.get("_meta").and_then(|m| m.get("io.modelcontextprotocol/protocolVersion")).is_none()
-            && self.dialogs().form
     }
 
-    /// ask with a dialog: records the question, then asks the client to show
-    /// it. The call is answered when the dialog comes back, in `answered`.
+    /// ask: records the questions, then puts them to the user -- in ekko's
+    /// menu where one can open, else in the client's dialog where it shows
+    /// one and the question fits in it. The call is answered once the user
+    /// has, in `watch` or `answered`.
     fn ask(&self, call: Value, params: &Value) -> Vec<Value> {
         let progress = params.get("_meta").and_then(|m| m.get("progressToken")).cloned();
         let mut args = match params.get("arguments") {
@@ -378,24 +395,53 @@ impl Server {
             let spec: ops::Ask = parse(&mut args)?;
             Ok((project, record(&ekko, &spec)?, spec))
         });
-        match recorded {
-            Err(error) => vec![self.tool_reply(call, format!("{}: {}", error.code, error.message), true)],
-            Ok((project, recorded, spec)) => {
-                let question = recorded["items"][0]["uid"].as_str().unwrap_or_default().to_string();
-                let pending = Pending {
-                    call,
-                    project,
-                    question,
-                    recorded,
-                    message: spec.text,
-                    options: spec.options,
-                    stage: Stage::Asked,
-                    progress,
-                    beats: 0,
-                };
-                vec![self.dialogs().open(pending)]
-            }
+        let (project, recorded, spec) = match recorded {
+            Err(error) => return vec![self.tool_reply(call, format!("{}: {}", error.code, error.message), true)],
+            Ok(recorded) => recorded,
+        };
+        let items = recorded["items"].as_array().cloned().unwrap_or_default();
+        let posed: Vec<menu::Posed> = spec
+            .questions
+            .iter()
+            .zip(&items)
+            .map(|(inquiry, item)| menu::Posed {
+                uid: item["uid"].as_str().unwrap_or_default().to_string(),
+                id: item["id"].as_u64().and_then(|id| u32::try_from(id).ok()).unwrap_or_default(),
+                text: inquiry.text.trim_end().to_string(),
+                options: inquiry.options.clone(),
+                multiple: inquiry.multiple,
+            })
+            .collect();
+        let first = &spec.questions[0];
+        let pending = Pending {
+            call,
+            project,
+            questions: posed.iter().map(|question| question.uid.clone()).collect(),
+            recorded,
+            message: first.text.clone(),
+            options: first.options.clone(),
+            stage: Stage::Asked,
+            progress,
+            beats: 0,
+            window: None,
+        };
+        let why = match menu::place() {
+            Some(place) => match menu::Window::open(&place, &menu::Spec { questions: posed }, pending.project.as_deref(), &self.cwd) {
+                Ok(window) => {
+                    self.dialogs().watch(Pending { window: Some(window), ..pending });
+                    return Vec::new();
+                }
+                Err(error) => format!("ekko's menu could not open: {error}"),
+            },
+            None => "ekko's menu has nowhere to open here: no tmux, and no display".to_string(),
+        };
+        // The client's dialog, the last resort: one question, one choice.
+        if self.dialogs().form && spec.questions.len() == 1 && !first.multiple {
+            return vec![self.dialogs().open(pending)];
         }
+        let mut reply = pending.recorded;
+        reply["unanswered"] = json!(format!("{why}; {OPEN}"));
+        vec![self.tool_reply(pending.call, reply.to_string(), false)]
     }
 
     /// A response from the client: to one of ask's dialogs, which records the
@@ -409,15 +455,15 @@ impl Server {
                 vec![self.dialogs().open(pending)]
             }
             dialog::Outcome::Answer(answer) => {
-                let question = Ref::Text(pending.question);
+                let question = Ref::Text(pending.questions[0].clone());
                 let written = self
                     .open(pending.project.as_deref())
                     .map_err(ToolError::from)
                     .and_then(|(ekko, _)| write(&ekko, false, |draft| draft.answer(&question, &answer).map(|id| vec![id])));
                 vec![match written {
-                    Ok(reply) => {
-                        let mut reply: Value = serde_json::from_str(&reply).expect("a write replies in JSON");
-                        reply["answer"] = json!(answer);
+                    Ok(_) => {
+                        let mut reply = pending.recorded;
+                        reply["answers"] = json!([{"id": reply["items"][0]["id"], "answer": answer}]);
                         self.tool_reply(pending.call, reply.to_string(), false)
                     }
                     Err(error) => {
@@ -428,18 +474,81 @@ impl Server {
             }
             dialog::Outcome::Unanswered(why) => {
                 let mut reply = pending.recorded;
-                reply["unanswered"] = json!(format!("{why}; the question stays open"));
+                reply["unanswered"] = json!(format!("{why}; {OPEN}"));
                 vec![self.tool_reply(pending.call, reply.to_string(), false)]
             }
         }
     }
 
-    /// The client gave up on a call: if it was ask's, its dialog is closed
-    /// too, and the question stays open on the board.
+    /// The client gave up on a call: if it was ask's, its dialog or menu is
+    /// closed too, and the questions stay open on the board.
     fn cancelled(&self, params: &Value) -> Vec<Value> {
         let Some(call) = params.get("requestId") else { return Vec::new() };
-        let Some((id, _)) = self.dialogs().take_call(call) else { return Vec::new() };
+        let Some((id, pending)) = self.dialogs().take_call(call) else { return Vec::new() };
+        if let Some(window) = pending.window {
+            window.close();
+            return Vec::new();
+        }
         vec![json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id, "reason": "The call it was for was cancelled"}})]
+    }
+
+    /// The replies to ask's calls whose questions in ekko's menu are settled:
+    /// all answered on the board -- from the menu, or by anyone -- or some
+    /// left open by a menu that closed or never opened. Checked every `WATCH`,
+    /// which also reminds a user who has not answered for a while.
+    pub fn watch(&self) -> Vec<Value> {
+        let open: Vec<(String, Vec<String>, Option<String>)> = self
+            .dialogs()
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.window.is_some())
+            .map(|(id, pending)| (id.clone(), pending.questions.clone(), pending.project.clone()))
+            .collect();
+        let mut replies = Vec::new();
+        for (id, questions, project) in open {
+            let why = if self.answers_to(&questions, project.as_deref()).iter().all(Option::is_some) {
+                None
+            } else {
+                let mut dialogs = self.dialogs();
+                let Some(pending) = dialogs.pending.get_mut(&id) else { continue };
+                let message = pending.message.clone();
+                let Some(window) = pending.window.as_mut() else { continue };
+                window.remind(&message);
+                match window.gone() {
+                    Some(why) => Some(why),
+                    None => continue,
+                }
+            };
+            let Some(pending) = self.dialogs().take(&json!(id)) else { continue };
+            if let Some(window) = pending.window {
+                window.close();
+            }
+            // Read again: the menu may have closed just after the answers landed.
+            let answers = self.answers_to(&questions, project.as_deref());
+            let mut reply = pending.recorded;
+            let items = reply["items"].as_array().cloned().unwrap_or_default();
+            let given: Vec<Value> = items.iter().zip(&answers).filter_map(|(item, answer)| Some(json!({"id": item["id"], "answer": answer.as_ref()?}))).collect();
+            if !given.is_empty() {
+                reply["answers"] = json!(given);
+            }
+            if answers.iter().any(Option::is_none) {
+                let why = why.unwrap_or_else(|| "the menu closed".to_string());
+                reply["unanswered"] = json!(format!("{why}; {OPEN}"));
+            }
+            replies.push(self.tool_reply(pending.call, reply.to_string(), false));
+        }
+        replies
+    }
+
+    /// The answer recorded to each question, by uid, where it has one.
+    fn answers_to(&self, uids: &[String], project: Option<&str>) -> Vec<Option<String>> {
+        let data = self.open(project).ok().and_then(|(ekko, _)| ekko.storage.get().ok());
+        uids.iter()
+            .map(|uid| {
+                let item = data.as_ref()?.values().find(|item| item.uid.as_deref() == Some(uid.as_str()))?;
+                Some(item.question.as_ref()?.answer.as_ref()?.text.clone())
+            })
+            .collect()
     }
 
     /// A tool's answer as a reply to call `id`.
@@ -717,10 +826,11 @@ impl Server {
                 write(&ekko, false, |draft| draft.link(&spec))
             }
             "ask" => {
-                // Here only when the client shows no dialog: see shows_dialog.
+                // Here only for a stateless request, whose reply cannot wait for
+                // the user: see puts_to_user.
                 let spec: ops::Ask = parse(args)?;
                 let mut recorded = record(&ekko, &spec)?;
-                recorded["unanswered"] = json!("this client shows no dialog; the question stays open");
+                recorded["unanswered"] = json!(format!("a stateless request cannot wait for the user; {OPEN}"));
                 Ok(recorded.to_string())
             }
             "answer" => {
@@ -876,14 +986,18 @@ fn write(
     Ok(reply.to_string())
 }
 
-/// Records ask's question, with the options it offers under it: the reply to
-/// the write, as JSON.
+/// Records ask's questions, each with the options it offers under it: the
+/// reply to the write, as JSON, its items in the order of the questions.
 fn record(ekko: &Ekko, spec: &ops::Ask) -> Result<Value, ToolError> {
-    if let Some(why) = dialog::refuse(&spec.options) {
+    if spec.questions.is_empty() || spec.questions.len() > 4 {
+        return Err(invalid("questions holds 1 to 4 questions"));
+    }
+    if let Some(why) = spec.questions.iter().find_map(dialog::check) {
         return Err(invalid(why));
     }
-    let text = dialog::noted(&spec.text, &spec.options);
-    let reply = write(ekko, false, |draft| draft.ask(&text, spec.about.as_ref()).map(|id| vec![id]))?;
+    let reply = write(ekko, false, |draft| {
+        spec.questions.iter().map(|q| draft.ask(&dialog::noted(&q.text, &q.options, q.multiple), spec.about.as_ref())).collect()
+    })?;
     Ok(serde_json::from_str(&reply).expect("a write replies in JSON"))
 }
 
@@ -1135,6 +1249,24 @@ fn tool_definitions() -> Value {
     let object = |properties: Value, required: &[&str]| {
         json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
     };
+    // ask's question, apart: nested inside the list below, it runs past the
+    // json! macro's recursion limit.
+    let choice = object(
+        json!({
+            "label": {"type": "string"},
+            "description": {"type": "string"},
+            "preview": {"type": "string", "description": "Shown beside the options while this one is focused: a mockup, a snippet, a config."}
+        }),
+        &["label"],
+    );
+    let question = object(
+        json!({
+            "text": {"type": "string", "description": "The question, with what the user needs to answer it."},
+            "options": {"type": "array", "minItems": 2, "maxItems": 6, "items": choice},
+            "multiple": {"type": "boolean", "description": "The user may pick several options."}
+        }),
+        &["text"],
+    );
 
     let mut tools = json!([
         {
@@ -1259,18 +1391,12 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "ask",
-            "description": "Ask the user something and wait for the answer. The question is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then it is put to the user in a dialog, and their answer is recorded. With options, they pick one or write another answer. When no answer comes back (unanswered says why), the question stays open: ask it in chat and record the reply with answer.",
+            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer.",
             "inputSchema": object(json!({
                 "project": project,
-                "text": {"type": "string", "description": "The question, with what the user needs to answer it."},
                 "about": item,
-                "options": {"type": "array", "minItems": 2, "maxItems": 6, "items": {
-                    "type": "object",
-                    "properties": {"label": {"type": "string"}, "description": {"type": "string"}},
-                    "required": ["label"],
-                    "additionalProperties": false
-                }}
-            }), &["text"]),
+                "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": question}
+            }), &["questions"]),
             "annotations": write,
         },
         {

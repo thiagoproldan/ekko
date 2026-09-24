@@ -173,22 +173,36 @@ pub struct SetState {
     pub state: String,
 }
 
-/// A question for the user, the task it is about, and the answers offered.
+/// Questions for the user, put to them together, and the task they are about.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ask {
-    pub text: String,
+    pub questions: Vec<Inquiry>,
     pub about: Option<Ref>,
-    #[serde(default)]
-    pub options: Vec<Choice>,
 }
 
-/// One answer a question offers: a few words, and what choosing it means.
+/// One question, and the answers it offers.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Inquiry {
+    pub text: String,
+    #[serde(default)]
+    pub options: Vec<Choice>,
+    /// The user may pick several of the options.
+    #[serde(default)]
+    pub multiple: bool,
+}
+
+/// One answer a question offers: a few words, what choosing it means, and
+/// what to show beside the options while it is focused.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Choice {
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// The user's answer to a question.
