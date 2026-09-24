@@ -976,7 +976,7 @@ fn name_readiness(reply: &mut Value, committed: &Committed) {
             ids.iter()
                 .filter_map(|id| data.get(id))
                 .map(|item| {
-                    json!({"id": item.id, "uid": item.uid, "text": agent::clip(&item.description, READINESS_CLIP)})
+                    json!({"id": item.id, "uid": item.uid, "text": agent::headline(&item.description, item.is_task, READINESS_CLIP)})
                 })
                 .collect(),
         )
@@ -1346,7 +1346,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "create",
-            "description": "Create a task or a note. The text is kept exactly as given. A note explaining a task should be attached_to it.",
+            "description": "Create a task or a note. The text is kept exactly as given; a task's first line is its title, at most 80 characters. A note explaining a task should be attached_to it.",
             "inputSchema": object(json!({
                 "project": project,
                 "kind": {"type": "string", "enum": ["task", "note", "handoff", "decision", "gotcha", "procedure"], "default": "task", "description": "handoff: a note attached_to an open task saying where this session stopped, what it decided and why, the files and the next step; it replaces the task's earlier handoff, and the next session's prime shows it. decision (what was settled, and why), gotcha (a trap, and how to avoid it), procedure (steps that work): a note that stays true after its task is done, loose or attached_to it, written when the user settles something or a session learns it; prime lists gotchas and procedures by first line, so lead with the point."},

@@ -370,23 +370,31 @@ impl<'a> Renderer<'a> {
     /// hidden. Returns the description untouched when there is nothing to
     /// gain, or when folding is off.
     ///
-    /// Notes only. They are prose and hold the reasoning worth keeping, which
-    /// is exactly why they run long -- on a real board they took 56 of 94
-    /// rendered lines while every task, open and closed, took 28. Tasks stay
-    /// whole because a truncated task hides something you are meant to act
-    /// on, where a truncated note hides something you can go and read.
+    /// Notes are prose and hold the reasoning worth keeping, which is exactly
+    /// why they run long -- on a real board they took 56 of 94 rendered lines
+    /// while every task, open and closed, took 28. A task is never cut: one
+    /// with a title (its first line) shows the title, what to act on, and a
+    /// count of the lines below it, which --context prints; one written
+    /// before titles stays whole.
     fn fold_note(&self, item: &Item) -> String {
         let Some(width) = self.fold_width else {
             return item.description.clone();
         };
-        if item.is_task {
-            return item.description.clone();
-        }
 
         // Everything the line spends before the description: the id column,
         // the icon, the mark and their separators.
         let overhead = 12 + item.mark().map_or(0, |mark| mark.len() + 3);
         let available = width.saturating_sub(overhead);
+        if item.is_task {
+            return match item.description.trim().split_once('\n') {
+                Some((title, body)) if available >= MIN_FOLD_WIDTH && !body.trim().is_empty() => {
+                    let hidden: usize = body.lines().map(|line| line.trim().chars().count().div_ceil(available)).sum();
+                    let plural = if hidden == 1 { "line" } else { "lines" };
+                    format!("{} (+{hidden} {plural})", title.trim())
+                }
+                _ => item.description.clone(),
+            };
+        }
         let chars = item.description.chars().count();
         if available < MIN_FOLD_WIDTH || chars <= available {
             return item.description.clone();
@@ -1585,6 +1593,22 @@ mod tests {
         });
 
         assert!(output.contains(&text), "a task must survive whole");
+    }
+
+    #[test]
+    fn a_titled_task_shows_its_title_and_counts_the_lines_below() {
+        // Its first line is its title, what to act on; --context prints the
+        // rest (task 260).
+        let mut task = Item::new_task(1, format!("ship the titles\n{}", "z".repeat(150)), vec!["@b".to_string()], 1);
+        task.date = GOLDEN_DAY.to_string();
+        task.timestamp = golden_now().timestamp_millis();
+
+        let output = render_folded_at(100, |r| {
+            r.display_by_board(&[("@b".to_string(), vec![task])]);
+        });
+
+        assert!(output.contains("ship the titles (+2 lines)"), "{output}");
+        assert!(!output.contains('z'), "the rest is for --context: {output}");
     }
 
     #[test]

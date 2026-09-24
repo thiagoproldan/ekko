@@ -455,6 +455,9 @@ impl<'a> Draft<'a> {
         }
         crate::ekko::fits("description", text)?;
         let kind = spec.kind.unwrap_or(if spec.attached_to.is_some() { Kind::Note } else { Kind::Task });
+        if kind == Kind::Task {
+            crate::ekko::titled(text)?;
+        }
         if kind != Kind::Task {
             for (field, given) in [
                 ("priority", spec.priority.is_some()),
@@ -672,8 +675,13 @@ impl<'a> Draft<'a> {
                 if more.trim().is_empty() {
                     return Err(invalid("append is empty, so there is nothing to add"));
                 }
-                let joins = item.description.ends_with(char::is_whitespace) || more.starts_with(char::is_whitespace);
-                if joins { format!("{}{more}", item.description) } else { format!("{} {more}", item.description) }
+                if item.is_task && !item.description.trim_end().contains('\n') {
+                    // What is added to a task goes to its body, never its title.
+                    format!("{}\n{}", item.description.trim_end(), more.trim_start())
+                } else {
+                    let joins = item.description.ends_with(char::is_whitespace) || more.starts_with(char::is_whitespace);
+                    if joins { format!("{}{more}", item.description) } else { format!("{} {more}", item.description) }
+                }
             }
             _ => return Err(invalid("An edit takes exactly one of text, replace or append")),
         };
@@ -681,6 +689,9 @@ impl<'a> Draft<'a> {
             return Err(EkkoError::MissingDesc);
         }
         crate::ekko::fits("description", &description)?;
+        if item.is_task {
+            crate::ekko::retitled(&item.description, &description)?;
+        }
         item.description = description;
         Ok(vec![id])
     }
@@ -1253,7 +1264,7 @@ mod tests {
     #[test]
     fn a_description_is_capped() {
         let (ekko, dir) = board("capped");
-        let full = "é".repeat(crate::ekko::MAX_DESCRIPTION);
+        let full = format!("capped\n{}", "é".repeat(crate::ekko::MAX_DESCRIPTION - "capped\n".len()));
         batch(&ekko, &[json!({"op": "create", "text": full})]).unwrap();
 
         let over = batch(&ekko, &[json!({"op": "create", "text": format!("{full}x")})]);
@@ -1271,6 +1282,51 @@ mod tests {
         let long = draft.answer(&Ref::Id(asked), &format!("{full}x"));
         assert!(matches!(&long, Err(EkkoError::InvalidInput(m)) if m.starts_with("The answer runs 20001 characters")), "{:?}", long.err());
         draft.answer(&Ref::Id(asked), &full).unwrap();
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A task's first line is its title, which the lists show: past
+    /// MAX_TITLE characters it is refused on creation, and so is an edit
+    /// that makes it so. What is appended to a task goes below its title, a
+    /// note's first line runs as long as it likes, and a task written before
+    /// titles keeps its long first line through edits that leave that line
+    /// alone (task 260).
+    #[test]
+    fn a_task_starts_with_a_short_title() {
+        let (ekko, dir) = board("titled");
+        let long = "t".repeat(crate::ekko::MAX_TITLE + 1);
+        let refused = batch(&ekko, &[json!({"op": "create", "text": long})]);
+        assert!(
+            matches!(&refused, Err(EkkoError::InvalidInput(m)) if m.contains("at most 80 characters, and this one runs 81")),
+            "{:?}",
+            refused.err()
+        );
+        let cli = ekko.create_task(std::slice::from_ref(&long));
+        assert!(matches!(&cli, Err(EkkoError::InvalidInput(m)) if m.contains("its title")), "the terminal too: {:?}", cli.err());
+
+        let titled = format!("{}\n{long}", "t".repeat(crate::ekko::MAX_TITLE));
+        batch(&ekko, &[json!({"op": "create", "text": titled})]).unwrap();
+        batch(&ekko, &[json!({"op": "create", "kind": "note", "text": long})]).unwrap();
+        let longer = batch(&ekko, &[json!({"op": "edit", "item": 1, "replace": {"old": "t\n", "new": "tt\n"}})]);
+        assert!(matches!(&longer, Err(EkkoError::InvalidInput(m)) if m.contains("runs 81")), "{:?}", longer.err());
+        let whole = batch(&ekko, &[json!({"op": "edit", "item": 1, "text": long})]);
+        assert!(matches!(&whole, Err(EkkoError::InvalidInput(_))), "{:?}", whole.err());
+        let cli = ekko.edit_description(&["@1".to_string(), long.clone()]);
+        assert!(matches!(&cli, Err(EkkoError::InvalidInput(m)) if m.contains("its title")), "the terminal too: {:?}", cli.err());
+
+        batch(&ekko, &[json!({"op": "create", "text": "short"})]).unwrap();
+        batch(&ekko, &[json!({"op": "edit", "item": 3, "append": "why it matters"})]).unwrap();
+        let grown = batch(&ekko, &[json!({"op": "edit", "item": 3, "append": "and more"})]).unwrap();
+        assert_eq!(grown.data[&3].description, "short\nwhy it matters and more");
+
+        // A task written before titles, one long line.
+        let mut data = ekko.storage.get().unwrap();
+        data.get_mut(&3).unwrap().description = long.clone();
+        ekko.storage.set(&data).unwrap();
+        let kept = batch(&ekko, &[json!({"op": "edit", "item": 3, "append": "more"})]).unwrap();
+        assert_eq!(kept.data[&3].description, format!("{long}\nmore"));
+        batch(&ekko, &[json!({"op": "edit", "item": 3, "replace": {"old": "more", "new": "less"}})]).unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1863,7 +1919,7 @@ mod tests {
                 "operation 6's text holds $5, which batch does not replace: that item is 3",
             ]
         );
-        assert_eq!(written.data[&2].description, format!("{text} (see $3 and $4)"));
+        assert_eq!(written.data[&2].description, format!("{text}\n(see $3 and $4)"), "what is added to a task goes below its title");
         assert_eq!(written.data[&1].description, "the task before $5");
         let alone = batch(&ekko, &[json!({"op": "create", "text": "costs $1"})]).unwrap();
         assert!(alone.notices.is_empty(), "{:?}", alone.notices);

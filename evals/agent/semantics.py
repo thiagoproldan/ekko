@@ -242,7 +242,7 @@ def session_aware_hook():
 def prime_budget():
     m = Mcp(scratch("semantics-budget"))
     reason = "a reason that runs long enough to matter " * 7
-    task = "described at the length real tasks on a board run to, so a listing fills"
+    task = "titled at the length real titles run to\nits body, described at the length real tasks on a board run to, so a listing fills"
     ops = [{"op": "create", "text": f"ready task number {k}, {task}"} for k in range(1, 81)]
     ops += [{"op": "create", "kind": "note", "text": reason, "attached_to": f"${k}"} for k in range(1, 81)]
     call(m, "batch", ops=ops)

@@ -843,7 +843,7 @@ fn questions_left_in_ekkos_menu_stay_open() {
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0x8c1979d21381eb4e;
+const PREFIX_FINGERPRINT: u64 = 0xaead77f39854ac15;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {

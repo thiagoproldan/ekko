@@ -1091,7 +1091,7 @@ impl Ekko {
             };
             let removed: Vec<serde_json::Value> = gone
                 .iter()
-                .map(|item| serde_json::json!({"id": item.id, "uid": item.uid, "text": crate::agent::clip(&item.description, 80)}))
+                .map(|item| serde_json::json!({"id": item.id, "uid": item.uid, "text": crate::agent::headline(&item.description, item.is_task, 80)}))
                 .collect();
             self.storage.append_journal(&serde_json::json!({
                 "rev": counters.revision,
@@ -1121,6 +1121,7 @@ impl Ekko {
     ) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let created = self.parse_create_options(input)?;
+        titled(&created.description)?;
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
         let mut item = self.authored(Item::new_task(id, created.description, created.boards, created.priority));
@@ -1364,6 +1365,9 @@ impl Ekko {
             return Err(EkkoError::MissingDesc);
         }
         fits("description", &new_description)?;
+        if data[&id].is_task {
+            retitled(&data[&id].description, &new_description)?;
+        }
 
         data.get_mut(&id).expect("id just validated against data").description = new_description;
         self.save_touching(&mut data)?;
@@ -2336,6 +2340,36 @@ pub fn fits(what: &str, text: &str) -> Result<(), EkkoError> {
         )));
     }
     Ok(())
+}
+
+/// The longest title a task takes, in characters: what Claude Code's task
+/// list shows of a task before it cuts (`tasklist::SUBJECT_CLIP`). By
+/// 2026-09-24 every open task's first line ran past 160, a median of 611
+/// (task 260), and each list cut it mid-sentence.
+pub const MAX_TITLE: usize = 80;
+
+/// A task's title: the first line of its text, which the lists show while
+/// context shows the whole.
+pub fn title(text: &str) -> &str {
+    text.trim_start().lines().next().unwrap_or_default().trim()
+}
+
+/// Refuses a task whose title runs past `MAX_TITLE`, saying by how much.
+pub fn titled(text: &str) -> Result<(), EkkoError> {
+    let length = title(text).chars().count();
+    if length > MAX_TITLE {
+        return Err(EkkoError::InvalidInput(format!(
+            "A task's first line is its title, at most {MAX_TITLE} characters, and this one runs {length}: start with a short title, then a line break and the rest"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses a task's new text whose title changed and runs past `MAX_TITLE`.
+/// A task written before titles keeps its long first line through edits that
+/// leave that line alone.
+pub fn retitled(old: &str, new: &str) -> Result<(), EkkoError> {
+    if title(old) == title(new) { Ok(()) } else { titled(new) }
 }
 
 /// `-` standing alone for the description reads it from stdin, so text with

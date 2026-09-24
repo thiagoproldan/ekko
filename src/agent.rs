@@ -730,6 +730,22 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
     format!("{}\u{2026} (+{} chars)", head.trim_end(), count - max)
 }
 
+/// What a list shows of an item's text. A task's first line is its title, so
+/// a task with more lines shows the title and how much the rest holds; a
+/// note, or a task written before titles, is clipped to `max` as before.
+pub(crate) fn headline(text: &str, is_task: bool, max: usize) -> String {
+    let text = text.trim();
+    match text.split_once('\n') {
+        Some((title, body)) if is_task && title.trim().chars().count() <= max => {
+            match body.split_whitespace().collect::<Vec<_>>().join(" ").chars().count() {
+                0 => title.trim().to_string(),
+                rest => format!("{} (+{rest} chars)", title.trim()),
+            }
+        }
+        _ => clip(text, max),
+    }
+}
+
 /// The resume view: what an agent needs to pick a board back up.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1301,7 +1317,7 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
                 (None, None) if reader.graph.links.superseded_by.contains_key(&other.id) => "handoff, replaced",
                 (None, None) => state_word(other),
             },
-            description: clip(&other.description, TASK_CLIP),
+            description: headline(&other.description, other.is_task, TASK_CLIP),
         })
     };
     let mut blockers: Vec<Link> = reader.graph.links.blockers.get(&id).into_iter().flatten().filter_map(link).collect();
@@ -1421,7 +1437,7 @@ pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String], limit: usize)
 
     if query.is_empty() {
         let hits =
-            candidates.iter().take(limit).map(|item| (reader.entry(item), clip(&item.description, TASK_CLIP))).collect();
+            candidates.iter().take(limit).map(|item| (reader.entry(item), headline(&item.description, item.is_task, TASK_CLIP))).collect();
         return Ok(Found { total: candidates.len(), every_word: true, hits, stashed: stashed.len(), ..Found::default() });
     }
     let texts: Vec<&str> = candidates.iter().map(|item| item.description.as_str()).collect();
@@ -1485,7 +1501,7 @@ pub fn away(ekko: &Ekko, stash: bool, trash: bool, limit: usize) -> Result<Strin
         }
         for item in items.iter().take(limit) {
             let entry = reader.entry_counting(item, false);
-            let mut body = format!("[{}] {}", listed_state(&entry), clip(&item.description, TASK_CLIP));
+            let mut body = format!("[{}] {}", listed_state(&entry), headline(&item.description, item.is_task, TASK_CLIP));
             if let Some(at) = item.trashed {
                 let left = crate::render::TRASH_DAYS - (now - at) / 86_400_000;
                 let _ = write!(body, " \u{b7} {}", match left {
@@ -1557,7 +1573,7 @@ pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoErr
         many => {
             out.push_str("Write the handoff for the task this session worked on, now, before its context is cleared: create with kind \"handoff\" and attached_to that task. More than one task is in progress:\n");
             for task in many {
-                let _ = writeln!(out, "{:>4}. {}", task.id, clip(&task.description, TASK_CLIP));
+                let _ = writeln!(out, "{:>4}. {}", task.id, headline(&task.description, true, TASK_CLIP));
             }
         }
     }
@@ -1608,7 +1624,7 @@ pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoErr
         };
     }
     if let [task] = tasks.as_slice() {
-        let _ = writeln!(out, "\nTask {}: {}", task.id, clip(&task.description, NOTE_CLIP));
+        let _ = writeln!(out, "\nTask {}: {}", task.id, headline(&task.description, true, NOTE_CLIP));
         let current = task
             .uid
             .as_deref()
@@ -2067,7 +2083,7 @@ pub fn sessions(ekko: &Ekko, board: &str) -> Result<Sessions, EkkoError> {
     items.sort_by_key(|item| item.id);
     let mut listed: Vec<(usize, u8, SessionItem)> = Vec::new();
     for item in items {
-        let line = || SessionItem { id: item.id, text: clip(&item.description, TASK_CLIP) };
+        let line = || SessionItem { id: item.id, text: headline(&item.description, item.is_task, TASK_CLIP) };
         match (State::of(item), &item.held_by, &item.done_by) {
             (Some(State::Progress), Some(holder), _) => listed.push((session_of(holder), 0, line())),
             (Some(State::Done), _, Some(by)) if done_today(item) => listed.push((session_of(by), 1, line())),
@@ -2141,7 +2157,7 @@ impl Changes {
                 Some((_, Some(answer))) => ("answered".to_string(), format!(" -> {}", clip(answer, NOTE_CLIP))),
                 None => (listed_state(entry), String::new()),
             };
-            let _ = writeln!(out, "{:>4}. [{state}{away}] {}{answer}{now}", entry.id, clip(&entry.description, TASK_CLIP));
+            let _ = writeln!(out, "{:>4}. [{state}{away}] {}{answer}{now}", entry.id, headline(&entry.description, entry.state.is_some(), TASK_CLIP));
         }
         for gone in &self.removed {
             let _ = writeln!(out, "{:>4}. [removed] {}", gone.id, gone.text);
@@ -2166,7 +2182,7 @@ impl Changes {
 /// One listing line: the id first, so a reader can find the item by its
 /// number, then the description and whatever sets it apart.
 fn entry_line(entry: &Entry, today: &str) -> String {
-    listed_line(entry, &clip(&entry.description, TASK_CLIP), false, today)
+    listed_line(entry, &headline(&entry.description, entry.state.is_some(), TASK_CLIP), false, today)
 }
 
 /// A listing line with `body` for its text, then whatever sets the item
@@ -3375,7 +3391,7 @@ mod tests {
         let (ekko, dir) = board("budget");
         let reason = "a reason that runs long enough to matter ".repeat(7);
         for k in 1..=80 {
-            let task = format!("ready task number {k}, described at the length real tasks on a board run to, so a listing fills");
+            let task = format!("ready task number {k}, titled at the length real titles run to\nits body, described at the length real tasks on a board run to, so a listing fills");
             ekko.create_task(&words(&[task.as_str()])).unwrap();
         }
         for k in 1..=80 {
@@ -3444,7 +3460,7 @@ mod tests {
     #[test]
     fn a_cut_prime_keeps_blocked_work_and_notes_beside_ready_work() {
         let (ekko, dir) = board("kept");
-        let long = "described at the length real tasks on a board run to, so that a listing fills and then some";
+        let long = "titled at the length real titles run to\nits body, described at the length real tasks on a board run to, so that a listing fills and then some";
         for k in 1..=120 {
             let task = format!("ready task {k}, {long}");
             ekko.create_task(&words(&[task.as_str()])).unwrap();
@@ -3470,6 +3486,26 @@ mod tests {
         assert_eq!(section("\nBlocked (6)").len(), BLOCKED_KEPT, "{text}");
         assert!(text.contains("+1 more: search with the blocked filter"), "{text}");
         assert!(section("\nRecent notes").len() >= NOTES_KEPT, "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A task's first line is its title: a list shows it and how much
+    /// follows, while a note, or a task written before titles, is clipped as
+    /// before (task 260).
+    #[test]
+    fn a_list_shows_a_task_by_its_title() {
+        assert_eq!(headline("Ship titles\nwhy: the lists cut\n  mid-sentence", true, TASK_CLIP), "Ship titles (+31 chars)");
+        assert_eq!(headline("Ship titles\n", true, TASK_CLIP), "Ship titles");
+        assert_eq!(headline("a note\nwith lines", false, TASK_CLIP), "a note with lines");
+        let legacy = "x".repeat(200);
+        assert_eq!(headline(&legacy, true, TASK_CLIP), clip(&legacy, TASK_CLIP));
+
+        let (ekko, dir) = board("titles");
+        ekko.create_task(&words(&["Ship titles\nwhy: the lists cut mid-sentence"])).unwrap();
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.contains("Ship titles (+31 chars)"), "{text}");
+        assert!(!text.contains("mid-sentence"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3541,7 +3577,7 @@ mod tests {
         let (ekko, dir) = board("handoff-long");
         let reason = "a reason that runs long enough to matter ".repeat(7);
         for k in 1..=80 {
-            let task = format!("ready task number {k}, described at the length real tasks on a board run to, so a listing fills");
+            let task = format!("ready task number {k}, titled at the length real titles run to\nits body, described at the length real tasks on a board run to, so a listing fills");
             ekko.create_task(&words(&[task.as_str()])).unwrap();
         }
         for k in 1..=20 {
@@ -3660,7 +3696,7 @@ mod tests {
         let reason = "a reason that runs long enough to matter ".repeat(7);
         let mut ops = Vec::new();
         for k in 1..=80 {
-            let text = format!("ready task number {k}, described at the length real tasks on a board run to, so a listing fills");
+            let text = format!("ready task number {k}, titled at the length real titles run to\nits body, described at the length real tasks on a board run to, so a listing fills");
             ops.push(serde_json::json!({"op": "create", "text": text}));
         }
         for k in 1..=80 {

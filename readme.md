@@ -336,6 +336,15 @@ To create a new task use the `--task`/`-t` option with your task's description f
 $ ekko -t Improve documentation
 ```
 
+A task's first line is its title, at most 80 characters: the board, `--next`, the prime and Claude Code's task list show the title, and `--context` shows the whole. The rest of the text goes on the lines below it, through stdin (see below). A longer first line is refused, when the task is created and when an edit changes it; what `edit`'s `append` adds to a task goes below the title. A task written before titles keeps its long first line until an edit changes that line.
+
+```
+$ ekko -t - <<'EOF'
+Improve documentation
+The install section still names the old flags.
+EOF
+```
+
 ### Create Note
 
 To create a new note use the `--note`/`-n` option with your note's body following right after.
