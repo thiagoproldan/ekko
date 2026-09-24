@@ -173,12 +173,22 @@ pub struct SetState {
     pub state: String,
 }
 
-/// A question for the user, and the task it is about.
+/// A question for the user, the task it is about, and the answers offered.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ask {
     pub text: String,
     pub about: Option<Ref>,
+    #[serde(default)]
+    pub options: Vec<Choice>,
+}
+
+/// One answer a question offers: a few words, and what choosing it means.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Choice {
+    pub label: String,
+    pub description: Option<String>,
 }
 
 /// The user's answer to a question.

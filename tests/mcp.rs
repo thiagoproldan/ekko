@@ -103,10 +103,10 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
 
     let tools = replies["2"]["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 20);
-    // The five nearly every session calls load at session start; the rest stay behind ToolSearch.
+    // The five nearly every session calls, and ask, load at session start; the rest stay behind ToolSearch.
     let loaded: Vec<&str> =
         tools.iter().filter(|tool| tool["_meta"]["anthropic/alwaysLoad"] == true).map(|tool| tool["name"].as_str().unwrap()).collect();
-    assert_eq!(loaded, ["context", "search", "create", "set_state", "edit"]);
+    assert_eq!(loaded, ["context", "search", "create", "set_state", "edit", "ask"]);
     assert!(tools.iter().all(|tool| tool["inputSchema"]["type"] == "object" && tool["description"].is_string()));
 
     let created: Value = serde_json::from_str(text(&replies["3"])).unwrap();
@@ -588,13 +588,102 @@ fn a_question_is_asked_and_answered_through_the_tools() {
     fs::remove_dir_all(&home).ok();
 }
 
+fn elicitation_client() -> String {
+    request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {"elicitation": {}}, "clientInfo": {"name": "test", "version": "0"}}))
+}
+
+fn dialog_answer(id: &str, result: Value) -> String {
+    json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string()
+}
+
+/// ask in a client that shows forms: the question is recorded, put in a
+/// dialog, and the answer that comes back is recorded against it -- a label
+/// chosen, or the text of "Other answer…" in a second dialog. Other requests
+/// are answered while a dialog is open.
+#[test]
+fn a_question_is_put_to_the_user_in_a_dialog_and_the_answer_recorded() {
+    let home = temp_home();
+    let options = json!([{"label": "Yes", "description": "all four"}, {"label": "No"}]);
+    let messages = transcript(
+        &home,
+        &[
+            elicitation_client(),
+            call(2, "ask", json!({"text": "Mark them?", "options": options})),
+            request(3, "ping", json!({})),
+            dialog_answer("ekko-ask-1", json!({"action": "accept", "content": {"answer": "Yes"}})),
+            call(4, "ask", json!({"text": "Why?", "options": options})),
+            dialog_answer("ekko-ask-2", json!({"action": "accept", "content": {"answer": "ekko:other"}})),
+            dialog_answer("ekko-ask-3", json!({"action": "accept", "content": {"answer": "only the ninth"}})),
+            call(5, "context", json!({"items": [1, 2]})),
+        ],
+    );
+    let by_id = |id: Value| messages.iter().find(|m| m["id"] == id && m.get("method").is_none()).unwrap_or_else(|| panic!("no reply {id}: {messages:?}"));
+    let opened: Vec<&Value> = messages.iter().filter(|m| m["method"] == "elicitation/create").collect();
+    assert_eq!(opened.len(), 3, "{messages:?}");
+    assert_eq!(opened[0]["id"], "ekko-ask-1");
+    assert_eq!(opened[0]["params"]["message"], "Mark them?");
+    let choices = &opened[0]["params"]["requestedSchema"]["properties"]["answer"]["oneOf"];
+    assert_eq!(choices[0], json!({"const": "Yes", "title": "Yes: all four"}));
+    assert_eq!(choices[2]["title"], "Other answer…");
+    assert_eq!(opened[2]["params"]["requestedSchema"]["properties"]["answer"], json!({"type": "string", "title": "Answer"}));
+    // The ping is answered before the dialog comes back.
+    let at = |id: Value| messages.iter().position(|m| m["id"] == id && m.get("method").is_none()).unwrap();
+    assert!(at(json!(3)) < at(json!(2)), "{messages:?}");
+
+    let first: Value = serde_json::from_str(text(by_id(json!(2)))).unwrap();
+    assert_eq!(first["answer"], "Yes", "{first}");
+    assert_eq!(first["items"][0]["id"], 1);
+    let second: Value = serde_json::from_str(text(by_id(json!(4)))).unwrap();
+    assert_eq!(second["answer"], "only the ninth", "{second}");
+    let read = text(by_id(json!(5)));
+    assert!(read.contains("Mark them?\nOptions:\n- Yes: all four\n- No"), "{read}");
+    assert!(read.contains(": Yes\n") && read.contains(": only the ninth\n"), "{read}");
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// What leaves a question open: a dialog declined or dismissed -- Claude Code
+/// under -p dismisses every one at once -- a call the client cancels, whose
+/// dialog is then closed, and a client that shows no forms at all.
+#[test]
+fn a_question_left_unanswered_stays_open_on_the_board() {
+    let home = temp_home();
+    let messages = transcript(
+        &home,
+        &[
+            elicitation_client(),
+            call(2, "ask", json!({"text": "Declined?"})),
+            dialog_answer("ekko-ask-1", json!({"action": "decline"})),
+            call(3, "ask", json!({"text": "Dismissed?"})),
+            dialog_answer("ekko-ask-2", json!({"action": "cancel"})),
+            call(4, "ask", json!({"text": "Cancelled?"})),
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 4}}).to_string(),
+            call(5, "ask", json!({"text": "One option?", "options": [{"label": "Only"}]})),
+            call(6, "prime", json!({})),
+        ],
+    );
+    let reply = |id: u64| messages.iter().find(|m| m["id"] == id).unwrap_or_else(|| panic!("no reply {id}: {messages:?}"));
+    assert!(text(reply(2)).contains("\"unanswered\":\"the user declined the dialog; the question stays open\""), "{}", text(reply(2)));
+    assert!(text(reply(3)).contains("\"unanswered\":\"the user dismissed the dialog; the question stays open\""), "{}", text(reply(3)));
+    assert!(!messages.iter().any(|m| m["id"] == 4), "a cancelled call is not answered: {messages:?}");
+    assert!(messages.iter().any(|m| m["method"] == "notifications/cancelled" && m["params"]["requestId"] == "ekko-ask-3"), "{messages:?}");
+    assert_eq!(reply(5)["result"]["isError"], true);
+    assert!(text(reply(5)).starts_with("INVALID_INPUT: options offers 2 to 6 answers"), "{}", text(reply(5)));
+    assert!(text(reply(6)).contains("\nWaiting on you (3)\n"), "{}", text(reply(6)));
+
+    let without = session(&home, &[request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})), call(2, "ask", json!({"text": "No forms?"}))]);
+    assert!(text(&without["2"]).contains("\"unanswered\":\"this client shows no dialog; the question stays open\""), "{}", without["2"]);
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// What Claude Code puts ahead of every conversation from this server: its
 /// instructions and the always-loaded tool definitions. A byte changed there
 /// makes every session resumed after an upgrade write its whole context again
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0xc892af84e2cacc16;
+const PREFIX_FINGERPRINT: u64 = 0xf1de37b93142e7d7;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {

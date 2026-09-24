@@ -1,6 +1,7 @@
 mod agent;
 mod cli;
 mod config;
+mod dialog;
 mod directory;
 mod ekko;
 mod holder;

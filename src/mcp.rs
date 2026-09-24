@@ -36,11 +36,12 @@ use serde_json::{json, Map, Value};
 
 use crate::agent;
 use crate::config;
+use crate::dialog::{self, Dialogs, Pending, Stage};
 use crate::holder;
 use crate::directory;
 use crate::ekko::{Ekko, EkkoError, Outcome};
 use crate::item::Setting;
-use crate::ops::{self, Committed, Draft, Op};
+use crate::ops::{self, Committed, Draft, Op, Ref};
 use crate::render::{Painter, Renderer};
 use crate::storage::ItemMap;
 
@@ -52,13 +53,14 @@ const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"
 /// The tools Claude Code loads at session start instead of behind ToolSearch.
 /// A deferred tool costs a session one ToolSearch round trip before its first
 /// use: a median of 2.9 s over 20 loads on 2026-09-21, and up to 20 s. These
-/// five are the ones nearly every session calls. Their definitions, about
+/// are the ones nearly every session calls, and ask, which takes
+/// AskUserQuestion's place (task 395): a question must go through it first. Their definitions, about
 /// 5,600 characters or 2,200 tokens (measured 2026-09-21), are read in every
 /// session, in every project, since the plugin is loaded everywhere, so the
 /// rest stay deferred -- and a byte changed in them rewrites the context of
 /// every session resumed after an upgrade, which the prefix fingerprint in
 /// tests/mcp.rs guards.
-const ALWAYS_LOADED: &[&str] = &["context", "search", "create", "set_state", "edit"];
+const ALWAYS_LOADED: &[&str] = &["context", "search", "create", "set_state", "edit", "ask"];
 
 const TOOLS: &[&str] = &[
     "prime", "next", "context", "search", "changes", "roadmap", "projects", "create", "set_state",
@@ -77,7 +79,7 @@ Each session starts with the board's prime already in context -- in progress, re
 - A write's reply names the tasks it set free (nowReady) or left waiting (nowBlocked): no next or prime is needed to find them.
 - batch applies several operations in one write, all or nothing; $1, $2 name the items its first and second operations create.
 - trash is recoverable for 30 days and still needs the user's consent. For work decided against, set_state cancelled keeps the record.
-- Ask the user through ask; answer records the reply.
+- Ask the user through ask: it shows them a dialog and records the answer.
 - Refusals come back as CODE: message. Branch on the code; nothing was written.";
 
 /// Where calls find their board: the folder the server was started in, and
@@ -104,6 +106,8 @@ pub struct Server {
     /// Who writes through this server: the Claude Code process that started
     /// it, which claims the tasks it sets in progress.
     actor: holder::Actor,
+    /// ask's dialogs open in the client, waiting for the user.
+    dialogs: Mutex<Dialogs>,
 }
 
 /// A binary as a file: where its name resolves, every link followed, and
@@ -151,6 +155,10 @@ pub enum Mode {
     /// Resources only: `ekko --mcp --resources`.
     Resources,
 }
+
+/// How often an open dialog's call is told it is still alive: well inside the
+/// 30 minutes of silence after which Claude Code aborts a stdio call.
+const BEAT: Duration = Duration::from_secs(300);
 
 /// How often the resources server looks at the board's revision. The writes
 /// go through the plugin's server, so this one hears of none of them.
@@ -218,6 +226,16 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
             }
         });
     }
+    if mode == Mode::Board {
+        let (server, stdout) = (Arc::clone(&server), Arc::clone(&stdout));
+        thread::spawn(move || loop {
+            thread::sleep(BEAT);
+            let beats = server.dialogs().beats();
+            if !beats.is_empty() && send(&stdout, beats).is_err() {
+                break;
+            }
+        });
+    }
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -226,9 +244,9 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
         }
         // The reply first, then any notice: a write's list_changed follows
         // the answer to the write.
-        let reply = server.handle_line(&line);
+        let messages = server.handle_line(&line);
         let notice = server.list_changed();
-        if send(&stdout, reply.into_iter().chain(notice)).is_err() {
+        if send(&stdout, messages.into_iter().chain(notice)).is_err() {
             break;
         }
     }
@@ -255,6 +273,7 @@ impl Server {
             started,
             launched,
             actor,
+            dialogs: Mutex::new(Dialogs::default()),
         }
     }
 
@@ -302,23 +321,138 @@ impl Server {
         Some(json!({"jsonrpc": "2.0", "method": "notifications/resources/list_changed"}))
     }
 
-    /// One incoming line to at most one reply: notifications and stray
-    /// responses get none.
-    pub fn handle_line(&self, line: &str) -> Option<Value> {
+    fn dialogs(&self) -> std::sync::MutexGuard<'_, Dialogs> {
+        self.dialogs.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// One incoming line to the messages it calls for: a reply, or a request
+    /// of ask's dialog, or none for notifications and stray responses.
+    pub fn handle_line(&self, line: &str) -> Vec<Value> {
         let message: Value = match serde_json::from_str(line) {
             Ok(message) => message,
-            Err(error) => return Some(error_reply(Value::Null, RpcError::new(-32700, format!("Parse error: {error}")))),
+            Err(error) => return vec![error_reply(Value::Null, RpcError::new(-32700, format!("Parse error: {error}")))],
         };
         let id = message.get("id").cloned();
         let Some(method) = message.get("method").and_then(Value::as_str) else {
-            return id.map(|id| error_reply(id, RpcError::new(-32600, "Invalid request: no method")));
+            return match id {
+                Some(id) if message.get("result").is_some() || message.get("error").is_some() => self.answered(&id, &message),
+                Some(id) => vec![error_reply(id, RpcError::new(-32600, "Invalid request: no method"))],
+                None => Vec::new(),
+            };
         };
-        let id = id?;
         let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
-        Some(match self.handle(method, &params) {
+        if method == "notifications/cancelled" {
+            return self.cancelled(&params);
+        }
+        let Some(id) = id else { return Vec::new() };
+        if method == "tools/call" && self.shows_dialog(&params) {
+            return self.ask(id, &params);
+        }
+        vec![match self.handle(method, &params) {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err(error) => error_reply(id, error),
-        })
+        }]
+    }
+
+    /// Whether a call is ask's, to be put to the user in a dialog: the client
+    /// said at initialize that it shows forms, and a stateless request of the
+    /// modern revision cannot be sent a request back.
+    fn shows_dialog(&self, params: &Value) -> bool {
+        self.mode == Mode::Board
+            && params.get("name").and_then(Value::as_str) == Some("ask")
+            && params.get("_meta").and_then(|m| m.get("io.modelcontextprotocol/protocolVersion")).is_none()
+            && self.dialogs().form
+    }
+
+    /// ask with a dialog: records the question, then asks the client to show
+    /// it. The call is answered when the dialog comes back, in `answered`.
+    fn ask(&self, call: Value, params: &Value) -> Vec<Value> {
+        let progress = params.get("_meta").and_then(|m| m.get("progressToken")).cloned();
+        let mut args = match params.get("arguments") {
+            None | Some(Value::Null) => Map::new(),
+            Some(Value::Object(map)) => map.clone(),
+            Some(_) => return vec![error_reply(call, RpcError::new(-32602, "Invalid params: arguments must be an object"))],
+        };
+        let recorded = take_project(&mut args).and_then(|project| {
+            let (ekko, _) = self.open(project.as_deref())?;
+            let spec: ops::Ask = parse(&mut args)?;
+            Ok((project, record(&ekko, &spec)?, spec))
+        });
+        match recorded {
+            Err(error) => vec![self.tool_reply(call, format!("{}: {}", error.code, error.message), true)],
+            Ok((project, recorded, spec)) => {
+                let question = recorded["items"][0]["uid"].as_str().unwrap_or_default().to_string();
+                let pending = Pending {
+                    call,
+                    project,
+                    question,
+                    recorded,
+                    message: spec.text,
+                    options: spec.options,
+                    stage: Stage::Asked,
+                    progress,
+                    beats: 0,
+                };
+                vec![self.dialogs().open(pending)]
+            }
+        }
+    }
+
+    /// A response from the client: to one of ask's dialogs, which records the
+    /// answer and answers the call, or opens the text field after "Other
+    /// answer…". A stray one is dropped.
+    fn answered(&self, id: &Value, response: &Value) -> Vec<Value> {
+        let Some(mut pending) = self.dialogs().take(id) else { return Vec::new() };
+        match dialog::outcome(response, pending.stage) {
+            dialog::Outcome::Other => {
+                pending.stage = Stage::Writing;
+                vec![self.dialogs().open(pending)]
+            }
+            dialog::Outcome::Answer(answer) => {
+                let question = Ref::Text(pending.question);
+                let written = self
+                    .open(pending.project.as_deref())
+                    .map_err(ToolError::from)
+                    .and_then(|(ekko, _)| write(&ekko, false, |draft| draft.answer(&question, &answer).map(|id| vec![id])));
+                vec![match written {
+                    Ok(reply) => {
+                        let mut reply: Value = serde_json::from_str(&reply).expect("a write replies in JSON");
+                        reply["answer"] = json!(answer);
+                        self.tool_reply(pending.call, reply.to_string(), false)
+                    }
+                    Err(error) => {
+                        let text = format!("{}: {} The user's answer in the dialog: {answer}", error.code, error.message);
+                        self.tool_reply(pending.call, text, true)
+                    }
+                }]
+            }
+            dialog::Outcome::Unanswered(why) => {
+                let mut reply = pending.recorded;
+                reply["unanswered"] = json!(format!("{why}; the question stays open"));
+                vec![self.tool_reply(pending.call, reply.to_string(), false)]
+            }
+        }
+    }
+
+    /// The client gave up on a call: if it was ask's, its dialog is closed
+    /// too, and the question stays open on the board.
+    fn cancelled(&self, params: &Value) -> Vec<Value> {
+        let Some(call) = params.get("requestId") else { return Vec::new() };
+        let Some((id, _)) = self.dialogs().take_call(call) else { return Vec::new() };
+        vec![json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id, "reason": "The call it was for was cancelled"}})]
+    }
+
+    /// A tool's answer as a reply to call `id`.
+    fn tool_reply(&self, id: Value, text: String, failed: bool) -> Value {
+        json!({"jsonrpc": "2.0", "id": id, "result": self.tool_result(text, failed)})
+    }
+
+    fn tool_result(&self, mut text: String, failed: bool) -> Value {
+        // After the answer, so a refusal still opens with its code.
+        if self.replaced() {
+            text = format!("{}\n\n{REPLACED}\n", text.trim_end());
+        }
+        json!({"content": [{"type": "text", "text": text}], "isError": failed})
     }
 
     fn handle(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
@@ -357,6 +491,7 @@ impl Server {
     }
 
     fn initialize(&self, params: &Value) -> Value {
+        self.dialogs().form = params.get("capabilities").is_some_and(dialog::shows_forms);
         let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
         let version = LEGACY.iter().find(|v| **v == requested).copied().unwrap_or(LEGACY[0]);
         let mut reply = json!({"protocolVersion": version, "serverInfo": server_info()});
@@ -452,15 +587,11 @@ impl Server {
             Some(Value::Object(map)) => map.clone(),
             Some(_) => return Err(RpcError::new(-32602, "Invalid params: arguments must be an object")),
         };
-        let (mut text, failed) = match self.tool(name, &mut args) {
+        let (text, failed) = match self.tool(name, &mut args) {
             Ok(text) => (text, false),
             Err(error) => (format!("{}: {}", error.code, error.message), true),
         };
-        // After the answer, so a refusal still opens with its code.
-        if self.replaced() {
-            text = format!("{}\n\n{REPLACED}\n", text.trim_end());
-        }
-        Ok(json!({"content": [{"type": "text", "text": text}], "isError": failed}))
+        Ok(self.tool_result(text, failed))
     }
 
     /// The board one call works on, resolved afresh each time: the same
@@ -485,11 +616,7 @@ impl Server {
             finish(args)?;
             return Ok(agent::projects_text(&crate::project::list(&self.home)));
         }
-        let project = match args.remove("project") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(name)) => Some(name),
-            Some(_) => return Err(invalid("project must be a string")),
-        };
+        let project = take_project(args)?;
         let (ekko, location) = self.open(project.as_deref())?;
 
         match name {
@@ -590,8 +717,11 @@ impl Server {
                 write(&ekko, false, |draft| draft.link(&spec))
             }
             "ask" => {
+                // Here only when the client shows no dialog: see shows_dialog.
                 let spec: ops::Ask = parse(args)?;
-                write(&ekko, false, |draft| draft.ask(&spec.text, spec.about.as_ref()).map(|id| vec![id]))
+                let mut recorded = record(&ekko, &spec)?;
+                recorded["unanswered"] = json!("this client shows no dialog; the question stays open");
+                Ok(recorded.to_string())
             }
             "answer" => {
                 let spec: ops::Reply = parse(args)?;
@@ -744,6 +874,25 @@ fn write(
         reply["notices"] = json!(committed.notices);
     }
     Ok(reply.to_string())
+}
+
+/// Records ask's question, with the options it offers under it: the reply to
+/// the write, as JSON.
+fn record(ekko: &Ekko, spec: &ops::Ask) -> Result<Value, ToolError> {
+    if let Some(why) = dialog::refuse(&spec.options) {
+        return Err(invalid(why));
+    }
+    let text = dialog::noted(&spec.text, &spec.options);
+    let reply = write(ekko, false, |draft| draft.ask(&text, spec.about.as_ref()).map(|id| vec![id]))?;
+    Ok(serde_json::from_str(&reply).expect("a write replies in JSON"))
+}
+
+fn take_project(args: &mut Map<String, Value>) -> Result<Option<String>, ToolError> {
+    match args.remove("project") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(name)) => Ok(Some(name)),
+        Some(_) => Err(invalid("project must be a string")),
+    }
 }
 
 /// A refusal worded for an agent.
@@ -1110,8 +1259,18 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "ask",
-            "description": "Ask the user something that waits for an answer, as a note on the board about a task: unlike a question held in your prompt, it outlives this session's /clear or restart, every session's prime lists it under 'Waiting on you', and the answer reaches you whichever session hears it. Record it here, then ask the user; record the reply with answer.",
-            "inputSchema": object(json!({"project": project, "text": {"type": "string"}, "about": item}), &["text"]),
+            "description": "Ask the user something and wait for the answer. The question is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then it is put to the user in a dialog, and their answer is recorded. With options, they pick one or write another answer. When no answer comes back (unanswered says why), the question stays open: ask it in chat and record the reply with answer.",
+            "inputSchema": object(json!({
+                "project": project,
+                "text": {"type": "string", "description": "The question, with what the user needs to answer it."},
+                "about": item,
+                "options": {"type": "array", "minItems": 2, "maxItems": 6, "items": {
+                    "type": "object",
+                    "properties": {"label": {"type": "string"}, "description": {"type": "string"}},
+                    "required": ["label"],
+                    "additionalProperties": false
+                }}
+            }), &["text"]),
             "annotations": write,
         },
         {
