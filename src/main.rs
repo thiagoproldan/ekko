@@ -1,5 +1,6 @@
 mod agent;
 mod cli;
+mod commits;
 mod config;
 mod dialog;
 mod directory;
@@ -220,7 +221,9 @@ fn main() -> ExitCode {
     // A command run by an agent through Bash, or by a hook, acts for the
     // Claude Code session it runs under; one typed at a terminal, for the user.
     let ekko = match Ekko::at(&location.dir) {
-        Ok(ekko) => ekko.acting_as(holder::Actor::of_this_command().with_registry(holder::Registry::at(agent::processes_dir(&home_dir)))),
+        Ok(ekko) => ekko
+            .acting_as(holder::Actor::of_this_command().with_registry(holder::Registry::at(agent::processes_dir(&home_dir))))
+            .in_folder(location.project.as_ref().and_then(|project| project.root.clone())),
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
 

@@ -14,6 +14,7 @@
 //! know which of those two output modes is active at all.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 
 use crate::config;
 use crate::directory::DirectoryError;
@@ -540,6 +541,10 @@ pub struct Ekko {
     /// Who writes through this handle, and so who claims a task set in
     /// progress; `None` claims nothing.
     pub(crate) actor: Option<crate::holder::Actor>,
+    /// The folder of the project whose board this is, where the commits
+    /// naming its items are read (`crate::commits`); `None` for the default
+    /// board, which belongs to no folder.
+    pub(crate) folder: Option<PathBuf>,
 }
 
 /// What the words given to `--task` or `--note` say: the `@boards`, the
@@ -555,13 +560,25 @@ struct Created {
 
 impl Ekko {
     pub fn new(storage: Storage) -> Self {
-        Ekko { storage, actor: None }
+        Ekko { storage, actor: None, folder: None }
     }
 
     /// This handle, writing for `actor`.
     pub fn acting_as(mut self, actor: crate::holder::Actor) -> Self {
         self.actor = Some(actor);
         self
+    }
+
+    /// This handle, for the board of the project in `folder`.
+    pub fn in_folder(mut self, folder: Option<PathBuf>) -> Self {
+        self.folder = folder;
+        self
+    }
+
+    /// `item`, new, as written by whoever this handle writes for (task 125).
+    pub(crate) fn authored(&self, mut item: Item) -> Item {
+        item.created_by = self.actor.as_ref().map(|actor| actor.holder(item.timestamp));
+        item
     }
 
     /// Opens the board in `dir` -- wherever `directory::locate` said this
@@ -847,6 +864,10 @@ impl Ekko {
                     let name = &with[WITH.len()..];
                     data.retain(|_, item| is_with(item, name));
                 }
+                by if by.starts_with(BY) => {
+                    let name = &by[BY.len()..];
+                    data.retain(|_, item| is_by(item, name));
+                }
                 // Only tasks that are still open: a finished task is not
                 // late, however long its deadline has been past.
                 "overdue" => {
@@ -1102,7 +1123,7 @@ impl Ekko {
         let created = self.parse_create_options(input)?;
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
-        let mut item = Item::new_task(id, created.description, created.boards, created.priority);
+        let mut item = self.authored(Item::new_task(id, created.description, created.boards, created.priority));
         item.due_date = created.due_date;
         item.with = created.with;
         item.phase = phase.map(str::to_string);
@@ -1150,7 +1171,7 @@ impl Ekko {
         let created = self.parse_create_options(input)?;
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
-        let mut item = Item::new_note(id, created.description, created.boards);
+        let mut item = self.authored(Item::new_note(id, created.description, created.boards));
         item.knowledge = Some(kind);
         item.phase = phase.map(str::to_string);
         data.insert(id, item);
@@ -1182,7 +1203,7 @@ impl Ekko {
         let created = self.parse_create_options(input)?;
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
-        let mut item = Item::new_note(id, created.description, created.boards);
+        let mut item = self.authored(Item::new_note(id, created.description, created.boards));
         item.phase = phase.map(str::to_string);
         data.insert(id, item.clone());
         self.save_touching(&mut data)?;
@@ -2163,6 +2184,9 @@ impl Ekko {
                 // would read as nobody having anything: said instead.
                 person(name)?;
                 attributes.push(term.clone());
+            } else if let Some(name) = term.strip_prefix(BY) {
+                author(name)?;
+                attributes.push(term.clone());
             } else if !term.starts_with('@') && is_known_attribute(term) {
                 attributes.push(term.clone());
             } else if stored_boards.contains(&at_board) {
@@ -2407,6 +2431,38 @@ pub(crate) fn is_with(item: &Item, name: &str) -> bool {
     item.with.as_deref().is_some_and(|with| crate::lexical::folded(with) == crate::lexical::folded(name.trim()))
 }
 
+/// The `--list` filter, and search's, for who wrote an item (task 125):
+/// `by:user`, a profile such as `by:trabalho`, or the start of a
+/// conversation.
+pub(crate) const BY: &str = "by:";
+
+/// A name `by:` can hold: one word. Refused otherwise, since a filter no
+/// author could match would read as nobody having written anything.
+fn author(name: &str) -> Result<(), EkkoError> {
+    let name = name.trim();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return Err(EkkoError::InvalidInput(format!(
+            "{name:?} cannot be who wrote an item: by:user, a profile such as by:trabalho, or the start of a conversation"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `name` names who wrote `item`: `user` names the person at the
+/// terminal; any other name, the profile of the session that wrote it, or
+/// the start of the conversation it ran then, four characters at least. An
+/// item written before authorship was recorded matches no name.
+pub(crate) fn is_by(item: &Item, name: &str) -> bool {
+    let Some(author) = &item.created_by else { return false };
+    let name = crate::lexical::folded(name.trim());
+    if author.pid.is_none() {
+        return name == "user";
+    }
+    let profile = author.profile.as_deref().unwrap_or("default");
+    crate::lexical::folded(profile) == name
+        || (name.len() >= 4 && author.conversation.as_deref().is_some_and(|conversation| conversation.starts_with(&*name)))
+}
+
 fn has_terms(text: &str, terms: &[String]) -> bool {
     let lower = text.to_lowercase();
     terms.iter().any(|term| lower.contains(&term.to_lowercase()))
@@ -2458,6 +2514,7 @@ pub(crate) fn is_known_attribute(term: &str) -> bool {
             | "overdue"
     ) || Knowledge::from_word(term).is_some()
         || term.starts_with(WITH)
+        || term.starts_with(BY)
         || term == STASHED
 }
 
@@ -4668,5 +4725,31 @@ mod tests {
         assert_eq!(archived[0]["outcome"], serde_json::json!({"shipped": "v0.11.0"}));
 
         cleanup(&dir);
+    }
+
+    /// by: names a session by its profile, case aside, or by the start of
+    /// the conversation it wrote in, four characters at least, and the
+    /// person only as `user`. An item from before authorship names no one.
+    #[test]
+    fn by_names_an_author_by_profile_or_conversation_or_as_the_user() {
+        let mut item = Item::new_note(1, "n".into(), vec![]);
+        assert!(!is_by(&item, "user"), "an item from before authorship named an author");
+        item.created_by = Some(crate::holder::Holder {
+            pid: Some(42),
+            start: Some(7),
+            boot: Some("b".into()),
+            profile: Some("trabalho".into()),
+            tty: Some("pts/1".into()),
+            conversation: Some("874cd2ed-5f00-4a1b-9c3d-000000000000".into()),
+            since: 0,
+        });
+        for name in ["trabalho", "TRABALHO", "874cd2ed", "874c"] {
+            assert!(is_by(&item, name), "{name} did not name the session");
+        }
+        for name in ["874", "user", "default", "pts/1"] {
+            assert!(!is_by(&item, name), "{name} named the session");
+        }
+        item.created_by = Some(crate::holder::Holder { pid: None, start: None, boot: None, profile: None, tty: None, conversation: None, since: 0 });
+        assert!(is_by(&item, "user") && !is_by(&item, "default"));
     }
 }

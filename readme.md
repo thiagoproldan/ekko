@@ -36,6 +36,8 @@ Added by Ekko, each of them invisible until you use it:
 - **A real paused state**, so "set aside" stops looking like "never started"
 - **A waiting state**, for work held by something outside the board, which `--list ready` and `--next` stop offering
 - **Who a task is with**: `with:NAME` and `--with`, so work that is yours, a colleague's or a client's leaves an agent's queue and is listed by name
+- **Who wrote each item**: the session that wrote it, or you, shown by `--context` and found with `--list by:NAME`
+- **Commits linked to tasks**: an `Ekko: 469` line in a commit's message, and `--context` lists the commits naming a task, through rebases too
 - **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
 - **Projects**: a board per folder or repository, made with `ekko init` and found from inside it the way git finds a repository
 - **Phases and `--roadmap`**: a project's roadmap, read backwards as history and forwards as a plan
@@ -228,7 +230,7 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 |---|---|
 | `prime` | the resume view: in progress, ready in order, blocked, recent notes, gotchas and procedures, what needs attention, and a cursor |
 | `next` | what to take up next, best first |
-| `context` | one item with its blockers, what it blocks and its notes, in full |
+| `context` | one item with its blockers, what it blocks and its notes, in full; who wrote it, and the commits naming it |
 | `search` | items matching a text and/or the `--list` filters, with a count of the stashed ones that match as well |
 | `changes` | what was written since a cursor, including items stashed or trashed since |
 | `roadmap`, `projects` | as the flags of the same name |
@@ -752,6 +754,28 @@ Who a task is with is said ahead of the work and stays until someone changes it.
 
 This is an Ekko addition. `with` is stored only on a task that is with someone, so a board that names nobody stays byte-identical, and taskbook reads such a task as any other.
 
+### Who Wrote It
+
+Every item records who wrote it as it is created: the Claude Code session that wrote it -- its profile, its terminal and the conversation it ran then, as `trabalho on pts/5 · a6b026e6` -- or you, at the terminal. `--context` says it on a line of its own, `written by trabalho on pts/5 · a6b026e6` or `written by the user`, and `--list by:NAME` finds what one author wrote: `by:user` for you, a profile such as `by:trabalho` for what its sessions wrote, or the start of a conversation, four characters at least, for what one conversation wrote. Over MCP, `search` takes the same filter.
+
+It is set once and kept by every later write, a restore included, so it says who wrote the item, not who touched it last. An item written before Ekko recorded it names no author, and no `by:` finds it. A question already says who asked it, so its context says no more.
+
+That makes three answers to "who", each kept apart: who a task is with is said ahead of the work, who holds one in progress is whoever started it, and who wrote an item is fixed as it is written.
+
+### Commits
+
+A commit names the tasks it carries with a trailer, a line at the end of its message:
+
+```
+fix(mcp): the replaced-binary note fires under the Nix-built plugin
+
+Ekko: 469
+```
+
+Several share a line, as `Ekko: 125, 396`, and a uid does as well as an id. `--context` then lists the commits naming the item, read from the git history of the project's folder each time it is asked: those on the branch checked out first, newest first, then those only on another branch, marked `(not on main)`. Nothing is stored, so a rebase, a cherry-pick or a squash that keeps the message keeps the link, where a note citing a SHA goes stale at the first rebase. A line naming anything but ids and uids, such as prose that starts with the word, is no trailer. Outside a git repository, or without git, there is simply no list.
+
+An agent is told the line as it takes a task up: `set_state` putting a task in progress, on a project in a git repository, answers with a notice giving the trailer its commits end with. Nothing is installed in the repository, and a commit without the line is still a commit.
+
 ### Stable ids
 
 The next display id is `max + 1`, so deleting the highest-numbered item and creating another hands that number straight back out. For someone typing at a terminal that is fine -- the id you use is the one on screen in front of you. For anything holding a reference between one command and the next, it is a trap.
@@ -929,6 +953,7 @@ The by default supported listing attributes, together with their respective alia
 - `ready` - Open tasks with nothing outstanding blocking them, waiting ones left out.
 - `blocked` - Items blocked by something still open.
 - `with:NAME` - Tasks with someone, by name, case and accents aside.
+- `by:NAME` - Items by [who wrote them](#who-wrote-it): `user` for you, a profile, or the start of a conversation.
 - `stashed` - Items in [the stash](#stash-and-trash), which every other listing leaves out; the trash stays out of it too.
 - `decision`, `decisions` - Notes recording what was settled, and why.
 - `gotcha`, `gotchas` - Notes recording a trap, and how to avoid it.

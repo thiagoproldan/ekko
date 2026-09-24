@@ -1184,7 +1184,22 @@ pub struct Context {
     /// `Reader::sequence`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sequence: Vec<Link>,
+    /// Who wrote it, as a person reads it -- `trabalho on pts/1 · 874cd2ed`,
+    /// `the user` -- where that was recorded (task 125).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_by: Option<String>,
+    /// The commits naming it in an `Ekko:` trailer, those on the branch
+    /// checked out first, each group newest first (task 396).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<crate::commits::Commit>,
+    /// The branch checked out, named beside the commits not on it; set only
+    /// when one is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
+
+/// How many of an item's commits its context lists; the rest are counted.
+const COMMITS_SHOWN: usize = 10;
 
 #[derive(Debug, Serialize)]
 pub struct Link {
@@ -1209,7 +1224,24 @@ pub fn contexts(ekko: &Ekko, targets: &[String]) -> Result<Vec<Context>, EkkoErr
     let raw: Vec<String> = targets.iter().map(|target| target.trim_start_matches('@').to_string()).collect();
     let ids = ekko.validate_ids(&raw, &all)?;
     let reader = Reader::shared(&all, &phases).seen_by(ekko);
-    Ok(ids.into_iter().map(|id| neighbourhood(&all, &reader, id)).collect())
+    let mut read: Vec<Context> = ids.into_iter().map(|id| neighbourhood(&all, &reader, id)).collect();
+    // One reading of the history for every item asked for.
+    if let Some(folder) = &ekko.folder {
+        let items: Vec<(u32, Option<&str>)> = read.iter().map(|context| (context.item.id, all[&context.item.id].uid.as_deref())).collect();
+        let since = read.iter().map(|context| all[&context.item.id].timestamp).min().unwrap_or(0);
+        let mut found = crate::commits::naming(folder, since, &items);
+        let elsewhere = found.values().flatten().any(|commit| !commit.landed);
+        let branch = if elsewhere { crate::commits::branch(folder) } else { None };
+        for context in &mut read {
+            let mut commits = found.remove(&context.item.id).unwrap_or_default();
+            commits.sort_by_key(|commit| !commit.landed);
+            if commits.iter().any(|commit| !commit.landed) {
+                context.branch = branch.clone();
+            }
+            context.commits = commits;
+        }
+    }
+    Ok(read)
 }
 
 /// Several neighbourhoods as one reply, each item described once: one that
@@ -1283,6 +1315,11 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         superseded_by,
         question,
         sequence,
+        // The conversation the author ran as it wrote, not the one its
+        // process runs now: a /clear since does not change who wrote it.
+        written_by: item.created_by.as_ref().map(crate::holder::Holder::label),
+        commits: Vec::new(),
+        branch: None,
     }
 }
 
@@ -2699,6 +2736,10 @@ impl Context {
             self.created,
             item.updated_at
         );
+        // A question already says who asked it.
+        if let (Some(by), None) = (&self.written_by, &self.question) {
+            let _ = writeln!(out, "      written by {by}");
+        }
         if let Some(asked) = &self.question {
             let moved = |after: &str| match asked.moved {
                 0 => String::new(),
@@ -2721,6 +2762,20 @@ impl Context {
             };
             let steps: Vec<String> = self.sequence.iter().map(|link| format!("{} {}", mark(link.state), link.id)).collect();
             let _ = writeln!(out, "      step {step} of {of}: {}", steps.join(" \u{2192} "));
+        }
+        if !self.commits.is_empty() {
+            let _ = writeln!(out, "\nCommits");
+            for commit in self.commits.iter().take(COMMITS_SHOWN) {
+                let elsewhere = match (commit.landed, &self.branch) {
+                    (true, _) => String::new(),
+                    (false, Some(branch)) => format!(" (not on {branch})"),
+                    (false, None) => " (not on HEAD)".to_string(),
+                };
+                let _ = writeln!(out, " {} {} {}{elsewhere}", commit.sha, commit.date, clip(&commit.subject, TASK_CLIP));
+            }
+            if self.commits.len() > COMMITS_SHOWN {
+                let _ = writeln!(out, "      +{} more", self.commits.len() - COMMITS_SHOWN);
+            }
         }
 
         let links = |out: &mut String, title: &str, links: &[Link]| {
@@ -4176,6 +4231,50 @@ mod tests {
         let clock = changes(&ekko, 1_000_000_000_000).unwrap();
         assert_eq!(ids(&clock.items), vec![1, 2, 3], "a clock cursor from an older prime went unanswered");
         assert_eq!(clock.cursor, seen.cursor);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Who wrote an item (task 125): recorded as it is created, by the
+    /// session or the person writing, whichever way it is written; context
+    /// says it on a line of its own, and the by: filter finds it. An item
+    /// from before it was recorded names no author and matches no name.
+    #[test]
+    fn an_item_says_who_wrote_it_and_by_finds_it() {
+        let (me, _, _) = crate::holder::test_sessions();
+        let (_, dir) = board("written-by");
+        let as_ = |actor: Option<&crate::holder::Actor>| {
+            let ekko = Ekko::new(Storage::new(&dir).unwrap());
+            match actor {
+                Some(actor) => ekko.acting_as(actor.clone()),
+                None => ekko,
+            }
+        };
+        as_(Some(&me)).create_task(&words(&["the session's"])).unwrap();
+        as_(Some(&crate::holder::Actor::person())).create_task(&words(&["the user's"])).unwrap();
+        as_(None).create_note(&words(&["nobody's"])).unwrap();
+        let session = as_(Some(&me));
+        let mut draft = crate::ops::Draft::open(&session).unwrap();
+        draft.apply(&serde_json::from_value(serde_json::json!({"op": "create", "kind": "note", "text": "written through a tool"})).unwrap()).unwrap();
+        draft.commit(false).unwrap();
+
+        let read = |id: &str| context(&as_(None), id).unwrap().text();
+        for (id, by) in [("1", Some("default on pts/1")), ("2", Some("the user")), ("3", None), ("4", Some("default on pts/1"))] {
+            let text = read(id);
+            match by {
+                Some(by) => assert!(text.contains(&format!("\n      written by {by}\n")), "{text}"),
+                None => assert!(!text.contains("written by"), "{text}"),
+            }
+        }
+
+        let found = |filter: &str| {
+            let hits = search(&as_(None), None, &words(&[filter]), 20).unwrap().hits;
+            hits.iter().map(|(entry, _)| entry.id).collect::<Vec<_>>()
+        };
+        assert_eq!(found("by:user"), vec![2]);
+        assert_eq!(found("by:Default"), vec![1, 4], "a profile, case aside");
+        assert!(found("by:trabalho").is_empty());
+        assert!(search(&as_(None), None, &words(&["by:"]), 20).is_err(), "a by: naming no one is refused");
 
         std::fs::remove_dir_all(&dir).ok();
     }

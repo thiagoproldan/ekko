@@ -31,8 +31,13 @@
           cargoLock.lockFile = ./Cargo.lock;
 
           # flock(1), for the storage tests that spawn a real external lock
-          # holder. Check-time only -- the binary itself needs nothing.
-          nativeCheckInputs = [ pkgs.util-linux ];
+          # holder, and git, for the tests of commit trailers, which make a
+          # repository of their own. Check-time only -- the binary itself
+          # needs neither, and reads commits only where git is installed.
+          nativeCheckInputs = [
+            pkgs.util-linux
+            pkgs.gitMinimal
+          ];
 
           meta = with pkgs.lib; {
             inherit (cargoToml.package) description;

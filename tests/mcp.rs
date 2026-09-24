@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -843,7 +843,7 @@ fn questions_left_in_ekkos_menu_stay_open() {
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0xb55f75929256c532;
+const PREFIX_FINGERPRINT: u64 = 0x8c1979d21381eb4e;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {
@@ -885,16 +885,30 @@ struct Session {
 
 impl Session {
     fn start(home: &PathBuf) -> Session {
+        Session::spawn(home, None)
+    }
+
+    /// A session started in `folder`, as Claude Code starts one in a
+    /// project's folder: its board is the project found from there.
+    fn in_folder(home: &PathBuf, folder: &Path) -> Session {
+        Session::spawn(home, Some(folder))
+    }
+
+    fn spawn(home: &PathBuf, folder: Option<&Path>) -> Session {
         // Not exec'd: the shell stays, as the server's parent, until the
         // server exits.
-        let mut child = Command::new("sh")
+        let mut command = Command::new("sh");
+        command
             .arg("-c")
             .arg(format!("'{}' --mcp; true", env!("CARGO_BIN_EXE_ekko")))
             .env("HOME", home)
-            .env("EKKO_DIR", home)
             .env("EKKO_TERMINAL", "none")
-            .env_remove("EKKO_PROJECT")
-            .current_dir(home)
+            .env_remove("EKKO_PROJECT");
+        match folder {
+            Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
+            None => command.env("EKKO_DIR", home).current_dir(home),
+        };
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -954,5 +968,79 @@ fn a_second_session_does_not_take_the_first_ones_task() {
     assert!(second.call("prime", json!({})).contains("   1. the first session's work \u{b7} in progress \u{b7} yours\n"));
 
     second.close();
+    fs::remove_dir_all(&home).ok();
+}
+
+/// A commit names the tasks it carries with an 'Ekko:' trailer (task 396).
+/// The session taking a task up in a git repository is told the trailer, and
+/// context lists the commits naming a task, read from git each time: those
+/// on the branch checked out first, then the rest, named apart. A trailer
+/// naming 12 is no commit of 1's, and the terminal's --context lists them
+/// too.
+#[test]
+fn commits_name_their_tasks_and_context_lists_them() {
+    let home = temp_home();
+    let repo = home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=ekko", "-c", "user.email=ekko@example.com", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+            .args(args)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let ekko = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(&repo)
+            .env("HOME", &home)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ekko {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    git(&["init", "-q"]);
+    ekko(&["init"]);
+
+    let mut session = Session::in_folder(&home, &repo);
+    session.call("create", json!({"text": "ship it"}));
+    session.call("create", json!({"text": "and this"}));
+    let started = session.call("set_state", json!({"items": [1], "state": "progress"}));
+    assert!(started.contains("Commits for 1: end the message with the trailer 'Ekko: 1', by which context lists them"), "{started}");
+    let again = session.call("set_state", json!({"items": [1], "state": "progress"}));
+    assert!(!again.contains("trailer"), "told again for a task already in progress: {again}");
+
+    let commit = |message: &str| {
+        git(&["commit", "-q", "--allow-empty", "-m", message]);
+        git(&["rev-parse", "--short", "HEAD"])
+    };
+    let first = commit("feat: the first half\n\nEkko: 1");
+    let both = commit("fix: both at once\n\nEkko: 1, 2\nCo-Authored-By: someone <a@b.c>");
+    let other = commit("chore: another task's\n\nEkko: 12");
+    git(&["checkout", "-q", "-b", "side"]);
+    let side = commit("wip: on a branch\n\nekko: #2");
+    git(&["checkout", "-q", "main"]);
+
+    let read = session.call("context", json!({"items": [1, 2]}));
+    let (one, two) = read.split_once("\n   2. and this").expect("both items read");
+    let line = |sha: &str| format!("\n {sha} ");
+    assert!(one.contains("\nCommits\n") && one.contains(&line(&first)) && one.contains(&line(&both)), "{one}");
+    assert!(one.contains("fix: both at once\n") && !one.contains(&line(&other)) && !one.contains(&line(&side)), "{one}");
+    assert!(two.contains(&line(&both)) && two.contains("wip: on a branch (not on main)\n"), "{two}");
+    assert!(two.find(&line(&both)) < two.find(&line(&side)), "the commits on main come first: {two}");
+    session.close();
+
+    let terminal = ekko(&["--context", "1"]);
+    assert!(terminal.contains(&line(&first)) && terminal.contains(&line(&both)), "{terminal}");
+
     fs::remove_dir_all(&home).ok();
 }

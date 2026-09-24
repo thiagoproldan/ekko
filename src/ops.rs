@@ -484,12 +484,12 @@ impl<'a> Draft<'a> {
 
         addressable(&spec.boards)?;
         let id = self.ekko.generate_id(&self.data);
-        let mut item = match kind {
+        let mut item = self.ekko.authored(match kind {
             Kind::Task => Item::new_task(id, text.to_string(), boards(&spec.boards), priority),
             Kind::Note | Kind::Handoff | Kind::Decision | Kind::Gotcha | Kind::Procedure => {
                 Item::new_note(id, text.to_string(), boards(&spec.boards))
             }
-        };
+        });
         item.due_date = due;
         item.with = with;
         item.phase = phase;
@@ -912,8 +912,39 @@ impl<'a> Draft<'a> {
         notices.extend(self.kept_references());
         notices.extend(self.settle_holders(force)?);
         notices.extend(self.loose_notes_of_the_done());
+        notices.extend(self.trailer_of_the_started());
         let (released, blocked) = self.ekko.save_against(&self.before, &mut self.data)?;
         Ok(Committed { data: self.data, overridden, reopened, released, blocked, notices })
+    }
+
+    /// The trailer by which a commit names the tasks it carries (task 396),
+    /// told once, to the session taking the tasks up: `context` lists a
+    /// task's commits by it, whatever a rebase later does to their SHAs.
+    /// Only on a project whose folder is in a git repository.
+    fn trailer_of_the_started(&self) -> Vec<String> {
+        let started = |item: &Item| State::of(item) == Some(State::Progress);
+        let mut ids: Vec<u32> = self
+            .data
+            .values()
+            .filter(|task| task.is_task && started(task) && !self.before.get(&task.id).is_some_and(started))
+            .map(|task| task.id)
+            .collect();
+        let session = self.ekko.actor.as_ref().is_some_and(|actor| !actor.is_person());
+        if ids.is_empty() || !session || !self.ekko.folder.as_deref().is_some_and(crate::commits::in_repository) {
+            return Vec::new();
+        }
+        ids.sort_unstable();
+        let trailer = |ids: &[u32]| ids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+        vec![match ids.as_slice() {
+            [id] => format!("Commits for {id}: end the message with the trailer 'Ekko: {id}', by which context lists them"),
+            [rest @ .., last] => format!(
+                "Commits for {} and {last}: end each message with a trailer naming the tasks it carries, as \
+                 'Ekko: {}' for all of them, by which context lists them",
+                trailer(rest),
+                trailer(&ids)
+            ),
+            [] => unreachable!("returned above when no task was started"),
+        }]
     }
 
     /// Each `$N` a batch's text holds for another operation N that created an

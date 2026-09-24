@@ -115,6 +115,14 @@ pub struct Item {
     /// stored exactly as before.
     #[serde(rename = "doneBy", default, skip_serializing_if = "Option::is_none")]
     pub done_by: Option<crate::holder::Holder>,
+    /// Who wrote the item (task 125): the Claude Code session that created
+    /// it -- its process, profile, terminal and the conversation it ran then
+    /// -- or, with no process, the person at the terminal. Set once, as the
+    /// item is created, and kept by every later write, a restore included.
+    /// Absent on an item written before it was recorded, whose author is not
+    /// known.
+    #[serde(rename = "createdBy", default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<crate::holder::Holder>,
     /// Who a task is with: a person or a party outside the sessions -- the
     /// user, a colleague, a client -- by a name of one word, stored in lower
     /// case. Unlike `held_by`, which a session takes by starting the work,
@@ -286,6 +294,7 @@ impl Item {
             question: None,
             held_by: None,
             done_by: None,
+            created_by: None,
             with: None,
             stashed: None,
             trashed: None,
@@ -323,6 +332,7 @@ impl Item {
             question: None,
             held_by: None,
             done_by: None,
+            created_by: None,
             with: None,
             stashed: None,
             trashed: None,
