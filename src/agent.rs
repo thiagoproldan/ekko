@@ -22,6 +22,7 @@ use chrono::Datelike;
 use serde::Serialize;
 
 use crate::ekko::{broken_dependencies, holds, phase_order, Ekko, EkkoError, Outcome, STASHED};
+use crate::holder::Whose;
 use crate::item::{Item, Knowledge, State};
 use crate::lexical::{self, Query};
 use crate::render::{Inversion, ProjectSummary, RoadmapStep, Stats};
@@ -499,6 +500,19 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Whose `note` is, by the session that wrote it: `None` for one written
+    /// before authors were recorded (0.19.0), or by a person.
+    fn whose(&self, note: &Item) -> Option<Whose> {
+        note.created_by.as_ref()?.whose(self.me.as_ref())
+    }
+
+    /// Who wrote `note`, named as this reader names a holder; `None` before
+    /// authors were recorded.
+    fn author(&self, note: &Item) -> Option<String> {
+        let author = note.created_by.as_ref()?;
+        Some(self.me.as_ref().map_or_else(|| author.label(), |me| me.name(author)))
+    }
+
     /// The display id holding `uid`.
     fn uid(&self, uid: &str) -> Option<u32> {
         self.graph.links.uids.get(uid).copied()
@@ -834,7 +848,8 @@ impl Held {
 }
 
 /// A handoff the prime names under the one it shows: the note, its task,
-/// when it was written, and who holds the task, as the reader sees it.
+/// when it was written, who holds the task and who wrote it, as the reader
+/// sees them.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OtherHandoff {
@@ -843,6 +858,10 @@ pub struct OtherHandoff {
     pub updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whose: Option<Whose>,
 }
 
 /// How many other handoffs a prime names before it counts the rest.
@@ -852,7 +871,8 @@ const OTHER_HANDOFFS_SHOWN: usize = 5;
 /// `ekko --sessions` lists them by the session that asked.
 const WAITING_ON_YOU_SHOWN: usize = 10;
 
-/// A handoff as the prime shows it: the note, and the task it hands over.
+/// A handoff as the prime shows it: the note, the task it hands over, and
+/// who wrote it, as the reader sees them.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Handoff {
@@ -862,6 +882,10 @@ pub struct Handoff {
     pub task_state: &'static str,
     pub updated_at: i64,
     pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whose: Option<Whose>,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -916,10 +940,14 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
 
     // Where the last session stopped, shown once in its own section rather
     // than clipped again among the notes of its task. With several sessions
-    // on the board, the newest handoff on a task this reader holds, then on
-    // one no other running session holds, then the newest of all; the rest
-    // written in the last hour are named under it, so a session cleared in
-    // one terminal does not resume the work another still holds.
+    // on the board, the newest handoff on a task this reader holds or that
+    // its session wrote, whatever state the task is in; then one on a task
+    // no other running session holds, written by a session that has ended
+    // or by nobody known; then the newest of all. The rest written in the
+    // last hour are named under it, so a session cleared in one terminal
+    // does not resume what another still holds, or wrote and will resume
+    // (task 514: handoffs sit on waiting and pending tasks too, which nobody
+    // holds).
     let mut handoffs: Vec<(&Item, &Item)> = all
         .values()
         .filter(|note| note.handoff && visible(note))
@@ -928,12 +956,14 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
             (visible(task) && holds(task)).then_some((note, task))
         })
         .collect();
-    let rank = |task: &Item| match reader.held(task) {
-        Some(held) if held.yours => 0,
-        Some(held) if held.elsewhere() => 2,
+    let rank = |note: &Item, task: &Item| match (reader.held(task), reader.whose(note)) {
+        (Some(held), _) if held.yours => 0,
+        (Some(held), _) if held.elsewhere() => 2,
+        (_, Some(Whose::Yours)) => 0,
+        (_, Some(Whose::Running)) => 2,
         _ => 1,
     };
-    handoffs.sort_by_key(|(note, task)| (rank(task), std::cmp::Reverse((updated(note), note.id))));
+    handoffs.sort_by_key(|(note, task)| (rank(note, task), std::cmp::Reverse((updated(note), note.id))));
     let hour_ago = chrono::Local::now().timestamp_millis() - 3_600_000;
     let other_handoffs: Vec<OtherHandoff> = handoffs
         .iter()
@@ -944,6 +974,8 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
             task: task.id,
             updated_at: updated(note),
             held: reader.held(task).map(|held| held.text()),
+            by: reader.author(note),
+            whose: reader.whose(note),
         })
         .collect();
     let handoff = handoffs.first().map(|(note, task)| Handoff {
@@ -953,6 +985,8 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         task_state: state_word(task),
         updated_at: updated(note),
         description: note.description.clone(),
+        by: reader.author(note),
+        whose: reader.whose(note),
     });
     if let Some(shown) = &handoff {
         for entry in listed([&mut doing, &mut ready, &mut blocked, &mut waiting, &mut with_someone]) {
@@ -1535,15 +1569,18 @@ pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoErr
          - Files and lines touched or about to be, as path:line.\n\
          - The next step, concrete enough to start on without asking. When it needs the user's word first (it spends their quota, publishes, deletes, or is their choice), write only that the next session asks them whether to do it, and leave out how: a plan on the page reads as leave to start.\n\
          - Open questions for the user.\n\
-         Leave out what the board or the code already says, and name by id any note the next session must read: the prime leaves out loose notes older than the handoff. A handoff replaces the task's earlier one, which stays on the task as an ordinary note. Then tell the user it is safe to /clear, and that after it any message, even just \"continue\", starts the next session -- \"continue <task id>\" when other sessions hand off on this board too: Claude Code never starts a turn on its own.\n"
+         Leave out what the board or the code already says, and name by id any note the next session must read: the prime leaves out loose notes older than the handoff. A handoff replaces the task's earlier one, which stays on the task as an ordinary note -- unless another session that still runs wrote it, whose handoff stays too. Then tell the user it is safe to /clear, and that after it any message, even just \"continue\", starts the next session -- \"continue <task id>\" when other sessions hand off on this board too: Claude Code never starts a turn on its own.\n"
     );
-    // A handoff written minutes ago is most likely this session's own, and a
-    // second one would demote it, or land on a task the session never
-    // touched because it happened to be the one left in progress.
+    // A handoff written minutes ago may be this session's own, and a second
+    // one would demote it, or land on a task the session never touched
+    // because it happened to be the one left in progress. One whose author
+    // is known is this session's or not; one from before authors were
+    // recorded is only likely to be.
     let now = chrono::Local::now().timestamp_millis();
     let recent = all
         .values()
         .filter(|note| note.handoff && visible(note))
+        .filter(|note| matches!(reader.whose(note), Some(Whose::Yours) | None))
         .map(|note| (note, now - note.updated_at.unwrap_or(note.timestamp)))
         .filter(|(_, age)| *age < RECENT_HANDOFF_MS)
         .min_by_key(|(_, age)| *age);
@@ -1556,24 +1593,37 @@ pub fn handoff_prompt(ekko: &Ekko, task: Option<&str>) -> Result<String, EkkoErr
             (_, Some(on)) => format!("task {on}"),
             (_, None) => "no open task".to_string(),
         };
-        let _ = writeln!(
-            out,
-            "\nHandoff {} on {target} was written {when}. If this session wrote it, do not write another: bring it up to date with edit append on {}.",
-            note.id, note.id
-        );
+        let _ = if reader.whose(note) == Some(Whose::Yours) {
+            writeln!(
+                out,
+                "\nHandoff {} on {target} was written {when}, by this session: do not write another, bring it up to date with edit append on {}.",
+                note.id, note.id
+            )
+        } else {
+            writeln!(
+                out,
+                "\nHandoff {} on {target} was written {when}. If this session wrote it, do not write another: bring it up to date with edit append on {}.",
+                note.id, note.id
+            )
+        };
     }
     if let [task] = tasks.as_slice() {
         let _ = writeln!(out, "\nTask {}: {}", task.id, clip(&task.description, NOTE_CLIP));
-        let earlier = task
+        let current = task
             .uid
             .as_deref()
             .and_then(|uid| reader.graph.links.attached.get(uid))
             .into_iter()
             .flatten()
             .filter_map(|id| all.get(id))
-            .find(|note| note.handoff);
-        if let Some(note) = earlier {
-            let _ = writeln!(out, "Its current handoff, {}, which this one replaces: {}", note.id, clip(&note.description, NOTE_CLIP));
+            .filter(|note| note.handoff);
+        for note in current {
+            let _ = match (reader.whose(note), reader.author(note)) {
+                (Some(Whose::Running), Some(by)) => {
+                    writeln!(out, "Handoff {} on it stays: {by} wrote it, a session that still runs.", note.id)
+                }
+                _ => writeln!(out, "Its current handoff, {}, which this one replaces: {}", note.id, clip(&note.description, NOTE_CLIP)),
+            };
         }
     }
     Ok(out)
@@ -2289,8 +2339,14 @@ impl Prime {
                 .take(OTHER_HANDOFFS_SHOWN)
                 .map(|other| {
                     let at = crate::holder::when(other.updated_at);
-                    match &other.held {
-                        Some(held) => format!("{} on task {} ({at}, {held})", other.id, other.task),
+                    let by = match (other.whose, &other.by) {
+                        (Some(Whose::Yours), _) => Some("yours".to_string()),
+                        (Some(Whose::Ended), Some(by)) => Some(format!("by {by}, ended")),
+                        (_, Some(by)) => Some(format!("by {by}")),
+                        (_, None) => None,
+                    };
+                    match other.held.as_ref().or(by.as_ref()) {
+                        Some(whose) => format!("{} on task {} ({at}, {whose})", other.id, other.task),
                         None => format!("{} on task {} ({at})", other.id, other.task),
                     }
                 })
@@ -2473,8 +2529,15 @@ impl Handoff {
         let written = chrono::DateTime::from_timestamp_millis(self.updated_at)
             .map(|at| at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_default();
+        let by = match (self.whose, &self.by) {
+            (Some(Whose::Yours), _) => " by this session".to_string(),
+            (Some(Whose::Running), Some(by)) => format!(" by {by}, which still runs: its own, not this session's"),
+            (Some(Whose::Ended), Some(by)) => format!(" by {by}, which has ended"),
+            (_, Some(by)) => format!(" by {by}"),
+            (_, None) => String::new(),
+        };
         let mut out = format!(
-            "\nWhere the last session stopped: handoff {} on task {} [{}], written {written}\n",
+            "\nWhere the last session stopped: handoff {} on task {} [{}], written {written}{by}\n",
             self.id, self.task, self.task_state
         );
         let body = self.description.trim();
@@ -3950,6 +4013,142 @@ mod tests {
         let theirs = prime(&as_(&other), "default board").unwrap().text();
         assert!(theirs.contains("Where the last session stopped: handoff 4 on task 2 [in progress]"), "{theirs}");
         assert!(theirs.contains("Other handoffs in the last hour: 3 on task 1 ("), "{theirs}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Handoffs sit on waiting and pending tasks too, which nobody holds, so
+    /// whose each is comes from who wrote it (task 514): each session leads
+    /// with its own, newer or not, and says so; a reader that wrote none
+    /// leads with the handoff of a session that has ended before one that
+    /// another running session will resume, and names whose each is. Seen on
+    /// 2026-09-24, when two sessions' handoffs, on a waiting and a pending
+    /// task, led every prime by age alone (note 536).
+    #[test]
+    fn each_session_resumes_from_its_own_handoff_whatever_the_task_state() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let (_, dir) = board("handoffs-by-author");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        let hand_off = |actor: &crate::holder::Actor, text: &str, task: u32| {
+            let ekko = as_(actor);
+            let mut draft = crate::ops::Draft::open(&ekko).unwrap();
+            let op = serde_json::json!({"op": "create", "kind": "handoff", "text": text, "attached_to": task});
+            draft.apply(&serde_json::from_value(op).unwrap()).unwrap();
+            draft.commit(false).unwrap();
+        };
+        for name in ["left behind", "mine", "theirs"] {
+            as_(&me).create_task(&words(&[name])).unwrap();
+        }
+        as_(&me).set_state(&words(&["@2", "waiting"]), false).unwrap();
+        // Oldest first: the ended session's, this one's, the running one's.
+        hand_off(&gone, "stopped, then ended", 1);
+        hand_off(&me, "my stop", 2);
+        hand_off(&other, "their stop", 3);
+
+        let mine = prime(&as_(&me), "default board").unwrap().text();
+        assert!(mine.contains("Where the last session stopped: handoff 5 on task 2 [waiting], written "), "{mine}");
+        assert!(mine.contains(" by this session\n    > my stop"), "{mine}");
+        assert!(mine.contains("Other handoffs in the last hour: 4 on task 1 ("), "{mine}");
+        assert!(mine.contains(", by default on pts/3, ended); 6 on task 3 ("), "{mine}");
+        assert!(mine.contains(", by default on pts/2)\n"), "{mine}");
+        let theirs = prime(&as_(&other), "default board").unwrap().text();
+        assert!(theirs.contains("Where the last session stopped: handoff 6 on task 3 [pending], written "), "{theirs}");
+        assert!(theirs.contains(" by this session\n    > their stop"), "{theirs}");
+
+        // A reader that wrote none -- a new session, or the user -- takes up
+        // the ended session's work, not the newer one a session still runs.
+        let fresh = prime(&as_(&crate::holder::Actor::person()), "default board").unwrap().text();
+        assert!(fresh.contains("Where the last session stopped: handoff 4 on task 1 [pending], written "), "{fresh}");
+        assert!(fresh.contains(" by default on pts/3, which has ended\n"), "{fresh}");
+        as_(&me).set_state(&words(&["@1", "done"]), false).unwrap();
+        let fresh = prime(&as_(&crate::holder::Actor::person()), "default board").unwrap().text();
+        assert!(fresh.contains("Where the last session stopped: handoff 6 on task 3 [pending], written "), "{fresh}");
+        assert!(fresh.contains(" by default on pts/2, which still runs: its own, not this session's\n"), "{fresh}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A conversation resumed in a new process resumes from the handoff it
+    /// wrote in the process that ended, or that process wrote before the
+    /// /clear that began it; a new conversation reads that handoff as an
+    /// ended session's.
+    #[test]
+    fn a_resumed_conversation_resumes_from_its_own_handoff() {
+        let (me, _, gone) = crate::holder::test_sessions();
+        let ended = crate::holder::Actor {
+            process: gone.process.clone().map(|process| crate::holder::Process { start: process.start + 1, ..process }),
+            tty: Some("pts/4".into()),
+            ..gone.clone()
+        };
+        let (_, dir) = board("handoff-resumed");
+        let registry = crate::holder::Registry::at(dir.join("processes"));
+        let as_ = |actor: &crate::holder::Actor| {
+            Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
+        };
+        let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
+            let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()) };
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
+        };
+        let hand_off = |actor: &crate::holder::Actor, text: &str, task: u32| {
+            let ekko = as_(actor);
+            let mut draft = crate::ops::Draft::open(&ekko).unwrap();
+            let op = serde_json::json!({"op": "create", "kind": "handoff", "text": text, "attached_to": task});
+            draft.apply(&serde_json::from_value(op).unwrap()).unwrap();
+            draft.commit(false).unwrap();
+        };
+        as_(&me).create_task(&words(&["the work"])).unwrap();
+        as_(&me).create_task(&words(&["other work"])).unwrap();
+        start(&gone, "startup", "c1-before");
+        hand_off(&gone, "stopped in c1", 1);
+        start(&gone, "clear", "c2-after-clear");
+        start(&ended, "startup", "c9-elsewhere");
+        hand_off(&ended, "stopped in c9", 2);
+
+        for resumed in ["c1-before", "c2-after-clear"] {
+            start(&me, "resume", resumed);
+            let text = prime(&as_(&me), "default board").unwrap().text();
+            assert!(text.contains("Where the last session stopped: handoff 3 on task 1 [pending], written "), "{resumed}: {text}");
+            assert!(text.contains(" by this session\n"), "{resumed}: {text}");
+        }
+        start(&me, "startup", "c5-new");
+        let text = prime(&as_(&me), "default board").unwrap().text();
+        assert!(text.contains("Where the last session stopped: handoff 4 on task 2 [pending], written "), "{text}");
+        assert!(text.contains(" by default on pts/4 \u{b7} c9-elsew, which has ended\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The handoff prompt names the handoff a new one replaces and the one a
+    /// session that still runs wrote on the task, which stays; and calls a
+    /// recent handoff this session's only when it is.
+    #[test]
+    fn the_handoff_prompt_tells_this_sessions_handoff_from_anothers() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let (_, dir) = board("handoff-prompt-sessions");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        let hand_off = |actor: &crate::holder::Actor, text: &str| {
+            let ekko = as_(actor);
+            let mut draft = crate::ops::Draft::open(&ekko).unwrap();
+            let op = serde_json::json!({"op": "create", "kind": "handoff", "text": text, "attached_to": 1});
+            draft.apply(&serde_json::from_value(op).unwrap()).unwrap();
+            draft.commit(false).unwrap();
+        };
+        as_(&me).create_task(&words(&["the work"])).unwrap();
+        hand_off(&other, "their stop");
+
+        let prompt = handoff_prompt(&as_(&me), Some("1")).unwrap();
+        assert!(prompt.contains("Handoff 2 on it stays: default on pts/2 wrote it, a session that still runs."), "{prompt}");
+        assert!(!prompt.contains("which this one replaces"), "{prompt}");
+        assert!(!prompt.contains("Handoff 2 on this task was written"), "not offered as this session's: {prompt}");
+
+        hand_off(&me, "my stop");
+        let prompt = handoff_prompt(&as_(&me), Some("1")).unwrap();
+        assert!(
+            prompt.contains("Handoff 3 on this task was written under a minute ago, by this session: do not write another"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Its current handoff, 3, which this one replaces: my stop"), "{prompt}");
+        assert!(prompt.contains("Handoff 2 on it stays"), "{prompt}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

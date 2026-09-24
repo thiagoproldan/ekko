@@ -212,6 +212,37 @@ impl Holder {
     pub fn label(&self) -> String {
         self.label_in(None)
     }
+
+    /// Whose what this author wrote is, as `reader` sees it (task 514): the
+    /// reader's own when its process wrote it -- before a /clear or a
+    /// compaction -- or when the reader resumed the conversation that wrote
+    /// it, or the one its process ran last; else another session's, which
+    /// still runs or has ended. `None` for a person's.
+    pub fn whose(&self, reader: Option<&Actor>) -> Option<Whose> {
+        let process = self.process()?;
+        if reader.is_some_and(|reader| reader.process.as_ref() == Some(&process)) {
+            return Some(Whose::Yours);
+        }
+        if process.alive() {
+            return Some(Whose::Running);
+        }
+        let now = reader.and_then(Actor::conversation);
+        let last = reader.and_then(|reader| self.conversation_in(reader.registry.as_ref()));
+        let resumed = now.is_some_and(|now| self.conversation.as_ref() == Some(&now) || last == Some(now));
+        Some(if resumed { Whose::Yours } else { Whose::Ended })
+    }
+}
+
+/// Whose a handoff is, as one reader sees it, by the session that wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Whose {
+    /// This reader's session wrote it.
+    Yours,
+    /// Another session that still runs: its own to resume.
+    Running,
+    /// A session that has ended: work left for any other to take up.
+    Ended,
 }
 
 /// What each Claude Code process on this machine runs: a small file per

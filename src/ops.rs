@@ -20,6 +20,7 @@ use crate::ekko::{
     holds, parse_due_date, person, phase_inversion, phase_order, remove_duplicates, uid_index, Ekko, EkkoError,
     Linked,
 };
+use crate::holder::Whose;
 use crate::item::{Answer, Item, Knowledge, Question, Setting, State};
 use crate::storage::{ItemMap, LockGuard};
 
@@ -568,19 +569,23 @@ impl<'a> Draft<'a> {
     }
 
     /// Makes note `id` the handoff of `task`: an open task only, since a
-    /// finished one has nothing left to hand over, and the only one there --
-    /// the handoff it replaces stays on the task as an ordinary note, which
-    /// the new one supersedes, so a read can tell it from the notes around
-    /// it and show it as history.
+    /// finished one has nothing left to hand over. The handoff it replaces
+    /// stays on the task as an ordinary note, which the new one supersedes,
+    /// so a read can tell it from the notes around it and show it as
+    /// history. It replaces this session's, one by a session that has ended
+    /// or by nobody known; another session's that still runs stays, its own
+    /// to resume (task 514).
     fn hand_over(&mut self, id: u32, task: u32) -> Result<(), EkkoError> {
         if !holds(&self.data[&task]) {
             return Err(invalid(format!("{task} is finished, and a finished task has nothing to hand over")));
         }
         let uid = self.data[&task].uid.clone();
+        let actor = self.ekko.actor.as_ref();
         let earlier: Vec<u32> = self
             .data
             .values()
             .filter(|note| note.handoff && note.id != id && note.attached_to.is_some() && note.attached_to == uid)
+            .filter(|note| note.created_by.as_ref().and_then(|author| author.whose(actor)) != Some(Whose::Running))
             .map(|note| note.id)
             .collect();
         let mut replaced = None;
@@ -1504,6 +1509,38 @@ mod tests {
         assert!(!data[&2].handoff, "the earlier handoff is demoted");
         assert_eq!(data[&2].attached_to, data[&1].uid, "and kept on the task");
         assert_eq!(data[&3].supersedes, data[&2].uid, "which the new one supersedes");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A handoff replaces this session's earlier one on its task, and one by
+    /// a session that has ended, but not one another session that still runs
+    /// wrote: that session resumes from it (task 514). Seen on 2026-09-24,
+    /// when two sessions handed off on one board and the later handoff on a
+    /// task would have taken the earlier one from the session still running.
+    #[test]
+    fn a_handoff_leaves_another_running_sessions_one_in_place() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let (ekko, dir) = board("handoff-sessions");
+        batch(&ekko, &[json!({"op": "create", "text": "the work"})]).unwrap();
+        let handoff = |actor: &Actor, text: &str| {
+            let ekko = Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+            batch(&ekko, &[json!({"op": "create", "kind": "handoff", "text": text, "attached_to": 1})]).unwrap().data
+        };
+        handoff(&gone, "left behind");
+        let data = handoff(&other, "their stop");
+        assert!(!data[&2].handoff, "an ended session's is replaced");
+        assert_eq!(data[&3].supersedes, data[&2].uid);
+
+        let data = handoff(&me, "my stop");
+        assert!(data[&3].handoff, "a running session's stays");
+        assert!(data[&4].handoff);
+        assert_eq!(data[&4].supersedes, None, "and is superseded by nothing");
+
+        let data = handoff(&me, "my later stop");
+        assert!(!data[&4].handoff, "this session's own is replaced");
+        assert!(data[&3].handoff, "and the running session's still stays");
+        assert_eq!(data[&5].supersedes, data[&4].uid);
 
         std::fs::remove_dir_all(&dir).ok();
     }

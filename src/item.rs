@@ -202,8 +202,9 @@ pub struct Item {
     /// of a transcript it would pay to re-read.
     ///
     /// Only a note attached to an open task carries it, and only the newest
-    /// on a task: writing another demotes the one before to an ordinary note,
-    /// which keeps it as history. A flag on the note rather than a board
+    /// on a task, but for one each other session that still runs wrote:
+    /// writing another demotes the one before to an ordinary note, which
+    /// keeps it as history. A flag on the note rather than a board
     /// named `handoff`: a board is a name anyone can pick, move an item off,
     /// or already use for something else, and none of those should silently
     /// change what a session resumes from. Absent unless set, so a board
