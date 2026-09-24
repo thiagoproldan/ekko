@@ -79,7 +79,7 @@ Each session starts with the board's prime already in context -- in progress, re
 - A write's reply names the tasks it set free (nowReady) or left waiting (nowBlocked): no next or prime is needed to find them.
 - batch applies several operations in one write, all or nothing; $1, $2 name the items its first and second operations create.
 - trash is recoverable for 30 days and still needs the user's consent. For work decided against, set_state cancelled keeps the record.
-- Ask the user through ask: it shows them a dialog and records the answer.
+- Ask the user through ask; it records the answer.
 - Refusals come back as CODE: message. Branch on the code; nothing was written.";
 
 /// Where calls find their board: the folder the server was started in, and
