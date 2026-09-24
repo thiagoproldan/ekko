@@ -101,9 +101,9 @@ pub struct Server {
     /// its prime: `if_rev` is answered as unchanged only on that same day.
     answered: Mutex<HashMap<&'static str, chrono::NaiveDate>>,
     started: chrono::NaiveDate,
-    /// How this process was started -- its program name and PATH -- and the
-    /// binary that led to, to tell when an upgrade has replaced it.
-    launched: Option<(OsString, Option<OsString>, Binary)>,
+    /// How this process was started, to tell when an upgrade has replaced
+    /// its binary (see `Launch`).
+    launched: Option<Launch>,
     /// Who writes through this server: the Claude Code process that started
     /// it, which claims the tasks it sets in progress.
     actor: holder::Actor,
@@ -139,9 +139,40 @@ impl Binary {
     }
 }
 
-/// Said under every reply of a server whose binary an upgrade replaced: it
-/// keeps answering by its own version's rules until Claude Code restarts it
-/// (gotcha 194), and only the user can do that.
+/// The names a server was started by, each with the binary it led to at
+/// start, and the PATH they are looked up in: its program name, and when
+/// that names a path, also its bare name on PATH if that led to the same
+/// binary. The Nix-built plugin, and the resources server beside it, start
+/// ekko by its store path, which a switch never changes: the switch moves
+/// the name on PATH instead (task 469). A dev build started by its path,
+/// beside another ekko on PATH, is watched by its path alone.
+struct Launch {
+    path_var: Option<OsString>,
+    names: Vec<(OsString, Binary)>,
+}
+
+impl Launch {
+    fn new(program: OsString, path_var: Option<OsString>) -> Option<Launch> {
+        let binary = Binary::resolve(&program, path_var.as_deref())?;
+        let bare = Path::new(&program).file_name().filter(|_| Path::new(&program).components().count() > 1);
+        let on_path = bare.and_then(|name| {
+            let found = Binary::resolve(name, path_var.as_deref())?;
+            (found == binary).then(|| (name.to_os_string(), found))
+        });
+        let names = std::iter::once((program, binary)).chain(on_path).collect();
+        Some(Launch { path_var, names })
+    }
+
+    /// Whether a name this server was started by now leads to another
+    /// binary. A name that no longer resolves is not taken for an upgrade.
+    fn replaced(&self) -> bool {
+        self.names.iter().any(|(name, binary)| Binary::resolve(name, self.path_var.as_deref()).is_some_and(|now| now != *binary))
+    }
+}
+
+/// Said under every tool reply and resource read of a server whose binary
+/// an upgrade replaced: it keeps answering by its own version's rules until
+/// Claude Code restarts it (gotcha 194), and only the user can do that.
 const REPLACED: &str = "Note: ekko was rebuilt or upgraded after this server started, and this server still runs the old binary. Ask the user to restart Claude Code to load the new one.";
 
 /// What a server offers. Two servers rather than one because Claude Code
@@ -272,11 +303,7 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
 impl Server {
     pub fn new(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>, mode: Mode) -> Self {
         let started = chrono::Local::now().date_naive();
-        let launched = std::env::args_os().next().and_then(|program| {
-            let path_var = std::env::var_os("PATH");
-            let binary = Binary::resolve(&program, path_var.as_deref())?;
-            Some((program, path_var, binary))
-        });
+        let launched = std::env::args_os().next().and_then(|program| Launch::new(program, std::env::var_os("PATH")));
         let actor = holder::Actor::client_of_this_server().with_registry(holder::Registry::at(agent::processes_dir(&home)));
         Server {
             home,
@@ -293,11 +320,19 @@ impl Server {
         }
     }
 
-    /// Whether the name this server was started by now leads to another
-    /// binary. A name that no longer resolves is not taken for an upgrade.
+    /// Whether an upgrade has replaced this server's binary (see `Launch`).
     fn replaced(&self) -> bool {
-        let Some((program, path_var, binary)) = &self.launched else { return false };
-        Binary::resolve(program, path_var.as_deref()).is_some_and(|now| now != *binary)
+        self.launched.as_ref().is_some_and(Launch::replaced)
+    }
+
+    /// `text`, and after it the note that an upgrade replaced this server's
+    /// binary, when one has.
+    fn noted(&self, text: String) -> String {
+        if self.replaced() {
+            format!("{}\n\n{REPLACED}\n", text.trim_end())
+        } else {
+            text
+        }
     }
 
     /// One line in place of `tool`'s answer when the cursor held is still
@@ -556,12 +591,9 @@ impl Server {
         json!({"jsonrpc": "2.0", "id": id, "result": self.tool_result(text, failed)})
     }
 
-    fn tool_result(&self, mut text: String, failed: bool) -> Value {
-        // After the answer, so a refusal still opens with its code.
-        if self.replaced() {
-            text = format!("{}\n\n{REPLACED}\n", text.trim_end());
-        }
-        json!({"content": [{"type": "text", "text": text}], "isError": failed})
+    fn tool_result(&self, text: String, failed: bool) -> Value {
+        // The note after the answer, so a refusal still opens with its code.
+        json!({"content": [{"type": "text", "text": self.noted(text)}], "isError": failed})
     }
 
     fn handle(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
@@ -680,7 +712,7 @@ impl Server {
         } else {
             return Err(RpcError::new(-32002, format!("Resource not found: {uri}")));
         };
-        Ok(json!({"contents": [{"uri": uri, "mimeType": "text/plain", "text": text}]}))
+        Ok(json!({"contents": [{"uri": uri, "mimeType": "text/plain", "text": self.noted(text)}]}))
     }
 
     fn call(&self, params: &Value) -> Result<Value, RpcError> {
@@ -1501,6 +1533,44 @@ mod tests {
         executable(&new.join("ekko"));
         assert_ne!(Binary::resolve(new.join("ekko").as_os_str(), None).as_ref(), Some(&direct));
         drop(running);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Nix-built plugin starts ekko by a store path, which a switch never
+    /// changes: the switch shows through the name on PATH, watched because it
+    /// led to the same binary at start (task 469). A dev build started by its
+    /// path never was the ekko on PATH, so a switch there is not its upgrade.
+    #[test]
+    fn a_server_started_by_its_store_path_is_told_of_a_switch_on_path() {
+        use std::os::unix::fs::symlink;
+        let dir = crate::paths::test_dir("ekko-launch");
+        let (old, new, dev, bin) = (dir.join("store-old"), dir.join("store-new"), dir.join("dev"), dir.join("bin"));
+        for folder in [&old, &new, &dev] {
+            fs::create_dir_all(folder).unwrap();
+            fs::write(folder.join("ekko"), "#!/bin/sh\n").unwrap();
+            fs::set_permissions(folder.join("ekko"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::create_dir_all(&bin).unwrap();
+        let switch = |to: &Path| {
+            fs::remove_file(bin.join("ekko")).ok();
+            symlink(to.join("ekko"), bin.join("ekko")).unwrap();
+        };
+        switch(&old);
+        let path_var = Some(std::env::join_paths([&bin]).unwrap());
+
+        let pinned = Launch::new(old.join("ekko").into(), path_var.clone()).unwrap();
+        let by_name = Launch::new("ekko".into(), path_var.clone()).unwrap();
+        let dev_build = Launch::new(dev.join("ekko").into(), path_var).unwrap();
+        assert!(![&pinned, &by_name, &dev_build].iter().any(|launch| launch.replaced()), "nothing changed");
+
+        switch(&new);
+        assert!(pinned.replaced(), "a switch, seen through the name on PATH");
+        assert!(by_name.replaced(), "a server started by the name itself");
+        assert!(!dev_build.replaced(), "the ekko on PATH never was the dev build");
+
+        switch(&old);
+        assert!(!pinned.replaced(), "PATH leads to this server's binary again");
 
         fs::remove_dir_all(&dir).ok();
     }
