@@ -1014,6 +1014,7 @@ Without the `--`, a word that happens to match a real flag name (`--json`, `--ta
 - Run the full check -- lint plus the test suite: `cargo clippy --all-targets && cargo test`
 - `cargo test` includes integration tests in `tests/` that spawn the real compiled binary (including real concurrent processes, to actually exercise the storage lock) -- not just unit tests
 - The screenshots above are generated from real command output by [`media/capture/shot.sh`](media/capture/readme.md), so a picture cannot drift from what Ekko actually prints
+- A release is one command, [`scripts/release.sh`](scripts/release.sh) `X.Y.Z NOTES.md`: it bumps the version, runs the tests, clippy and the agent evals against a release build, pushes the release commit and waits for CI, then signs the tag and publishes the GitHub release. `--check` runs the checks alone and puts the bump back, and `--help` lists every step and how a run that failed resumes
 
 ## Credits
 
