@@ -10,7 +10,9 @@
 //! several with the space bar where the question allows, a preview beside
 //! the focused option, "Other answer…" to write one, and Tab for a note. The
 //! answers go on the board, where the server that opened the menu reads them
-//! and answers ask's call. Esc leaves every question open.
+//! and answers ask's call. Esc leaves every question open. A key counts only
+//! once the menu has been up, or back in focus, for a second and the keyboard
+//! has been quiet, so typing meant for another window never answers.
 //!
 //! The file holds the questions, previews included, which the board does not
 //! keep. The menu writes its pid beside it: a pid gone with the answers not
@@ -40,6 +42,15 @@ const OPENING: Duration = Duration::from_secs(15);
 /// How long an open menu waits before a desktop notification says a
 /// question is waiting: long enough that a user at the screen has answered.
 const REMIND: Duration = Duration::from_secs(20);
+
+/// How long the menu is up, or back in focus, before a key counts: keys typed
+/// for another window as this one took the focus are dropped. A space typed
+/// as the window opened once chose the recommended option (task 593).
+const SETTLE: Duration = Duration::from_secs(1);
+
+/// How long the keyboard must then be quiet after a key dropped: typing that
+/// runs on, still meant for another window, is dropped as a whole.
+const QUIET: Duration = Duration::from_millis(400);
 
 /// Terminals looked for on PATH when `EKKO_TERMINAL` is unset, each with
 /// what runs a command in it. Konsole in a process of its own, so that the
@@ -288,6 +299,9 @@ pub enum Key {
     Back,
     Esc,
     Char(char),
+    /// The terminal took the focus (xterm's focus reporting, mode 1004): no
+    /// key pressed, but what keys wait after (SETTLE).
+    Focus,
 }
 
 /// Where the menu stands after a key.
@@ -403,8 +417,10 @@ impl Menu {
                     return if page.posed.multiple { self.toggle() } else { self.choose() };
                 }
             }
+            // Space marks and never answers: of the keys the menu acts on, it
+            // is the one most often typed for another window (task 593).
             Key::Char(' ') if page.posed.multiple => return self.toggle(),
-            Key::Char(' ') | Key::Enter if !page.posed.multiple => return self.choose(),
+            Key::Enter if !page.posed.multiple => return self.choose(),
             Key::Enter => return self.confirm(),
             Key::Esc | Key::Char('q') => return Step::Left,
             _ => {}
@@ -713,19 +729,15 @@ fn run(ekko: &Ekko, questions: Vec<Posed>) -> Result<Vec<Outcome>, EkkoError> {
     let done = {
         let _raw = Raw::enter()?;
         let mut out = io::stdout();
-        let mut first = true;
+        // Mode 1004: the terminal reports taking the focus, and keys wait
+        // SETTLE after it as after the first draw.
+        let _ = write!(out, "\x1b[?1004h");
+        let mut settle = Settle::new(Instant::now());
         loop {
             let _ = write!(out, "{}", menu.draw(columns()));
             let _ = out.flush();
-            if first {
-                // Keys typed for another window just as this one took the
-                // focus are dropped, so none of them chooses an option.
-                first = false;
-                std::thread::sleep(Duration::from_millis(250));
-                // SAFETY: discards input not yet read from the terminal.
-                unsafe { libc::tcflush(0, libc::TCIFLUSH) };
-            }
-            let Some(key) = read_key(&mut Keys, follows) else { break false };
+            let mut keys = std::iter::from_fn(|| read_key(&mut Keys, follows));
+            let Some(key) = keys.find(|key| settle.counts(key, Instant::now())) else { break false };
             match menu.press(key) {
                 Step::Stay => {}
                 Step::Done => break true,
@@ -734,7 +746,7 @@ fn run(ekko: &Ekko, questions: Vec<Posed>) -> Result<Vec<Outcome>, EkkoError> {
         }
     };
     let mut out = io::stdout();
-    let _ = write!(out, "\x1b[?25h\x1b[H\x1b[2J");
+    let _ = write!(out, "\x1b[?1004l\x1b[?25h\x1b[H\x1b[2J");
     let _ = out.flush();
     if !done {
         let ids: Vec<String> = menu.pages.iter().map(|page| page.posed.id.to_string()).collect();
@@ -755,6 +767,28 @@ fn run(ekko: &Ekko, questions: Vec<Posed>) -> Result<Vec<Outcome>, EkkoError> {
     }
     let committed = draft.commit(false)?;
     Ok(answered.into_iter().map(|id| Outcome::Answered(committed.data[&id].clone())).collect())
+}
+
+/// When keys start to count: SETTLE after the menu is drawn.
+struct Settle(Instant);
+
+impl Settle {
+    fn new(drawn: Instant) -> Settle {
+        Settle(drawn + SETTLE)
+    }
+
+    /// Whether `key`, read at `now`, counts. The start moves, where that is
+    /// later, to SETTLE after the terminal takes the focus, and to QUIET
+    /// after a key dropped.
+    fn counts(&mut self, key: &Key, now: Instant) -> bool {
+        let wait = match key {
+            Key::Focus => SETTLE,
+            _ if now < self.0 => QUIET,
+            _ => return true,
+        };
+        self.0 = self.0.max(now + wait);
+        false
+    }
 }
 
 /// The terminal's width, or a guess where it cannot say.
@@ -862,7 +896,8 @@ fn read_key(keys: &mut impl Read, follows: impl Fn() -> bool) -> Option<Key> {
             0x1b if !follows() => Key::Esc,
             0x1b => {
                 keys.read_exact(&mut byte).ok()?;
-                if byte[0] != b'[' && byte[0] != b'O' {
+                let intro = byte[0];
+                if intro != b'[' && intro != b'O' {
                     continue;
                 }
                 // The sequence runs to its final letter: ESC [ 1 ; 5 A too.
@@ -877,6 +912,8 @@ fn read_key(keys: &mut impl Read, follows: impl Fn() -> bool) -> Option<Key> {
                     b'B' => Key::Down,
                     b'C' => Key::Right,
                     b'D' => Key::Left,
+                    // ESC [ I: the focus came; ESC [ O, it left, is skipped.
+                    b'I' if intro == b'[' => Key::Focus,
                     _ => continue,
                 }
             }
@@ -949,6 +986,21 @@ mod tests {
         assert_eq!(menu.press(Key::Char('1')), Step::Done);
         assert_eq!(menu.answers()[0].1, "Yes");
         assert_eq!(Menu::new(vec![posed(1, "Q?", yes_no(), false)]).press(Key::Esc), Step::Left);
+        assert_eq!(Menu::new(vec![posed(1, "Q?", yes_no(), false)]).press(Key::Char(' ')), Step::Stay, "space does not choose");
+    }
+
+    #[test]
+    fn keys_count_once_the_menu_has_been_up_a_second_and_the_keyboard_is_quiet() {
+        let drawn = Instant::now();
+        let at = |ms: u64| drawn + Duration::from_millis(ms);
+        let mut settle = Settle::new(drawn);
+        assert!(!settle.counts(&Key::Char(' '), at(300)), "typed for another window as the menu opened");
+        assert!(!settle.counts(&Key::Char('e'), at(900)));
+        assert!(!settle.counts(&Key::Enter, at(1200)), "typing that runs on past the second is dropped too");
+        assert!(settle.counts(&Key::Enter, at(1700)), "the keyboard was quiet for {QUIET:?}");
+        assert!(!settle.counts(&Key::Focus, at(5000)), "the focus is no key");
+        assert!(!settle.counts(&Key::Char('1'), at(5500)), "the menu back in focus waits again");
+        assert!(settle.counts(&Key::Char('1'), at(6000)));
     }
 
     #[test]
@@ -1059,9 +1111,9 @@ mod tests {
 
     #[test]
     fn keys_are_read_from_their_bytes() {
-        let mut keys: &[u8] = b"\x1b[A\x1b[1;5B\x1b[C\x1bOD\t\rx\x7f\xc3\xa0";
+        let mut keys: &[u8] = b"\x1b[I\x1b[A\x1b[1;5B\x1b[O\x1b[C\x1bOD\t\rx\x7f\xc3\xa0";
         let read: Vec<Key> = std::iter::from_fn(|| read_key(&mut keys, || true)).collect();
-        assert_eq!(read, [Key::Up, Key::Down, Key::Right, Key::Left, Key::Tab, Key::Enter, Key::Char('x'), Key::Back, Key::Char('à')]);
+        assert_eq!(read, [Key::Focus, Key::Up, Key::Down, Key::Right, Key::Left, Key::Tab, Key::Enter, Key::Char('x'), Key::Back, Key::Char('à')]);
     }
 
     #[test]
