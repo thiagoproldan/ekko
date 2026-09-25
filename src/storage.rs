@@ -528,17 +528,21 @@ impl Storage {
 
 /// Of the versions in history, by modification time in nanoseconds, the ones
 /// to let go of at `now`: past the newest `HISTORY_RECENT`, all but the
-/// newest of each day, and every one older than `HISTORY_DAYS` days.
+/// newest of each day, and every one from before the last `HISTORY_DAYS`
+/// days. A day is the calendar's, in UTC. Counted back from `now` instead, a
+/// version shared its day with every newer one written within 24 hours of
+/// it, so a board written every day pruned each version before it could
+/// become a day of its own, and kept nothing past the newest 50 (task 640).
 fn stale_versions(mut versions: Vec<u128>, now: SystemTime) -> Vec<u128> {
     const DAY: u128 = 86_400_000_000_000;
-    let now = now.duration_since(UNIX_EPOCH).map(|at| at.as_nanos()).unwrap_or(0);
+    let today = now.duration_since(UNIX_EPOCH).map(|at| at.as_nanos()).unwrap_or(0) / DAY;
     versions.sort_unstable_by(|a, b| b.cmp(a));
     let mut days_kept = Vec::new();
     let mut stale = Vec::new();
     for version in versions.into_iter().skip(HISTORY_RECENT) {
-        let age_days = now.saturating_sub(version) / DAY;
-        if age_days < u128::from(HISTORY_DAYS) && !days_kept.contains(&age_days) {
-            days_kept.push(age_days);
+        let day = version / DAY;
+        if today.saturating_sub(day) < u128::from(HISTORY_DAYS) && !days_kept.contains(&day) {
+            days_kept.push(day);
         } else {
             stale.push(version);
         }
@@ -1030,5 +1034,30 @@ mod tests {
         expected.extend([at - 2 * DAY - MINUTE, at - 20 * DAY]);
         expected.sort_unstable();
         assert_eq!(stale, expected, "past the newest 50, one a day for 14 days");
+    }
+
+    /// Pruned at every write, as `keep_version` prunes it, history still ends
+    /// up with each earlier day's last version: nothing newer of that day is
+    /// ever written to replace it. Days counted back from the write lost
+    /// them all (task 640).
+    #[test]
+    fn history_pruned_write_by_write_keeps_each_days_last_version() {
+        const MINUTE: u128 = 60_000_000_000;
+        const DAY: u128 = 1_440 * MINUTE;
+        let midnight = 20_000 * DAY;
+        let mut kept: Vec<u128> = Vec::new();
+        for write in 0..5 * 144 {
+            let at = midnight + write * 10 * MINUTE;
+            kept.push(at);
+            let now = UNIX_EPOCH + Duration::from_nanos(u64::try_from(at).unwrap());
+            let stale = stale_versions(kept.clone(), now);
+            kept.retain(|version| !stale.contains(version));
+        }
+
+        let last_of_each_day: Vec<u128> = (1..5).map(|day| midnight + day * DAY - 10 * MINUTE).collect();
+        for last in &last_of_each_day {
+            assert!(kept.contains(last), "day {} kept its last version", (last - midnight) / DAY);
+        }
+        assert_eq!(kept.len(), HISTORY_RECENT + 1 + last_of_each_day.len(), "the newest 50, today's newest past them, one per earlier day");
     }
 }
