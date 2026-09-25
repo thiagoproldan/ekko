@@ -66,9 +66,7 @@ pub fn naming(folder: &Path, since: i64, items: &[(u32, Option<&str>)]) -> HashM
     if items.is_empty() {
         return found;
     }
-    let day = chrono::DateTime::from_timestamp_millis(since - 86_400_000)
-        .map_or_else(|| "1970-01-01".to_string(), |at| at.format("%Y-%m-%d").to_string());
-    let since = format!("--since={day}");
+    let since = since_arg(since);
     let grep = format!("--grep=^[[:space:]]*{KEY}:");
     let Some(log) = git(folder, &["log", "--all", &since, "-i", &grep, "--format=%H%x1f%h%x1f%cs%x1f%s%x1f%B%x1e"])
     else {
@@ -94,6 +92,16 @@ pub fn naming(folder: &Path, since: i64, items: &[(u32, Option<&str>)]) -> HashM
         }
     }
     found
+}
+
+/// `git log`'s bound for items made since `since`, in epoch milliseconds,
+/// less a day: an instant, as `@<seconds>`. A bare date is no instant to
+/// git: it reads `2026-09-24` as that day at the current time of day, in
+/// the local zone. Given the UTC date of a day before, that cut at the
+/// present moment whenever the local date was already behind UTC's -- from
+/// 21:00 in Brasília -- and left out every commit made before it (task 623).
+fn since_arg(since: i64) -> String {
+    format!("--since=@{}", (since - 86_400_000).max(0) / 1000)
 }
 
 /// Whether `folder` is in a git repository, where commits can name items:
@@ -129,6 +137,14 @@ fn git(folder: &Path, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bound is an instant a day before the item, never a date git would
+    /// read at the current time of day (task 623).
+    #[test]
+    fn the_bound_is_an_instant_a_day_before_the_item() {
+        assert_eq!(since_arg(1_790_000_000_000), "--since=@1789913600");
+        assert_eq!(since_arg(0), "--since=@0");
+    }
 
     #[test]
     fn a_trailer_names_ids_and_uids_and_nothing_else() {
