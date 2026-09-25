@@ -64,7 +64,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "claude-code"))
-from transcripts import LOCAL, W_CR, W_CW1H, W_CW5M, W_IN, W_OUT, profiles, when  # noqa: E402
+from transcripts import LOCAL, SKIP, W_CR, W_CW1H, W_CW5M, W_IN, W_OUT, profiles, when  # noqa: E402
 
 OUT = os.path.normpath(os.path.join(HERE, "..", "..", "target", "evals", "recall"))
 
@@ -450,7 +450,7 @@ def scan(since):
     seen_rows = set()
     for base in profiles():
         for path in sorted(glob.glob(os.path.join(base, "projects", "**", "*.jsonl"), recursive=True)):
-            if "/subagents/" in path:
+            if "/subagents/" in path or SKIP in path:
                 continue
             events, calls = [], {}
             with open(path, errors="replace") as handle:

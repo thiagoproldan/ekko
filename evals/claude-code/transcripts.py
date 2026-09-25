@@ -112,6 +112,11 @@ def tool_of(block):
     return (name, args.get("file_path") or args.get("notebook_path") or "")
 
 
+# The runs of the paired test (evals/paired/harness.py) live under a folder of
+# this name: they are experiments, not the user's sessions.
+SKIP = "ekko-paired"
+
+
 def profiles():
     """Every Claude Code config dir in the home folder: ~/.claude, and each
     ~/.claude-<name> beside it that a profile keeps apart."""
@@ -126,7 +131,7 @@ def scan():
     paths = []
     for base in profiles():
         pattern = os.path.join(base, "projects", "**", "*.jsonl")
-        paths += [(os.path.basename(base), path) for path in sorted(glob.glob(pattern, recursive=True))]
+        paths += [(os.path.basename(base), path) for path in sorted(glob.glob(pattern, recursive=True)) if SKIP not in path]
     for profile, path in paths:
         with open(path, errors="replace") as handle:
             for line_no, raw in enumerate(handle):
