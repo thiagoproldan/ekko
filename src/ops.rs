@@ -21,7 +21,7 @@ use crate::ekko::{
     Linked,
 };
 use crate::holder::Whose;
-use crate::item::{Answer, Item, Knowledge, Question, Setting, State};
+use crate::item::{Answer, How, Item, Knowledge, Question, Setting, State, Until, Wait};
 use crate::storage::{ItemMap, LockGuard};
 
 /// An item as a caller names it: a display id, a uid, or `$N` for the item
@@ -212,6 +212,32 @@ pub struct Choice {
 pub struct Reply {
     pub question: Ref,
     pub text: String,
+}
+
+/// A session waiting on an item, or, with `cancel`, no longer waiting on it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitOn {
+    pub item: Ref,
+    /// done, free or answered: by default answered for a question and done
+    /// for a task.
+    pub until: Option<String>,
+    /// What the session will do once the wait is over.
+    pub text: Option<String>,
+    #[serde(default)]
+    pub cancel: bool,
+}
+
+/// What `Draft::wait` did.
+#[derive(Debug, PartialEq)]
+pub enum Waited {
+    /// The note it recorded the wait in.
+    Recorded(u32),
+    /// Nothing: the item, by display id, already is where the wait would
+    /// end, as `How` says.
+    Met(u32, How),
+    /// Nothing: this session already waits on it for the same, in this note.
+    Already(u32),
 }
 
 /// One operation of a batch, tagged by `op`.
@@ -571,6 +597,118 @@ impl<'a> Draft<'a> {
         Ok(id)
     }
 
+    /// The session this draft writes for, which alone can wait: the user at
+    /// the terminal is told nothing.
+    fn waiter(&self) -> Result<&crate::holder::Actor, EkkoError> {
+        self.ekko
+            .actor
+            .as_ref()
+            .filter(|actor| !actor.is_person())
+            .ok_or_else(|| invalid("A wait is a Claude Code session's, told when it is over: the user at the terminal has nothing to wait with"))
+    }
+
+    /// Records that this session waits on `spec.item` until it is what
+    /// `spec.until` names: a note whose text is what the session will do
+    /// then, attached to the task waited on, or to the task a question is
+    /// about. An item already there, or already waited on by this session
+    /// for the same, writes nothing.
+    pub fn wait(&mut self, spec: &WaitOn) -> Result<Waited, EkkoError> {
+        let target = self.resolve(&spec.item)?;
+        let item = &self.data[&target];
+        if item.trashed.is_some() || item.stashed.is_some() {
+            let away = if item.trashed.is_some() { "the trash" } else { "the stash" };
+            return Err(invalid(format!("{target} is in {away}: nothing moves there to wait on")));
+        }
+        let question = item.question.is_some();
+        if !item.is_task && !question {
+            return Err(invalid(format!("{target} is a note: a wait is on a task or a question")));
+        }
+        let until = match spec.until.as_deref() {
+            None if question => Until::Answered,
+            None => Until::Done,
+            Some(word) => Until::parse(word)
+                .ok_or_else(|| invalid(format!("until is done, free or answered, not {word}")))?,
+        };
+        match (until, question) {
+            (Until::Answered, false) => return Err(invalid(format!("{target} is not a question: until answered waits on one"))),
+            (Until::Done | Until::Free, true) => {
+                return Err(invalid(format!("{target} is a question: it is waited on until answered")))
+            }
+            _ => {}
+        }
+        let text = spec.text.as_deref().map(str::trim).unwrap_or_default();
+        if text.is_empty() {
+            return Err(invalid("wait needs text: what this session will do once the wait is over"));
+        }
+        crate::ekko::fits("wait", text)?;
+        let Some(on) = item.uid.clone() else {
+            return Err(invalid(format!("{target} has no uid to wait on; any write to it gives it one")));
+        };
+        let about = if question { item.attached_to.clone().map(Ref::Text) } else { Some(Ref::Id(target)) };
+
+        let waiter = self.waiter()?;
+        let now = chrono::Local::now().timestamp_millis();
+        let wait = Wait { on, until, by: waiter.holder(now), rev: 0, over: None };
+        if let Some(how) = wait.over_on(Some(item)) {
+            return Ok(Waited::Met(target, how));
+        }
+        let mut already: Vec<&Item> = self
+            .data
+            .values()
+            .filter(|note| note.trashed.is_none() && note.stashed.is_none())
+            .filter(|note| {
+                note.wait.as_ref().is_some_and(|open| {
+                    open.over.is_none() && open.on == wait.on && open.until == until && waiter.is(&open.by)
+                })
+            })
+            .collect();
+        already.sort_by_key(|note| note.id);
+        if let Some(note) = already.first() {
+            return Ok(Waited::Already(note.id));
+        }
+
+        let spec = Create {
+            kind: Some(Kind::Note),
+            text: text.to_string(),
+            boards: Vec::new(),
+            priority: None,
+            due: None,
+            with: None,
+            phase: None,
+            blocked_by: Vec::new(),
+            attached_to: about,
+            supersedes: None,
+            starred: false,
+        };
+        let id = self.create(&spec)?;
+        self.item(id).wait = Some(wait);
+        Ok(Waited::Recorded(id))
+    }
+
+    /// Ends this session's open waits on `item`, as dropped: the notes it
+    /// ended, none where it waited on nothing there.
+    pub fn unwait(&mut self, item: &Ref) -> Result<Vec<u32>, EkkoError> {
+        let target = self.resolve(item)?;
+        let Some(on) = self.data[&target].uid.clone() else { return Ok(Vec::new()) };
+        let waiter = self.waiter()?.clone();
+        let now = chrono::Local::now().timestamp_millis();
+        let mut mine: Vec<u32> = self
+            .data
+            .values()
+            .filter(|note| {
+                note.wait.as_ref().is_some_and(|wait| wait.over.is_none() && wait.on == on && waiter.is(&wait.by))
+            })
+            .map(|note| note.id)
+            .collect();
+        mine.sort_unstable();
+        for id in &mine {
+            if let Some(wait) = self.item(*id).wait.as_mut() {
+                wait.over = Some(crate::item::Over { how: How::Dropped, by: Some(waiter.holder(now)), at: now, rev: 0 });
+            }
+        }
+        Ok(mine)
+    }
+
     /// Makes note `id` the handoff of `task`: an open task only, since a
     /// finished one has nothing left to hand over. The handoff it replaces
     /// stays on the task as an ordinary note, which the new one supersedes,
@@ -777,7 +915,8 @@ impl<'a> Draft<'a> {
     /// Gives note `id` the kind `kind` names -- decision, gotcha, procedure,
     /// or `note` for none -- which is how a note written before typed notes
     /// existed becomes one. A task has no kind, a handoff expires and so is
-    /// never a decision, and a note in a line of supersession keeps the kind
+    /// never a decision, nor is a wait, which ends on its own, and a note in
+    /// a line of supersession keeps the kind
     /// of that line: a decision replaced by a gotcha would be neither.
     fn retype(&mut self, id: u32, kind: Kind) -> Result<(), EkkoError> {
         let named = self.names().name(id);
@@ -797,6 +936,11 @@ impl<'a> Draft<'a> {
         if item.handoff {
             return Err(invalid(format!(
                 "{named} is a handoff, which the next one replaces; write what stays true as a note of its own"
+            )));
+        }
+        if item.wait.is_some() {
+            return Err(invalid(format!(
+                "{named} is a session's wait, which ends on its own; write what stays true as a note of its own"
             )));
         }
         let replaced = item.uid.as_deref().is_some_and(|uid| {
@@ -929,8 +1073,31 @@ impl<'a> Draft<'a> {
         notices.extend(self.settle_holders(force)?);
         notices.extend(self.loose_notes_of_the_done());
         notices.extend(self.trailer_of_the_started());
-        let (released, blocked) = self.ekko.save_against(&self.before, &mut self.data)?;
-        Ok(Committed { data: self.data, overridden, reopened, released, blocked, notices })
+        let saved = self.ekko.save_against(&self.before, &mut self.data)?;
+        notices.extend(self.ended_waits(&saved.ended));
+        Ok(Committed { data: self.data, overridden, reopened, released: saved.released, blocked: saved.blocked, notices })
+    }
+
+    /// Each wait this write ended, told to the session that wrote it: whose
+    /// wait it was and on what, and that they are told in turn (task 389).
+    fn ended_waits(&self, ended: &[u32]) -> Vec<String> {
+        let actor = self.ekko.actor.as_ref();
+        ended
+            .iter()
+            .filter_map(|id| {
+                let wait = self.data.get(id)?.wait.as_ref()?;
+                let how = wait.over.as_ref()?.how;
+                let target = self.data.values().find(|item| item.uid.as_deref() == Some(wait.on.as_str()));
+                let named = target.map_or_else(|| "what it waited on".to_string(), |item| item.id.to_string());
+                if actor.is_some_and(|actor| actor.is(&wait.by)) {
+                    let what = crate::agent::ended_phrase(how, true);
+                    return Some(format!("{named} {what}: this session's wait on it (note {id}) is over"));
+                }
+                let what = crate::agent::ended_phrase(how, false);
+                let waiter = actor.map_or_else(|| wait.by.label(), |actor| actor.name(&wait.by));
+                Some(format!("{named} {what}: {waiter} waited on it (note {id}) and is told"))
+            })
+            .collect()
     }
 
     /// The trailer by which a commit names the tasks it carries (task 396),
@@ -993,7 +1160,8 @@ impl<'a> Draft<'a> {
     /// something, or holds a lesson, would leave unsettled with nobody told
     /// (task 398). Only notes without a kind: a decision, a gotcha or a
     /// procedure stays in force on its own, a handoff is history once its
-    /// task is done, and a question waits on the user wherever it is.
+    /// task is done, a question waits on the user wherever it is, and a wait
+    /// ends on its own.
     /// Nothing is written on its own.
     fn loose_notes_of_the_done(&self) -> Vec<String> {
         let done = |item: &Item| State::of(item) == Some(State::Done);
@@ -1013,7 +1181,7 @@ impl<'a> Draft<'a> {
                 .values()
                 .filter(|note| !note.is_task && note.attached_to.as_deref() == Some(uid))
                 .filter(|note| note.trashed.is_none() && note.stashed.is_none())
-                .filter(|note| note.knowledge.is_none() && !note.handoff && note.question.is_none())
+                .filter(|note| note.knowledge.is_none() && !note.handoff && note.question.is_none() && note.wait.is_none())
                 .filter(|note| !note.uid.as_deref().is_some_and(|uid| replaced.contains(uid)))
                 .map(|note| note.id)
                 .collect();
@@ -1462,6 +1630,122 @@ mod tests {
         assert!(again.contains("already answered: yes, after the rebase"), "{again}");
         assert!(draft.answer(&Ref::Id(1), "yes").unwrap_err().to_string().contains("1 is not a question"));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn wait_on(ekko: &Ekko, item: u32, until: Option<&str>, text: &str) -> Result<Waited, EkkoError> {
+        let mut draft = Draft::open(ekko)?;
+        let spec = WaitOn { item: Ref::Id(item), until: until.map(str::to_string), text: Some(text.to_string()), cancel: false };
+        let waited = draft.wait(&spec)?;
+        draft.commit(false)?;
+        Ok(waited)
+    }
+
+    /// A session waits on a task another holds in a note attached to it,
+    /// which carries who waits and until what (task 389). The write that
+    /// completes the task ends the wait, recording how and by whom, and
+    /// tells its writer whose wait it was. Waiting again for the same, or on
+    /// what is already there, writes nothing.
+    #[test]
+    fn a_wait_is_recorded_and_ended_by_the_write_that_brings_it() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let (board, dir) = board("waits");
+        let as_ = |actor: &Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        let held = [json!({"op": "create", "text": "Release v0.15.0"}), json!({"op": "set_state", "items": [1], "state": "progress"})];
+        batch(&as_(&other), &held).unwrap();
+
+        let Waited::Recorded(note) = wait_on(&as_(&me), 1, None, "land 380: rebase, test, push").unwrap() else {
+            panic!("a wait recorded")
+        };
+        let written = board.storage.get().unwrap()[&note].clone();
+        let wait = written.wait.clone().expect("a wait");
+        assert_eq!((wait.until, wait.over.is_none(), written.description.as_str()), (Until::Done, true, "land 380: rebase, test, push"));
+        assert!(me.is(&wait.by));
+        assert_eq!(Some(wait.rev), written.rev, "the revision of the write that recorded it");
+        assert_eq!(written.attached_to, board.storage.get().unwrap()[&1].uid);
+        assert_eq!(wait_on(&as_(&me), 1, Some("done"), "again").unwrap(), Waited::Already(note));
+
+        let done = batch(&as_(&other), &[json!({"op": "set_state", "items": [1], "state": "done"})]).unwrap();
+        assert_eq!(done.notices, vec![format!("1 is done: default on pts/1 waited on it (note {note}) and is told")]);
+        let written = board.storage.get().unwrap()[&note].clone();
+        let over = written.wait.unwrap().over.expect("over");
+        assert_eq!(over.how, How::Done);
+        assert!(other.is(over.by.as_ref().unwrap()));
+        assert_eq!(Some(over.rev), written.rev, "the revision of the write that ended it");
+
+        assert_eq!(wait_on(&as_(&me), 1, None, "late").unwrap(), Waited::Met(1, How::Done));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Until free, a wait ends as the task leaves its holder's hands: set
+    /// back to pending, held by a session that has ended, or taken up by the
+    /// one waiting. Until answered, as its question gets an answer. cancel
+    /// drops a wait, and a wait is refused where it could never end.
+    #[test]
+    fn a_wait_ends_as_its_condition_says_or_is_dropped() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let (board, dir) = board("waits-free");
+        let as_ = |actor: &Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        let how = |note: u32| board.storage.get().unwrap()[&note].wait.clone().unwrap().over.map(|over| over.how);
+        let tasks = [
+            json!({"op": "create", "text": "held, then let go"}),
+            json!({"op": "create", "text": "held by a session that has ended"}),
+            json!({"op": "create", "text": "taken up by the one waiting"}),
+            json!({"op": "set_state", "items": [1, 3], "state": "progress"}),
+        ];
+        batch(&as_(&other), &tasks).unwrap();
+        batch(&as_(&gone), &[json!({"op": "set_state", "items": [2], "state": "progress"})]).unwrap();
+
+        let Waited::Recorded(let_go) = wait_on(&as_(&me), 1, Some("free"), "take it up").unwrap() else { panic!() };
+        batch(&as_(&other), &[json!({"op": "set_state", "items": [1], "state": "unstarted"})]).unwrap();
+        assert_eq!(how(let_go), Some(How::Released));
+        assert_eq!(wait_on(&as_(&me), 2, Some("free"), "take it up").unwrap(), Waited::Met(2, How::Ended));
+
+        let Waited::Recorded(taken) = wait_on(&as_(&me), 3, Some("free"), "take it up").unwrap() else { panic!() };
+        let writer = as_(&me);
+        let mut draft = Draft::open(&writer).unwrap();
+        draft.set_state(&[Ref::Id(3)], "progress").unwrap();
+        let took = draft.commit(true).unwrap();
+        assert_eq!(how(taken), Some(How::Yours));
+        assert!(took.notices.contains(&format!("3 is yours now: this session's wait on it (note {taken}) is over")), "{:?}", took.notices);
+
+        let writer = as_(&other);
+        let mut draft = Draft::open(&writer).unwrap();
+        let asked = draft.ask("Merge now?", Some(&Ref::Id(1))).unwrap();
+        draft.commit(false).unwrap();
+        let Waited::Recorded(answer) = wait_on(&as_(&me), asked, None, "merge after it").unwrap() else { panic!() };
+        assert_eq!(board.storage.get().unwrap()[&answer].wait.clone().unwrap().until, Until::Answered);
+        let writer = as_(&Actor::person());
+        let mut draft = Draft::open(&writer).unwrap();
+        draft.answer(&Ref::Id(asked), "yes").unwrap();
+        draft.commit(false).unwrap();
+        assert_eq!(how(answer), Some(How::Answered));
+
+        let Waited::Recorded(dropped) = wait_on(&as_(&me), 1, None, "never mind").unwrap() else { panic!() };
+        let writer = as_(&me);
+        let mut draft = Draft::open(&writer).unwrap();
+        assert_eq!(draft.unwait(&Ref::Id(1)).unwrap(), vec![dropped]);
+        draft.commit(false).unwrap();
+        assert_eq!(how(dropped), Some(How::Dropped));
+        let writer = as_(&me);
+        let mut draft = Draft::open(&writer).unwrap();
+        assert!(draft.unwait(&Ref::Id(1)).unwrap().is_empty(), "nothing left to drop");
+        drop(draft);
+
+        let refused = |actor: &Actor, item: u32, until: Option<&str>, text: &str| {
+            wait_on(&as_(actor), item, until, text).unwrap_err().to_string()
+        };
+        let person = refused(&Actor::person(), 1, None, "x");
+        assert!(person.contains("the user at the terminal"), "{person}");
+        assert!(refused(&me, dropped, None, "x").contains("is a note: a wait is on a task or a question"));
+        assert!(refused(&me, 1, Some("answered"), "x").contains("1 is not a question"));
+        assert!(refused(&me, asked, Some("done"), "x").contains("is a question: it is waited on until answered"));
+        assert!(refused(&me, 1, Some("soon"), "x").contains("until is done, free or answered, not soon"));
+        assert!(refused(&me, 1, None, "  ").contains("wait needs text"));
+        let Err(retyped) = batch(&as_(&me), &[json!({"op": "update", "item": dropped, "kind": "decision"})]) else {
+            panic!("a wait takes no kind")
+        };
+        assert!(retyped.to_string().contains("is a session's wait, which ends on its own"), "{retyped}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

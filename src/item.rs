@@ -243,6 +243,15 @@ pub struct Item {
     /// set, so a board that asks nothing is stored exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<Question>,
+    /// On a note that records a Claude Code session waiting on another item
+    /// -- a task another session or the user holds, or a question -- until
+    /// it reaches what the session needs (task 389). A session that waited
+    /// with a loop of its own lost the wait on a /clear, and nobody else
+    /// knew of it; on the board it outlives the session, the holder and the
+    /// user see it, and the write that ends it records how. Absent unless
+    /// set, so a board where nobody waits is stored exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<Wait>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -293,6 +302,7 @@ impl Item {
             knowledge: None,
             supersedes: None,
             question: None,
+            wait: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -331,6 +341,7 @@ impl Item {
             knowledge: None,
             supersedes: None,
             question: None,
+            wait: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -342,14 +353,16 @@ impl Item {
     }
 
     /// The word the views a person reads put on a note that is more than a
-    /// note: "handoff", or the kind of knowledge it holds. None for anything
-    /// else. The two never meet on one note, since a handoff cannot be given
-    /// a kind.
+    /// note: "handoff", "waiting" or "wait over" for a wait, or the kind of
+    /// knowledge it holds. None for anything else. They never meet on one
+    /// note, since a handoff or a wait cannot be given a kind.
     pub fn mark(&self) -> Option<&'static str> {
         if self.is_task {
             None
         } else if self.handoff {
             Some("handoff")
+        } else if let Some(wait) = &self.wait {
+            Some(if wait.over.is_none() { "waiting" } else { "wait over" })
         } else {
             self.knowledge.map(Knowledge::word)
         }
@@ -385,6 +398,119 @@ pub struct Answer {
     /// it, stamped as the question's is.
     pub at: i64,
     pub rev: u64,
+}
+
+/// A session waiting on an item until it reaches what the session needs;
+/// see `Item::wait`. The note's text is what the session will do then: the
+/// holder reads why, and a session told after a /clear knows what to do.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Wait {
+    /// The item waited on, by uid: a task, or a question.
+    pub on: String,
+    pub until: Until,
+    /// The Claude Code session that waits, with the conversation it ran:
+    /// the one told once the wait is over, after a /clear or a restart too.
+    pub by: crate::holder::Holder,
+    /// The revision of the write that recorded it, stamped as that write is
+    /// saved.
+    pub rev: u64,
+    /// How it ended, once it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over: Option<Over>,
+}
+
+impl Wait {
+    /// How this wait is over on a board where the item it waits on is
+    /// `target` -- `None` where that item is gone -- or `None` while it
+    /// still holds.
+    pub fn over_on(&self, target: Option<&Item>) -> Option<How> {
+        let Some(item) = target.filter(|item| item.trashed.is_none() && item.stashed.is_none()) else {
+            return Some(How::Removed);
+        };
+        let closed = match State::of(item) {
+            Some(State::Done) => Some(How::Done),
+            Some(State::Cancelled) => Some(How::Cancelled),
+            _ => None,
+        };
+        match self.until {
+            Until::Answered => item.question.as_ref().and_then(|question| question.answer.as_ref()).map(|_| How::Answered),
+            Until::Done => closed,
+            Until::Free if closed.is_some() => closed,
+            Until::Free if State::of(item) != Some(State::Progress) => Some(How::Released),
+            Until::Free => match &item.held_by {
+                Some(holder) if self.by.process().is_some() && holder.process() == self.by.process() => Some(How::Yours),
+                Some(holder) if !holder.alive() => Some(How::Ended),
+                Some(_) => None,
+                None => Some(How::Released),
+            },
+        }
+    }
+}
+
+/// What a wait waits for; see `Wait`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Until {
+    /// A task closing, done or cancelled.
+    Done,
+    /// A task leaving the hands of whoever holds it in progress: out of
+    /// progress, its holder's session ended, or taken up by the one waiting.
+    Free,
+    /// A question getting its answer.
+    Answered,
+}
+
+impl Until {
+    pub fn word(self) -> &'static str {
+        match self {
+            Until::Done => "done",
+            Until::Free => "free",
+            Until::Answered => "answered",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Until> {
+        match word {
+            "done" => Some(Until::Done),
+            "free" => Some(Until::Free),
+            "answered" => Some(Until::Answered),
+            _ => None,
+        }
+    }
+}
+
+/// How a wait ended, and by what write; see `Wait`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Over {
+    pub how: How,
+    /// The session whose write ended it, or, with no process, the user at
+    /// the terminal. Absent where no write did: a holder's session ending
+    /// is seen by whichever write comes next.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<crate::holder::Holder>,
+    /// When, in milliseconds, and the revision of that write, stamped as it
+    /// is saved.
+    pub at: i64,
+    pub rev: u64,
+}
+
+/// How a wait ended; see `Over`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum How {
+    Done,
+    Cancelled,
+    Answered,
+    /// Out of progress without closing: pending, paused or waiting.
+    Released,
+    /// Still in progress, but the session holding it has ended.
+    Ended,
+    /// Now in progress under the session that waited.
+    Yours,
+    /// Off the board: in the stash or the trash, or deleted.
+    Removed,
+    /// Dropped by the session that waited: nobody is told.
+    Dropped,
 }
 
 /// The kinds of lasting knowledge a note can hold; see `Item::knowledge`.

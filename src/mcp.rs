@@ -43,6 +43,7 @@ use crate::menu;
 use crate::ekko::{Ekko, EkkoError, Outcome};
 use crate::item::Setting;
 use crate::ops::{self, Committed, Draft, Op, Ref};
+use crate::wake;
 use crate::render::{Painter, Renderer};
 use crate::storage::ItemMap;
 
@@ -65,7 +66,7 @@ const ALWAYS_LOADED: &[&str] = &["context", "search", "create", "set_state", "ed
 
 const TOOLS: &[&str] = &[
     "prime", "next", "context", "search", "changes", "roadmap", "projects", "create", "set_state",
-    "force_state", "edit", "update", "link", "ask", "answer", "batch", "stash", "trash", "away", "phases",
+    "force_state", "edit", "update", "link", "ask", "answer", "wait", "batch", "stash", "trash", "away", "phases",
 ];
 
 const INSTRUCTIONS: &str = "\
@@ -109,6 +110,9 @@ pub struct Server {
     actor: holder::Actor,
     /// ask's dialogs open in the client, waiting for the user.
     dialogs: Mutex<Dialogs>,
+    /// The board's revision when this session was last told what it had
+    /// not been (see `told`): nothing new to tell until it moves.
+    told_at: Mutex<Option<u64>>,
 }
 
 /// A binary as a file: where its name resolves, every link followed, and
@@ -317,6 +321,7 @@ impl Server {
             launched,
             actor,
             dialogs: Mutex::new(Dialogs::default()),
+            told_at: Mutex::new(None),
         }
     }
 
@@ -474,6 +479,7 @@ impl Server {
         if self.dialogs().form && spec.questions.len() == 1 && !first.multiple {
             return vec![self.dialogs().open(pending)];
         }
+        self.left_open(pending.questions.iter().map(String::as_str));
         let mut reply = pending.recorded;
         reply["unanswered"] = json!(format!("{why}; {OPEN}"));
         vec![self.tool_reply(pending.call, reply.to_string(), false)]
@@ -508,6 +514,7 @@ impl Server {
                 }]
             }
             dialog::Outcome::Unanswered(why) => {
+                self.left_open(pending.questions.iter().map(String::as_str));
                 let mut reply = pending.recorded;
                 reply["unanswered"] = json!(format!("{why}; {OPEN}"));
                 vec![self.tool_reply(pending.call, reply.to_string(), false)]
@@ -520,6 +527,7 @@ impl Server {
     fn cancelled(&self, params: &Value) -> Vec<Value> {
         let Some(call) = params.get("requestId") else { return Vec::new() };
         let Some((id, pending)) = self.dialogs().take_call(call) else { return Vec::new() };
+        self.left_open(pending.questions.iter().map(String::as_str));
         if let Some(window) = pending.window {
             window.close();
             return Vec::new();
@@ -567,6 +575,7 @@ impl Server {
                 reply["answers"] = json!(given);
             }
             if answers.iter().any(Option::is_none) {
+                self.left_open(questions.iter().zip(&answers).filter(|(_, answer)| answer.is_none()).map(|(uid, _)| uid.as_str()));
                 let why = why.unwrap_or_else(|| "the menu closed".to_string());
                 reply["unanswered"] = json!(format!("{why}; {OPEN}"));
             }
@@ -592,8 +601,40 @@ impl Server {
     }
 
     fn tool_result(&self, text: String, failed: bool) -> Value {
-        // The note after the answer, so a refusal still opens with its code.
-        json!({"content": [{"type": "text", "text": self.noted(text)}], "isError": failed})
+        // The notes after the answer, so a refusal still opens with its code.
+        json!({"content": [{"type": "text", "text": self.told(self.noted(text))}], "isError": failed})
+    }
+
+    /// `text`, and after it what this session has not been told yet (see
+    /// `wake::untold`): its waits another's write ended, the answers to the
+    /// questions its ask left open, and the waits others keep on its work --
+    /// each once, on the board it started on (task 389).
+    fn told(&self, text: String) -> String {
+        let Some(process) = self.actor.process.as_ref().filter(|_| self.mode == Mode::Board) else { return text };
+        let Ok((ekko, location)) = self.open(None) else { return text };
+        let Ok(revision) = ekko.storage.get_counters().map(|counters| counters.revision) else { return text };
+        if self.told_at.lock().unwrap_or_else(PoisonError::into_inner).replace(revision) == Some(revision) {
+            return text;
+        }
+        let since = wake::since(&self.home, &self.actor, &Self::label(&location));
+        match wake::untold(&ekko, &self.actor, &wake::Told::of(&self.home, process), since, true) {
+            Ok(lines) if !lines.is_empty() => {
+                let lines: Vec<String> = lines.iter().map(|line| format!("ekko: {line}")).collect();
+                format!("{}\n\n{}\n", text.trim_end(), lines.join("\n"))
+            }
+            _ => text,
+        }
+    }
+
+    /// Marks ask's questions that come back without an answer as left open
+    /// for this session: one answered later, in another terminal, is news
+    /// to it, which it is told once (`wake::untold`).
+    fn left_open<'s>(&self, uids: impl IntoIterator<Item = &'s str>) {
+        let Some(process) = self.actor.process.as_ref() else { return };
+        let told = wake::Told::of(&self.home, process);
+        for uid in uids {
+            told.left_open(uid);
+        }
     }
 
     fn handle(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
@@ -795,7 +836,10 @@ impl Server {
                         .iter()
                         .filter_map(|entry| Some(format!("{} ({})", entry.id, entry.held.as_ref()?.by)))
                         .collect();
-                    text.push_str(&format!("In progress in other sessions, not to take up: {}\n", held.join(", ")));
+                    text.push_str(&format!(
+                        "In progress in other sessions, not to take up: {}. To be told when one is free or done, wait on it\n",
+                        held.join(", ")
+                    ));
                 }
                 // Ready work with someone outside the sessions is theirs.
                 if let Some(line) = agent::with_someone_line(&ekko)? {
@@ -863,12 +907,17 @@ impl Server {
                 // the user: see puts_to_user.
                 let spec: ops::Ask = parse(args)?;
                 let mut recorded = record(&ekko, &spec)?;
+                self.left_open(recorded["items"].as_array().into_iter().flatten().filter_map(|item| item["uid"].as_str()));
                 recorded["unanswered"] = json!(format!("a stateless request cannot wait for the user; {OPEN}"));
                 Ok(recorded.to_string())
             }
             "answer" => {
                 let spec: ops::Reply = parse(args)?;
                 write(&ekko, false, |draft| draft.answer(&spec.question, &spec.text).map(|id| vec![id]))
+            }
+            "wait" => {
+                let spec: ops::WaitOn = parse(args)?;
+                wait(&ekko, &spec)
             }
             "batch" => {
                 let ops = args.remove("ops").ok_or_else(|| invalid("batch needs ops"))?;
@@ -1019,6 +1068,52 @@ fn write(
     Ok(reply.to_string())
 }
 
+/// wait: records that this session waits on an item, or, with cancel, that
+/// it no longer does. An item already where the wait would end, or already
+/// waited on by this session for the same, writes nothing and says so.
+fn wait(ekko: &Ekko, spec: &ops::WaitOn) -> Result<String, ToolError> {
+    let mut draft = Draft::open(ekko)?;
+    let waited = if spec.cancel {
+        draft.unwait(&spec.item).map(|dropped| (dropped, None))
+    } else {
+        draft.wait(spec).map(|waited| (Vec::new(), Some(waited)))
+    };
+    let (dropped, waited) = waited.map_err(|error| refusal(&error, &draft.names()))?;
+    let recorded = match waited {
+        None if dropped.is_empty() => return Ok("This session waits on nothing there: nothing was written.\n".to_string()),
+        None => dropped.clone(),
+        Some(ops::Waited::Met(target, how)) => {
+            let already = match how {
+                crate::item::How::Released => format!("{target} is free already, as nothing holds it in progress"),
+                crate::item::How::Ended => {
+                    format!("{target} is free already, as the session holding it has ended (set_state progress takes it over)")
+                }
+                crate::item::How::Yours => format!("{target} is free already, as this session holds it"),
+                crate::item::How::Answered => format!("{target} was answered already (context reads the answer)"),
+                other => format!("{target} {} already", agent::ended_phrase(other, true)),
+            };
+            return Ok(format!("No wait was recorded: {already}.\n"));
+        }
+        Some(ops::Waited::Already(note)) => {
+            return Ok(format!("This session already waits on it for that, in note {note}: nothing was written.\n"));
+        }
+        Some(ops::Waited::Recorded(id)) => vec![id],
+    };
+    let names = draft.names();
+    let committed = draft.commit(false).map_err(|error| refusal(&error, &names))?;
+    let items: Vec<Value> = recorded.iter().map(|id| ops::written(&committed.data, *id)).collect();
+    let mut reply = json!({"ok": true, "items": items});
+    if dropped.is_empty() {
+        reply["told"] = json!("once the wait is over, whichever way it ends: woken while idle where ekko's plugin runs, else in your next ekko reply");
+    } else {
+        reply["dropped"] = json!(dropped);
+    }
+    if !committed.notices.is_empty() {
+        reply["notices"] = json!(committed.notices);
+    }
+    Ok(reply.to_string())
+}
+
 /// Records ask's questions, each with the options it offers under it: the
 /// reply to the write, as JSON, its items in the order of the questions.
 fn record(ekko: &Ekko, spec: &ops::Ask) -> Result<Value, ToolError> {
@@ -1055,7 +1150,7 @@ fn agent_message(error: &EkkoError, name: &dyn Fn(u32) -> String) -> String {
     let verb = |ids: &[u32]| if ids.len() == 1 { "is" } else { "are" };
     match error {
         EkkoError::Held(held) => format!(
-            "{}, and still running, so nothing was written. Ask the user before touching it; with their word, force_state takes it over",
+            "{}, and still running, so nothing was written. Ask the user before touching it; with their word, force_state takes it over. To be told once it is free, wait on it with until free",
             crate::ekko::held_elsewhere_text(held, name),
         ),
         EkkoError::Blocked(found) => format!(
@@ -1436,6 +1531,18 @@ fn tool_definitions() -> Value {
             "name": "answer",
             "description": "Record the user's answer to an open question, in their words: it closes the question, and the session that asked sees the answer in its prime, even after a /clear or restart. A question is answered once; for a newer answer, ask again.",
             "inputSchema": object(json!({"project": project, "question": item, "text": {"type": "string"}}), &["question", "text"]),
+            "annotations": write,
+        },
+        {
+            "name": "wait",
+            "description": "Wait on a task another session or the user holds, or on a question, instead of watching the board: recorded as a note attached to it, whose text is what you will do once the wait is over, so it outlives this session's /clear or restart and the holder sees it. You are told once when it is over, whichever way it ended -- woken while idle where ekko's plugin runs, else in your next ekko reply. until: done (the task is done or cancelled), free (it leaves its holder's hands) or answered (a question); by default done for a task, answered for a question. cancel drops this session's waits on the item.",
+            "inputSchema": object(json!({
+                "project": project,
+                "item": item,
+                "until": {"type": "string", "enum": ["done", "free", "answered"]},
+                "text": {"type": "string", "description": "What this session will do once the wait is over; not needed with cancel."},
+                "cancel": {"type": "boolean"}
+            }), &["item"]),
             "annotations": write,
         },
         {

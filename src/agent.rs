@@ -23,7 +23,7 @@ use serde::Serialize;
 
 use crate::ekko::{broken_dependencies, holds, phase_order, Ekko, EkkoError, Outcome, STASHED};
 use crate::holder::Whose;
-use crate::item::{Item, Knowledge, State};
+use crate::item::{How, Item, Knowledge, State};
 use crate::lexical::{self, Query};
 use crate::render::{Inversion, ProjectSummary, RoadmapStep, Stats};
 use crate::storage::ItemMap;
@@ -427,6 +427,9 @@ pub struct NoteRef {
     /// On a question: whether it has been answered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answered: Option<bool>,
+    /// On a wait: whether it is still open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<bool>,
 }
 
 impl NoteRef {
@@ -436,6 +439,9 @@ impl NoteRef {
     fn mark(&self) -> String {
         if let Some(answered) = self.answered {
             return if answered { "[answered] " } else { "[question] " }.to_string();
+        }
+        if let Some(waiting) = self.waiting {
+            return if waiting { "[waiting] " } else { "[wait over] " }.to_string();
         }
         match (self.knowledge, self.superseded_by.as_slice()) {
             (None, []) => String::new(),
@@ -535,6 +541,7 @@ impl<'a> Reader<'a> {
             knowledge: note.knowledge,
             superseded_by: self.superseded_by(note.id),
             answered: note.question.as_ref().map(|question| question.answer.is_some()),
+            waiting: note.wait.as_ref().map(|wait| wait.over.is_none()),
         }
     }
 
@@ -746,6 +753,23 @@ pub(crate) fn headline(text: &str, is_task: bool, max: usize) -> String {
     }
 }
 
+/// What became of the item a wait was on, as `how` says the wait ended,
+/// to follow the item's name: "is done", "was answered". `to_waiter` words
+/// it for the session that waited.
+pub(crate) fn ended_phrase(how: How, to_waiter: bool) -> &'static str {
+    match how {
+        How::Done => "is done",
+        How::Cancelled => "was cancelled",
+        How::Answered => "was answered",
+        How::Released => "left progress",
+        How::Ended => "is free: the session holding it has ended",
+        How::Yours if to_waiter => "is yours now",
+        How::Yours => "is held by the session that waited",
+        How::Removed => "is off the board",
+        How::Dropped => "is no longer waited on",
+    }
+}
+
 /// The resume view: what an agent needs to pick a board back up.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -814,6 +838,52 @@ pub struct Prime {
     /// The questions this session asked, answered in the last day.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub answered: Vec<Asked>,
+    /// The waits this session keeps open, oldest first (task 389).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waits: Vec<Waiting>,
+    /// This session's waits that ended in the last day.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waits_over: Vec<Waiting>,
+    /// The waits other sessions keep open on work this session holds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub waited_on: Vec<Waiting>,
+}
+
+/// A wait as the views show it: its note, the item it is on, who waits and
+/// until what, what they will do then, and how it ended once it has.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Waiting {
+    pub id: u32,
+    /// The item waited on, while it is on the board, and its title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on: Option<u32>,
+    pub on_text: String,
+    pub by: String,
+    pub until: &'static str,
+    /// What the session will do once the wait is over.
+    pub text: String,
+    /// Who holds the item waited on in progress, while anyone does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
+    /// How it ended, to follow the item's name, and whose write ended it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_by: Option<String>,
+    /// Writes to the board since the wait, or, once it ended, between the
+    /// wait and its end.
+    pub moved: u64,
+}
+
+impl Waiting {
+    /// The item waited on, by id and title, or what is left of it.
+    fn on(&self) -> String {
+        match self.on {
+            Some(id) => format!("{id} ({})", self.on_text),
+            None => "an item no longer on the board".to_string(),
+        }
+    }
 }
 
 /// A question as the prime lists it: the note, the task it is about, who
@@ -1039,6 +1109,8 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         .filter(|item| updated(item) > since)
         .collect();
     notes.retain(|note| note.question.as_ref().is_none_or(|question| question.answer.is_some()));
+    // A wait has sections of its own, for the sessions it concerns.
+    notes.retain(|note| note.wait.is_none());
     notes.sort_by_key(|item| (std::cmp::Reverse(updated(item)), std::cmp::Reverse(item.id)));
     let recent_notes = notes.into_iter().take(RECENT_NOTES).map(|note| reader.note_ref(note)).collect();
 
@@ -1067,6 +1139,30 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     }
     for entry in listed([&mut doing, &mut ready, &mut blocked, &mut waiting, &mut with_someone]) {
         entry.notes.retain(|note| !waiting_on_you.iter().any(|asked| asked.id == note.id));
+    }
+
+    // Waits in sections of their own (task 389): this session's, open and
+    // ended in the last day by another's write, and the ones other sessions
+    // keep on work it holds.
+    let (mut waits, mut waits_over, mut waited_on) = (Vec::new(), Vec::new(), Vec::new());
+    for note in all.values().filter(|note| visible(note)) {
+        let Some(wait) = &note.wait else { continue };
+        let target = reader.uid(&wait.on).and_then(|id| all.get(&id));
+        let held_here = target
+            .filter(|item| State::of(item) == Some(State::Progress))
+            .and_then(|item| item.held_by.as_ref())
+            .is_some_and(|holder| reader.me.as_ref().is_some_and(|me| me.is(holder)));
+        match &wait.over {
+            None if mine(&wait.by) => waits.push(wait_view(note, wait, &reader, cursor as u64, true)),
+            None if held_here => waited_on.push(wait_view(note, wait, &reader, cursor as u64, false)),
+            Some(over) if over.how != How::Dropped && over.at >= day_ago && mine(&wait.by) => {
+                let by_me = over.by.as_ref().is_some_and(|by| reader.me.as_ref().is_some_and(|me| me.is(by)));
+                if !by_me {
+                    waits_over.push(wait_view(note, wait, &reader, cursor as u64, true));
+                }
+            }
+            _ => {}
+        }
     }
 
     let (roadmap, rootless, inversions) = match (phases.is_empty(), ekko.display_roadmap()?) {
@@ -1120,6 +1216,9 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         decisions,
         waiting_on_you,
         answered,
+        waits,
+        waits_over,
+        waited_on,
     })
 }
 
@@ -1230,6 +1329,9 @@ pub struct Context {
     /// On a question: who asked, and the answer once given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question: Option<Asked>,
+    /// On a wait: who waits, on what and until what, and how it ended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait: Option<Waiting>,
     /// The sequence of steps it stands in, first step first; see
     /// `Reader::sequence`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1348,6 +1450,10 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
     let superseded_by = entry.superseded_by.iter().filter_map(link).collect();
     let revision = all.values().filter_map(|other| other.rev).max().unwrap_or(0);
     let question = item.question.as_ref().map(|question| asked(item, question, reader, revision));
+    let wait = item.wait.as_ref().map(|wait| {
+        let to_waiter = reader.me.as_ref().is_some_and(|me| me.is(&wait.by));
+        wait_view(item, wait, reader, revision, to_waiter)
+    });
     let sequence = reader.sequence(id).iter().filter_map(link).collect();
 
     Context {
@@ -1364,12 +1470,38 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         supersedes,
         superseded_by,
         question,
+        wait,
         sequence,
         // The conversation the author ran as it wrote, not the one its
         // process runs now: a /clear since does not change who wrote it.
         written_by: item.created_by.as_ref().map(crate::holder::Holder::label),
         commits: Vec::new(),
         branch: None,
+    }
+}
+
+/// A wait as the views show it, the board being at `revision`, with its
+/// holders named as the reader names them and its ending worded for the
+/// session that waited when `to_waiter` says so.
+fn wait_view(note: &Item, wait: &crate::item::Wait, reader: &Reader<'_>, revision: u64, to_waiter: bool) -> Waiting {
+    let registry = reader.me.as_ref().and_then(|me| me.registry.as_ref());
+    let target = reader.uid(&wait.on).and_then(|id| reader.graph.all.get(&id));
+    let held = target.filter(|item| State::of(item) == Some(State::Progress)).and_then(|item| item.held_by.as_ref());
+    let over = wait.over.as_ref();
+    Waiting {
+        id: note.id,
+        on: target.map(|item| item.id),
+        on_text: target.map(|item| headline(&item.description, item.is_task, 80)).unwrap_or_default(),
+        by: wait.by.label_in(registry),
+        until: wait.until.word(),
+        text: note.description.clone(),
+        held: held.map(|holder| reader.me.as_ref().map_or_else(|| holder.label(), |me| me.name(holder))),
+        ended: over.map(|over| ended_phrase(over.how, to_waiter)),
+        ended_by: over.filter(|over| over.how != How::Ended).and_then(|over| over.by.as_ref()).map(|by| by.label_in(registry)),
+        moved: match over {
+            Some(over) => over.rev.saturating_sub(wait.rev + 1),
+            None => revision.saturating_sub(wait.rev),
+        },
     }
 }
 
@@ -1897,7 +2029,7 @@ impl SessionEvent {
 
 /// Where ekko keeps what it knows of sessions: the XDG state directory,
 /// outside every board, so that reading a board still writes nothing to it.
-fn state_dir(home: &Path) -> PathBuf {
+pub(crate) fn state_dir(home: &Path) -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
@@ -1968,7 +2100,7 @@ fn session_file(state: &Path, session: &str) -> Option<PathBuf> {
     (!safe.is_empty()).then(|| state.join(format!("{safe}.json")))
 }
 
-fn served_cursor(state: &Path, session: &str, board: &str) -> Option<i64> {
+pub(crate) fn served_cursor(state: &Path, session: &str, board: &str) -> Option<i64> {
     let served: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(session_file(state, session)?).ok()?).ok()?;
     if served["board"].as_str()? != board {
         return None;
@@ -2025,6 +2157,8 @@ pub struct SessionView {
     pub holding: Vec<SessionItem>,
     pub finished: Vec<SessionItem>,
     pub asking: Vec<SessionItem>,
+    /// Its open waits, by note (task 389).
+    pub waiting: Vec<SessionItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2045,6 +2179,7 @@ pub fn sessions(ekko: &Ekko, board: &str) -> Result<Sessions, EkkoError> {
         holding: Vec::new(),
         finished: Vec::new(),
         asking: Vec::new(),
+        waiting: Vec::new(),
     };
     let here = ekko.storage.storage_path();
     let mut found: Vec<(Option<crate::holder::Process>, SessionView)> = recorded
@@ -2068,6 +2203,7 @@ pub fn sessions(ekko: &Ekko, board: &str) -> Result<Sessions, EkkoError> {
             holding: Vec::new(),
             finished: Vec::new(),
             asking: Vec::new(),
+            waiting: Vec::new(),
         });
         found.push((process, session));
         found.len() - 1
@@ -2081,6 +2217,7 @@ pub fn sessions(ekko: &Ekko, board: &str) -> Result<Sessions, EkkoError> {
     };
     let mut items: Vec<&Item> = all.values().filter(|item| item.stashed.is_none() && item.trashed.is_none()).collect();
     items.sort_by_key(|item| item.id);
+    let ids: HashMap<&str, u32> = all.values().filter_map(|item| Some((item.uid.as_deref()?, item.id))).collect();
     let mut listed: Vec<(usize, u8, SessionItem)> = Vec::new();
     for item in items {
         let line = || SessionItem { id: item.id, text: headline(&item.description, item.is_task, TASK_CLIP) };
@@ -2092,13 +2229,19 @@ pub fn sessions(ekko: &Ekko, board: &str) -> Result<Sessions, EkkoError> {
         if let Some(asker) = item.question.as_ref().filter(|question| question.answer.is_none()).and_then(|question| question.asked_by.as_ref()) {
             listed.push((session_of(asker), 2, line()));
         }
+        if let Some(wait) = item.wait.as_ref().filter(|wait| wait.over.is_none()) {
+            let on = ids.get(wait.on.as_str()).map_or_else(|| "an item no longer on the board".to_string(), u32::to_string);
+            let text = format!("on {on} until {}: {}", wait.until.word(), clip(&item.description, TASK_CLIP));
+            listed.push((session_of(&wait.by), 3, SessionItem { id: item.id, text }));
+        }
     }
     for (at, kind, line) in listed {
         let session = &mut found[at].1;
         match kind {
             0 => session.holding.push(line),
             1 => session.finished.push(line),
-            _ => session.asking.push(line),
+            2 => session.asking.push(line),
+            _ => session.waiting.push(line),
         }
     }
     found.sort_by(|(_, a), (_, b)| b.running.cmp(&a.running).then_with(|| a.name.cmp(&b.name)));
@@ -2123,10 +2266,16 @@ impl Sessions {
                 (false, _) => "ended".to_string(),
             };
             let _ = writeln!(out, "\n{} \u{b7} {state}", session.name);
-            if session.holding.is_empty() && session.finished.is_empty() && session.asking.is_empty() {
+            if session.holding.is_empty() && session.finished.is_empty() && session.asking.is_empty() && session.waiting.is_empty() {
                 let _ = writeln!(out, "      nothing in progress");
             }
-            for (what, lines) in [("in progress", &session.holding), ("done today", &session.finished), ("asking", &session.asking)] {
+            let kinds = [
+                ("in progress", &session.holding),
+                ("done today", &session.finished),
+                ("asking", &session.asking),
+                ("waiting", &session.waiting),
+            ];
+            for (what, lines) in kinds {
                 for line in lines {
                     let _ = writeln!(out, "      {what:<11} {:>4}. {}", line.id, line.text);
                 }
@@ -2400,6 +2549,29 @@ impl Prime {
                 };
                 let _ =
                     writeln!(out, "{:>4}. {}\n      -> {} (recorded by {by}{moved})", asked.id, clip(&asked.text, TASK_CLIP), clip(answer, NOTE_CLIP));
+            }
+        }
+        // Waits beside the questions: what sessions and the user owe each
+        // other (task 389).
+        if !self.waits.is_empty() {
+            let _ = writeln!(out, "\nThis session waits ({})", self.waits.len());
+            for wait in &self.waits {
+                let held = wait.held.as_ref().map(|by| format!(", held by {by}")).unwrap_or_default();
+                let _ = writeln!(out, "{:>4}. on {} until {}{held}: {}", wait.id, wait.on(), wait.until, clip(&wait.text, NOTE_CLIP));
+            }
+        }
+        if !self.waits_over.is_empty() {
+            let _ = writeln!(out, "\nWaits over, for this session ({})", self.waits_over.len());
+            for wait in &self.waits_over {
+                let by = wait.ended_by.as_ref().map(|by| format!(", by {by}")).unwrap_or_default();
+                let ended = wait.ended.unwrap_or_default();
+                let _ = writeln!(out, "{:>4}. {} {ended}{by}\n      -> {}", wait.id, wait.on(), clip(&wait.text, NOTE_CLIP));
+            }
+        }
+        if !self.waited_on.is_empty() {
+            let _ = writeln!(out, "\nOther sessions wait on your work ({})", self.waited_on.len());
+            for wait in &self.waited_on {
+                let _ = writeln!(out, "{:>4}. {} waits on {} until {}: {}", wait.id, wait.by, wait.on(), wait.until, clip(&wait.text, NOTE_CLIP));
             }
         }
 
@@ -2785,6 +2957,9 @@ impl Context {
         if let Some(asked) = &self.question {
             facts[0] = format!("note, a question asked by {}", asked.by);
         }
+        if let Some(wait) = &self.wait {
+            facts[0] = format!("note, a wait by {} on {} until {}", wait.by, wait.on(), wait.until);
+        }
         if let Some(with) = &item.with {
             facts.push(format!("with {with}"));
         }
@@ -2815,9 +2990,26 @@ impl Context {
             self.created,
             item.updated_at
         );
-        // A question already says who asked it.
-        if let (Some(by), None) = (&self.written_by, &self.question) {
+        // A question already says who asked it, and a wait who waits.
+        if let (Some(by), None, None) = (&self.written_by, &self.question, &self.wait) {
             let _ = writeln!(out, "      written by {by}");
+        }
+        if let Some(wait) = &self.wait {
+            let moved = |after: &str| match wait.moved {
+                0 => String::new(),
+                1 => format!(", 1 write {after}"),
+                n => format!(", {n} writes {after}"),
+            };
+            let _ = match wait.ended {
+                Some(ended) => {
+                    let by = wait.ended_by.as_ref().map(|by| format!(", by {by}")).unwrap_or_default();
+                    writeln!(out, "      over: {} {ended}{by}{}", wait.on(), moved("after the wait began"))
+                }
+                None => {
+                    let held = wait.held.as_ref().map(|by| format!(", held by {by}")).unwrap_or_default();
+                    writeln!(out, "      still waiting{held}{}", moved("since it began"))
+                }
+            };
         }
         if let Some(asked) = &self.question {
             let moved = |after: &str| match asked.moved {
@@ -4376,6 +4568,49 @@ mod tests {
         assert!(text.contains("\ndefault on pts/2 \u{b7} c-idle \u{b7} since ") && text.contains("      nothing in progress\n"), "{text}");
         assert!(text.contains("\ndefault on pts/3 \u{b7} c-gone \u{b7} ended\n      in progress    3. left behind\n"), "{text}");
         assert!(text.contains("claude --resume c-gone\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A wait shows where each side needs it (task 389): in the prime of the
+    /// session waiting and in the holder's, in its note's context, and in
+    /// ekko --sessions; once another's write ends it, under 'Waits over, for
+    /// this session'.
+    #[test]
+    fn a_wait_shows_to_the_session_waiting_the_holder_and_the_user() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let (_, dir) = board("waits");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        as_(&other).create_task(&words(&["Release v0.15.0"])).unwrap();
+        as_(&other).set_state(&words(&["@1", "progress"]), false).unwrap();
+        let mine = as_(&me);
+        let mut draft = crate::ops::Draft::open(&mine).unwrap();
+        let spec = crate::ops::WaitOn { item: crate::ops::Ref::Id(1), until: None, text: Some("land 380's fix".into()), cancel: false };
+        let crate::ops::Waited::Recorded(note) = draft.wait(&spec).unwrap() else { panic!("a wait recorded") };
+        draft.commit(false).unwrap();
+
+        let waiting = prime(&as_(&me), "default board").unwrap().text();
+        let line = format!("{note:>4}. on 1 (Release v0.15.0) until done, held by default on pts/2: land 380's fix\n");
+        assert!(waiting.contains(&format!("\nThis session waits (1)\n{line}")), "{waiting}");
+        assert!(!waiting.contains("Recent notes"), "a wait is not a loose note: {waiting}");
+        let holding = prime(&as_(&other), "default board").unwrap().text();
+        let line = format!("{note:>4}. default on pts/1 waits on 1 (Release v0.15.0) until done: land 380's fix\n");
+        assert!(holding.contains(&format!("\nOther sessions wait on your work (1)\n{line}")), "{holding}");
+        assert!(!holding.contains("This session waits"), "{holding}");
+        let read = contexts(&as_(&other), &[note.to_string()]).unwrap()[0].text();
+        assert!(read.contains("note, a wait by default on pts/1 on 1 (Release v0.15.0) until done \u{b7} "), "{read}");
+        assert!(read.contains("\n      still waiting, held by default on pts/2\n") && !read.contains("written by"), "{read}");
+        let text = sessions(&as_(&me), "default board").unwrap().text();
+        assert!(text.contains(&format!("      waiting     {note:>4}. on 1 until done: land 380's fix\n")), "{text}");
+
+        as_(&other).set_state(&words(&["@1", "done"]), false).unwrap();
+        let over = prime(&as_(&me), "default board").unwrap().text();
+        let line = format!("{note:>4}. 1 (Release v0.15.0) is done, by default on pts/2\n      -> land 380's fix\n");
+        assert!(over.contains(&format!("\nWaits over, for this session (1)\n{line}")), "{over}");
+        assert!(!over.contains("This session waits"), "{over}");
+        let read = contexts(&as_(&me), &[note.to_string()]).unwrap()[0].text();
+        assert!(read.contains("\n      over: 1 (Release v0.15.0) is done, by default on pts/2\n"), "{read}");
+        assert!(!sessions(&as_(&me), "default board").unwrap().text().contains("waiting "), "an ended wait waits no more");
 
         std::fs::remove_dir_all(&dir).ok();
     }

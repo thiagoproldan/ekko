@@ -103,7 +103,7 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
     assert!(init["instructions"].as_str().is_some_and(|s| s.contains("shared with the user")));
 
     let tools = replies["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 20);
+    assert_eq!(tools.len(), 21);
     // The five nearly every session calls, and ask, load at session start; the rest stay behind ToolSearch.
     let loaded: Vec<&str> =
         tools.iter().filter(|tool| tool["_meta"]["anthropic/alwaysLoad"] == true).map(|tool| tool["name"].as_str().unwrap()).collect();
@@ -903,7 +903,8 @@ impl Session {
             .arg(format!("'{}' --mcp; true", env!("CARGO_BIN_EXE_ekko")))
             .env("HOME", home)
             .env("EKKO_TERMINAL", "none")
-            .env_remove("EKKO_PROJECT");
+            .env_remove("EKKO_PROJECT")
+            .env_remove("XDG_STATE_HOME");
         match folder {
             Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
             None => command.env("EKKO_DIR", home).current_dir(home),
@@ -968,6 +969,44 @@ fn a_second_session_does_not_take_the_first_ones_task() {
     assert!(second.call("prime", json!({})).contains("   1. the first session's work \u{b7} in progress \u{b7} yours\n"));
 
     second.close();
+    fs::remove_dir_all(&home).ok();
+}
+
+/// A session refused a task another holds waits on it instead (task 389).
+/// The holder is told once, in its next reply; the write that completes the
+/// task says whose wait it ended; and the session waiting is told once, in
+/// its next reply, what happened and what it meant to do then.
+#[test]
+fn a_session_waiting_on_another_is_told_once_it_is_over() {
+    let home = temp_home();
+    let mut holder = Session::start(&home);
+    let mut waiter = Session::start(&home);
+    holder.call("create", json!({"text": "Release v0.15.0"}));
+    holder.call("set_state", json!({"items": [1], "state": "progress"}));
+
+    let refused = waiter.call("set_state", json!({"items": [1], "state": "done"}));
+    assert!(refused.starts_with("HELD: ") && refused.ends_with("To be told once it is free, wait on it with until free"), "{refused}");
+    let waited = waiter.call("wait", json!({"item": 1, "text": "land 380: rebase, test, push"}));
+    assert!(waited.starts_with("{\"ok\":true,\"items\":[{\"id\":2,") && waited.contains("\"told\":"), "{waited}");
+    let again = waiter.call("wait", json!({"item": 1, "until": "done", "text": "again"}));
+    assert!(again.starts_with("This session already waits on it for that, in note 2"), "{again}");
+
+    let told = holder.call("next", json!({}));
+    let line = "waits on 1 (Release v0.15.0), which this session holds, until done (note 2): land 380: rebase, test, push\n";
+    assert!(told.contains("\n\nekko: ") && told.ends_with(line), "{told}");
+    assert!(!holder.call("next", json!({})).contains("ekko: "), "the holder is told once");
+
+    let done = holder.call("set_state", json!({"items": [1], "state": "done"}));
+    assert!(done.contains("\"notices\":[\"1 is done: ") && done.contains("waited on it (note 2) and is told"), "{done}");
+    let over = waiter.call("next", json!({}));
+    assert!(over.contains("\n\nekko: 1 (Release v0.15.0) is done, by "), "{over}");
+    assert!(over.ends_with("This session waited on it (note 2) to: land 380: rebase, test, push\n"), "{over}");
+    assert!(!waiter.call("next", json!({})).contains("ekko: "), "the session waiting is told once");
+    let late = waiter.call("wait", json!({"item": 1, "text": "late"}));
+    assert_eq!(late, "No wait was recorded: 1 is done already.\n");
+
+    holder.close();
+    waiter.close();
     fs::remove_dir_all(&home).ok();
 }
 

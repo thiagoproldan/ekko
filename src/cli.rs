@@ -21,7 +21,7 @@ pub struct InitCli {
 
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
-#[command(group(clap::ArgGroup::new("hooked").args(["prime", "tasklist"])))]
+#[command(group(clap::ArgGroup::new("hooked").args(["prime", "tasklist", "wake"])))]
 pub struct Cli {
     /// Attach a note to the task it explains, by id: the note first, then
     /// its task. No task detaches it.
@@ -155,7 +155,7 @@ pub struct Cli {
     #[arg(long)]
     pub sessions: bool,
 
-    /// With --prime or --tasklist: answer a Claude Code hook, whose event
+    /// With --prime, --tasklist or --wake: answer a Claude Code hook, whose event
     /// arrives as JSON on stdin. For --prime, a session that resumes or forks
     /// gets what moved since this hook last served it, not a second prime.
     #[arg(long, requires = "hooked")]
@@ -167,6 +167,13 @@ pub struct Cli {
     /// file changes.
     #[arg(long, requires = "hook")]
     pub tasklist: bool,
+
+    /// With --hook: tell this Claude Code session, on stderr and exiting 2,
+    /// what it has not been told of its waits and of the questions it left
+    /// open -- see `wake`. The plugin runs it in the background when the
+    /// board's file changes, and exit 2 wakes a session sitting idle.
+    #[arg(long, requires = "hook")]
+    pub wake: bool,
 
     /// What to take up next, best first, optionally only the first N.
     #[arg(long, num_args = 0..=1, value_name = "N")]

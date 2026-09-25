@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use crate::config;
 use crate::directory::DirectoryError;
-use crate::item::{tally, Change, Item, Knowledge, Setting, State};
+use crate::item::{tally, Change, How, Item, Knowledge, Over, Setting, State};
 use crate::render::{Inversion, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
 use crate::storage::{Counters, ItemMap, Storage, StorageError};
 
@@ -305,6 +305,15 @@ pub(crate) fn held_elsewhere_text(held: &[(u32, String, i64)], name: &dyn Fn(u32
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// What a save did that the items it wrote do not show on their own: the
+/// work it set free or left waiting, and the waits it ended, by display id.
+#[derive(Debug, Default)]
+pub(crate) struct Saved {
+    pub released: Vec<u32>,
+    pub blocked: Vec<u32>,
+    pub ended: Vec<u32>,
 }
 
 impl From<StorageError> for EkkoError {
@@ -925,13 +934,13 @@ impl Ekko {
     /// The same diff decides whether the write takes a task out of another
     /// running session's hands (`held_elsewhere`), so a session that runs
     /// ekko through its shell meets the hold whichever command it runs.
-    pub(crate) fn save_touching(&self, data: &mut ItemMap) -> Result<(Vec<u32>, Vec<u32>), EkkoError> {
+    pub(crate) fn save_touching(&self, data: &mut ItemMap) -> Result<Saved, EkkoError> {
         self.save_touching_forced(data, false)
     }
 
     /// `save_touching` for --check and --set, whose `--force` pushes past
     /// another session's hold as it does past the dependency rule.
-    pub(crate) fn save_touching_forced(&self, data: &mut ItemMap, force: bool) -> Result<(Vec<u32>, Vec<u32>), EkkoError> {
+    pub(crate) fn save_touching_forced(&self, data: &mut ItemMap, force: bool) -> Result<Saved, EkkoError> {
         let before = self.storage.get()?;
         let held = if force { Vec::new() } else { self.held_elsewhere(&before, data, &[]) };
         if !held.is_empty() {
@@ -1004,7 +1013,7 @@ impl Ekko {
     /// `save_touching` against the board as the caller read it, under the
     /// lock it still holds: a structured write already has that copy, and
     /// reading storage.json a second time only parses the whole board again.
-    pub(crate) fn save_against(&self, before: &ItemMap, data: &mut ItemMap) -> Result<(Vec<u32>, Vec<u32>), EkkoError> {
+    pub(crate) fn save_against(&self, before: &ItemMap, data: &mut ItemMap) -> Result<Saved, EkkoError> {
         let now = chrono::Local::now().timestamp_millis();
 
         // The trash empties here, on the way past, and only here.
@@ -1020,7 +1029,7 @@ impl Ekko {
             None => true,
         });
 
-        let changed: Vec<u32> = data.iter().filter(|(id, item)| before.get(*id) != Some(*item)).map(|(id, _)| *id).collect();
+        let mut changed: Vec<u32> = data.iter().filter(|(id, item)| before.get(*id) != Some(*item)).map(|(id, _)| *id).collect();
         let gone: Vec<&Item> = before.iter().filter(|(id, _)| !data.contains_key(*id)).map(|(_, item)| item).collect();
 
         // Who holds a task follows its state: one entering progress is claimed
@@ -1048,6 +1057,16 @@ impl Ekko {
             }
         }
 
+        // A wait ends with the write that brings what it waits for, once
+        // the holds above are settled -- or, when the session holding its
+        // task has ended, with whichever write comes next.
+        let ended = self.end_waits(data, now);
+        for id in &ended {
+            if !changed.contains(id) {
+                changed.push(*id);
+            }
+        }
+
         let kept = self.storage.get_counters()?;
         let mut counters = kept.clone();
         counters.highest_id = counters.highest_id.max(before.keys().chain(data.keys()).max().copied().unwrap_or(0));
@@ -1070,6 +1089,15 @@ impl Ekko {
                     }
                     if let Some(answer) = question.answer.as_mut().filter(|answer| answer.rev == 0) {
                         answer.rev = counters.revision;
+                    }
+                }
+                // So is a wait recorded or ended in it.
+                if let Some(wait) = item.wait.as_mut() {
+                    if wait.rev == 0 {
+                        wait.rev = counters.revision;
+                    }
+                    if let Some(over) = wait.over.as_mut().filter(|over| over.rev == 0) {
+                        over.rev = counters.revision;
                     }
                 }
             }
@@ -1104,7 +1132,35 @@ impl Ekko {
         if counters != kept {
             self.storage.set_counters(&counters)?;
         }
-        Ok((released, blocked))
+        Ok(Saved { released, blocked, ended })
+    }
+
+    /// Ends each open wait the board in `data` now meets, recording how and
+    /// by whose write: the ids of their notes. A wait put away with its note
+    /// waits no longer, and is left as it is.
+    fn end_waits(&self, data: &mut ItemMap, now: i64) -> Vec<u32> {
+        let open = |note: &Item| note.trashed.is_none() && note.stashed.is_none() && note.wait.as_ref().is_some_and(|wait| wait.over.is_none());
+        if !data.values().any(open) {
+            return Vec::new();
+        }
+        let ending: Vec<(u32, How)> = {
+            let by_uid: HashMap<&str, &Item> = data.values().filter_map(|item| Some((item.uid.as_deref()?, item))).collect();
+            data.values()
+                .filter(|note| open(note))
+                .filter_map(|note| {
+                    let wait = note.wait.as_ref()?;
+                    Some((note.id, wait.over_on(by_uid.get(wait.on.as_str()).copied())?))
+                })
+                .collect()
+        };
+        let writer = self.actor.as_ref().map(|actor| actor.holder(now));
+        for (id, how) in &ending {
+            if let Some(wait) = data.get_mut(id).and_then(|note| note.wait.as_mut()) {
+                let by = if *how == How::Ended { None } else { writer.clone() };
+                wait.over = Some(Over { how: *how, by, at: now, rev: 0 });
+            }
+        }
+        ending.into_iter().map(|(id, _)| id).collect()
     }
 
     /// `phase` is the scope the CLI was invoked with. Items created without

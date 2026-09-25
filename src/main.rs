@@ -18,6 +18,7 @@ mod paths;
 mod render;
 mod storage;
 mod tasklist;
+mod wake;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -226,6 +227,12 @@ fn main() -> ExitCode {
             .in_folder(location.project.as_ref().and_then(|project| project.root.clone())),
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
+
+    // Its own exit code: 2 wakes the session, and anything else must stay
+    // silent on a hook that runs on every write to the board.
+    if cli.wake {
+        return wake::hook(&ekko, &read_hook_input(), &home_dir, &board_label);
+    }
 
     match dispatch(&cli, &ekko, location.project.as_ref(), &home_dir, &board_label) {
         Ok(outcomes) => {

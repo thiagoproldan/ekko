@@ -1,6 +1,6 @@
 {
   "name": "ekko",
-  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes; the board's resume view added to context when a session starts; and the board drawn in the session's task list under the spinner.",
+  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes; the board's resume view added to context when a session starts; the board drawn in the session's task list under the spinner; and a session woken when what it waits on is over.",
   "homepage": "https://github.com/thiagoproldan/ekko",
   "license": "MIT",
   "mcpServers": {
@@ -42,6 +42,13 @@
           {
             "type": "command",
             "command": "ekko --tasklist --hook"
+          },
+          {
+            "type": "command",
+            "command": "ekko --wake --hook",
+            "asyncRewake": true,
+            "rewakeMessage": "ekko:",
+            "rewakeSummary": "ekko woke this session"
           }
         ]
       }
