@@ -616,7 +616,7 @@ impl Server {
         if self.told_at.lock().unwrap_or_else(PoisonError::into_inner).replace(revision) == Some(revision) {
             return text;
         }
-        let since = wake::since(&self.home, &self.actor, &Self::label(&location));
+        let since = wake::since(&self.home, &self.actor, &location.label());
         match wake::untold(&ekko, &self.actor, &wake::Told::of(&self.home, process), since, true) {
             Ok(lines) if !lines.is_empty() => {
                 let lines: Vec<String> = lines.iter().map(|line| format!("ekko: {line}")).collect();
@@ -745,7 +745,7 @@ impl Server {
             .ok_or_else(|| RpcError::new(-32602, "Invalid params: resources/read needs a uri"))?;
         let (ekko, location) = self.open(None).map_err(resource_error)?;
         let text = if uri == PRIME_URI {
-            agent::prime(&ekko, &Self::label(&location)).map_err(resource_error)?.text()
+            agent::prime(&ekko, &location.label()).map_err(resource_error)?.text()
         } else if let Some(id) = uri.strip_prefix("item://").filter(|id| !id.is_empty()) {
             let read = agent::contexts(&ekko, &[id.to_string()])
                 .map_err(|error| RpcError::new(-32002, format!("Resource not found: {uri}: {error}")))?;
@@ -783,15 +783,7 @@ impl Server {
         let name = project.or(self.project_env.as_deref());
         let location = directory::locate(&self.home, &self.cwd, None, self.ekko_dir_env.as_deref(), name)?;
         let folder = location.project.as_ref().and_then(|project| project.root.clone());
-        Ok((Ekko::at(&location.dir)?.acting_as(self.actor.clone()).in_folder(folder), location))
-    }
-
-    fn label(location: &directory::Location) -> String {
-        match (&location.project, location.discovered) {
-            (Some(project), true) => format!("project {}, found from this folder", project.name),
-            (Some(project), false) => format!("project {}", project.name),
-            (None, _) => "default board".to_string(),
-        }
+        Ok((Ekko::at(&location)?.acting_as(self.actor.clone()).in_folder(folder), location))
     }
 
     fn tool(&self, name: &str, args: &mut Map<String, Value>) -> Result<String, ToolError> {
@@ -809,7 +801,7 @@ impl Server {
                 if let Some(line) = self.unchanged("prime", &ekko, if_rev)? {
                     return Ok(line);
                 }
-                let text = agent::prime(&ekko, &Self::label(&location))?.text();
+                let text = agent::prime(&ekko, &location.label())?.text();
                 self.answered_today("prime");
                 Ok(text)
             }
@@ -876,7 +868,7 @@ impl Server {
             "changes" => {
                 let since = take(args, "since", Value::as_i64, "an integer")?.ok_or_else(|| invalid("changes needs since"))?;
                 finish(args)?;
-                Ok(agent::changes_within(&ekko, since, &Self::label(&location))?)
+                Ok(agent::changes_within(&ekko, since, &location.label())?)
             }
             "roadmap" => {
                 finish(args)?;

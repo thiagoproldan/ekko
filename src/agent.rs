@@ -2690,10 +2690,13 @@ pub fn projects_text(projects: &[ProjectSummary]) -> String {
     }
     let mut out = String::new();
     for project in projects {
-        let place = match (project.status, project.path.as_deref()) {
-            ("missing", Some(path)) => format!("{path}, folder missing"),
-            (_, Some(path)) => path.to_string(),
-            (status, None) => status.to_string(),
+        let place = match (project.status, project.path.as_deref(), project.copied.as_deref()) {
+            ("missing", Some(path), Some(when)) => {
+                format!("{path}, board gone, copied {when}: ekko init {path} restores it")
+            }
+            ("missing", Some(path), None) => format!("{path}, board gone, no copy"),
+            (_, Some(path), _) => path.to_string(),
+            (status, None, _) => status.to_string(),
         };
         let _ = writeln!(
             out,

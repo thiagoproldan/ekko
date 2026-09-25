@@ -97,12 +97,18 @@ impl From<serde_json::Error> for StorageError {
 }
 
 pub struct Storage {
+    /// The board's directory, `.ekko/`.
+    dir: PathBuf,
     storage_file: PathBuf,
     archive_file: PathBuf,
     temp_dir: PathBuf,
     lock_file: PathBuf,
     /// Where the versions of storage.json a write replaced are kept.
     history_dir: PathBuf,
+    /// Where every write copies the board's files, outside the project's
+    /// folder -- `~/.ekko/copies/<project id>/` -- or `None` for a board
+    /// that is no project's (task 503).
+    copy_dir: Option<PathBuf>,
 }
 
 /// Proof of a held lock. Releases it on drop, including when a caller
@@ -131,15 +137,24 @@ impl Storage {
         fs::create_dir_all(&temp_dir)?;
 
         let storage = Storage {
+            dir: ekko_dir.to_path_buf(),
             storage_file: storage_dir.join("storage.json"),
             archive_file: archive_dir.join("archive.json"),
             temp_dir,
             lock_file: ekko_dir.join(".lock"),
             history_dir: ekko_dir.join("history"),
+            copy_dir: None,
         };
 
         storage.clean_temp_dir()?;
         Ok(storage)
+    }
+
+    /// This storage, copying the board's files to `copy_dir` at every write
+    /// (see `copy_out`).
+    pub fn copied_to(mut self, copy_dir: Option<PathBuf>) -> Self {
+        self.copy_dir = copy_dir;
+        self
     }
 
     /// Sweeps up temp files abandoned by a crashed write (create-then-
@@ -206,7 +221,65 @@ impl Storage {
 
     pub fn set(&self, data: &ItemMap) -> Result<(), StorageError> {
         self.keep_version();
-        write_atomic(&self.storage_file, &self.temp_dir, data)
+        write_atomic(&self.storage_file, &self.temp_dir, data)?;
+        self.copy_out(&self.storage_file);
+        // The files a write seldom touches are copied the first time too, so
+        // a copy is whole from its first write; after that, each refreshes
+        // its own copy whenever it is written.
+        for file in self.board_files() {
+            if self.copy_of(&file).is_some_and(|copy| !copy.exists()) {
+                self.copy_out(&file);
+            }
+        }
+        Ok(())
+    }
+
+    /// Every file that makes up the board, and that a copy must hold to bring
+    /// it back: a file added to the board is added here.
+    fn board_files(&self) -> [PathBuf; 6] {
+        [
+            self.storage_file.clone(),
+            self.counters_file(),
+            self.journal_file(),
+            self.phases_file(),
+            self.archive_file.clone(),
+            self.dir.join(crate::project::MARKER),
+        ]
+    }
+
+    /// Where `file`, one of the board's, is copied: the same place under
+    /// `copy_dir` as it has under the board's directory.
+    fn copy_of(&self, file: &Path) -> Option<PathBuf> {
+        Some(self.copy_dir.as_ref()?.join(file.strip_prefix(&self.dir).ok()?))
+    }
+
+    /// Brings the copy of `file` up to date, outside the project's folder, so
+    /// that `git clean -fdx` or removing the folder leaves the board behind
+    /// (task 503). A hard link where one can be made: it costs nothing, and
+    /// since a write replaces a file by rename, never in place, the version
+    /// linked never changes. A copy where it cannot, across filesystems --
+    /// or across btrfs subvolumes, where `fs::copy` clones instead. Put in
+    /// place by rename, so a copy is always a whole file. Best effort, like
+    /// `keep_version`: a copy that cannot be made never stops the write.
+    fn copy_out(&self, file: &Path) {
+        let Some(copy) = self.copy_of(file) else { return };
+        let (Ok(source), Some(parent)) = (fs::metadata(file), copy.parent()) else { return };
+        // Already this very file: a journal appended in place, or a file no
+        // write has replaced since.
+        if fs::metadata(&copy).is_ok_and(|kept| (kept.dev(), kept.ino()) == (source.dev(), source.ino())) {
+            return;
+        }
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let mut temp = copy.clone().into_os_string();
+        temp.push(".new");
+        let temp = PathBuf::from(temp);
+        let _ = fs::remove_file(&temp);
+        let placed = fs::hard_link(file, &temp).is_ok() || fs::copy(file, &temp).is_ok();
+        if !placed || fs::rename(&temp, &copy).is_err() {
+            let _ = fs::remove_file(&temp);
+        }
     }
 
     /// Keeps the version of storage.json this write is about to replace, in
@@ -234,7 +307,9 @@ impl Storage {
     }
 
     pub fn set_archive(&self, data: &ItemMap) -> Result<(), StorageError> {
-        write_atomic(&self.archive_file, &self.temp_dir, data)
+        write_atomic(&self.archive_file, &self.temp_dir, data)?;
+        self.copy_out(&self.archive_file);
+        Ok(())
     }
 
     /// Blocks (thread::sleep between polls, not a busy spin) until the lock
@@ -379,7 +454,9 @@ impl Storage {
     /// and rename dance as everything else, so a reader never sees half a
     /// list.
     pub fn set_phases(&self, phases: &[String]) -> Result<(), StorageError> {
-        replace_durably(&self.phases_file(), &self.temp_dir, serde_json::to_string_pretty(phases)?.as_bytes())
+        replace_durably(&self.phases_file(), &self.temp_dir, serde_json::to_string_pretty(phases)?.as_bytes())?;
+        self.copy_out(&self.phases_file());
+        Ok(())
     }
 }
 
@@ -424,7 +501,9 @@ impl Storage {
 
     /// Written through the same temp-file and rename dance as everything else.
     pub fn set_counters(&self, counters: &Counters) -> Result<(), StorageError> {
-        replace_durably(&self.counters_file(), &self.temp_dir, serde_json::to_string_pretty(counters)?.as_bytes())
+        replace_durably(&self.counters_file(), &self.temp_dir, serde_json::to_string_pretty(counters)?.as_bytes())?;
+        self.copy_out(&self.counters_file());
+        Ok(())
     }
 }
 
@@ -490,7 +569,9 @@ impl Storage {
 
     /// Appends one entry. Callers hold the lock.
     pub fn append_journal(&self, entry: &serde_json::Value) -> Result<(), StorageError> {
-        self.append_journal_within(entry, JOURNAL_BYTES)
+        self.append_journal_within(entry, JOURNAL_BYTES)?;
+        self.copy_out(&self.journal_file());
+        Ok(())
     }
 
     fn append_journal_within(&self, entry: &serde_json::Value, bytes: u64) -> Result<(), StorageError> {
@@ -1059,5 +1140,70 @@ mod tests {
             assert!(kept.contains(last), "day {} kept its last version", (last - midnight) / DAY);
         }
         assert_eq!(kept.len(), HISTORY_RECENT + 1 + last_of_each_day.len(), "the newest 50, today's newest past them, one per earlier day");
+    }
+
+    /// Every write copies the file it wrote outside the board's directory, in
+    /// the board's own layout, so the board outlives its folder (task 503).
+    #[test]
+    fn every_write_copies_the_board_outside_its_folder() {
+        let dir = temp_ekko_dir();
+        let copy = temp_ekko_dir().join("copy");
+        fs::write(dir.join("project.json"), r#"{"name": "site", "id": "abc"}"#).unwrap();
+        let storage = Storage::new(&dir).unwrap().copied_to(Some(copy.clone()));
+        storage.set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
+        storage.set_counters(&Counters { revision: 1, highest_id: 1, ..Counters::default() }).unwrap();
+        storage.append_journal(&serde_json::json!({"rev": 1})).unwrap();
+        storage.append_journal(&serde_json::json!({"rev": 2})).unwrap();
+        storage.set_archive(&BTreeMap::from([(2, sample_item(2))])).unwrap();
+        storage.set_phases(&["one".to_string()]).unwrap();
+        storage.set(&BTreeMap::from([(1, sample_item(1)), (3, sample_item(3))])).unwrap();
+
+        fs::remove_dir_all(&dir).unwrap();
+        let copied = Storage::new(&copy).unwrap();
+        assert_eq!(copied.get().unwrap().keys().copied().collect::<Vec<u32>>(), vec![1, 3], "the latest version");
+        assert_eq!(copied.get_counters().unwrap().highest_id, 1);
+        assert_eq!(copied.read_journal().unwrap().len(), 2, "an append in place reaches the copy");
+        assert_eq!(copied.get_archive().unwrap()[&2].description, "item 2");
+        assert_eq!(copied.get_phases().unwrap(), vec!["one".to_string()]);
+        assert!(copy.join("project.json").is_file(), "the marker, which names the project");
+        assert!(!copy.join("history").exists(), "the history stays with the board");
+        fs::remove_dir_all(copy.parent().unwrap()).ok();
+    }
+
+    /// A board written before it had a copy comes out whole from the first
+    /// write that copies it: the files that write leaves alone are copied too.
+    #[test]
+    fn the_first_copy_of_a_board_holds_every_file() {
+        let dir = temp_ekko_dir();
+        let copy = temp_ekko_dir();
+        let before = Storage::new(&dir).unwrap();
+        before.set_archive(&BTreeMap::from([(2, sample_item(2))])).unwrap();
+        before.set_phases(&["one".to_string()]).unwrap();
+        before.append_journal(&serde_json::json!({"rev": 1})).unwrap();
+        before.set_counters(&Counters { revision: 1, highest_id: 2, ..Counters::default() }).unwrap();
+
+        let storage = Storage::new(&dir).unwrap().copied_to(Some(copy.clone()));
+        storage.set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
+
+        let copied = Storage::new(&copy).unwrap();
+        assert_eq!(copied.get().unwrap().len(), 1);
+        assert_eq!(copied.get_archive().unwrap().len(), 1);
+        assert_eq!(copied.get_phases().unwrap(), vec!["one".to_string()]);
+        assert_eq!(copied.read_journal().unwrap().len(), 1);
+        assert_eq!(copied.get_counters().unwrap().highest_id, 2);
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&copy).ok();
+    }
+
+    /// A copy that cannot be made never stops the write it would have kept.
+    #[test]
+    fn a_copy_that_cannot_be_made_does_not_fail_the_write() {
+        let dir = temp_ekko_dir();
+        let not_a_directory = dir.join("copy");
+        fs::write(&not_a_directory, "").unwrap();
+        let storage = Storage::new(&dir).unwrap().copied_to(Some(not_a_directory));
+        storage.set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
+        assert_eq!(storage.get().unwrap().len(), 1);
+        fs::remove_dir_all(&dir).ok();
     }
 }

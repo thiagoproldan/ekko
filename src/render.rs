@@ -137,6 +137,10 @@ pub struct ProjectSummary {
     /// `here`; `missing`, when its folder no longer holds it; or `legacy`,
     /// when it still lives under `~/.ekko/projects/` waiting for `ekko init`.
     pub status: &'static str,
+    /// For a missing project, when its copy was last written: `ekko init` in
+    /// its folder restores it from there (task 503).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copied: Option<String>,
 }
 
 /// One node of the roadmap: a declared phase, how far it has got, and whether
@@ -929,6 +933,16 @@ impl<'a> Renderer<'a> {
             };
             suffix.push_str(&place);
             self.emit("\n ", None, &title, &suffix);
+            // The way out of a missing project, which the listing, reading
+            // only, leaves to the user: restore it, or forget it (task 503).
+            if let ("missing", Some(path)) = (project.status, project.path.as_deref()) {
+                let forget = format!("ekko --project {} --destroy forgets it", project.name);
+                let line = match &project.copied {
+                    Some(when) => format!("copied {when}: ekko init {path} restores it; {forget}"),
+                    None => format!("no copy: {forget}"),
+                };
+                self.emit("   ", None, &self.painter.grey(&line), "");
+            }
         }
     }
 
@@ -1197,15 +1211,40 @@ impl<'a> Renderer<'a> {
         self.emit(" ", None, &self.painter.grey(&format!("moved to {}", trash.display())), "");
     }
 
+    /// What `--destroy` did to a project whose folder no longer held its
+    /// board: forgot it, and parked its copy in the trash if it had one.
+    pub fn success_forgotten(&mut self, forgotten: &crate::project::Forgotten) {
+        let gone = format!("(its board was gone from {})", forgotten.path.display());
+        let suffix = format!("{} {}", self.painter.grey(&forgotten.name), self.painter.grey(&gone));
+        self.success("\n", "Forgot project:", &suffix);
+        if let Some(parked) = &forgotten.parked {
+            self.emit(" ", None, &self.painter.grey(&format!("its copy moved to {}", parked.display())), "");
+        }
+    }
+
     /// What `ekko init` did: the project and where its board is, then each
-    /// thing it did beyond that -- a legacy project moved in, a board already
-    /// in the folder kept, the board kept out of git -- so nothing it changed
-    /// goes unsaid.
+    /// thing it did beyond that -- a legacy project moved in, a lost board
+    /// brought back, a board already in the folder kept, the board kept out
+    /// of git -- so nothing it changed goes unsaid.
     pub fn success_init(&mut self, init: &crate::project::Initialized) {
-        let verb = if init.existing { "Already a project:" } else { "Initialized project:" };
+        let verb = match (init.existing, &init.restored) {
+            (true, _) => "Already a project:",
+            (false, Some(_)) => "Restored project:",
+            (false, None) => "Initialized project:",
+        };
         let board = init.root.join(".ekko").display().to_string();
         let suffix = format!("{} {}", init.name, self.painter.grey(&board));
         self.success("\n", verb, &suffix);
+        if let Some(restored) = &init.restored {
+            let copy = restored.copied.as_deref().map_or("its copy".to_string(), |when| format!("its copy of {when}"));
+            let mut line = format!("its board was gone, and came back from {copy}");
+            if restored.from != init.root {
+                line.push_str(&format!("; it was at {}", restored.from.display()));
+            }
+            self.emit(" ", None, &self.painter.grey(&line), "");
+            let fresh = "the history of its versions starts over; for an empty board instead, ekko --destroy, then ekko init";
+            self.emit(" ", None, &self.painter.grey(fresh), "");
+        }
         if let Some(adopted) = &init.adopted {
             let line = format!(
                 "moved its board in from {}; the old copy is in {}",
@@ -1892,10 +1931,10 @@ mod tests {
     #[test]
     fn the_project_listing_says_what_each_one_holds() {
         let projects = vec![
-            ProjectSummary { name: "plan".into(), complete: 0, tasks: 15, notes: 4, path: Some("/work/plan".into()), status: "here" },
-            ProjectSummary { name: "solo".into(), complete: 1, tasks: 2, notes: 0, path: Some("/work/solo".into()), status: "here" },
-            ProjectSummary { name: "empty".into(), complete: 0, tasks: 0, notes: 0, path: None, status: "legacy" },
-            ProjectSummary { name: "gone".into(), complete: 0, tasks: 0, notes: 0, path: Some("/old/gone".into()), status: "missing" },
+            ProjectSummary { name: "plan".into(), complete: 0, tasks: 15, notes: 4, path: Some("/work/plan".into()), status: "here", copied: None },
+            ProjectSummary { name: "solo".into(), complete: 1, tasks: 2, notes: 0, path: Some("/work/solo".into()), status: "here", copied: None },
+            ProjectSummary { name: "empty".into(), complete: 0, tasks: 0, notes: 0, path: None, status: "legacy", copied: None },
+            ProjectSummary { name: "gone".into(), complete: 0, tasks: 0, notes: 0, path: Some("/old/gone".into()), status: "missing", copied: None },
         ];
 
         let output = render_with(Config::default(), |r| r.display_projects(&projects));

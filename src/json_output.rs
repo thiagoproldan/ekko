@@ -68,6 +68,14 @@ fn success_value(outcome: &Outcome) -> Value {
             // other way to work out where the project went.
             "trash": trash.display().to_string(),
         }),
+        Outcome::Forgotten(forgotten) => json!({
+            "ok": true,
+            "command": command,
+            "project": forgotten.name,
+            "forgotten": true,
+            "path": forgotten.path.display().to_string(),
+            "trash": forgotten.parked.as_ref().map(|parked| parked.display().to_string()),
+        }),
         Outcome::Init(init) => json!({
             "ok": true,
             "command": command,
@@ -77,6 +85,10 @@ fn success_value(outcome: &Outcome) -> Value {
             "adopted": init.adopted.as_ref().map(|adopted| json!({
                 "from": adopted.from.display().to_string(),
                 "parked": adopted.parked.display().to_string(),
+            })),
+            "restored": init.restored.as_ref().map(|restored| json!({
+                "from": restored.from.display().to_string(),
+                "copied": restored.copied,
             })),
             "excluded": init.excluded,
         }),

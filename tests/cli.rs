@@ -198,6 +198,59 @@ fn init_makes_a_folder_a_project_that_ekko_finds_from_inside_it() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// A board cleaned out of its folder, as `git clean -fdx` does, is not lost:
+/// every write copied it under ~/.ekko/copies/, the prime in that folder
+/// says so, --projects names the way back, and `ekko init` there takes it.
+/// --destroy forgets a project whose folder is gone (task 503).
+#[test]
+fn a_board_cleaned_out_of_its_folder_comes_back_with_init() {
+    let home = temp_ekko_dir();
+    let app = home.join("work").join("app");
+    let gone = home.join("work").join("gone");
+    fs::create_dir_all(app.join(".git")).unwrap();
+    fs::create_dir_all(&gone).unwrap();
+    let ekko = |cwd: &PathBuf, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &home)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .output()
+            .expect("failed to run ekko")
+    };
+    let text = |output: &process::Output| String::from_utf8_lossy(&output.stdout).into_owned();
+    let reply = |output: &process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stdout)))
+    };
+
+    assert!(ekko(&app, &["init"]).status.success());
+    assert!(ekko(&app, &["--task", "survives git clean"]).status.success());
+    fs::remove_dir_all(app.join(".ekko")).unwrap();
+
+    let prime = text(&ekko(&app, &["--prime"]));
+    assert!(prime.contains("was project app, whose board is gone: ekko init"), "{prime}");
+    let projects = text(&ekko(&home, &["--projects"]));
+    assert!(projects.contains("restores it"), "{projects}");
+
+    let init = reply(&ekko(&app, &["--json", "init"]));
+    assert!(init["restored"]["copied"].is_string(), "{init}");
+    let board = fs::read_to_string(app.join(".ekko").join("storage").join("storage.json")).unwrap();
+    assert!(board.contains("survives git clean"), "{board}");
+
+    assert!(ekko(&gone, &["init"]).status.success());
+    assert!(ekko(&gone, &["--task", "forgotten with its folder"]).status.success());
+    fs::remove_dir_all(&gone).unwrap();
+    let destroyed = reply(&ekko(&home, &["--json", "--project", "gone", "--destroy"]));
+    assert_eq!((&destroyed["project"], &destroyed["forgotten"]), (&serde_json::json!("gone"), &serde_json::json!(true)));
+    assert!(destroyed["trash"].is_string(), "{destroyed}");
+    let projects = text(&ekko(&home, &["--projects"]));
+    assert!(projects.contains("app") && !projects.contains("gone"), "{projects}");
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// The refusal and the override both have to survive the real argument
 /// parser: `--force` is a flag no unit test ever parses, and one accepted
 /// where it means nothing would be a flag that silently does nothing.

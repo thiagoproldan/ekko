@@ -212,16 +212,28 @@ fn main() -> ExitCode {
     let location =
         match directory::locate(&home_dir, &cwd, cli.ekko_dir.as_deref(), ekko_dir_env.as_deref(), project_name) {
             Ok(location) => location,
+            // A project whose folder no longer holds its board has none to
+            // open: --destroy forgets it instead (task 503).
+            Err(directory::DirectoryError::ProjectMoved { name, .. }) if cli.destroy => {
+                return match project::forget(&home_dir, &name, chrono::Local::now().timestamp_millis()) {
+                    Ok(forgotten) => {
+                        let outcome = Outcome::Forgotten(forgotten);
+                        if json_mode {
+                            json_output::print_success(&outcome);
+                        } else {
+                            with_renderer(&home_dir, |r| outcome.render(r));
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
+                };
+            }
             Err(err) => return finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
         };
-    let board_label = match (&location.project, location.discovered) {
-        (Some(project), true) => format!("project {}, found from this folder", project.name),
-        (Some(project), false) => format!("project {}", project.name),
-        (None, _) => "default board".to_string(),
-    };
+    let board_label = location.label();
     // A command run by an agent through Bash, or by a hook, acts for the
     // Claude Code session it runs under; one typed at a terminal, for the user.
-    let ekko = match Ekko::at(&location.dir) {
+    let ekko = match Ekko::at(&location) {
         Ok(ekko) => ekko
             .acting_as(holder::Actor::of_this_command().with_registry(holder::Registry::at(agent::processes_dir(&home_dir))))
             .in_folder(location.project.as_ref().and_then(|project| project.root.clone())),

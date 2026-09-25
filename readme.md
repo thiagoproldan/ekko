@@ -652,8 +652,26 @@ $ ekko --projects
 - **`--project <name>` reaches a project from anywhere**, and `EKKO_PROJECT` does the same for a whole shell. Named beats found: `--ekko-dir` > `--project` or `EKKO_PROJECT` > `EKKO_DIR` > the folder's project > the config file > `~/.ekko`.
 - **A name belongs to one project that still exists.** `ekko init` refuses a taken name and says whose it is, and an unknown name is an error, never a new empty project.
 - **A project that moved is reported as moved.** `ekko init` in its new folder records where it went; nothing is looked up and rewritten behind your back, because a read never writes.
-- **The listing says what each project holds and where it is**, counted the way the project's own stats line counts it, and marks a project its folder no longer holds.
+- **The listing says what each project holds and where it is**, counted the way the project's own stats line counts it, and marks a project its folder no longer holds, with the way back.
 - **Home is not a project.** `~/.ekko/` is the default board, and `ekko init` in home is refused.
+
+#### A copy outside the folder
+
+The board lives in its folder, so whatever takes the folder's untracked files takes the board: `git clean -fdx`, whose `-x` removes what `.git/info/exclude` keeps out of git, removing the folder, or cloning it again. So every write also copies the board's files to `~/.ekko/copies/<project id>/` -- the board as its `.ekko/` holds it, without the history of its versions. On one filesystem the copy is a hard link and costs nothing: a write replaces a file by rename, never in place, so a version once linked never changes. Across filesystems, or btrfs subvolumes, it is a copy, which btrfs makes a clone.
+
+A folder that has lost its board works on the default board, and the line every prime starts with says so:
+
+```
+ekko · default board -- /home/you/src/winwayland was project winwayland, whose board is gone: ekko init /home/you/src/winwayland restores it from its copy of 2026-09-25 04:07 · cursor 0
+```
+
+`ekko init` in that folder -- or in a new folder of the project's name, where it was cloned again -- brings the board back from its copy: the same project and items, with its history starting over. A board already in the folder is never replaced. `--projects` shows the way back under each project its folder no longer holds:
+
+```
+$ ekko --projects
+  winwayland [0/0]  missing from /home/you/src/winwayland
+    copied 2026-09-25 04:07: ekko init /home/you/src/winwayland restores it; ekko --project winwayland --destroy forgets it
+```
 
 #### Projects from before
 
@@ -677,6 +695,8 @@ Four things it does, each answering something the `rm -rf` it replaces got wrong
 - **It counts before it moves**, because afterwards nothing could say how big the thing was.
 - **It moves rather than deletes.** Every other removal in Ekko has somewhere to come back from; this one had nothing. A destroyed project's board goes to `~/.ekko/.trash/<name>-<epoch-millis>`, and the project is forgotten. The timestamp is what lets destroy, init again and destroy again keep both copies. Nothing empties the trash for you; to restore one, move it back into its folder as `.ekko/` and run `ekko init` there.
 - **It does not ask.** No command in Ekko stops to confirm, and one that did would break every script and agent driving it. The count in the reply is the confirmation, and the trash is the safety net.
+
+Its copy outside the folder goes with it. A project whose folder no longer holds its board has none to move: `--destroy` forgets it, and moves its copy, if it has one, to the trash the same way.
 
 One race is left on purpose: a second process already blocked on the lock will acquire it *after* the move and write into the trashed copy rather than a live project. Nothing is lost -- the writes land somewhere no longer listed. Closing it would need a tombstone protocol for the case of two processes racing on one project at the moment it is destroyed.
 

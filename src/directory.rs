@@ -144,6 +144,11 @@ pub const PROJECTS_DIR_NAME: &str = "projects";
 /// listing's way and made `.trash` a name nobody could give a project.
 pub const TRASH_DIR_NAME: &str = ".trash";
 
+/// Where each project's board is copied at every write, outside its folder:
+/// `~/.ekko/copies/<project id>/`, holding the board's files as its `.ekko/`
+/// holds them, without the history (task 503).
+pub const COPIES_DIR_NAME: &str = "copies";
+
 /// Where one invocation's board lives, and the project it belongs to.
 #[derive(Debug)]
 pub struct Location {
@@ -152,6 +157,31 @@ pub struct Location {
     /// Found from the folder, rather than named with `--project` or
     /// `EKKO_PROJECT`.
     pub discovered: bool,
+    /// Where every write copies the board, when the board is a project's.
+    pub copy: Option<PathBuf>,
+    /// On the default board, the project registered for this folder when the
+    /// folder no longer holds its board.
+    pub lost: Option<project::Lost>,
+}
+
+impl Location {
+    fn new(home_dir: &Path, dir: PathBuf, project: Option<Project>, discovered: bool) -> Self {
+        let copy = project::copy_dir(home_dir, &dir);
+        Location { dir, project, discovered, copy, lost: None }
+    }
+
+    /// How the prime, the sessions and the hooks name this board. On the
+    /// default board in a folder whose project's board is gone, it says so
+    /// and how to bring it back: nothing else would, and the session's
+    /// writes would land on the default board meanwhile.
+    pub fn label(&self) -> String {
+        match (&self.project, self.discovered, &self.lost) {
+            (Some(project), true, _) => format!("project {}, found from this folder", project.name),
+            (Some(project), false, _) => format!("project {}", project.name),
+            (None, _, Some(lost)) => format!("default board -- {}", lost.warning()),
+            (None, _, None) => "default board".to_string(),
+        }
+    }
 }
 
 /// Resolves the board for one invocation.
@@ -171,7 +201,7 @@ pub fn locate(
     env_var: Option<&str>,
     project_name: Option<&str>,
 ) -> Result<Location, DirectoryError> {
-    let plain = |dir: PathBuf| Location { dir, project: None, discovered: false };
+    let plain = |dir: PathBuf| Location::new(home_dir, dir, None, false);
 
     if flag.is_some() {
         if project_name.is_some() {
@@ -181,15 +211,17 @@ pub fn locate(
     }
     if let Some(name) = project_name {
         let found = project::resolve_named(home_dir, name)?;
-        return Ok(Location { dir: found.dir.clone(), project: Some(found), discovered: false });
+        return Ok(Location::new(home_dir, found.dir.clone(), Some(found), false));
     }
     if env_var.is_some_and(is_present) {
         return Ok(plain(retrieve_ekko_directory(home_dir, cwd, None, env_var)?));
     }
     if let Some(found) = project::discover(home_dir, cwd) {
-        return Ok(Location { dir: found.dir.clone(), project: Some(found), discovered: true });
+        return Ok(Location::new(home_dir, found.dir.clone(), Some(found), true));
     }
-    Ok(plain(retrieve_ekko_directory(home_dir, cwd, None, None)?))
+    let mut location = plain(retrieve_ekko_directory(home_dir, cwd, None, None)?);
+    location.lost = project::lost_at(home_dir, cwd);
+    Ok(location)
 }
 
 pub fn retrieve_ekko_directory(
@@ -319,6 +351,30 @@ mod tests {
         for dir in [&home, &custom, &outside] {
             fs::remove_dir_all(dir).ok();
         }
+    }
+
+    /// A project's board is copied at every write, and when its folder loses
+    /// it, the default board in that folder says so, and how to bring it
+    /// back, in the label every prime starts with (task 503).
+    #[test]
+    fn a_projects_board_is_copied_and_its_loss_named_in_the_label() {
+        let home = fs::canonicalize(temp_dir()).unwrap();
+        let folder = home.join("work").join("site");
+        fs::create_dir_all(&folder).unwrap();
+        let id = project::init(&home, &folder, None, None, 0).unwrap().id;
+        let found = locate(&home, &folder, None, None, None).unwrap();
+        assert_eq!(found.copy, Some(home.join(".ekko").join(COPIES_DIR_NAME).join(&id)));
+        assert_eq!(found.label(), "project site, found from this folder");
+        crate::ekko::Ekko::at(&found).unwrap().storage.set(&crate::storage::ItemMap::new()).unwrap();
+
+        fs::remove_dir_all(folder.join(EKKO_DIR_NAME)).unwrap();
+        let fallen = locate(&home, &folder, None, None, None).unwrap();
+        assert_eq!((fallen.dir.clone(), fallen.copy.clone()), (home.join(".ekko"), None));
+        let label = fallen.label();
+        assert!(label.starts_with("default board -- "), "{label}");
+        assert!(label.contains(&format!("{} was project site, whose board is gone: ekko init", folder.display())), "{label}");
+
+        fs::remove_dir_all(&home).ok();
     }
 
     #[test]

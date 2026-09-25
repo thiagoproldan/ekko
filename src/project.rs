@@ -24,14 +24,15 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::directory::{DirectoryError, EKKO_DIR_NAME, PROJECTS_DIR_NAME, TRASH_DIR_NAME};
+use crate::directory::{DirectoryError, COPIES_DIR_NAME, EKKO_DIR_NAME, PROJECTS_DIR_NAME, TRASH_DIR_NAME};
 use crate::render::ProjectSummary;
 use crate::storage::{ItemMap, Storage};
 
-const MARKER: &str = "project.json";
+pub(crate) const MARKER: &str = "project.json";
 const REGISTRY: &str = "projects.json";
 const REGISTRY_LOCK: &str = "projects.lock";
 
@@ -80,6 +81,9 @@ pub struct Initialized {
     /// <folder>` leaves behind -- and init made it the project in place.
     pub claimed: bool,
     pub adopted: Option<Adopted>,
+    /// The folder had no board, and init brought back the one of a project
+    /// whose board was gone, from its copy.
+    pub restored: Option<Restored>,
     /// Whether `.ekko/` is kept out of git through `.git/info/exclude`.
     pub excluded: bool,
 }
@@ -92,13 +96,112 @@ pub struct Adopted {
     pub parked: PathBuf,
 }
 
+/// A project's board brought back from its copy: where the project was
+/// registered, and when the copy was last written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Restored {
+    pub from: PathBuf,
+    pub copied: Option<String>,
+}
+
+/// A registered project whose folder no longer holds its board -- removed,
+/// cleaned with `git clean -fdx`, or moved without it -- and when its copy
+/// was last written, if it has one (task 503).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lost {
+    pub name: String,
+    pub path: PathBuf,
+    pub copied: Option<String>,
+}
+
+impl Lost {
+    /// What a session on the default board in its folder is told.
+    pub fn warning(&self) -> String {
+        let path = self.path.display();
+        match &self.copied {
+            Some(when) => format!(
+                "{path} was project {}, whose board is gone: ekko init {path} restores it from its copy of {when}",
+                self.name
+            ),
+            None => format!(
+                "{path} was project {}, whose board is gone and has no copy: ekko --project {} --destroy forgets it",
+                self.name, self.name
+            ),
+        }
+    }
+}
+
+/// What `--destroy` did to a project whose folder no longer holds its board:
+/// forgot it, and moved its copy, if it had one, to the trash.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Forgotten {
+    pub name: String,
+    pub path: PathBuf,
+    pub parked: Option<PathBuf>,
+}
+
 fn io(error: impl std::fmt::Display) -> DirectoryError {
     DirectoryError::Io(error.to_string())
 }
 
 fn read_marker(root: &Path) -> Option<Marker> {
-    let text = fs::read_to_string(root.join(EKKO_DIR_NAME).join(MARKER)).ok()?;
+    marker_in(&root.join(EKKO_DIR_NAME))
+}
+
+fn marker_in(ekko_dir: &Path) -> Option<Marker> {
+    let text = fs::read_to_string(ekko_dir.join(MARKER)).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// Where the board in `ekko_dir` is copied at every write, when it is a
+/// project's: `~/.ekko/copies/<id>/`, by the project's id, which neither a
+/// move nor a new folder changes.
+pub fn copy_dir(home: &Path, ekko_dir: &Path) -> Option<PathBuf> {
+    copies(home, &marker_in(ekko_dir)?.id)
+}
+
+fn copies(home: &Path, id: &str) -> Option<PathBuf> {
+    // An id is a uid; anything that could name another directory is not one.
+    let plain = !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    plain.then(|| home.join(EKKO_DIR_NAME).join(COPIES_DIR_NAME).join(id))
+}
+
+/// When the copy of project `id` was last written, as the listing and the
+/// prime print it -- `None` when it has no copy to restore.
+fn copied_at(home: &Path, id: &str) -> Option<String> {
+    let modified = fs::metadata(copies(home, id)?.join("storage").join("storage.json")).ok()?.modified().ok()?;
+    Some(when(modified))
+}
+
+fn when(time: SystemTime) -> String {
+    chrono::DateTime::<chrono::Local>::from(time).format("%Y-%m-%d %H:%M").to_string()
+}
+
+/// Whether a registered project's folder no longer holds its board.
+fn missing(entry: &Registered) -> bool {
+    read_marker(&entry.path).is_none_or(|found| found.id != entry.id)
+}
+
+fn lost(home: &Path, entry: &Registered) -> Lost {
+    Lost { name: entry.name.clone(), path: entry.path.clone(), copied: copied_at(home, &entry.id) }
+}
+
+/// The project registered for the folder `cwd` is in, when that folder no
+/// longer holds its board: looked for at or above `cwd`, no further up than
+/// the top of its repository, where `discover` would have found it.
+pub fn lost_at(home: &Path, cwd: &Path) -> Option<Lost> {
+    let registry = read_registry(home).ok()?;
+    let registered = |dir: &Path| registry.projects.iter().find(|entry| entry.path == dir);
+    let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    for dir in cwd.ancestors() {
+        if let Some(entry) = registered(dir) {
+            return missing(entry).then(|| lost(home, entry));
+        }
+        if let Some(main) = repository_root(dir) {
+            return registered(&main).filter(|entry| missing(entry)).map(|entry| lost(home, entry));
+        }
+    }
+    None
 }
 
 fn project_at(root: &Path, marker: Marker) -> Project {
@@ -293,12 +396,14 @@ pub fn init(
             existing: true,
             claimed: false,
             adopted: None,
+            restored: None,
             excluded,
         });
     }
 
-    let name = match name {
-        Some(name) => name.trim().to_string(),
+    let named = name.map(|asked| asked.trim().to_string());
+    let name = match &named {
+        Some(name) => name.clone(),
         None => root.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(),
     };
     validate_name(&name)?;
@@ -308,6 +413,36 @@ pub fn init(
         .find(|entry| entry.name == name && read_marker(&entry.path).is_some_and(|found| found.id == entry.id));
     if let Some(taken) = taken {
         return Err(DirectoryError::NameTaken { name, path: taken.path.clone() });
+    }
+
+    // A project whose board is gone -- its folder removed, cleaned with `git
+    // clean -fdx`, or cloned again elsewhere -- comes back from its copy
+    // instead of starting empty (task 503): the one registered for this
+    // folder, else the one of this name. A board already in the folder, or a
+    // legacy one waiting under that name, is kept instead.
+    if !holds_board(&dir) && !legacy_folder(&home, &name).is_dir() {
+        let restorable: Vec<&Registered> =
+            registry.projects.iter().filter(|entry| missing(entry) && copied_at(&home, &entry.id).is_some()).collect();
+        let here = restorable
+            .iter()
+            .find(|entry| entry.path == root && named.as_ref().is_none_or(|asked| *asked == entry.name));
+        if let Some(entry) = here.or_else(|| restorable.iter().find(|entry| entry.name == name)).map(|entry| (*entry).clone()) {
+            let restored = restore(&home, &entry, &dir)?;
+            let marker = Marker { name: entry.name, id: entry.id };
+            register(&mut registry, &marker, &root);
+            write_registry(&home, &registry)?;
+            let excluded = exclude_from_git(&root)?;
+            return Ok(Initialized {
+                name: marker.name,
+                id: marker.id,
+                root,
+                existing: false,
+                claimed: false,
+                adopted: None,
+                restored: Some(restored),
+                excluded,
+            });
+        }
     }
 
     let legacy = legacy_folder(&home, &name);
@@ -328,7 +463,19 @@ pub fn init(
     register(&mut registry, &marker, &root);
     write_registry(&home, &registry)?;
     let excluded = exclude_from_git(&root)?;
-    Ok(Initialized { name, id: marker.id, root, existing: false, claimed, adopted, excluded })
+    Ok(Initialized { name, id: marker.id, root, existing: false, claimed, adopted, restored: None, excluded })
+}
+
+/// Brings a lost project's board back into `dir` from its copy. The marker
+/// is written from the registry, whatever the copy holds, so the project
+/// comes back as the one registered.
+fn restore(home: &Path, entry: &Registered, dir: &Path) -> Result<Restored, DirectoryError> {
+    let copy = copies(home, &entry.id).ok_or_else(|| io(format!("no copy of {}", entry.name)))?;
+    let copied = copied_at(home, &entry.id);
+    copy_tree(&copy, dir)?;
+    let marker = Marker { name: entry.name.clone(), id: entry.id.clone() };
+    fs::write(dir.join(MARKER), crate::json::to_pretty_string(&marker).map_err(io)?)?;
+    Ok(Restored { from: entry.path.clone(), copied })
 }
 
 /// Moves a legacy project's board into its folder: copied under the board's
@@ -425,6 +572,7 @@ pub fn list(home: &Path) -> Vec<ProjectSummary> {
                 (0, 0, 0)
             };
             ProjectSummary {
+                copied: if here { None } else { copied_at(home, &entry.id) },
                 name: entry.name,
                 complete,
                 tasks,
@@ -443,7 +591,7 @@ pub fn list(home: &Path) -> Vec<ProjectSummary> {
             }
             let storage = entry.path().join(EKKO_DIR_NAME).join("storage").join("storage.json");
             let (complete, tasks, notes) = count_items(&storage);
-            listed.push(ProjectSummary { name, complete, tasks, notes, path: None, status: "legacy" });
+            listed.push(ProjectSummary { name, complete, tasks, notes, path: None, status: "legacy", copied: None });
         }
     }
 
@@ -472,6 +620,10 @@ pub fn destroy(home: &Path, project: &Project, now_millis: i64) -> Result<PathBu
         }
         Some(id) => {
             move_tree(&project.dir, &target)?;
+            // The board is in the trash, and its copy holds nothing more.
+            if let Some(copy) = copies(home, id) {
+                let _ = fs::remove_dir_all(copy);
+            }
             let _registry_lock = lock_registry(home)?;
             let mut registry = read_registry(home)?;
             registry.projects.retain(|entry| &entry.id != id);
@@ -479,6 +631,30 @@ pub fn destroy(home: &Path, project: &Project, now_millis: i64) -> Result<PathBu
         }
     }
     Ok(target)
+}
+
+/// `--destroy` on a registered project whose folder no longer holds its
+/// board, which leaves no board to move: forgets the project, and moves its
+/// copy, when it has one, to the trash, where `destroy` puts a board.
+pub fn forget(home: &Path, name: &str, now_millis: i64) -> Result<Forgotten, DirectoryError> {
+    let _registry_lock = lock_registry(home)?;
+    let mut registry = read_registry(home)?;
+    let Some(entry) = registry.projects.iter().find(|entry| entry.name == name && missing(entry)).cloned() else {
+        return Err(DirectoryError::UnknownProject(name.to_string()));
+    };
+    let parked = match copies(home, &entry.id).filter(|copy| copy.is_dir()) {
+        Some(copy) => {
+            let trash = home.join(EKKO_DIR_NAME).join(TRASH_DIR_NAME);
+            fs::create_dir_all(&trash).map_err(|e| DirectoryError::Trash(format!("{}: {e}", trash.display())))?;
+            let target = trash.join(format!("{name}-{now_millis}"));
+            move_tree(&copy, &target)?;
+            Some(target)
+        }
+        None => None,
+    };
+    registry.projects.retain(|kept| kept.id != entry.id);
+    write_registry(home, &registry)?;
+    Ok(Forgotten { name: entry.name, path: entry.path, parked })
 }
 
 /// Reads one project's storage directly rather than through `Storage`, which
@@ -746,6 +922,113 @@ mod tests {
         let legacy = resolve_named(&home, "old").unwrap();
         let parked = destroy(&home, &legacy, NOW + 1).unwrap();
         assert!(parked.join(".ekko").is_dir() && !home.join(".ekko").join("projects").join("old").exists());
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A board of one task, written through the storage a project's writes
+    /// go through, which copies it outside the folder.
+    fn seed_copied(home: &Path, root: &Path, description: &str) {
+        let dir = root.join(EKKO_DIR_NAME);
+        let storage = Storage::new(&dir).unwrap().copied_to(copy_dir(home, &dir));
+        let mut items = ItemMap::new();
+        items.insert(1, crate::item::Item::new_task(1, description.to_string(), vec!["@a".into()], 1));
+        storage.set(&items).unwrap();
+    }
+
+    /// A board cleaned out of its folder, as `git clean -fdx` does, is
+    /// reported lost with its copy, and init there brings it back: the same
+    /// project, the same items (task 503).
+    #[test]
+    fn a_board_cleaned_out_of_its_folder_comes_back_from_its_copy() {
+        let home = temp("lost");
+        let site = folder(&home, "work/site");
+        fs::create_dir_all(site.join(".git")).unwrap();
+        let inside = folder(&home, "work/site/src");
+        let id = init(&home, &site, None, None, NOW).unwrap().id;
+        seed_copied(&home, &site, "kept outside the folder");
+        fs::remove_dir_all(site.join(EKKO_DIR_NAME)).unwrap();
+
+        let lost = lost_at(&home, &inside).expect("the lost board went unreported");
+        assert_eq!((lost.name.as_str(), lost.path.as_path(), lost.copied.is_some()), ("site", site.as_path(), true));
+        let listed = list(&home);
+        assert_eq!((listed[0].status, listed[0].copied.is_some()), ("missing", true));
+
+        let again = init(&home, &inside, None, None, NOW).unwrap();
+        assert_eq!((again.id, again.existing, again.restored.is_some()), (id, false, true));
+        let board = Storage::new(&site.join(EKKO_DIR_NAME)).unwrap().get().unwrap();
+        assert_eq!(board[&1].description, "kept outside the folder");
+        assert_eq!(lost_at(&home, &inside), None);
+        assert_eq!(discover(&home, &inside).map(|p| p.name), Some("site".to_string()));
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A project whose folder is gone comes back from its copy in a new
+    /// folder of its name, as when a repository is cloned again elsewhere.
+    #[test]
+    fn a_lost_project_comes_back_in_a_new_folder_of_its_name() {
+        let home = temp("reclone");
+        let old = folder(&home, "old/site");
+        let id = init(&home, &old, None, None, NOW).unwrap().id;
+        seed_copied(&home, &old, "outlived its folder");
+        fs::remove_dir_all(&old).unwrap();
+        let new = folder(&home, "new/site");
+
+        let again = init(&home, &new, None, None, NOW).unwrap();
+        assert_eq!((again.id, again.restored.map(|restored| restored.from)), (id, Some(old)));
+        assert_eq!(resolve_named(&home, "site").unwrap().root, Some(new.clone()));
+        let board = Storage::new(&new.join(EKKO_DIR_NAME)).unwrap().get().unwrap();
+        assert_eq!(board[&1].description, "outlived its folder");
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// With no copy there is nothing to bring back, and init starts the
+    /// folder afresh; nor does a copy ever replace a board in the folder.
+    #[test]
+    fn init_restores_only_a_copy_into_a_folder_with_no_board() {
+        let home = temp("nocopy");
+        let site = folder(&home, "work/site");
+        let id = init(&home, &site, None, None, NOW).unwrap().id;
+        seed(&site.join(EKKO_DIR_NAME), "never copied");
+        fs::remove_dir_all(site.join(EKKO_DIR_NAME)).unwrap();
+        assert_eq!(lost_at(&home, &site).map(|lost| lost.copied), Some(None));
+        let fresh = init(&home, &site, None, None, NOW).unwrap();
+        assert!(fresh.restored.is_none() && fresh.id != id);
+
+        let other = folder(&home, "work/other");
+        init(&home, &other, None, None, NOW).unwrap();
+        seed_copied(&home, &other, "the copy");
+        fs::remove_file(other.join(EKKO_DIR_NAME).join(MARKER)).unwrap();
+        let kept = init(&home, &other, None, None, NOW).unwrap();
+        assert!(kept.claimed && kept.restored.is_none(), "the board in the folder was not kept");
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// --destroy forgets a lost project and parks its copy in the trash; on a
+    /// project still in its folder, the copy goes with the board.
+    #[test]
+    fn destroy_forgets_a_lost_project_and_parks_its_copy() {
+        let home = temp("forget");
+        let site = folder(&home, "work/site");
+        let id = init(&home, &site, None, None, NOW).unwrap().id;
+        seed_copied(&home, &site, "gone");
+        fs::remove_dir_all(&site).unwrap();
+
+        assert!(matches!(forget(&home, "other", NOW), Err(DirectoryError::UnknownProject(_))));
+        let forgotten = forget(&home, "site", NOW).unwrap();
+        let parked = forgotten.parked.expect("the copy was not parked");
+        assert!(parked.join("storage").join("storage.json").is_file());
+        assert!(!copies(&home, &id).unwrap().exists() && list(&home).is_empty());
+
+        let kept = folder(&home, "work/kept");
+        let id = init(&home, &kept, None, None, NOW).unwrap().id;
+        seed_copied(&home, &kept, "trashed");
+        let trash = destroy(&home, &resolve_named(&home, "kept").unwrap(), NOW + 1).unwrap();
+        assert!(trash.join("storage").join("storage.json").is_file());
+        assert!(!copies(&home, &id).unwrap().exists(), "the copy outlived the destroyed board");
 
         fs::remove_dir_all(&home).ok();
     }

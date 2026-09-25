@@ -402,6 +402,8 @@ pub enum Outcome {
     List(Vec<(String, Vec<Item>)>),
     Projects(Vec<ProjectSummary>),
     Destroyed { name: String, tasks: u32, notes: u32, trash: std::path::PathBuf },
+    /// `--destroy` on a project whose folder no longer held its board.
+    Forgotten(crate::project::Forgotten),
     Init(Box<crate::project::Initialized>),
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
@@ -449,7 +451,7 @@ impl Outcome {
             Outcome::Find(_) => "find",
             Outcome::List(_) => "list",
             Outcome::Projects(_) => "projects",
-            Outcome::Destroyed { .. } => "destroy",
+            Outcome::Destroyed { .. } | Outcome::Forgotten(_) => "destroy",
             Outcome::Init(_) => "init",
             Outcome::Phases(_) => "phases",
             Outcome::Blocked { .. } => "blocked",
@@ -524,6 +526,7 @@ impl Outcome {
             Outcome::Destroyed { name, tasks, notes, trash } => {
                 out.success_destroy(name, *tasks, *notes, trash)
             }
+            Outcome::Forgotten(forgotten) => out.success_forgotten(forgotten),
             Outcome::Phases(names) => out.display_phases(names),
             Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
             Outcome::Attached { item, target } => out.success_attached(item.id, *target),
@@ -590,10 +593,10 @@ impl Ekko {
         item
     }
 
-    /// Opens the board in `dir` -- wherever `directory::locate` said this
-    /// invocation's board lives.
-    pub fn at(dir: &std::path::Path) -> Result<Self, EkkoError> {
-        Ok(Self::new(Storage::new(dir)?))
+    /// Opens the board wherever `directory::locate` said this invocation's
+    /// board lives, copying it at every write when it is a project's.
+    pub fn at(location: &crate::directory::Location) -> Result<Self, EkkoError> {
+        Ok(Self::new(Storage::new(&location.dir)?.copied_to(location.copy.clone())))
     }
 
     // ---- id / option parsing -------------------------------------------
