@@ -25,7 +25,7 @@ use crate::ekko::{broken_dependencies, holds, phase_order, Ekko, EkkoError, Outc
 use crate::holder::Whose;
 use crate::item::{How, Item, Knowledge, State};
 use crate::lexical::{self, Query};
-use crate::render::{Inversion, ProjectSummary, RoadmapStep, Stats};
+use crate::render::{Inversion, RoadmapStep, Stats};
 use crate::storage::ItemMap;
 
 /// How much of a reason `prime` quotes before pointing at `context`.
@@ -2682,34 +2682,6 @@ pub fn roadmap_text(outcome: &Outcome) -> String {
     out
 }
 
-/// The projects as an agent reads them, one per line. None is said as a fact:
-/// making a project is the user's step, in its folder.
-pub fn projects_text(projects: &[ProjectSummary]) -> String {
-    if projects.is_empty() {
-        return "No projects yet. A project is made by the user, in its folder.\n".to_string();
-    }
-    let mut out = String::new();
-    for project in projects {
-        let place = match (project.status, project.path.as_deref(), project.copied.as_deref()) {
-            ("missing", Some(path), Some(when)) => {
-                format!("{path}, board gone, copied {when}: ekko init {path} restores it")
-            }
-            ("missing", Some(path), None) => format!("{path}, board gone, no copy"),
-            (_, Some(path), _) => path.to_string(),
-            (status, None, _) => status.to_string(),
-        };
-        let _ = writeln!(
-            out,
-            "{} \u{b7} {}/{} tasks done \u{b7} {} \u{b7} {place}",
-            project.name,
-            project.complete,
-            project.tasks,
-            if project.notes == 1 { "1 note".to_string() } else { format!("{} notes", project.notes) }
-        );
-    }
-    out
-}
-
 impl Handoff {
     /// The handoff as its own prime section: which task it hands over and
     /// when it was written, then its text line by line, each quoted so a line
@@ -3509,8 +3481,6 @@ mod tests {
         ];
         let line = roadmap_text(&Outcome::Roadmap { steps, rootless: 4, inversions: vec![] });
         assert_eq!(line, "roadmap: design 1/2 (in progress) \u{2192} build 0/3 \u{b7} 4 at the root\n");
-        let empty = projects_text(&[]);
-        assert!(!empty.contains("ekko init") && empty.contains("user"), "{empty}");
     }
 
     /// A concise read clips the notes around an item the way prime quotes

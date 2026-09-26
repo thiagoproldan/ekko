@@ -69,7 +69,7 @@ const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"
 const ALWAYS_LOADED: &[&str] = &["context", "search", "create", "set_state", "edit", "ask"];
 
 const TOOLS: &[&str] = &[
-    "prime", "next", "context", "search", "changes", "roadmap", "projects", "create", "set_state",
+    "prime", "next", "context", "search", "changes", "roadmap", "create", "set_state",
     "force_state", "edit", "update", "link", "ask", "answer", "wait", "batch", "stash", "trash", "away", "phases",
 ];
 
@@ -367,7 +367,7 @@ impl Server {
     pub fn list_changed(&self) -> Option<Value> {
         let mut listed = self.listed.lock().unwrap_or_else(PoisonError::into_inner);
         let (revision, resources) = listed.as_mut()?;
-        let (ekko, _) = self.open(None).ok()?;
+        let (ekko, _) = self.open().ok()?;
         let now = ekko.storage.get_counters().ok()?.revision;
         if now == *revision {
             return None;
@@ -434,12 +434,12 @@ impl Server {
             Some(Value::Object(map)) => map.clone(),
             Some(_) => return vec![error_reply(call, RpcError::new(-32602, "Invalid params: arguments must be an object"))],
         };
-        let recorded = take_project(&mut args).and_then(|project| {
-            let (ekko, _) = self.open(project.as_deref())?;
+        let recorded = refuse_project(&args).and_then(|()| {
+            let (ekko, _) = self.open()?;
             let spec: ops::Ask = parse(&mut args)?;
-            Ok((project, record(&ekko, &spec)?, spec))
+            Ok((record(&ekko, &spec)?, spec))
         });
-        let (project, recorded, spec) = match recorded {
+        let (recorded, spec) = match recorded {
             Err(error) => return vec![self.tool_reply(call, format!("{}: {}", error.code, error.message), true)],
             Ok(recorded) => recorded,
         };
@@ -459,7 +459,6 @@ impl Server {
         let first = &spec.questions[0];
         let pending = Pending {
             call,
-            project,
             questions: posed.iter().map(|question| question.uid.clone()).collect(),
             recorded,
             message: first.text.clone(),
@@ -470,7 +469,7 @@ impl Server {
             window: None,
         };
         let why = match menu::place() {
-            Some(place) => match menu::Window::open(&place, &menu::Spec { questions: posed }, pending.project.as_deref(), &self.cwd) {
+            Some(place) => match menu::Window::open(&place, &menu::Spec { questions: posed }, &self.cwd) {
                 Ok(window) => {
                     self.dialogs().watch(Pending { window: Some(window), ..pending });
                     return Vec::new();
@@ -502,7 +501,7 @@ impl Server {
             dialog::Outcome::Answer(answer) => {
                 let question = Ref::Text(pending.questions[0].clone());
                 let written = self
-                    .open(pending.project.as_deref())
+                    .open()
                     .map_err(ToolError::from)
                     .and_then(|(ekko, _)| write(&ekko, false, |draft| draft.answer(&question, &answer).map(|id| vec![id])));
                 vec![match written {
@@ -544,16 +543,16 @@ impl Server {
     /// left open by a menu that closed or never opened. Checked every `WATCH`,
     /// which also reminds a user who has not answered for a while.
     pub fn watch(&self) -> Vec<Value> {
-        let open: Vec<(String, Vec<String>, Option<String>)> = self
+        let open: Vec<(String, Vec<String>)> = self
             .dialogs()
             .pending
             .iter()
             .filter(|(_, pending)| pending.window.is_some())
-            .map(|(id, pending)| (id.clone(), pending.questions.clone(), pending.project.clone()))
+            .map(|(id, pending)| (id.clone(), pending.questions.clone()))
             .collect();
         let mut replies = Vec::new();
-        for (id, questions, project) in open {
-            let why = if self.answers_to(&questions, project.as_deref()).iter().all(Option::is_some) {
+        for (id, questions) in open {
+            let why = if self.answers_to(&questions).iter().all(Option::is_some) {
                 None
             } else {
                 let mut dialogs = self.dialogs();
@@ -571,7 +570,7 @@ impl Server {
                 window.close();
             }
             // Read again: the menu may have closed just after the answers landed.
-            let answers = self.answers_to(&questions, project.as_deref());
+            let answers = self.answers_to(&questions);
             let mut reply = pending.recorded;
             let items = reply["items"].as_array().cloned().unwrap_or_default();
             let given: Vec<Value> = items.iter().zip(&answers).filter_map(|(item, answer)| Some(json!({"id": item["id"], "answer": answer.as_ref()?}))).collect();
@@ -589,8 +588,8 @@ impl Server {
     }
 
     /// The answer recorded to each question, by uid, where it has one.
-    fn answers_to(&self, uids: &[String], project: Option<&str>) -> Vec<Option<String>> {
-        let data = self.open(project).ok().and_then(|(ekko, _)| ekko.storage.get().ok());
+    fn answers_to(&self, uids: &[String]) -> Vec<Option<String>> {
+        let data = self.open().ok().and_then(|(ekko, _)| ekko.storage.get().ok());
         uids.iter()
             .map(|uid| {
                 let item = data.as_ref()?.values().find(|item| item.uid.as_deref() == Some(uid.as_str()))?;
@@ -615,7 +614,7 @@ impl Server {
     /// each once, on the board it started on (task 389).
     fn told(&self, text: String) -> String {
         let Some(process) = self.actor.process.as_ref().filter(|_| self.mode == Mode::Board) else { return text };
-        let Ok((ekko, location)) = self.open(None) else { return text };
+        let Ok((ekko, location)) = self.open() else { return text };
         let Ok(revision) = ekko.storage.get_counters().map(|counters| counters.revision) else { return text };
         if self.told_at.lock().unwrap_or_else(PoisonError::into_inner).replace(revision) == Some(revision) {
             return text;
@@ -701,7 +700,7 @@ impl Server {
         offer
     }
 
-    /// A prompt, filled in from the board it names. `handoff` is the only one:
+    /// A prompt, filled in from the session's board. `handoff` is the only one:
     /// Claude Code offers it as `/mcp__<server>__handoff`, so a person can ask
     /// for the handoff in one command, and the text it sends already says
     /// which task and which earlier handoff, sparing the agent a read.
@@ -713,7 +712,7 @@ impl Server {
         let arguments = params.get("arguments");
         let argument = |key: &str| arguments.and_then(|a| a.get(key)).and_then(Value::as_str).filter(|v| !v.trim().is_empty());
         let text = self
-            .open(argument("project"))
+            .open()
             .and_then(|(ekko, _)| agent::handoff_prompt(&ekko, argument("task")))
             .map_err(|error| RpcError::new(-32602, format!("{}: {error}", error.code())))?;
         Ok(json!({
@@ -726,7 +725,7 @@ impl Server {
     /// and the items `agent::mentionable` names. Remembered, with the
     /// revision it was built at, for `list_changed` to compare against.
     fn resources(&self) -> Result<Vec<Value>, RpcError> {
-        let (ekko, _) = self.open(None).map_err(resource_error)?;
+        let (ekko, _) = self.open().map_err(resource_error)?;
         let revision = ekko.storage.get_counters().map_err(|error| resource_error(error.into()))?.revision;
         let resources = resource_list(&ekko).map_err(resource_error)?;
         *self.listed.lock().unwrap_or_else(PoisonError::into_inner) = Some((revision, resources.clone()));
@@ -742,7 +741,7 @@ impl Server {
             .and_then(Value::as_str)
             .ok_or_else(|| RpcError::new(-32602, "Invalid params: resources/read needs a uri"))?;
         let not_found = if modern { -32602 } else { -32002 };
-        let (ekko, location) = self.open(None).map_err(resource_error)?;
+        let (ekko, location) = self.open().map_err(resource_error)?;
         let text = if uri == PRIME_URI {
             agent::prime(&ekko, &location.label()).map_err(resource_error)?.text()
         } else if let Some(id) = uri.strip_prefix("item://").filter(|id| !id.is_empty()) {
@@ -775,23 +774,20 @@ impl Server {
         Ok(self.tool_result(text, failed))
     }
 
-    /// The board one call works on, resolved afresh each time: the same
-    /// session start `--prime` ran from, and a project made with `ekko init`
-    /// mid-session is the one the next call sees.
-    fn open(&self, project: Option<&str>) -> Result<(Ekko, directory::Location), EkkoError> {
-        let name = project.or(self.project_env.as_deref());
-        let location = directory::locate(&self.home, &self.cwd, None, self.ekko_dir_env.as_deref(), name)?;
+    /// The session's board, resolved afresh each time: the same one
+    /// `--prime` found at session start, from the folder or the project
+    /// `EKKO_PROJECT` named at launch, and a project made with `ekko init`
+    /// mid-session is the one the next call sees. No call names another
+    /// (task 697): see `refuse_project`.
+    fn open(&self) -> Result<(Ekko, directory::Location), EkkoError> {
+        let location = directory::locate(&self.home, &self.cwd, None, self.ekko_dir_env.as_deref(), self.project_env.as_deref())?;
         let folder = location.project.as_ref().and_then(|project| project.root.clone());
         Ok((Ekko::at(&location)?.acting_as(self.actor.clone()).in_folder(folder), location))
     }
 
     fn tool(&self, name: &str, args: &mut Map<String, Value>) -> Result<String, ToolError> {
-        if name == "projects" {
-            finish(args)?;
-            return Ok(agent::projects_text(&crate::project::list(&self.home)));
-        }
-        let project = take_project(args)?;
-        let (ekko, location) = self.open(project.as_deref())?;
+        refuse_project(args)?;
+        let (ekko, location) = self.open()?;
 
         match name {
             "prime" => {
@@ -1120,12 +1116,19 @@ fn record(ekko: &Ekko, spec: &ops::Ask) -> Result<Value, ToolError> {
     Ok(serde_json::from_str(&reply).expect("a write replies in JSON"))
 }
 
-fn take_project(args: &mut Map<String, Value>) -> Result<Option<String>, ToolError> {
-    match args.remove("project") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(name)) => Ok(Some(name)),
-        Some(_) => Err(invalid("project must be a string")),
+/// A session works on its own board (task 697): a board another project
+/// holds is the user's to open, in a command they see, so no tool takes
+/// project. A call that names one anyway is refused with the rule, before
+/// anything is read.
+fn refuse_project(args: &Map<String, Value>) -> Result<(), ToolError> {
+    if !args.contains_key("project") {
+        return Ok(());
     }
+    Err(invalid(
+        "no tool takes project: a session works on its own board, the one prime names on its first line. \
+         Another project's board is opened only when the user asks for it, with ekko --project NAME in a command they see; \
+         prose goes on stdin there (--note - <<'EOF'), since inline the CLI reads @word as a board and p:N and d:DATE as fields",
+    ))
 }
 
 /// A refusal worded for an agent.
@@ -1212,10 +1215,10 @@ fn agent_message(error: &EkkoError, name: &dyn Fn(u32) -> String) -> String {
             format!("due must be a date written YYYY-MM-DD, got: {}", value.trim_start_matches("d:"))
         }
         EkkoError::Directory(directory::DirectoryError::UnknownProject(project)) => format!(
-            "No project named {project}; projects lists the ones that exist. A project is made by the user, with ekko init in its folder"
+            "No project named {project}, which EKKO_PROJECT names at this session's launch. A project is made by the user, with ekko init in its folder"
         ),
         EkkoError::Directory(directory::DirectoryError::MissingProjectName) => {
-            "project is empty; leave it out to work on this session's board".to_string()
+            "EKKO_PROJECT is empty at this session's launch; the user unsets it, or names a project".to_string()
         }
         other => other.to_string(),
     }
@@ -1364,13 +1367,11 @@ fn prompt_definitions() -> Value {
         "description": "Write the handoff the next session resumes from, before this one's context is cleared.",
         "arguments": [
             {"name": "task", "description": "The task to hand over, by id or uid; the one in progress when omitted.", "required": false},
-            {"name": "project", "description": "Work on this project instead of the session's board.", "required": false},
         ],
     }])
 }
 
 fn tool_definitions() -> Value {
-    let project = json!({"type": "string", "description": "Work on this project instead of the session's board, which prime names on its first line."});
     let if_rev = json!({"type": "integer", "description": "The cursor from an earlier read: if the board has not moved since, the answer is one line saying so."});
     let item = json!({"type": ["integer", "string"], "description": "A display id, or a uid -- which never changes."});
     let items = json!({"type": "array", "items": item, "minItems": 1});
@@ -1403,42 +1404,36 @@ fn tool_definitions() -> Value {
         {
             "name": "prime",
             "description": "The resume view of the board: in progress, ready in the order to take it up, blocked, recent notes, what needs attention, and a cursor for changes. Already in context at session start.",
-            "inputSchema": object(json!({"project": project, "if_rev": if_rev}), &[]),
+            "inputSchema": object(json!({"if_rev": if_rev}), &[]),
             "annotations": read,
         },
         {
             "name": "next",
             "description": "What to take up next, best first: work in progress, earlier phase, higher priority, nearer deadline, more work waiting on it, older.",
-            "inputSchema": object(json!({"project": project, "limit": {"type": "integer", "minimum": 1}, "if_rev": if_rev}), &[]),
+            "inputSchema": object(json!({"limit": {"type": "integer", "minimum": 1}, "if_rev": if_rev}), &[]),
             "annotations": read,
         },
         {
             "name": "context",
             "description": "Items, one with item or up to 20 with items: text, state and fields, what blocks it and the roots free to start, what it blocks, how much open work waits on it, and its notes -- clipped to 300 characters each unless detail is full -- or the task a note explains.",
-            "inputSchema": object(json!({"project": project, "item": item, "items": {"type": "array", "items": item, "minItems": 1, "maxItems": 20}, "detail": {"type": "string", "enum": ["concise", "full"], "default": "concise"}}), &[]),
+            "inputSchema": object(json!({"item": item, "items": {"type": "array", "items": item, "minItems": 1, "maxItems": 20}, "detail": {"type": "string", "enum": ["concise", "full"], "default": "concise"}}), &[]),
             "annotations": read,
         },
         {
             "name": "search",
             "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, waiting, done, cancelled, ready, blocked, due, overdue, star, task, note, decision, gotcha, procedure, with:NAME, by:NAME (who wrote it: user, a profile, a conversation's start), stashed (otherwise left out), or a board name -- as @name when a filter has the same one. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
-            "inputSchema": object(json!({"project": project, "text": {"type": "string"}, "filters": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1}}), &[]),
+            "inputSchema": object(json!({"text": {"type": "string"}, "filters": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1}}), &[]),
             "annotations": read,
         },
         {
             "name": "changes",
             "description": "What moved after a cursor -- the board revision from prime or an earlier changes, so nothing repeats or ties: items written, stashed or trashed, items removed from storage, and work set free (ready now) or left waiting (blocked now). Returns the next cursor.",
-            "inputSchema": object(json!({"project": project, "since": {"type": "integer"}}), &["since"]),
+            "inputSchema": object(json!({"since": {"type": "integer"}}), &["since"]),
             "annotations": read,
         },
         {
             "name": "roadmap",
             "description": "A project's declared phases in order, with progress and where work sits.",
-            "inputSchema": object(json!({"project": project}), &[]),
-            "annotations": read,
-        },
-        {
-            "name": "projects",
-            "description": "The projects that exist, with what each holds.",
             "inputSchema": object(json!({}), &[]),
             "annotations": read,
         },
@@ -1446,7 +1441,6 @@ fn tool_definitions() -> Value {
             "name": "create",
             "description": "Create a task or a note. The text is kept exactly as given; a task's first line is its title, at most 80 characters. A note explaining a task should be attached_to it.",
             "inputSchema": object(json!({
-                "project": project,
                 "kind": {"type": "string", "enum": ["task", "note", "handoff", "decision", "gotcha", "procedure"], "default": "task", "description": "handoff: a note attached_to an open task saying where this session stopped, what it decided and why, the files and the next step; it replaces the task's earlier handoff, and the next session's prime shows it. decision (what was settled, and why), gotcha (a trap, and how to avoid it), procedure (steps that work): a note that stays true after its task is done, loose or attached_to it, written when the user settles something or a session learns it; prime lists gotchas and procedures by first line, so lead with the point."},
                 "text": {"type": "string"},
                 "boards": {"type": "array", "items": {"type": "string"}},
@@ -1464,20 +1458,19 @@ fn tool_definitions() -> Value {
         {
             "name": "set_state",
             "description": "Set the state of items; safe to retry. Completing a task blocked by open work is refused (BLOCKED), and so is reopening a task completed work depends on (COMPLETED_DEPENDENTS).",
-            "inputSchema": object(json!({"project": project, "items": items, "state": state}), &["items", "state"]),
+            "inputSchema": object(json!({"items": items, "state": state}), &["items", "state"]),
             "annotations": json!({"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}),
         },
         {
             "name": "force_state",
             "description": "set_state that overrides the dependency rule and reports what it overrode. Only when the user has explicitly said the dependency was dealt with.",
-            "inputSchema": object(json!({"project": project, "items": items, "state": state}), &["items", "state"]),
+            "inputSchema": object(json!({"items": items, "state": state}), &["items", "state"]),
             "annotations": json!({"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}),
         },
         {
             "name": "edit",
             "description": "Change an item's text: exactly one of text (all of it), replace (one exact occurrence of old) or append. if_updated_at refuses the edit (STALE) if the item changed since that read.",
             "inputSchema": object(json!({
-                "project": project,
                 "item": item,
                 "text": {"type": "string"},
                 "replace": {"type": "object", "properties": {"old": {"type": "string"}, "new": {"type": "string"}}, "required": ["old", "new"], "additionalProperties": false},
@@ -1490,7 +1483,6 @@ fn tool_definitions() -> Value {
             "name": "update",
             "description": "Change an item's boards (replaced), priority, due date (null clears), who a task is with (null: nobody), phase (null moves it to the project root), star, or a note's kind. add_boards and remove_boards change the boards without replacing them, so another session's change is kept; if_updated_at refuses the update (STALE) if the item changed since that read.",
             "inputSchema": object(json!({
-                "project": project,
                 "item": item,
                 "boards": {"type": "array", "items": {"type": "string"}},
                 "add_boards": {"type": "array", "items": {"type": "string"}},
@@ -1509,7 +1501,6 @@ fn tool_definitions() -> Value {
             "name": "link",
             "description": "Exactly one of: blocked_by, replacing what the item is blocked by (empty clears it); add_blocked_by and remove_blocked_by, changing it without replacing it, so another session's link is kept; attached_to, attaching a note to the task it explains (null detaches); or supersedes, the earlier note of the same kind a decision, gotcha or procedure replaces (null clears). if_updated_at refuses the link (STALE) if the item changed since that read.",
             "inputSchema": object(json!({
-                "project": project,
                 "item": item,
                 "blocked_by": {"type": "array", "items": item},
                 "add_blocked_by": {"type": "array", "items": item},
@@ -1524,7 +1515,6 @@ fn tool_definitions() -> Value {
             "name": "ask",
             "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer.",
             "inputSchema": object(json!({
-                "project": project,
                 "about": item,
                 "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": question}
             }), &["questions"]),
@@ -1533,14 +1523,13 @@ fn tool_definitions() -> Value {
         {
             "name": "answer",
             "description": "Record the user's answer to an open question, in their words: it closes the question, and the session that asked sees the answer in its prime, even after a /clear or restart. A question is answered once; for a newer answer, ask again.",
-            "inputSchema": object(json!({"project": project, "question": item, "text": {"type": "string"}}), &["question", "text"]),
+            "inputSchema": object(json!({"question": item, "text": {"type": "string"}}), &["question", "text"]),
             "annotations": write,
         },
         {
             "name": "wait",
             "description": "Wait on a task another session or the user holds, or on a question, instead of watching the board: recorded as a note attached to it, whose text is what you will do once the wait is over, so it outlives this session's /clear or restart and the holder sees it. You are told once when it is over, whichever way it ended -- woken while idle where ekko's plugin runs, else in your next ekko reply. until: done (the task is done or cancelled), free (it leaves its holder's hands) or answered (a question); by default done for a task, answered for a question. cancel drops this session's waits on the item.",
             "inputSchema": object(json!({
-                "project": project,
                 "item": item,
                 "until": {"type": "string", "enum": ["done", "free", "answered"]},
                 "text": {"type": "string", "description": "What this session will do once the wait is over; not needed with cancel."},
@@ -1550,9 +1539,8 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "batch",
-            "description": "Several operations in one write, all or nothing. Each is an object with op (create, set_state, edit, update or link) and that tool's arguments, without project. $1, $2 refer to the items created by the first and second operations, in the fields that take an item; a text keeps them as written, and the reply names the item each one is.",
+            "description": "Several operations in one write, all or nothing. Each is an object with op (create, set_state, edit, update or link) and that tool's arguments. $1, $2 refer to the items created by the first and second operations, in the fields that take an item; a text keeps them as written, and the reply names the item each one is.",
             "inputSchema": object(json!({
-                "project": project,
                 "ops": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"op": {"type": "string", "enum": ["create", "set_state", "edit", "update", "link"]}}, "required": ["op"]}}
             }), &["ops"]),
             "annotations": write,
@@ -1560,25 +1548,25 @@ fn tool_definitions() -> Value {
         {
             "name": "stash",
             "description": "Put items (or every item on a board, given as @board) away without changing them, or bring them back with away false.",
-            "inputSchema": object(json!({"project": project, "items": items, "away": {"type": "boolean", "default": true}}), &["items"]),
+            "inputSchema": object(json!({"items": items, "away": {"type": "boolean", "default": true}}), &["items"]),
             "annotations": write,
         },
         {
             "name": "trash",
             "description": "Move items to the trash, kept 30 days, or bring them back with away false. Ask the user first; prefer set_state cancelled for work decided against.",
-            "inputSchema": object(json!({"project": project, "items": items, "away": {"type": "boolean", "default": true}}), &["items"]),
+            "inputSchema": object(json!({"items": items, "away": {"type": "boolean", "default": true}}), &["items"]),
             "annotations": json!({"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false}),
         },
         {
             "name": "away",
             "description": "What is put away: the stash, and the trash with the days each item has left there, one line per item with its state, at most limit (default 20) of each. which narrows it to one of them.",
-            "inputSchema": object(json!({"project": project, "which": {"type": "string", "enum": ["stash", "trash"]}, "limit": {"type": "integer", "minimum": 1}}), &[]),
+            "inputSchema": object(json!({"which": {"type": "string", "enum": ["stash", "trash"]}, "limit": {"type": "integer", "minimum": 1}}), &[]),
             "annotations": read,
         },
         {
             "name": "phases",
             "description": "Declare the project's phases in the order work goes through them, replacing the sequence: reordering is declaring it again. Answers with the roadmap.",
-            "inputSchema": object(json!({"project": project, "sequence": {"type": "array", "items": {"type": "string"}, "minItems": 1}}), &["sequence"]),
+            "inputSchema": object(json!({"sequence": {"type": "array", "items": {"type": "string"}, "minItems": 1}}), &["sequence"]),
             "annotations": write,
         }
     ]);

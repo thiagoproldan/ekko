@@ -192,9 +192,6 @@ def wording_and_limits():
     m = Mcp(path)
     text, _ = call(m, "roadmap")
     check("0.8", "roadmap gives the agent no CLI command", "names one" if "ekko --" in text else "none", "none", "ekko --" not in text)
-    text, _ = call(m, "projects")
-    commands = "ekko init" in text or "ekko --" in text
-    check("0.8", "projects gives the agent no CLI command", "names one" if commands else "none", "none", not commands)
     text, refused = call(m, "next", limit=0)
     check("0.4", "next(limit=0) is refused", "refused" if refused else f"answered: {text.strip()[:40]}", "refused", refused)
 

@@ -129,14 +129,14 @@ pub struct Window {
 
 impl Window {
     /// Opens a menu on `spec` at `place`, for the board the server finds from
-    /// `cwd` and `project`.
-    pub fn open(place: &Place, spec: &Spec, project: Option<&str>, cwd: &Path) -> io::Result<Window> {
+    /// `cwd`.
+    pub fn open(place: &Place, spec: &Spec, cwd: &Path) -> io::Result<Window> {
         static OPENED: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let file = dir.join(format!("ekko-menu-{}-{}.json", std::process::id(), OPENED.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_file(pid_file(&file));
         std::fs::write(&file, serde_json::to_vec(spec)?)?;
-        let line = command_line(&std::env::current_exe()?, &file, project, cwd);
+        let line = command_line(&std::env::current_exe()?, &file, cwd);
         let mut command = match place {
             Place::Window(terminal) => {
                 let mut command = Command::new(&terminal[0]);
@@ -228,7 +228,7 @@ fn alive(pid: i32) -> bool {
 /// recorded as the user's -- which they are -- and not the asking session's.
 /// Through `env` and `sh`, since a tmux popup runs it in tmux's environment,
 /// and a terminal may start it in a folder of its own.
-fn command_line(exe: &Path, file: &Path, project: Option<&str>, cwd: &Path) -> Vec<String> {
+fn command_line(exe: &Path, file: &Path, cwd: &Path) -> Vec<String> {
     let mut line: Vec<String> = ["env", "-u", "CLAUDECODE"].map(str::to_string).to_vec();
     for name in ["EKKO_DIR", "EKKO_PROJECT"] {
         if let Ok(value) = std::env::var(name) {
@@ -238,9 +238,6 @@ fn command_line(exe: &Path, file: &Path, project: Option<&str>, cwd: &Path) -> V
     line.extend(["sh", "-c", "cd \"$0\" && exec \"$@\""].map(str::to_string));
     line.extend([cwd, exe].map(|path| path.to_string_lossy().into_owned()));
     line.extend(["--menu".to_string(), file.to_string_lossy().into_owned()]);
-    if let Some(project) = project {
-        line.extend(["--project".to_string(), project.to_string()]);
-    }
     line
 }
 
@@ -1118,11 +1115,11 @@ mod tests {
 
     #[test]
     fn the_menu_runs_in_the_servers_folder_as_the_user_quoted_for_tmux() {
-        let line = command_line(Path::new("/nix/store/x/bin/ekko"), Path::new("/run/ekko-menu-1-0.json"), Some("it's"), Path::new("/home/a b"));
+        let line = command_line(Path::new("/nix/store/x/bin/ekko"), Path::new("/run/ekko-menu-1-0.json"), Path::new("/home/it's a b"));
         let at = line.iter().position(|word| word == "sh").unwrap();
         assert_eq!(&line[..3], ["env", "-u", "CLAUDECODE"]);
-        assert_eq!(&line[at..], ["sh", "-c", "cd \"$0\" && exec \"$@\"", "/home/a b", "/nix/store/x/bin/ekko", "--menu", "/run/ekko-menu-1-0.json", "--project", "it's"]);
-        assert!(shell_line(&line).ends_with("'--project' 'it'\\''s'"), "{}", shell_line(&line));
+        assert_eq!(&line[at..], ["sh", "-c", "cd \"$0\" && exec \"$@\"", "/home/it's a b", "/nix/store/x/bin/ekko", "--menu", "/run/ekko-menu-1-0.json"]);
+        assert!(shell_line(&line).contains(" '/home/it'\\''s a b' "), "{}", shell_line(&line));
         let spec = Spec { questions: vec![posed(1, "Q?", yes_no(), false)] };
         let words = sized(&["konsole".to_string(), "--separate".to_string(), "-e".to_string()], &spec);
         assert_eq!(words[0], "--separate");

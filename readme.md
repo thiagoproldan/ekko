@@ -233,7 +233,7 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 | `context` | one item with its blockers, what it blocks and its notes, in full; who wrote it, and the commits naming it |
 | `search` | items matching a text and/or the `--list` filters, with a count of the stashed ones that match as well |
 | `changes` | what was written since a cursor, including items stashed or trashed since |
-| `roadmap`, `projects` | as the flags of the same name |
+| `roadmap` | as the flag of the same name |
 | `create` | a task, a note, a handoff, or a decision, gotcha or procedure, with every field apart from the text, relations included |
 | `set_state`, `force_state` | idempotent state changes; `force_state` overrides the dependency rule and a running session's hold, and is a tool of its own so it can be permissioned apart |
 | `edit` | the whole text, one exact replacement, or an append -- optionally conditioned on the `updatedAt` last read |
@@ -246,7 +246,7 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 | `away` | what is put away: the stash, and the trash with the days each item has left, one line per item |
 | `phases` | declare the project's phases in order, replacing the sequence; answers with the roadmap |
 
-There is no `clear` and no `destroy`: an agent that needs either asks the user to run it.
+There is no `clear` and no `destroy`: an agent that needs either asks the user to run it. Nor does any tool take `project`, or list the projects: a session works on its own board, the one its folder finds or `EKKO_PROJECT` names at launch, and another project's board is the user's to open, with `ekko --project` in a command they see.
 
 **Handoffs.** A long session is cheaper to clear and resume than to carry, as long as what it knows survives the clear. `create` with `kind: "handoff"` writes that: a note on the open task the session was working, saying where it stopped, what it decided and why, the files and lines, the next step and the open questions. The next prime quotes a handoff on open work in a section of its own -- the one this session wrote, when it wrote one (see Several sessions), else the newest -- line by line, up to 3,500 characters on top of the prime's 6,000, so the whole still fits the 10,000 characters Claude Code keeps of a hook -- and `context` reads a longer one whole. Under a handoff, the prime lists only the loose notes changed after it: the older ones are history the handoff had the chance to take in, so a note the next session must read is named in the handoff by id. A new handoff on the same task demotes the one before to an ordinary note, unless another session that still runs wrote it, and one moved to another task, or detached, is an ordinary note too. The server also offers `handoff` as an MCP prompt, which Claude Code lists as a slash command: it asks the agent to write the handoff now, naming the task in progress and the handoff it replaces.
 

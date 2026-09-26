@@ -103,7 +103,7 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
     assert!(init["instructions"].as_str().is_some_and(|s| s.contains("shared with the user")));
 
     let tools = replies["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 21);
+    assert_eq!(tools.len(), 20);
     // The five nearly every session calls, and ask, load at session start; the rest stay behind ToolSearch.
     let loaded: Vec<&str> =
         tools.iter().filter(|tool| tool["_meta"]["anthropic/alwaysLoad"] == true).map(|tool| tool["name"].as_str().unwrap()).collect();
@@ -901,13 +901,69 @@ fn questions_left_in_ekkos_menu_stay_open() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// A session works on its own board (task 697): no tool or prompt takes
+/// project, no tool lists the other projects, and every tool the server
+/// lists -- so one added later too -- refuses a call that names another
+/// project with the rule, before reading or writing either board.
+#[test]
+fn no_tool_reaches_another_projects_board() {
+    let home = temp_home();
+    let other = home.join("other");
+    fs::create_dir_all(&other).unwrap();
+    for args in [&["init"][..], &["--task", "a secret of the other project"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(&other)
+            .env("HOME", &home)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ekko {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let mut lines = vec![
+        request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})),
+        request(2, "tools/list", json!({})),
+        request(3, "prompts/list", json!({})),
+    ];
+    let listed = session(&home, &lines);
+    let tools = listed["2"]["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+    assert!(names.len() > 15 && !names.contains(&"projects"), "{names:?}");
+    for tool in tools {
+        assert!(tool["inputSchema"]["properties"].get("project").is_none(), "{} takes project", tool["name"]);
+    }
+    for prompt in listed["3"]["result"]["prompts"].as_array().unwrap() {
+        assert!(!prompt["arguments"].to_string().contains("\"project\""), "{prompt}");
+    }
+
+    let first = 10;
+    lines.extend(names.iter().zip(first..).map(|(name, id)| call(id, name, json!({"project": "other"}))));
+    lines.push(call(99, "projects", json!({})));
+    lines.push(call(100, "search", json!({"text": "secret"})));
+    let replies = session(&home, &lines);
+    for (name, id) in names.iter().zip(first..) {
+        let reply = &replies[&id.to_string()];
+        assert_eq!(reply["result"]["isError"], true, "{name}: {reply}");
+        assert!(text(reply).starts_with("INVALID_INPUT: no tool takes project: a session works on its own board"), "{name}: {}", text(reply));
+    }
+    assert!(replies["99"]["error"]["message"].as_str().unwrap().contains("Unknown tool: projects"), "{}", replies["99"]);
+    let searched = text(&replies["100"]);
+    assert!(!searched.contains("secret"), "the session's board holds the other project's task: {searched}");
+    let own = Command::new(env!("CARGO_BIN_EXE_ekko")).arg("--list").current_dir(&other).env("HOME", &home).env_remove("EKKO_DIR").env_remove("EKKO_PROJECT").output().unwrap();
+    let own = String::from_utf8(own.stdout).unwrap();
+    assert!(own.contains("a secret of the other project") && own.lines().filter(|line| line.contains("secret")).count() == 1, "the other board changed: {own}");
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// What Claude Code puts ahead of every conversation from this server: its
 /// instructions and the always-loaded tool definitions. A byte changed there
 /// makes every session resumed after an upgrade write its whole context again
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0xb5de580a429a0ef2;
+const PREFIX_FINGERPRINT: u64 = 0x89dee0cc3aaeca9e;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {

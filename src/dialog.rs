@@ -45,7 +45,6 @@ pub enum Stage {
 pub struct Pending {
     /// The id of the tools/call the answer is for.
     pub call: Value,
-    pub project: Option<String>,
     /// The questions' uids: a display id could be renumbered before the
     /// answers come. The client's dialog puts only the first.
     pub questions: Vec<String>,
