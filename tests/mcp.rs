@@ -245,12 +245,18 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
             request(5, "no/such/method", json!({})),
             request(6, "tools/call", json!({"name": "destroy", "arguments": {}})),
             "this is not json".to_string(),
+            request(7, "ping", json!({"_meta": meta("2026-07-28")})),
+            request(8, "ping", json!({})),
         ],
     );
 
-    // Unanswered, as by a server older than 2026-07-28: a client that probes
-    // with it takes the handshake, where ask can wait for the user (task 705).
-    assert_eq!(replies["1"]["error"]["code"], -32601, "{}", replies["1"]);
+    // Answered, so a client that probes with it, as Claude Code does, stays
+    // on 2026-07-28 (task 708).
+    let discovered = &replies["1"]["result"];
+    assert_eq!(discovered["resultType"], "complete", "{}", replies["1"]);
+    assert_eq!(discovered["supportedVersions"], json!(["2026-07-28"]));
+    assert_eq!(discovered["capabilities"], json!({"tools": {}, "prompts": {}}));
+    assert!(discovered["instructions"].as_str().is_some_and(|s| s.contains("shared with the user")), "{discovered}");
 
     assert_eq!(replies["2"]["result"]["resultType"], "complete");
     assert_eq!(replies["2"]["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "ekko");
@@ -258,10 +264,14 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
 
     assert_eq!(replies["3"]["error"]["code"], -32022);
     assert_eq!(replies["3"]["error"]["data"]["requested"], "1900-01-01");
+    // The versions to retry with per request: the handshake's are not.
+    assert_eq!(replies["3"]["error"]["data"]["supported"], json!(["2026-07-28"]));
     assert_eq!(replies["4"]["error"]["code"], -32602, "clientCapabilities is required on a modern request");
     assert_eq!(replies["5"]["error"]["code"], -32601);
     assert_eq!(replies["6"]["error"]["code"], -32602);
     assert_eq!(replies["null"]["error"]["code"], -32700);
+    assert_eq!(replies["7"]["error"]["code"], -32601, "2026-07-28 dropped ping: {}", replies["7"]);
+    assert_eq!(replies["8"]["result"], json!({}), "the handshake keeps it");
 
     fs::remove_dir_all(&home).ok();
 }
@@ -269,12 +279,11 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
 /// Every result a 2026-07-28 client gets holds the fields that revision's
 /// schema requires of its type (schema/2026-07-28/schema.json in
 /// modelcontextprotocol/modelcontextprotocol): resultType on each, and on the
-/// ones that are a CacheableResult -- the lists and resources/read -- ttlMs, a
-/// number of at least 0, and cacheScope, public or private. Claude Code drops
-/// a whole list over one missing field, which left sessions with none of
-/// ekko's tools (task 705), so each method either server answers is
-/// enumerated here; server/discover, the last CacheableResult, is answered by
-/// neither.
+/// ones that are a CacheableResult -- server/discover, the lists and
+/// resources/read -- ttlMs, a number of at least 0, and cacheScope, public or
+/// private. Claude Code drops a whole list over one missing field, which left
+/// sessions with none of ekko's tools (task 705), so each method either
+/// server answers is enumerated here, server/discover included (task 708).
 #[test]
 fn every_2026_07_28_result_holds_the_fields_its_type_requires() {
     let home = temp_home();
@@ -296,7 +305,9 @@ fn every_2026_07_28_result_holds_the_fields_its_type_requires() {
     let board: &[&str] = &["--mcp"];
     let resources: &[&str] = &["--mcp", "--resources"];
     // The server, the method, its params, and what its result type requires beside resultType.
-    let methods: [(&[&str], &str, Value, &[&str]); 7] = [
+    let methods: [(&[&str], &str, Value, &[&str]); 9] = [
+        (board, "server/discover", json!({}), &["supportedVersions", "capabilities", "ttlMs", "cacheScope"]),
+        (resources, "server/discover", json!({}), &["supportedVersions", "capabilities", "ttlMs", "cacheScope"]),
         (board, "tools/list", json!({}), &["tools", "ttlMs", "cacheScope"]),
         (board, "prompts/list", json!({}), &["prompts", "ttlMs", "cacheScope"]),
         (board, "tools/call", json!({"name": "prime", "arguments": {}}), &["content"]),
@@ -320,8 +331,6 @@ fn every_2026_07_28_result_holds_the_fields_its_type_requires() {
                 assert!(matches!(result["cacheScope"].as_str(), Some("public" | "private")), "{method}: cacheScope {}", result["cacheScope"]);
             }
         }
-        let discover = live.ask(modern(98, "server/discover", &json!({})));
-        assert_eq!(discover["error"]["code"], -32601, "server/discover on {server:?}: {discover}");
         if server == resources {
             let missing = live.ask(modern(99, "resources/read", &json!({"uri": "item://99"})));
             assert_eq!(missing["error"]["code"], -32602, "2026-07-28 moved resource not found from -32002 to -32602: {missing}");
@@ -544,8 +553,13 @@ impl Live {
 
     /// Sends a request and returns its reply, failing on anything else first.
     fn ask(&mut self, line: String) -> Value {
-        writeln!(self.stdin.as_mut().unwrap(), "{line}").unwrap();
+        self.send(&line);
         self.next(std::time::Duration::from_secs(5)).expect("no reply")
+    }
+
+    /// Sends a line that takes no reply, such as a notification.
+    fn send(&mut self, line: &str) {
+        writeln!(self.stdin.as_mut().unwrap(), "{line}").unwrap();
     }
 
     fn next(&self, within: std::time::Duration) -> Option<Value> {
@@ -755,8 +769,17 @@ struct Held {
 
 impl Held {
     /// `ekko --mcp` whose menu opens with `terminal`, a script standing in
-    /// for the terminal: it gets ekko's command line as its arguments.
+    /// for the terminal, opened with the handshake.
     fn start(home: &PathBuf, terminal: &str) -> Held {
+        let mut live = Held::spawn(home, terminal);
+        live.send(&request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})));
+        live.reply(1);
+        live
+    }
+
+    /// The same server, with no handshake: a 2026-07-28 client's. The script
+    /// gets ekko's command line as its arguments.
+    fn spawn(home: &PathBuf, terminal: &str) -> Held {
         let script = home.join("terminal.sh");
         // The arguments end in `<ekko> --menu <file>`: the script finds both,
         // and the pid file beside the questions, as $exe, $spec and $pid.
@@ -791,10 +814,7 @@ impl Held {
             }
         });
         let stdin = child.stdin.take();
-        let mut live = Held { child, stdin, messages, seen: Vec::new() };
-        live.send(&request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})));
-        live.reply(1);
-        live
+        Held { child, stdin, messages, seen: Vec::new() }
     }
 
     fn send(&mut self, line: &str) {
@@ -897,6 +917,138 @@ fn questions_left_in_ekkos_menu_stay_open() {
     assert!(gone, "the cancelled call's menu is closed");
     assert!(!cancelled.seen.iter().any(|m| m["id"] == 2), "a cancelled call is not answered: {:?}", cancelled.seen);
     cancelled.stop();
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// Under 2026-07-28 too, ask waits for the answers in ekko's menu, since a
+/// stateless request can still take its time (task 708), and its reply is a
+/// complete result. A client declaring forms still gets the menu first, and
+/// no request of the server's, which that revision's clients take none of.
+#[test]
+fn a_modern_call_of_ask_waits_for_the_answers_in_ekkos_menu() {
+    let home = temp_home();
+    let answer = "echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" Yes; done";
+    let mut live = Held::spawn(&home, answer);
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}},
+        "progressToken": 7,
+    });
+    let question = json!({"questions": [{"text": "Mark them?", "options": [{"label": "Yes"}, {"label": "No"}]}]});
+    live.send(&request(2, "tools/call", json!({"name": "ask", "arguments": question, "_meta": meta})));
+    let reply = live.reply(2);
+    assert_eq!(reply["result"]["resultType"], "complete", "{reply}");
+    assert_eq!(reply["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "ekko");
+    let answered: Value = serde_json::from_str(text(&reply)).unwrap();
+    assert_eq!(answered["answers"], json!([{"id": 1, "answer": "Yes"}]), "{answered}");
+    assert!(!live.seen.iter().any(|m| m.get("method").is_some() && m.get("id").is_some()), "a request of the server's: {:?}", live.seen);
+    live.stop();
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// ask's last resort under 2026-07-28, whose clients take no request from a
+/// server (task 708): the dialog comes in an input_required result, and the
+/// answer on the call's retry with the requestState naming it. The question
+/// is recorded once, "Other answer…" asks again for the text, a retry
+/// without the answer is asked again, a state the server never gave or gave
+/// already is refused, and a client that declares no forms gets no dialog.
+#[test]
+fn a_modern_client_answers_the_dialog_by_retrying_the_call() {
+    let home = temp_home();
+    let mut live = Live::start(&home, &["--mcp"]);
+    let meta = |capabilities: Value| json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": capabilities});
+    let forms = json!({"elicitation": {"form": {}, "url": {}}});
+    let ask = |id: u64, retry: Value| {
+        let mut params = json!({"name": "ask", "arguments": {"questions": [{"text": "Mark them?", "options": [{"label": "Yes", "description": "all four"}, {"label": "No"}]}]}});
+        params["_meta"] = meta(forms.clone());
+        params.as_object_mut().unwrap().extend(retry.as_object().unwrap().clone());
+        request(id, "tools/call", params)
+    };
+    let state = |reply: &Value| reply["result"]["requestState"].as_str().unwrap_or_else(|| panic!("no requestState: {reply}")).to_string();
+
+    let first = live.ask(ask(2, json!({})));
+    assert_eq!(first["result"]["resultType"], "input_required", "{first}");
+    assert_eq!(first["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "ekko");
+    let form = &first["result"]["inputRequests"]["answer"];
+    assert_eq!(form["method"], "elicitation/create");
+    assert_eq!(form["params"]["mode"], "form");
+    assert_eq!(form["params"]["message"], "Mark them?");
+    assert_eq!(form["params"]["requestedSchema"]["properties"]["answer"]["oneOf"][0], json!({"const": "Yes", "title": "Yes: all four"}));
+
+    let again = live.ask(ask(3, json!({"requestState": state(&first)})));
+    assert_eq!(again["result"]["inputRequests"], first["result"]["inputRequests"], "a retry without the answer is asked the same: {again}");
+    let other = live.ask(ask(4, json!({"requestState": state(&again), "inputResponses": {"answer": {"action": "accept", "content": {"answer": "ekko:other"}}}})));
+    assert_eq!(other["result"]["inputRequests"]["answer"]["params"]["requestedSchema"]["properties"]["answer"], json!({"type": "string", "title": "Answer"}), "{other}");
+    let written = json!({"requestState": state(&other), "inputResponses": {"answer": {"action": "accept", "content": {"answer": "only the ninth"}}}});
+    let done = live.ask(ask(5, written.clone()));
+    assert_eq!(done["result"]["resultType"], "complete", "{done}");
+    let answered: Value = serde_json::from_str(text(&done)).unwrap();
+    assert_eq!(answered["answers"], json!([{"id": 1, "answer": "only the ninth"}]), "{answered}");
+
+    assert_eq!(live.ask(ask(6, written))["error"]["code"], -32602, "a state given to a retry already");
+    let forged = json!({"requestState": "ekko-input-99", "inputResponses": {"answer": {"action": "accept", "content": {"answer": "forged"}}}});
+    assert_eq!(live.ask(ask(7, forged))["error"]["code"], -32602, "a state never given");
+
+    let declined = live.ask(ask(8, json!({})));
+    let left = live.ask(ask(9, json!({"requestState": state(&declined), "inputResponses": {"answer": {"action": "decline"}}})));
+    assert!(text(&left).contains("\"unanswered\":\"the user declined the dialog; the questions without an answer stay open"), "{left}");
+
+    let without = live.ask(request(10, "tools/call", json!({"name": "ask", "arguments": {"questions": [{"text": "No forms?"}]}, "_meta": meta(json!({}))})));
+    assert_eq!(without["result"]["resultType"], "complete", "{without}");
+    assert!(text(&without).contains("\"unanswered\":\"ekko's menu has nowhere to open here"), "{without}");
+
+    // Asked three times, recorded three times: the second and third wait on the user.
+    let prime = live.ask(request(11, "tools/call", json!({"name": "prime", "arguments": {}, "_meta": meta(json!({}))})));
+    assert!(text(&prime).contains("\nWaiting on you (2)\n"), "{}", text(&prime));
+    assert!(text(&prime).contains("No forms?"), "{}", text(&prime));
+    live.stop();
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// Under 2026-07-28 the resource list's changes come on a subscriptions/listen
+/// stream (task 708): acknowledged first, with what the server honors of what
+/// was asked, then each change tagged with the stream's id, until the client
+/// cancels it. A 2026-07-28 client that opened no stream hears nothing, since
+/// that revision sends only what a client asked for.
+#[test]
+fn a_modern_client_hears_of_changes_on_the_stream_it_opened() {
+    let home = temp_home();
+    let meta = json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}});
+    let write = |words: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ekko")).args(words).env("HOME", &home).env("EKKO_DIR", &home).env_remove("EKKO_PROJECT").output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    let listen = |id: &str| {
+        let notifications = json!({"resourcesListChanged": true, "toolsListChanged": true, "resourceSubscriptions": ["prime://board"]});
+        json!({"jsonrpc": "2.0", "id": id, "method": "subscriptions/listen", "params": {"_meta": meta, "notifications": notifications}}).to_string()
+    };
+    let quiet = std::time::Duration::from_secs(4);
+
+    let mut live = Live::start(&home, &["--mcp", "--resources"]);
+    assert!(live.ask(request(1, "resources/list", json!({"_meta": meta})))["result"]["resources"].is_array());
+    write(&["--task", "before", "any", "stream"]);
+    assert_eq!(live.next(quiet), None, "told of a change it never asked to hear of");
+
+    let ack = live.ask(listen("listen:0"));
+    let acknowledged = json!({"_meta": {"io.modelcontextprotocol/subscriptionId": "listen:0"}, "notifications": {"resourcesListChanged": true}});
+    assert_eq!(ack, json!({"jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": acknowledged}));
+    write(&["--task", "on", "the", "stream"]);
+    let notice = live.next(std::time::Duration::from_secs(10)).expect("no list_changed within 10 seconds of the write");
+    let tagged = json!({"_meta": {"io.modelcontextprotocol/subscriptionId": "listen:0"}});
+    assert_eq!(notice, json!({"jsonrpc": "2.0", "method": "notifications/resources/list_changed", "params": tagged}));
+
+    live.send(&json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": "listen:0"}}).to_string());
+    write(&["--task", "after", "the", "stream"]);
+    assert_eq!(live.next(quiet), None, "told of a change on a stream the client cancelled, or answered its request");
+    live.stop();
+
+    // The board server's lists do not change: it honors nothing.
+    let mut board = Live::start(&home, &["--mcp"]);
+    assert_eq!(board.ask(listen("listen:1"))["params"]["notifications"], json!({}));
+    board.stop();
 
     fs::remove_dir_all(&home).ok();
 }

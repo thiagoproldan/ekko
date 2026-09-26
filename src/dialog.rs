@@ -5,6 +5,9 @@
 //! restart (note 357). So ask records the question first, then asks the
 //! client to show it: an `elicitation/create` request in form mode, which
 //! Claude Code shows as a dialog, and whose answer ask records in turn.
+//! Under 2026-07-28, whose clients take no request from a server, the same
+//! form goes in an `input_required` result instead, and the answer comes
+//! back on the call's retry (task 708).
 //!
 //! The form has one field. With options it is a choice among them plus
 //! "Other answer…", which opens a second dialog holding a text field; with
@@ -59,6 +62,10 @@ pub struct Pending {
     /// ekko's own menu, when the questions are there rather than in the
     /// client's dialog.
     pub window: Option<crate::menu::Window>,
+    /// Whether the call is a 2026-07-28 request: its replies are complete
+    /// results, and its dialog is a result asking for one, which the client
+    /// answers by retrying the call, since it takes no request from a server.
+    pub modern: bool,
 }
 
 /// The dialogs of one server: whether its client shows them, and the ones
@@ -75,14 +82,35 @@ impl Dialogs {
     pub fn open(&mut self, pending: Pending) -> Value {
         self.sent += 1;
         let id = format!("ekko-ask-{}", self.sent);
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "elicitation/create",
-            "params": {"mode": "form", "message": pending.message, "requestedSchema": schema(&pending.options, pending.stage)},
-        });
+        let request = json!({"jsonrpc": "2.0", "id": id, "method": "elicitation/create", "params": params(&pending)});
         self.pending.insert(id, pending);
         request
+    }
+
+    /// `pending`'s dialog at its stage for a 2026-07-28 client, which takes
+    /// no request from a server: the result asking for it, and the call that
+    /// result answers. The client retries the call with the answer and the
+    /// `requestState` naming the dialog (see `resume`); the call itself is
+    /// over, so nothing keeps it alive any more.
+    pub fn input_required(&mut self, mut pending: Pending) -> (Value, Value) {
+        self.sent += 1;
+        let state = format!("ekko-input-{}", self.sent);
+        let result = json!({
+            "resultType": "input_required",
+            "inputRequests": {"answer": {"method": "elicitation/create", "params": params(&pending)}},
+            "requestState": state,
+        });
+        pending.progress = None;
+        let call = pending.call.clone();
+        self.pending.insert(state, pending);
+        (call, result)
+    }
+
+    /// The dialog a retry's `requestState` names, taken out: None for a
+    /// state this server never gave, or gave to a retry already.
+    pub fn resume(&mut self, state: &str) -> Option<Pending> {
+        let given = self.pending.get(state).is_some_and(|pending| pending.modern && pending.window.is_none());
+        given.then(|| self.pending.remove(state)).flatten()
     }
 
     /// Keeps `pending`, whose question is in ekko's menu, until the answer
@@ -92,9 +120,12 @@ impl Dialogs {
         self.pending.insert(format!("ekko-menu-{}", self.sent), pending);
     }
 
-    /// The pending dialog a response is for, taken out.
+    /// The pending dialog a client's response is for, taken out: only one
+    /// this server sent a request for, which a 2026-07-28 call never has.
     pub fn take(&mut self, id: &Value) -> Option<Pending> {
-        self.pending.remove(id.as_str()?)
+        let id = id.as_str()?;
+        let sent = self.pending.get(id).is_some_and(|pending| !pending.modern && pending.window.is_none());
+        sent.then(|| self.pending.remove(id)).flatten()
     }
 
     /// The dialog opened for tools/call `call`, taken out, with the id of the
@@ -179,6 +210,11 @@ fn title(option: &Choice) -> String {
         Some(description) => format!("{}: {}", option.label.trim(), description.split_whitespace().collect::<Vec<_>>().join(" ")),
         None => option.label.trim().to_string(),
     }
+}
+
+/// The form request's params, the same under either revision.
+fn params(pending: &Pending) -> Value {
+    json!({"mode": "form", "message": pending.message, "requestedSchema": schema(&pending.options, pending.stage)})
 }
 
 /// The form: one field, a choice or a text.

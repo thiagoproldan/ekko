@@ -8,15 +8,17 @@
 //!
 //! Newline-delimited JSON-RPC over stdin and stdout, answered one request at a
 //! time. Dual-era, per the 2026-07-28 revision: a request whose `_meta` names
-//! a protocol version is served statelessly under that revision, and an
-//! `initialize` handshake is served under the legacy revision it negotiates.
-//! `server/discover` goes unanswered, as by a server older than 2026-07-28,
-//! so a client that probes with it -- Claude Code does since 2026-09-25 --
-//! takes the handshake, where ask can wait for the user's answer in ekko's
-//! menu and the resources server's `list_changed` needs no subscription
-//! (task 705). Written by hand rather than through an SDK because the whole protocol this
-//! server needs is a handful of methods, and the binary stays one file on
-//! disk with no runtime.
+//! a protocol version is served statelessly under that revision --
+//! `server/discover` included, which Claude Code probes with since
+//! 2026-09-25 -- and an `initialize` handshake is served under the legacy
+//! revision it negotiates. Under either, ask waits for the user's answer in
+//! ekko's menu; the client's dialog, its last resort, is a request of the
+//! server's under the handshake and an `input_required` result under
+//! 2026-07-28, and the resources server's `list_changed` goes untagged to a
+//! client of the handshake and on a `subscriptions/listen` stream to a
+//! 2026-07-28 one (tasks 705 and 708). Written by hand rather than through an
+//! SDK because the whole protocol this server needs is a handful of methods,
+//! and the binary stays one file on disk with no runtime.
 //!
 //! With `--resources`, a second server offers the board as resources instead,
 //! `prime://board` and `item://<id>`, so a person can mention an item with @ and
@@ -32,6 +34,7 @@ use std::io::{self, BufRead, Write};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -101,6 +104,12 @@ pub struct Server {
     /// never did has nothing to be told has changed. Behind a mutex because
     /// the resources server also checks it from a thread of its own.
     listed: Mutex<Option<(u64, Vec<Value>)>>,
+    /// The `subscriptions/listen` streams open for the resource list's
+    /// changes, by the id of the request that opened each.
+    listening: Mutex<Vec<Value>>,
+    /// Whether a client opened with the handshake, whose revisions hear of
+    /// changes untagged: a 2026-07-28 client hears only on a stream it opened.
+    handshake: AtomicBool,
     /// The day prime and next last answered in full, by tool, or the day the
     /// server started, which is when the SessionStart hook handed the session
     /// its prime: `if_rev` is answered as unchanged only on that same day.
@@ -266,10 +275,9 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
         let (server, stdout) = (Arc::clone(&server), Arc::clone(&stdout));
         thread::spawn(move || loop {
             thread::sleep(POLL);
-            if let Some(notice) = server.list_changed() {
-                if send(&stdout, [notice]).is_err() {
-                    break;
-                }
+            let notices = server.list_changed();
+            if !notices.is_empty() && send(&stdout, notices).is_err() {
+                break;
             }
         });
     }
@@ -320,6 +328,8 @@ impl Server {
             project_env,
             mode,
             listed: Mutex::new(None),
+            listening: Mutex::new(Vec::new()),
+            handshake: AtomicBool::new(false),
             answered: Mutex::new(HashMap::new()),
             started,
             launched,
@@ -358,27 +368,51 @@ impl Server {
         self.answered.lock().unwrap_or_else(PoisonError::into_inner).insert(tool, chrono::Local::now().date_naive());
     }
 
-    /// The notification that the resource list changed, when it has since
-    /// the client last read it -- through anyone's writes. Claude Code reads
-    /// the list again on it, and only an item on the list it read can be
-    /// mentioned with @, so without this an item made mid-session could not
-    /// be. Checked after every message and, in the resources server, every
+    /// The notifications that the resource list changed, when it has since
+    /// the client last read it -- through anyone's writes: one on each
+    /// `subscriptions/listen` stream open for it, tagged with its id, or one
+    /// untagged to a client of the handshake. Claude Code reads the list
+    /// again on it, and only an item on the list it read can be mentioned
+    /// with @, so without this an item made mid-session could not be.
+    /// Checked after every message and, in the resources server, every
     /// `POLL` besides.
-    pub fn list_changed(&self) -> Option<Value> {
-        let mut listed = self.listed.lock().unwrap_or_else(PoisonError::into_inner);
-        let (revision, resources) = listed.as_mut()?;
-        let (ekko, _) = self.open().ok()?;
-        let now = ekko.storage.get_counters().ok()?.revision;
-        if now == *revision {
-            return None;
+    pub fn list_changed(&self) -> Vec<Value> {
+        if !self.changed() {
+            return Vec::new();
         }
-        let current = resource_list(&ekko).ok()?;
+        let listening = self.listening.lock().unwrap_or_else(PoisonError::into_inner);
+        if listening.is_empty() && self.handshake.load(Ordering::Relaxed) {
+            return vec![json!({"jsonrpc": "2.0", "method": "notifications/resources/list_changed"})];
+        }
+        listening
+            .iter()
+            .map(|id| {
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/resources/list_changed",
+                    "params": {"_meta": {"io.modelcontextprotocol/subscriptionId": id}},
+                })
+            })
+            .collect()
+    }
+
+    /// Whether the resource list differs from the one the client last read,
+    /// which it then counts as read.
+    fn changed(&self) -> bool {
+        let mut listed = self.listed.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some((revision, resources)) = listed.as_mut() else { return false };
+        let Some(ekko) = self.open().ok().map(|(ekko, _)| ekko) else { return false };
+        let Ok(now) = ekko.storage.get_counters().map(|counters| counters.revision) else { return false };
+        if now == *revision {
+            return false;
+        }
+        let Ok(current) = resource_list(&ekko) else { return false };
         *revision = now;
         if current == *resources {
-            return None;
+            return false;
         }
         *resources = current;
-        Some(json!({"jsonrpc": "2.0", "method": "notifications/resources/list_changed"}))
+        true
     }
 
     fn dialogs(&self) -> std::sync::MutexGuard<'_, Dialogs> {
@@ -405,30 +439,43 @@ impl Server {
             return self.cancelled(&params);
         }
         let Some(id) = id else { return Vec::new() };
+        let modern = match era(&params) {
+            Ok(modern) => modern,
+            Err(error) => return vec![error_reply(id, error)],
+        };
         if method == "tools/call" && self.puts_to_user(&params) {
-            return self.ask(id, &params);
+            return self.ask(id, &params, modern);
         }
-        vec![match self.handle(method, &params) {
+        if method == "subscriptions/listen" && modern {
+            return self.listen(id, &params);
+        }
+        vec![match self.handle(method, &params, modern) {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err(error) => error_reply(id, error),
         }]
     }
 
     /// Whether a call is ask's, to be put to the user and answered once they
-    /// have: its reply waits, which a stateless request of the modern
-    /// revision cannot.
+    /// have: its reply waits, under either revision.
     fn puts_to_user(&self, params: &Value) -> bool {
-        self.mode == Mode::Board
-            && params.get("name").and_then(Value::as_str) == Some("ask")
-            && params.get("_meta").and_then(|m| m.get("io.modelcontextprotocol/protocolVersion")).is_none()
+        self.mode == Mode::Board && params.get("name").and_then(Value::as_str) == Some("ask")
     }
 
     /// ask: records the questions, then puts them to the user -- in ekko's
     /// menu where one can open, else in the client's dialog where it shows
     /// one and the question fits in it. The call is answered once the user
-    /// has, in `watch` or `answered`.
-    fn ask(&self, call: Value, params: &Value) -> Vec<Value> {
-        let progress = params.get("_meta").and_then(|m| m.get("progressToken")).cloned();
+    /// has, in `watch`, `answered` or `resume`.
+    fn ask(&self, call: Value, params: &Value, modern: bool) -> Vec<Value> {
+        if modern && params.get("requestState").is_some() {
+            return self.resume(call, params);
+        }
+        let meta = params.get("_meta");
+        let progress = meta.and_then(|m| m.get("progressToken")).cloned();
+        // A 2026-07-28 request says what its client shows; the handshake said it once.
+        let form = match meta.and_then(|m| m.get("io.modelcontextprotocol/clientCapabilities")) {
+            Some(capabilities) if modern => dialog::shows_forms(capabilities),
+            _ => self.dialogs().form,
+        };
         let mut args = match params.get("arguments") {
             None | Some(Value::Null) => Map::new(),
             Some(Value::Object(map)) => map.clone(),
@@ -440,7 +487,7 @@ impl Server {
             Ok((record(&ekko, &spec)?, spec))
         });
         let (recorded, spec) = match recorded {
-            Err(error) => return vec![self.tool_reply(call, format!("{}: {}", error.code, error.message), true)],
+            Err(error) => return vec![self.tool_reply(call, format!("{}: {}", error.code, error.message), true, modern)],
             Ok(recorded) => recorded,
         };
         let items = recorded["items"].as_array().cloned().unwrap_or_default();
@@ -467,6 +514,7 @@ impl Server {
             progress,
             beats: 0,
             window: None,
+            modern,
         };
         let why = match menu::place() {
             Some(place) => match menu::Window::open(&place, &menu::Spec { questions: posed }, &self.cwd) {
@@ -479,24 +527,60 @@ impl Server {
             None => "ekko's menu has nowhere to open here: no tmux, and no display".to_string(),
         };
         // The client's dialog, the last resort: one question, one choice.
-        if self.dialogs().form && spec.questions.len() == 1 && !first.multiple {
-            return vec![self.dialogs().open(pending)];
+        if form && spec.questions.len() == 1 && !first.multiple {
+            return vec![self.put(pending)];
         }
         self.left_open(pending.questions.iter().map(String::as_str));
         let mut reply = pending.recorded;
         reply["unanswered"] = json!(format!("{why}; {OPEN}"));
-        vec![self.tool_reply(pending.call, reply.to_string(), false)]
+        vec![self.tool_reply(pending.call, reply.to_string(), false, modern)]
     }
 
-    /// A response from the client: to one of ask's dialogs, which records the
-    /// answer and answers the call, or opens the text field after "Other
-    /// answer…". A stray one is dropped.
+    /// The client's dialog for `pending`, at its stage: a request of this
+    /// server's under the handshake, or under 2026-07-28, whose clients take
+    /// none, the reply asking for it, which the client answers by retrying
+    /// the call (`resume`).
+    fn put(&self, pending: Pending) -> Value {
+        if !pending.modern {
+            return self.dialogs().open(pending);
+        }
+        let (call, result) = self.dialogs().input_required(pending);
+        json!({"jsonrpc": "2.0", "id": call, "result": complete("tools/call", result)})
+    }
+
+    /// A 2026-07-28 retry of ask, with the answer from its dialog: the
+    /// `requestState` names the dialog, whose questions are on the board
+    /// already, so nothing is recorded twice. A state this server never gave,
+    /// or gave to a retry already, is refused, since a client could have
+    /// changed it (mrtr.md); a retry without the answer is asked again.
+    fn resume(&self, call: Value, params: &Value) -> Vec<Value> {
+        let state = params.get("requestState").and_then(Value::as_str).unwrap_or_default();
+        let Some(mut pending) = self.dialogs().resume(state) else {
+            return vec![error_reply(call, RpcError::new(-32602, "Invalid params: requestState names no dialog open in this server"))];
+        };
+        pending.call = call;
+        let Some(answer) = params.get("inputResponses").and_then(|responses| responses.get("answer")) else {
+            return vec![self.put(pending)];
+        };
+        let outcome = dialog::outcome(&json!({"result": answer}), pending.stage);
+        self.settle(pending, outcome)
+    }
+
+    /// A response from the client to one of ask's dialogs, under the
+    /// handshake. A stray one is dropped.
     fn answered(&self, id: &Value, response: &Value) -> Vec<Value> {
-        let Some(mut pending) = self.dialogs().take(id) else { return Vec::new() };
-        match dialog::outcome(response, pending.stage) {
+        let Some(pending) = self.dialogs().take(id) else { return Vec::new() };
+        let outcome = dialog::outcome(response, pending.stage);
+        self.settle(pending, outcome)
+    }
+
+    /// What a dialog's outcome leads to: the answer recorded and the call
+    /// answered, or the text field "Other answer…" opens.
+    fn settle(&self, mut pending: Pending, outcome: dialog::Outcome) -> Vec<Value> {
+        match outcome {
             dialog::Outcome::Other => {
                 pending.stage = Stage::Writing;
-                vec![self.dialogs().open(pending)]
+                vec![self.put(pending)]
             }
             dialog::Outcome::Answer(answer) => {
                 let question = Ref::Text(pending.questions[0].clone());
@@ -508,11 +592,11 @@ impl Server {
                     Ok(_) => {
                         let mut reply = pending.recorded;
                         reply["answers"] = json!([{"id": reply["items"][0]["id"], "answer": answer}]);
-                        self.tool_reply(pending.call, reply.to_string(), false)
+                        self.tool_reply(pending.call, reply.to_string(), false, pending.modern)
                     }
                     Err(error) => {
                         let text = format!("{}: {} The user's answer in the dialog: {answer}", error.code, error.message);
-                        self.tool_reply(pending.call, text, true)
+                        self.tool_reply(pending.call, text, true, pending.modern)
                     }
                 }]
             }
@@ -520,22 +604,59 @@ impl Server {
                 self.left_open(pending.questions.iter().map(String::as_str));
                 let mut reply = pending.recorded;
                 reply["unanswered"] = json!(format!("{why}; {OPEN}"));
-                vec![self.tool_reply(pending.call, reply.to_string(), false)]
+                vec![self.tool_reply(pending.call, reply.to_string(), false, pending.modern)]
             }
         }
     }
 
-    /// The client gave up on a call: if it was ask's, its dialog or menu is
-    /// closed too, and the questions stay open on the board.
+    /// The client gave up on a request: a `subscriptions/listen` stream,
+    /// which ends without another word, or ask's call, whose dialog or menu
+    /// is closed too, and whose questions stay open on the board.
     fn cancelled(&self, params: &Value) -> Vec<Value> {
         let Some(call) = params.get("requestId") else { return Vec::new() };
+        let mut listening = self.listening.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = listening.iter().position(|id| id == call) {
+            listening.remove(at);
+            return Vec::new();
+        }
+        drop(listening);
         let Some((id, pending)) = self.dialogs().take_call(call) else { return Vec::new() };
         self.left_open(pending.questions.iter().map(String::as_str));
         if let Some(window) = pending.window {
             window.close();
             return Vec::new();
         }
+        // A 2026-07-28 dialog is a result the client already has: no request of ours is open.
+        if pending.modern {
+            return Vec::new();
+        }
         vec![json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id, "reason": "The call it was for was cancelled"}})]
+    }
+
+    /// `subscriptions/listen`, 2026-07-28's way to hear of changes:
+    /// acknowledged with what this server honors of what the client asked --
+    /// the resource list's changes, on the resources server; nothing else
+    /// changes here -- then held open, every notification on it tagged with
+    /// its id, until the client cancels it.
+    fn listen(&self, id: Value, params: &Value) -> Vec<Value> {
+        let asked = params.get("notifications").and_then(|n| n.get("resourcesListChanged")) == Some(&json!(true));
+        let honored = if asked && self.mode == Mode::Resources {
+            // Changes from now on are news, whether or not the list was read yet.
+            let mut listed = self.listed.lock().unwrap_or_else(PoisonError::into_inner);
+            if listed.is_none() {
+                *listed = self.open().ok().and_then(|(ekko, _)| Some((ekko.storage.get_counters().ok()?.revision, resource_list(&ekko).ok()?)));
+            }
+            drop(listed);
+            self.listening.lock().unwrap_or_else(PoisonError::into_inner).push(id.clone());
+            json!({"resourcesListChanged": true})
+        } else {
+            json!({})
+        };
+        vec![json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {"_meta": {"io.modelcontextprotocol/subscriptionId": id}, "notifications": honored},
+        })]
     }
 
     /// The replies to ask's calls whose questions in ekko's menu are settled:
@@ -565,7 +686,7 @@ impl Server {
                     None => continue,
                 }
             };
-            let Some(pending) = self.dialogs().take(&json!(id)) else { continue };
+            let Some(pending) = self.dialogs().pending.remove(&id) else { continue };
             if let Some(window) = pending.window {
                 window.close();
             }
@@ -582,7 +703,7 @@ impl Server {
                 let why = why.unwrap_or_else(|| "the menu closed".to_string());
                 reply["unanswered"] = json!(format!("{why}; {OPEN}"));
             }
-            replies.push(self.tool_reply(pending.call, reply.to_string(), false));
+            replies.push(self.tool_reply(pending.call, reply.to_string(), false, pending.modern));
         }
         replies
     }
@@ -598,9 +719,11 @@ impl Server {
             .collect()
     }
 
-    /// A tool's answer as a reply to call `id`.
-    fn tool_reply(&self, id: Value, text: String, failed: bool) -> Value {
-        json!({"jsonrpc": "2.0", "id": id, "result": self.tool_result(text, failed)})
+    /// A tool's answer as a reply to call `id`: a complete result, if the
+    /// call was a 2026-07-28 request.
+    fn tool_reply(&self, id: Value, text: String, failed: bool, modern: bool) -> Value {
+        let result = self.tool_result(text, failed);
+        json!({"jsonrpc": "2.0", "id": id, "result": if modern { complete("tools/call", result) } else { result }})
     }
 
     fn tool_result(&self, text: String, failed: bool) -> Value {
@@ -640,26 +763,13 @@ impl Server {
         }
     }
 
-    fn handle(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
-        let meta = params.get("_meta");
-        let version = meta.and_then(|m| m.get("io.modelcontextprotocol/protocolVersion")).and_then(Value::as_str);
-        if let Some(requested) = version {
-            if !MODERN.contains(&requested) {
-                return Err(RpcError {
-                    code: -32022,
-                    message: "Unsupported protocol version".to_string(),
-                    data: Some(json!({"supported": supported(), "requested": requested})),
-                });
-            }
-            if meta.and_then(|m| m.get("io.modelcontextprotocol/clientCapabilities")).is_none() {
-                return Err(RpcError::new(-32602, "Invalid params: _meta lacks io.modelcontextprotocol/clientCapabilities"));
-            }
-        }
-
+    fn handle(&self, method: &str, params: &Value, modern: bool) -> Result<Value, RpcError> {
         let board = self.mode == Mode::Board;
         let result = match method {
             "initialize" => return Ok(self.initialize(params)),
-            "ping" => json!({}),
+            "server/discover" if modern => self.discover(),
+            // 2026-07-28 dropped ping.
+            "ping" if !modern => json!({}),
             "tools/list" if board => json!({"tools": tool_definitions()}),
             "tools/call" if board => self.call(params)?,
             "prompts/list" if board => json!({"prompts": prompt_definitions()}),
@@ -668,13 +778,22 @@ impl Server {
             // None: Claude Code offers a template in its @ menu, and a URI
             // typed from it is never read -- only a listed one is.
             "resources/templates/list" if !board => json!({"resourceTemplates": []}),
-            "resources/read" if !board => self.read(params, version.is_some())?,
+            "resources/read" if !board => self.read(params, modern)?,
             _ => return Err(RpcError::new(-32601, format!("Method not found: {method}"))),
         };
-        Ok(if version.is_some() { complete(method, result) } else { result })
+        Ok(if modern { complete(method, result) } else { result })
+    }
+
+    /// server/discover: the versions served per request, with what
+    /// `initialize` offers under the handshake.
+    fn discover(&self) -> Value {
+        let mut reply = json!({"supportedVersions": MODERN});
+        reply.as_object_mut().expect("an object").extend(self.offer());
+        reply
     }
 
     fn initialize(&self, params: &Value) -> Value {
+        self.handshake.store(true, Ordering::Relaxed);
         self.dialogs().form = params.get("capabilities").is_some_and(dialog::shows_forms);
         let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
         let version = LEGACY.iter().find(|v| **v == requested).copied().unwrap_or(LEGACY[0]);
@@ -889,15 +1008,6 @@ impl Server {
                 let spec: ops::Link = parse(args)?;
                 write(&ekko, false, |draft| draft.link(&spec))
             }
-            "ask" => {
-                // Here only for a stateless request, whose reply cannot wait for
-                // the user: see puts_to_user.
-                let spec: ops::Ask = parse(args)?;
-                let mut recorded = record(&ekko, &spec)?;
-                self.left_open(recorded["items"].as_array().into_iter().flatten().filter_map(|item| item["uid"].as_str()));
-                recorded["unanswered"] = json!(format!("a stateless request cannot wait for the user; {OPEN}"));
-                Ok(recorded.to_string())
-            }
             "answer" => {
                 let spec: ops::Reply = parse(args)?;
                 write(&ekko, false, |draft| draft.answer(&spec.question, &spec.text).map(|id| vec![id]))
@@ -940,7 +1050,7 @@ impl Server {
                     if name == "stash" { ekko.set_stashed(&items, away)? } else { ekko.set_trashed(&items, away)? };
                 Ok(render(&self.home, &outcome))
             }
-            _ => unreachable!("tool names are checked against TOOLS"),
+            _ => unreachable!("tool names are checked against TOOLS, and ask's calls take their own way (puts_to_user)"),
         }
     }
 }
@@ -1311,8 +1421,26 @@ fn render(home: &std::path::Path, outcome: &Outcome) -> String {
     String::from_utf8_lossy(&buffer).trim_start_matches('\n').to_string()
 }
 
-fn supported() -> Vec<&'static str> {
-    MODERN.iter().chain(LEGACY).copied().collect()
+/// Whether a request is of the 2026-07-28 revision, served statelessly: its
+/// `_meta` names the version, which has to be one served per request, with
+/// the client's capabilities beside it. A request without is the handshake's.
+fn era(params: &Value) -> Result<bool, RpcError> {
+    let meta = params.get("_meta");
+    let Some(requested) = meta.and_then(|m| m.get("io.modelcontextprotocol/protocolVersion")).and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    if !MODERN.contains(&requested) {
+        // The versions to retry with, per request: the handshake's are not.
+        return Err(RpcError {
+            code: -32022,
+            message: "Unsupported protocol version".to_string(),
+            data: Some(json!({"supported": MODERN, "requested": requested})),
+        });
+    }
+    if meta.and_then(|m| m.get("io.modelcontextprotocol/clientCapabilities")).is_none() {
+        return Err(RpcError::new(-32602, "Invalid params: _meta lacks io.modelcontextprotocol/clientCapabilities"));
+    }
+    Ok(true)
 }
 
 /// The resource list `resources/list` answers with, in the order a person
@@ -1333,14 +1461,17 @@ fn server_info() -> Value {
     json!({"name": "ekko", "version": env!("CARGO_PKG_VERSION")})
 }
 
-/// The methods served whose results are a CacheableResult in the 2026-07-28
-/// schema, the sixth being `server/discover`: they carry ttlMs and cacheScope,
-/// and Claude Code drops a whole list that lacks them (task 705).
-const CACHEABLE: &[&str] = &["tools/list", "prompts/list", "resources/list", "resources/templates/list", "resources/read"];
+/// The methods whose results are a CacheableResult in the 2026-07-28 schema:
+/// they carry ttlMs and cacheScope, and Claude Code drops a whole list that
+/// lacks them (task 705).
+const CACHEABLE: &[&str] = &["server/discover", "tools/list", "prompts/list", "resources/list", "resources/templates/list", "resources/read"];
 
+/// A result as 2026-07-28 wants it: its type -- complete, unless it says
+/// otherwise -- and the server's identity, with the caching fields where the
+/// method's type requires them.
 fn complete(method: &str, mut result: Value) -> Value {
     if let Value::Object(map) = &mut result {
-        map.insert("resultType".to_string(), json!("complete"));
+        map.entry("resultType").or_insert_with(|| json!("complete"));
         map.insert("_meta".to_string(), json!({"io.modelcontextprotocol/serverInfo": server_info()}));
         if CACHEABLE.contains(&method) {
             // Stale at once and never shared, the official SDKs' default: the
