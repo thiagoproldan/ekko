@@ -36,7 +36,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import harness  # noqa: E402
-from harness import OUT, POINT, PROFILE, REPO, ROOT, TASKS, git, log, units  # noqa: E402
+from harness import OUT, POINTS, REPO, ROOT, TASKS, git, log, units  # noqa: E402
 
 JUDGE = os.path.join(OUT, "judge")
 HIDDEN_OUT = os.path.join(OUT, "hidden")
@@ -77,13 +77,20 @@ def board_home():
     return home
 
 
-def ekko_env(home):
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("EKKO", "CLAUDE"))}
-    env.update(HOME=home, EKKO_DIR=home)
+def ekko_env(home, folder=None, profile=None):
+    """ekko's environment on the board at `home` or, given `folder`, on the
+    project found from there, as Claude Code starts a session in a project's
+    folder. `profile` names the Claude Code profile a session runs under."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("EKKO", "CLAUDE", "GIT_"))}
+    env.update(HOME=home, EKKO_TERMINAL="none", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+    if not folder:
+        env["EKKO_DIR"] = home
+    if profile:
+        env["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude-" + profile)
     return env
 
 
-def mcp(binary, home, calls):
+def mcp(binary, home, calls, folder=None, profile=None):
     """Each call's reply over `ekko --mcp`, spoken to as tests/mcp.rs speaks to
     it: every line in, stdin closed, the replies read back by id. A reply is
     its text, or the error it carried."""
@@ -92,7 +99,7 @@ def mcp(binary, home, calls):
              json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})]
     for index, (tool, arguments) in enumerate(calls, 1):
         lines.append(json.dumps({"jsonrpc": "2.0", "id": index, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}))
-    out = subprocess.run([binary, "--mcp"], input="\n".join(lines) + "\n", env=ekko_env(home), cwd=home,
+    out = subprocess.run([binary, "--mcp"], input="\n".join(lines) + "\n", env=ekko_env(home, folder, profile), cwd=folder or home,
                          capture_output=True, text=True, timeout=120).stdout
     replies = {}
     for raw in out.splitlines():
@@ -107,8 +114,9 @@ def mcp(binary, home, calls):
     return [replies.get(index, "") for index in range(1, len(calls) + 1)]
 
 
-def cli(binary, home, *args):
-    done = subprocess.run([binary, *args], env=ekko_env(home), cwd=home, capture_output=True, text=True, timeout=60)
+def cli(binary, home, *args, folder=None):
+    done = subprocess.run([binary, *args], env=ekko_env(home, folder), cwd=folder or home, capture_output=True, text=True,
+                          timeout=60)
     return ANSI.sub("", done.stdout + done.stderr)
 
 
@@ -172,7 +180,69 @@ def hidden_394(binary):
     ]
 
 
-HIDDEN = {"397": hidden_397, "394": hidden_394}
+def hidden_396(binary):
+    """Tasks 125 and 396, done as one. 125's text fixes that an item says who
+    wrote it; 396's, that a commit names its task with the trailer
+    'Ekko: <id>' and the board reads where the task landed off git, a rebase
+    included. by:NAME was a choice, question 504's recommended option, which
+    the runs had to make alone. The boards are the reference's own tests'
+    (bccf056): a session under a profile of its own, the person at the
+    terminal, and a git repository the project lives in."""
+    home = board_home()
+    cli(binary, home, "--task", "written at the terminal")
+    replies = mcp(binary, home, [
+        ("create", {"text": "written by a session"}),
+        ("context", {"item": 2}),
+        ("search", {"filters": ["by:hiddenprof"]}),
+    ], profile="hiddenprof")
+    by_user = cli(binary, home, "--list", "by:user")
+    shutil.rmtree(home, ignore_errors=True)
+    found = [
+        ("context names the session that wrote an item", "hiddenprof" in replies[1], replies[1]),
+        ("search's by:PROFILE finds what a session wrote", listed(replies[2]) == {2}, replies[2]),
+        ("--list by:user finds what the person wrote", listed(by_user) == {1}, by_user),
+    ]
+
+    home = board_home()
+    repo = os.path.join(home, "repo")
+    os.makedirs(repo)
+
+    def git_in(*args, env=None):
+        return subprocess.run(["git", "-c", "user.name=ekko", "-c", "user.email=ekko@example.com", "-c", "commit.gpgsign=false",
+                               "-c", "init.defaultBranch=main", *args], cwd=repo, env={**ekko_env(home, repo), **(env or {})},
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(message):
+        git_in("commit", "-q", "--allow-empty", "-m", message)
+        return git_in("rev-parse", "HEAD")
+
+    git_in("init", "-q")
+    cli(binary, home, "init", folder=repo)
+    mcp(binary, home, [("create", {"text": "ship it"}), ("create", {"text": "and this"})], folder=repo, profile="hiddenprof")
+    # After the items: a read may skip commits older than the item.
+    landed = commit("feat: the first half\n\nEkko: 1")
+    other = commit("chore: another task's\n\nEkko: 12")
+    before = commit("fix: the second half\n\nEkko: 2")
+    # A rebase in small: the message kept, the sha changed.
+    later = f"{int(datetime.datetime.now().timestamp()) + 60} +0000"
+    git_in("commit", "-q", "--amend", "--allow-empty", "--no-edit", env={"GIT_COMMITTER_DATE": later})
+    rebased = git_in("rev-parse", "HEAD")
+    one, two = mcp(binary, home, [("context", {"item": 1}), ("context", {"item": 2})], folder=repo, profile="hiddenprof")
+    terminal = cli(binary, home, "--context", "1", folder=repo)
+    shutil.rmtree(home, ignore_errors=True)
+
+    def names(text, sha):
+        return re.search(rf"\b{sha[:7]}", text) is not None
+
+    return found + [
+        ("context lists the commit whose trailer is 'Ekko: 1'", names(one, landed), one),
+        ("a trailer naming 12 is not listed on 1", not names(one, other), one),
+        ("a rebased commit is listed by its new sha", rebased != before and names(two, rebased) and not names(two, before), two),
+        ("the terminal's --context lists the commit too", names(terminal, landed), terminal),
+    ]
+
+
+HIDDEN = {"397": hidden_397, "394": hidden_394, "396": hidden_396}
 
 
 def validate(task):
@@ -222,11 +292,16 @@ def checks(run_id):
     hidden = HIDDEN.get(record["task"])
     found["hidden"] = [{"name": name, "ok": ok, "reply": reply[:600]} for name, ok, reply in hidden(binary)] if hidden and os.path.exists(binary) else []
     found["clippy"] = cargo(repo, "clippy", "--locked", "--all-targets", "--", "-D", "warnings").returncode == 0
+    # The flake's build runs the tests in Nix's sandbox, as CI does: a test
+    # that needs git finds none there unless the flake gives it, which
+    # cargo test in the devshell never shows (396/cmax/1, 2026-09-26).
+    found["nix"] = subprocess.run(["nix", "build", ".#default", "--no-link"], cwd=repo, capture_output=True, text=True,
+                                  timeout=3600, stdin=subprocess.DEVNULL).returncode == 0
     with open(os.path.join(OUT, "runs", run_id, "checks.json"), "w") as handle:
         json.dump(found, handle, indent=2)
     passed = sum(1 for check in found["hidden"] if check["ok"])
     log(f"{run_id}: tests {'ok' if found['tests']['ok'] else 'FAILED'} ({found['tests']['passed']} passed, {found['tests']['failed']} failed), "
-        f"hidden {passed}/{len(found['hidden'])}, clippy {'ok' if found['clippy'] else 'FAILED'}")
+        f"hidden {passed}/{len(found['hidden'])}, clippy {'ok' if found['clippy'] else 'FAILED'}, nix build {'ok' if found['nix'] else 'FAILED'}")
     return found
 
 
@@ -280,7 +355,7 @@ def claude(prompt, effort, stream_path):
     binary = re.findall(r'exec -a "\$0" "([^"]+)"', wrapper)[-1]
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
     env.update(dict(re.findall(r"(?m)^export (\w+)=(\S+)$", wrapper)))
-    env.update(CLAUDE_CONFIG_DIR=PROFILE, CTX_DISABLE="1")
+    env.update(**harness.PROFILE_ENV, CTX_DISABLE="1")
     folder = tempfile.mkdtemp(prefix="ekko-paired-judge-")
     command = [binary, "-p", "--output-format", "stream-json", "--verbose", "--effort", effort, "--model", MODEL,
                "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--system-prompt", SYSTEM,
@@ -351,7 +426,8 @@ def judge(task):
                          "answers": {labels[label]: scores for label, scores in (found.get("answers") or {}).items() if label in labels}})
         log(f"judge {task} #{turn}: {' '.join(f'{label}={name}' for label, name in labels.items())} -> prefers {verdicts[-1]['prefer']} ({found.get('margin')})")
     with open(os.path.join(JUDGE, f"{task}.json"), "w") as handle:
-        json.dump({"task": task, "checklist": checklist, "verdicts": verdicts, "units": round(spent)}, handle, indent=2)
+        json.dump({"task": task, "account": harness.ACCOUNT, "checklist": checklist, "verdicts": verdicts, "units": round(spent)}, handle,
+                  indent=2)
 
 
 # ---- the report -----------------------------------------------------------------
@@ -429,6 +505,23 @@ def measure(record):
     return segments, sub_units, sub_calls, versions
 
 
+def billed(record):
+    """A run's cost as each session's own tally has it -- modelUsage and
+    total_cost_usd in its result -- which also counts the calls its transcript
+    leaves out: a compaction's summary (~63k units each in 396/bmax/1) and
+    helper models. In units and dollars."""
+    total = dollars = 0.0
+    for index in range(len(record["sessions"])):
+        for stream in glob.glob(os.path.join(OUT, "runs", record["run"], f"{index}-*.stream.jsonl")):
+            result = harness.result_of(stream)
+            dollars += result.get("total_cost_usd") or 0
+            for usage in (result.get("modelUsage") or {}).values():
+                total += units({"input_tokens": usage.get("inputTokens"), "output_tokens": usage.get("outputTokens"),
+                                "cache_read_input_tokens": usage.get("cacheReadInputTokens"),
+                                "cache_creation_input_tokens": usage.get("cacheCreationInputTokens")})
+    return total, dollars
+
+
 def reset_cost(segment, earlier):
     """R, as note 407 reads it: how far the context rose, over how many calls
     and units, from a segment's start to its first edit or commit; and x, the
@@ -474,8 +567,8 @@ def report():
                 segment["handoff"] = (len(handoff), sum(call.units for call in handoff))
 
     lines += ["## Runs", "",
-              "| run | status | sessions | calls | subagent calls | units | points | minutes | peak context | tests | clippy | hidden new | hidden guard |",
-              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+              "| run | status | account | sessions | calls | subagent calls | units | billed units | billed $ | points | minutes | peak context | tests | clippy | nix build | hidden new | hidden guard |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     hidden_kinds = {}
     for task in {record["task"] for record in runs}:
         path = os.path.join(HIDDEN_OUT, f"{task}.json")
@@ -492,14 +585,21 @@ def report():
             return f"{sum(picked)}/{len(picked)}" if picked else "-"
 
         tests = "-" if not found else ("ok" if found["tests"]["ok"] else f"FAILED {found['tests']['failed']}") + f" ({found['tests']['passed']})"
-        lines.append(f"| {record['run']} | {record['status']} | {len(record['sessions'])} | {record['calls']} | {sub_calls} | {m(record['units'])} | "
-                     f"{record['units'] / POINT:.0f} | {sum(s['seconds'] for s in record['sessions']) / 60:.0f} | "
+        # Runs from before the record named its account went on trabalho.
+        account = record.get("account", "trabalho")
+        cost, dollars = billed(record)
+        lines.append(f"| {record['run']} | {record['status']} | {account} | {len(record['sessions'])} | {record['calls']} | {sub_calls} | "
+                     f"{m(record['units'])} | {m(cost)} | {dollars:.2f} | {cost / POINTS[account]:.0f} | "
+                     f"{sum(s['seconds'] for s in record['sessions']) / 60:.0f} | "
                      f"{max((c.ctx for seg in segments for c in seg['calls']), default=0) // 1000}k | {tests} | "
                      f"{'-' if not found else 'ok' if found['clippy'] else 'FAILED'} | "
+                     f"{'-' if not found or 'nix' not in found else 'ok' if found['nix'] else 'FAILED'} | "
                      f"{hidden('new')} | {hidden('guard')} |")
     versions = sorted(set().union(*(measured[record["run"]][3] for record in runs))) if runs else []
     lines += ["", f"Claude Code versions in the runs: {', '.join(versions) or '-'}. "
-              f"Points are of the trabalho account's 5-hour window, at {POINT // 1000}k units a point.", ""]
+              "Units are the transcripts' calls; billed units and dollars are each session's own tally, which also counts "
+              "a compaction's summary call and helper models. Points are of billed units, in the 5-hour window of the account each run went on, at "
+              + ", ".join(f"{point // 1000}k units a point on {name}" for name, point in POINTS.items()) + ".", ""]
 
     lines += ["## 526: high against max, per task", "",
               "| task | max units | high units | high / max | max calls | high calls | max resets | high resets | the original session |",
@@ -558,10 +658,12 @@ def report():
     judged = sorted(glob.glob(os.path.join(JUDGE, "*.json")))
     if judged:
         lines += ["## The judge", "", "| task | run | correctness | completeness | scope | fit | checklist met | preferred |", "|---|---|---|---|---|---|---|---|"]
-        spent = 0
+        spent = points = 0
         for path in judged:
             found = json.load(open(path))
             spent += found["units"]
+            # Verdicts from before the record named its account came from trabalho.
+            points += found["units"] / POINTS[found.get("account", "trabalho")]
             names = sorted({name for v in found["verdicts"] for name in v["labels"].values()})
             for name in names:
                 scores = [v["answers"].get(name) or {} for v in found["verdicts"]]
@@ -573,7 +675,7 @@ def report():
                              f"{len(wins)} of {len(found['verdicts'])}{' (' + ', '.join(wins) + ')' if wins else ''} |")
             for v in found["verdicts"]:
                 lines.append(f"| {found['task']} | order {' '.join(f'{k}={n}' for k, n in v['labels'].items())} | | | | | | {v['prefer']}: {v['why']} |")
-        lines += ["", f"The judge's calls: {m(spent)} ({spent / POINT:.0f} points).", ""]
+        lines += ["", f"The judge's calls: {m(spent)} ({points:.0f} points, each on the account that paid for it).", ""]
 
     text = "\n".join(lines)
     with open(os.path.join(OUT, "report.md"), "w") as handle:
@@ -583,12 +685,14 @@ def report():
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--account", choices=sorted(POINTS), default=harness.ACCOUNT, help="who pays for the judge")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("validate", "judge"):
         sub.add_parser(name).add_argument("tasks", nargs="*")
     sub.add_parser("checks").add_argument("runs", nargs="*")
     sub.add_parser("report")
     args = parser.parse_args()
+    harness.use_account(args.account)
     if args.command == "validate":
         for task in args.tasks or sorted(HIDDEN):
             validate(task)

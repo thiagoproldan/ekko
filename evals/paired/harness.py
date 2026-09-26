@@ -11,8 +11,8 @@ headless, one cell at a time, and priced off their transcripts.
 A run gets a repo holding only the history up to its task's parent commit (no
 remote, and no later commit to find), the board as it stood when the user
 asked for the task, and scratch state for ekko's registry and for ctx. It logs
-in with the trabalho profile, through the same `claude` wrapper and plugins
-as a session of the user's, so today's ekko and ctx serve every cell alike.
+in with ACCOUNT's profile, through the same `claude` wrapper and plugins as a
+session of the user's, so today's ekko and ctx serve every cell alike.
 Its transcripts, main thread and subagents, are copied into
 target/evals/paired/ as soon as each session ends: they outlive the profile.
 
@@ -44,7 +44,10 @@ sys.path.insert(0, os.path.join(HERE, "..", "claude-code"))
 from transcripts import W_CR, W_CW1H, W_CW5M, W_IN, W_OUT  # noqa: E402
 
 HOME = os.path.expanduser("~")
-PROFILE = os.path.join(HOME, ".claude-trabalho")
+# The account that pays, `--account`: the pilot's short runs went on trabalho,
+# 259's long runs on default (decisions 741 and 744). PROFILE, PROFILE_ENV and
+# POINT follow it (use_account).
+ACCOUNT = "default"
 # The run repos: big once built, outside ~/Projetos, and a folder name the
 # transcript studies skip (evals/claude-code/transcripts.py, SKIP).
 ROOT = os.path.join(HOME, ".cache", "ekko-paired")
@@ -60,13 +63,15 @@ T = 160_000
 # from 67k (and from 78-79k when one file read crossed the line). So bmax's W
 # for compaction at T:
 WINDOW = T + 33_000
-# Units a point of the trabalho account's 5-hour window: 1.85M units took it from
-# 67% to 91% on 2026-09-24 (note 444's 175k is the default account's).
-POINT = 77_000
+# Units a point of each account's 5-hour window. Default: 3.95M units took it
+# from 1% to 64% on 2026-09-26 (00:57-01:43), not note 444's 175k; trabalho:
+# 1.85M units took it from 67% to 91% on 2026-09-24.
+POINTS = {"default": 63_000, "trabalho": 77_000}
 # The headless stream reports the account's windows (rate_limit_event): a run
 # starts only if the 5-hour window can take it whole (its expected points on top
 # stay under FIVE_HOUR), and the pilot stops at SEVEN_DAY of the week, so that
-# the user's own days keep their quota.
+# the user's own days keep their quota; `pilot --week` moves it, at the user's
+# word. A run in progress is stopped at week_stop(), short of the limit itself.
 FIVE_HOUR, SEVEN_DAY = 0.95, 0.70
 SEGMENTS = 8  # sessions a run may take before it is stopped
 AFTER_HANDOFF = 180  # seconds a session may go on once its handoff is written
@@ -213,6 +218,11 @@ def settings(run_dir, trigger):
     found = re.search(r"--settings (\S+)", wrapper)
     base = json.load(open(found.group(1))) if found else {}
     base.pop("statusLine", None)
+    # Default's settings.json turns auto-compact off, and Claude Code 2.1.283
+    # reads autoCompactEnabled by the settings' precedence, where these
+    # outrank the user's: without this, bmax's --autocompact would never
+    # compact there. Every cell alike, as on trabalho, where it is on.
+    base["autoCompactEnabled"] = True
     permissions = base.setdefault("permissions", {})
     permissions["deny"] = list(dict.fromkeys(permissions.get("deny", []) + DENY))
     if trigger:
@@ -234,7 +244,7 @@ def child_env(run_dir, trigger):
     env.pop("EKKO_DIR", None)
     env.pop("EKKO_PROJECT", None)
     env.update(
-        CLAUDE_CONFIG_DIR=PROFILE,
+        **PROFILE_ENV,
         CTX_STATE=os.path.join(run_dir, "ctx-state"),
         CTX_WORKER_HOME=CTX_WORKER_HOME,
         CTX_HANDOFF_TOKENS="1000000000",  # the harness drives the resets
@@ -406,6 +416,24 @@ def windows(lines):
     return found
 
 
+def use_account(name):
+    """Log in with `name`'s profile from now on, and price runs by its point.
+    Default's profile is ~/.claude with its global config in ~/.claude.json,
+    which Claude Code reads only while CLAUDE_CONFIG_DIR is unset: set to
+    ~/.claude it looks for ~/.claude/.claude.json instead."""
+    global ACCOUNT, PROFILE, PROFILE_ENV, POINT
+    ACCOUNT, POINT = name, POINTS[name]
+    PROFILE = os.path.join(HOME, ".claude" if name == "default" else ".claude-" + name)
+    PROFILE_ENV = {} if name == "default" else {"CLAUDE_CONFIG_DIR": PROFILE}
+
+
+use_account(ACCOUNT)
+
+
+def week_stop():
+    return min(SEVEN_DAY + 0.1, 0.99)
+
+
 def ping():
     """The account's windows now, for the price of one tiny call."""
     folder = os.path.join(ROOT, "ping")
@@ -455,9 +483,11 @@ def run(name, cell, rep, window=None, prompt=None, cap=None, effort=None, extra_
     os.makedirs(out_dir)
     log(f"{run_id}: preparing")
     repo, parent, count, newer = prepare(name, run_dir, build)
-    record = {"run": run_id, "task": name, "cell": cell, "rep": rep, "effort": spec["effort"], "T": T if spec["trigger"] else None,
+    record = {"run": run_id, "task": name, "cell": cell, "rep": rep, "account": ACCOUNT, "effort": spec["effort"],
+              "T": T if spec["trigger"] else None,
               "window": window if spec.get("compact") else None, "parent": parent, "reference": commit, "board_items": count,
-              "board_text_maybe_newer": newer, "sessions": [], "started": now().isoformat(timespec="seconds")}
+              "board_text_maybe_newer": newer, "sessions": [], "started": now().isoformat(timespec="seconds"),
+              "guards": {"five_hour": FIVE_HOUR, "week": SEVEN_DAY, "week_stop": week_stop(), "cap": cap}}
     settings_path, env = settings(run_dir, spec["trigger"]), child_env(run_dir, spec["trigger"])
     env.update(extra_env or {})
     text, status = prompt, "done"
@@ -484,7 +514,7 @@ def run(name, cell, rep, window=None, prompt=None, cap=None, effort=None, extra_
                     break
                 with open(stream, errors="replace") as handle:
                     week = windows(handle).get("seven_day", (0, 0))[0]
-                if week >= SEVEN_DAY + 0.1:
+                if week >= week_stop():
                     status = "week"
                     stop(proc)
                     break
@@ -566,6 +596,8 @@ def probe(parts="cb"):
 
 
 def pilot(dry_run, anytime, window, long=False):
+    log(f"account {ACCOUNT} at {POINT // 1000}k units a point; a run starts while the week is under {SEVEN_DAY:.0%} "
+        f"and its expected points fit under {FIVE_HOUR:.0%} of the 5-hour window, and stops at {week_stop():.0%} of the week")
     rng = random.Random(549)
     queue = []
     for name, cells in LONG if long else PILOT:
@@ -599,7 +631,7 @@ def pilot(dry_run, anytime, window, long=False):
         record = run(name, cell, rep, window=window)
         spent_units += record["units"]
         if record["status"] == "week":
-            log(f"stopped mid-run: the week passed {SEVEN_DAY + 0.1:.0%}, {len(queue)} runs left")
+            log(f"stopped mid-run: the week passed {week_stop():.0%}, {len(queue)} runs left")
             break
         if record["status"] == "limit":
             tries[(name, cell, rep)] = tries.get((name, cell, rep), 0) + 1
@@ -616,7 +648,9 @@ def pilot(dry_run, anytime, window, long=False):
 
 
 def main():
+    global SEVEN_DAY
     parser = argparse.ArgumentParser()
+    parser.add_argument("--account", choices=sorted(POINTS), default=ACCOUNT)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("trigger")
     check = sub.add_parser("probe")
@@ -626,12 +660,16 @@ def main():
     one.add_argument("cell", choices=sorted(CELLS))
     one.add_argument("--rep", type=int, default=1)
     one.add_argument("--window", type=int)
+    one.add_argument("--week", type=float, help=f"the week's share at which a run in progress stops is this plus 0.1, at most 0.99 (default {SEVEN_DAY})")
     many = sub.add_parser("pilot")
     many.add_argument("--dry-run", action="store_true")
     many.add_argument("--anytime", action="store_true")
     many.add_argument("--window", type=int)
     many.add_argument("--long", action="store_true")
+    many.add_argument("--week", type=float, help=f"the week's share under which a run may start (default {SEVEN_DAY})")
     args = parser.parse_args()
+    use_account(args.account)
+    SEVEN_DAY = getattr(args, "week", None) or SEVEN_DAY
     if args.command == "trigger":
         trigger()
     elif args.command == "probe":
