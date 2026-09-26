@@ -224,7 +224,7 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 
 ### The MCP server
 
-`ekko --mcp` serves the board over the [Model Context Protocol](https://modelcontextprotocol.io) on stdin and stdout, until stdin closes. It speaks the 2026-07-28 revision (per-request `_meta`, `server/discover`) and the handshake revisions before it (`initialize`, back to 2024-11-05).
+`ekko --mcp` serves the board over the [Model Context Protocol](https://modelcontextprotocol.io) on stdin and stdout, until stdin closes. It speaks the handshake revisions (`initialize`, 2025-11-25 back to 2024-11-05), and answers a request of the 2026-07-28 revision, whose `_meta` names it, statelessly. It leaves `server/discover` unanswered, so a client that probes with it, as Claude Code does, takes the handshake: there `ask` waits for your answer in ekko's menu, while on a stateless request it only records the questions.
 
 | tool | what it does |
 |---|---|

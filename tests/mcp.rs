@@ -248,14 +248,12 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
         ],
     );
 
-    let discover = &replies["1"]["result"];
-    assert_eq!(discover["resultType"], "complete");
-    assert_eq!(discover["supportedVersions"][0], "2026-07-28");
-    assert!(discover["supportedVersions"].as_array().unwrap().contains(&json!("2025-11-25")));
-    assert_eq!(discover["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "ekko");
-    assert_eq!(discover["capabilities"], json!({"tools": {}, "prompts": {}}));
+    // Unanswered, as by a server older than 2026-07-28: a client that probes
+    // with it takes the handshake, where ask can wait for the user (task 705).
+    assert_eq!(replies["1"]["error"]["code"], -32601, "{}", replies["1"]);
 
     assert_eq!(replies["2"]["result"]["resultType"], "complete");
+    assert_eq!(replies["2"]["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "ekko");
     assert_eq!(text(&replies["2"]), "Nothing is in progress or ready.\n");
 
     assert_eq!(replies["3"]["error"]["code"], -32022);
@@ -264,6 +262,72 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
     assert_eq!(replies["5"]["error"]["code"], -32601);
     assert_eq!(replies["6"]["error"]["code"], -32602);
     assert_eq!(replies["null"]["error"]["code"], -32700);
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// Every result a 2026-07-28 client gets holds the fields that revision's
+/// schema requires of its type (schema/2026-07-28/schema.json in
+/// modelcontextprotocol/modelcontextprotocol): resultType on each, and on the
+/// ones that are a CacheableResult -- the lists and resources/read -- ttlMs, a
+/// number of at least 0, and cacheScope, public or private. Claude Code drops
+/// a whole list over one missing field, which left sessions with none of
+/// ekko's tools (task 705), so each method either server answers is
+/// enumerated here; server/discover, the last CacheableResult, is answered by
+/// neither.
+#[test]
+fn every_2026_07_28_result_holds_the_fields_its_type_requires() {
+    let home = temp_home();
+    let written = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        .args(["--task", "port", "the", "parser"])
+        .env("HOME", &home)
+        .env("EKKO_DIR", &home)
+        .env_remove("EKKO_PROJECT")
+        .output()
+        .unwrap();
+    assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stderr));
+
+    let meta = json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}});
+    let modern = |id: usize, method: &str, params: &Value| {
+        let mut params = params.clone();
+        params["_meta"] = meta.clone();
+        request(id as u64, method, params)
+    };
+    let board: &[&str] = &["--mcp"];
+    let resources: &[&str] = &["--mcp", "--resources"];
+    // The server, the method, its params, and what its result type requires beside resultType.
+    let methods: [(&[&str], &str, Value, &[&str]); 7] = [
+        (board, "tools/list", json!({}), &["tools", "ttlMs", "cacheScope"]),
+        (board, "prompts/list", json!({}), &["prompts", "ttlMs", "cacheScope"]),
+        (board, "tools/call", json!({"name": "prime", "arguments": {}}), &["content"]),
+        (board, "prompts/get", json!({"name": "handoff", "arguments": {"task": "1"}}), &["messages"]),
+        (resources, "resources/list", json!({}), &["resources", "ttlMs", "cacheScope"]),
+        (resources, "resources/templates/list", json!({}), &["resourceTemplates", "ttlMs", "cacheScope"]),
+        (resources, "resources/read", json!({"uri": "prime://board"}), &["contents", "ttlMs", "cacheScope"]),
+    ];
+
+    for server in [board, resources] {
+        let mut live = Live::start(&home, server);
+        for (id, (_, method, params, required)) in methods.iter().filter(|row| row.0 == server).enumerate() {
+            let reply = live.ask(modern(id, method, params));
+            let result = &reply["result"];
+            assert_eq!(result["resultType"], "complete", "{method} on {server:?}: {reply}");
+            for field in *required {
+                assert!(result.get(field).is_some(), "{method} on {server:?} lacks {field}: {reply}");
+            }
+            if required.contains(&"ttlMs") {
+                assert!(result["ttlMs"].as_f64().is_some_and(|ms| ms >= 0.0), "{method}: ttlMs {}", result["ttlMs"]);
+                assert!(matches!(result["cacheScope"].as_str(), Some("public" | "private")), "{method}: cacheScope {}", result["cacheScope"]);
+            }
+        }
+        let discover = live.ask(modern(98, "server/discover", &json!({})));
+        assert_eq!(discover["error"]["code"], -32601, "server/discover on {server:?}: {discover}");
+        if server == resources {
+            let missing = live.ask(modern(99, "resources/read", &json!({"uri": "item://99"})));
+            assert_eq!(missing["error"]["code"], -32602, "2026-07-28 moved resource not found from -32002 to -32602: {missing}");
+        }
+        live.stop();
+    }
 
     fs::remove_dir_all(&home).ok();
 }

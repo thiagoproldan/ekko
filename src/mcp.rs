@@ -10,7 +10,11 @@
 //! time. Dual-era, per the 2026-07-28 revision: a request whose `_meta` names
 //! a protocol version is served statelessly under that revision, and an
 //! `initialize` handshake is served under the legacy revision it negotiates.
-//! Written by hand rather than through an SDK because the whole protocol this
+//! `server/discover` goes unanswered, as by a server older than 2026-07-28,
+//! so a client that probes with it -- Claude Code does since 2026-09-25 --
+//! takes the handshake, where ask can wait for the user's answer in ekko's
+//! menu and the resources server's `list_changed` needs no subscription
+//! (task 705). Written by hand rather than through an SDK because the whole protocol this
 //! server needs is a handful of methods, and the binary stays one file on
 //! disk with no runtime.
 //!
@@ -656,7 +660,6 @@ impl Server {
         let board = self.mode == Mode::Board;
         let result = match method {
             "initialize" => return Ok(self.initialize(params)),
-            "server/discover" => self.discover(),
             "ping" => json!({}),
             "tools/list" if board => json!({"tools": tool_definitions()}),
             "tools/call" if board => self.call(params)?,
@@ -666,10 +669,10 @@ impl Server {
             // None: Claude Code offers a template in its @ menu, and a URI
             // typed from it is never read -- only a listed one is.
             "resources/templates/list" if !board => json!({"resourceTemplates": []}),
-            "resources/read" if !board => self.read(params)?,
+            "resources/read" if !board => self.read(params, version.is_some())?,
             _ => return Err(RpcError::new(-32601, format!("Method not found: {method}"))),
         };
-        Ok(if version.is_some() || method == "server/discover" { complete(result) } else { result })
+        Ok(if version.is_some() { complete(method, result) } else { result })
     }
 
     fn initialize(&self, params: &Value) -> Value {
@@ -677,12 +680,6 @@ impl Server {
         let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
         let version = LEGACY.iter().find(|v| **v == requested).copied().unwrap_or(LEGACY[0]);
         let mut reply = json!({"protocolVersion": version, "serverInfo": server_info()});
-        reply.as_object_mut().expect("an object").extend(self.offer());
-        reply
-    }
-
-    fn discover(&self) -> Value {
-        let mut reply = json!({"supportedVersions": supported()});
         reply.as_object_mut().expect("an object").extend(self.offer());
         reply
     }
@@ -738,20 +735,22 @@ impl Server {
 
     /// A resource's text: `prime://board` reads as the prime tool answers, and
     /// `item://<id>` as context does, concise -- any item, listed or not.
-    fn read(&self, params: &Value) -> Result<Value, RpcError> {
+    /// 2026-07-28 moved resource not found from -32002 to -32602.
+    fn read(&self, params: &Value, modern: bool) -> Result<Value, RpcError> {
         let uri = params
             .get("uri")
             .and_then(Value::as_str)
             .ok_or_else(|| RpcError::new(-32602, "Invalid params: resources/read needs a uri"))?;
+        let not_found = if modern { -32602 } else { -32002 };
         let (ekko, location) = self.open(None).map_err(resource_error)?;
         let text = if uri == PRIME_URI {
             agent::prime(&ekko, &location.label()).map_err(resource_error)?.text()
         } else if let Some(id) = uri.strip_prefix("item://").filter(|id| !id.is_empty()) {
             let read = agent::contexts(&ekko, &[id.to_string()])
-                .map_err(|error| RpcError::new(-32002, format!("Resource not found: {uri}: {error}")))?;
+                .map_err(|error| RpcError::new(not_found, format!("Resource not found: {uri}: {error}")))?;
             read.iter().map(|context| context.text_with(agent::Detail::Concise)).collect::<Vec<_>>().join("\n")
         } else {
-            return Err(RpcError::new(-32002, format!("Resource not found: {uri}")));
+            return Err(RpcError::new(not_found, format!("Resource not found: {uri}")));
         };
         Ok(json!({"contents": [{"uri": uri, "mimeType": "text/plain", "text": self.noted(text)}]}))
     }
@@ -1331,10 +1330,22 @@ fn server_info() -> Value {
     json!({"name": "ekko", "version": env!("CARGO_PKG_VERSION")})
 }
 
-fn complete(mut result: Value) -> Value {
+/// The methods served whose results are a CacheableResult in the 2026-07-28
+/// schema, the sixth being `server/discover`: they carry ttlMs and cacheScope,
+/// and Claude Code drops a whole list that lacks them (task 705).
+const CACHEABLE: &[&str] = &["tools/list", "prompts/list", "resources/list", "resources/templates/list", "resources/read"];
+
+fn complete(method: &str, mut result: Value) -> Value {
     if let Value::Object(map) = &mut result {
         map.insert("resultType".to_string(), json!("complete"));
         map.insert("_meta".to_string(), json!({"io.modelcontextprotocol/serverInfo": server_info()}));
+        if CACHEABLE.contains(&method) {
+            // Stale at once and never shared, the official SDKs' default: the
+            // board changes between calls, from terminals this server never
+            // hears, and a list kept past this process could hide an upgrade.
+            map.insert("ttlMs".to_string(), json!(0));
+            map.insert("cacheScope".to_string(), json!("private"));
+        }
     }
     result
 }
