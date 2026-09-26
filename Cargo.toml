@@ -1,6 +1,6 @@
 [package]
 name = "ekko"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Tasks, boards & notes for the command-line habitat"
