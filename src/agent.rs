@@ -2213,16 +2213,35 @@ pub fn sessions(ekko: &Ekko, board: &str) -> Result<Sessions, EkkoError> {
         asking: Vec::new(),
         waiting: Vec::new(),
     };
+    // A process whose conversation Claude Code moved to a background session
+    // is no session of its own: what it holds, finished, asked and waits on
+    // is the one's the conversation goes on in (tasks 862, 871).
+    let moved: Vec<(crate::holder::Process, crate::holder::Process)> = recorded
+        .iter()
+        .filter(|running| running.process().alive())
+        .filter_map(|running| {
+            let dir = running.transcript.as_deref()?.parent()?;
+            let to = crate::holder::continued_in(dir, &running.conversation)?;
+            let into = recorded.iter().find(|other| {
+                other.process() != running.process()
+                    && other.process().alive()
+                    && (other.conversation == to || other.earlier.contains(&to))
+            })?;
+            Some((running.process(), into.process()))
+        })
+        .collect();
+    let went_on = |process: crate::holder::Process| moved.iter().find(|(from, _)| *from == process).map_or(process, |(_, into)| into.clone());
     let here = ekko.storage.storage_path();
     let mut found: Vec<(Option<crate::holder::Process>, SessionView)> = recorded
         .iter()
         .filter(|running| running.board.as_deref() == Some(here) && running.process().alive())
+        .filter(|running| !moved.iter().any(|(from, _)| *from == running.process()))
         .map(|running| (Some(running.process()), view(running)))
         .collect();
     // The session behind a claim, a signature or a question: listed once,
     // from the registry where it is recorded, else from the claim itself.
     let mut session_of = |holder: &crate::holder::Holder| {
-        let process = holder.process();
+        let process = holder.process().map(went_on);
         if let Some(at) = found.iter().position(|(known, _)| *known == process) {
             return at;
         }
@@ -4561,15 +4580,17 @@ mod tests {
             let prime = prime(&as_(&me), "default board").unwrap().text();
             let told = crate::wake::Told::of(&dir.join("home"), me.process.as_ref().unwrap());
             let woken = crate::wake::untold(&as_(&me), &reader, &told, 0, false).unwrap().join("\n");
+            let listed = sessions(&as_(&me), "default board").unwrap().text();
             let checks = [
                 ("the handoff", prime.contains(" by this session\n")),
                 ("not another's handoff", !prime.contains("which still runs: its own, not this session's")),
                 ("the answer", prime.contains("\nAnswered, for this session (1)\n")),
                 ("the wait", prime.contains("\nThis session waits (1)\n")),
                 ("the wait's end", woken.contains(&format!("This session waited on it (note {ended}) to: ship it"))),
+                ("no session of its own", !listed.contains("default on pts/2")),
             ];
             for (what, holds) in checks {
-                assert_eq!(holds, yes, "{text}, {what}: {prime}\n{woken}");
+                assert_eq!(holds, yes, "{text}, {what}: {prime}\n{woken}\n{listed}");
             }
         };
 
