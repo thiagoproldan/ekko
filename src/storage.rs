@@ -219,7 +219,11 @@ impl Storage {
 
     pub fn set(&self, data: &ItemMap) -> Result<(), StorageError> {
         self.keep_version();
-        write_atomic(&self.storage_file, &self.temp_dir, data)?;
+        let version = write_atomic(&self.storage_file, &self.temp_dir, data)?;
+        // The version this write made is the map it wrote, so the read after
+        // it -- the MCP server reads the board after every write -- parses
+        // nothing (task 859). A later write by any process is a new inode.
+        keep_board(&self.storage_file, version, Arc::new(data.clone()));
         self.copy_out(&self.storage_file);
         // The files a write seldom touches are copied the first time too, so
         // a copy is whole from its first write; after that, each refreshes
@@ -601,7 +605,7 @@ impl Storage {
             content.push_str(&line);
             content.push('\n');
         }
-        replace_durably(&path, &self.temp_dir, content.as_bytes())
+        replace_durably(&path, &self.temp_dir, content.as_bytes()).map(|_| ())
     }
 }
 
@@ -650,6 +654,12 @@ struct Version {
     len: u64,
 }
 
+impl Version {
+    fn of(meta: &fs::Metadata) -> Version {
+        Version { dev: meta.dev(), ino: meta.ino(), mtime: meta.mtime(), mtime_nsec: meta.mtime_nsec(), len: meta.len() }
+    }
+}
+
 /// The file open, with the version the descriptor holds -- read from the same
 /// descriptor the content will be, so the two cannot disagree -- or `None`
 /// when the board has no file yet.
@@ -659,13 +669,20 @@ fn open_versioned(path: &Path) -> Result<Option<(File, Version)>, StorageError> 
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let meta = file.metadata()?;
-    let version =
-        Version { dev: meta.dev(), ino: meta.ino(), mtime: meta.mtime(), mtime_nsec: meta.mtime_nsec(), len: meta.len() };
+    let version = Version::of(&file.metadata()?);
     Ok(Some((file, version)))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The boards this thread parsed: a test's own reads, whatever the tests
+    /// running beside it read.
+    static PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn parse_map(mut file: File) -> Result<ItemMap, StorageError> {
+    #[cfg(test)]
+    PARSED.with(|parsed| parsed.set(parsed.get() + 1));
     let mut content = String::new();
     file.read_to_string(&mut content)?;
     Ok(serde_json::from_str(&content)?)
@@ -690,7 +707,7 @@ fn keep_board(path: &Path, version: Version, board: Arc<ItemMap>) {
     boards.push((path.to_path_buf(), version, board));
 }
 
-fn write_atomic(path: &Path, temp_dir: &Path, data: &ItemMap) -> Result<(), StorageError> {
+fn write_atomic(path: &Path, temp_dir: &Path, data: &ItemMap) -> Result<Version, StorageError> {
     replace_durably(path, temp_dir, json::to_pretty_string(data)?.as_bytes())
 }
 
@@ -699,13 +716,15 @@ fn write_atomic(path: &Path, temp_dir: &Path, data: &ItemMap) -> Result<(), Stor
 /// file is synced before the rename and its directory after. Without the
 /// first sync, a crash just after the rename can leave an empty file on a
 /// filesystem that allocates lazily, which for storage.json is the whole
-/// board.
-fn replace_durably(path: &Path, temp_dir: &Path, content: &[u8]) -> Result<(), StorageError> {
+/// board. Answers with the version written: the temp file's, read before the
+/// rename, which carries its inode, times and length over to `path`.
+fn replace_durably(path: &Path, temp_dir: &Path, content: &[u8]) -> Result<Version, StorageError> {
     use std::io::Write as _;
     let temp_file = temp_file_path(path, temp_dir);
     let mut file = File::create(&temp_file)?;
     file.write_all(content)?;
     file.sync_all()?;
+    let version = Version::of(&file.metadata()?);
     drop(file);
     fs::rename(&temp_file, path)?;
     // Best effort: some filesystems refuse to sync a directory, and the
@@ -713,7 +732,7 @@ fn replace_durably(path: &Path, temp_dir: &Path, content: &[u8]) -> Result<(), S
     if let Some(dir) = path.parent().and_then(|parent| File::open(parent).ok()) {
         let _ = dir.sync_all();
     }
-    Ok(())
+    Ok(version)
 }
 
 /// pid + nanosecond timestamp instead of the JS version's random hex --
@@ -773,6 +792,88 @@ mod tests {
         storage.set(&data).unwrap();
 
         assert_eq!(storage.get().unwrap(), data);
+        let file = dir.join("storage").join("storage.json");
+        assert_eq!(read_map(&file).unwrap(), data, "the file itself, which the read above no longer parses");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The version a write made is the map it wrote, so the read after it
+    /// parses nothing (task 859); and a version another process wrote is
+    /// parsed, though this one read the board just before.
+    #[test]
+    fn a_write_is_read_back_without_a_parse() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        let file = dir.join("storage").join("storage.json");
+        let parsed = || PARSED.with(std::cell::Cell::get);
+        let mut data = BTreeMap::from([(1, sample_item(1))]);
+        storage.set(&data).unwrap();
+
+        let before = parsed();
+        assert_eq!(*storage.get_shared().unwrap(), data);
+        assert_eq!(parsed(), before, "its own write");
+
+        data.insert(2, sample_item(2));
+        let theirs = dir.join("theirs.json");
+        fs::write(&theirs, json::to_pretty_string(&data).unwrap()).unwrap();
+        fs::rename(&theirs, &file).unwrap();
+        assert_eq!(*storage.get_shared().unwrap(), data);
+        assert_eq!(parsed(), before + 1, "another's write");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What a write keeps must be what a parse of its file gives back, or a
+    /// session would read its own write one way and every other process
+    /// another. Each kind of item a session writes, through the operations
+    /// that write it, and a field from a later version.
+    #[test]
+    fn a_parse_of_the_written_board_gives_back_the_map_written() {
+        let (me, _, _) = crate::holder::test_sessions();
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        let mut later = sample_item(1);
+        later.unknown.insert("fromALaterVersion".into(), serde_json::json!({"kept": [1, "two", null, true]}));
+        storage.set(&BTreeMap::from([(1, later)])).unwrap();
+        storage.set_counters(&Counters { revision: 1, highest_id: 1, ..Counters::default() }).unwrap();
+        storage.set_phases(&["alpha".to_string()]).unwrap();
+
+        let ekko = crate::ekko::Ekko::new(Storage::new(&dir).unwrap()).acting_as(me);
+        let mut draft = crate::ops::Draft::open(&ekko).unwrap();
+        let ops = [
+            serde_json::json!({"op": "create", "text": "a task", "boards": ["@coding"], "priority": 3, "due": "2026-10-08",
+                "with": "rodrigo", "phase": "alpha", "starred": true}),
+            serde_json::json!({"op": "create", "text": "after it", "blocked_by": [2]}),
+            serde_json::json!({"op": "create", "kind": "decision", "text": "why", "attached_to": 2}),
+            serde_json::json!({"op": "create", "kind": "gotcha", "text": "a trap"}),
+            serde_json::json!({"op": "create", "kind": "procedure", "text": "the steps"}),
+            serde_json::json!({"op": "create", "kind": "handoff", "text": "where it stopped", "attached_to": 3}),
+            serde_json::json!({"op": "create", "text": "put away"}),
+            serde_json::json!({"op": "create", "text": "thrown away"}),
+            serde_json::json!({"op": "set_state", "items": [2], "state": "progress"}),
+            serde_json::json!({"op": "set_state", "items": [1], "state": "done"}),
+        ];
+        for op in ops {
+            draft.apply(&serde_json::from_value(op).unwrap()).unwrap();
+        }
+        let asked = draft.ask("Merge now?", Some(&crate::ops::Ref::Id(2))).unwrap();
+        let spec = crate::ops::WaitOn { item: crate::ops::Ref::Id(3), until: None, text: Some("then merge".into()), cancel: false };
+        draft.wait(&spec).unwrap();
+        draft.commit(false).unwrap();
+        let person = crate::ekko::Ekko::new(Storage::new(&dir).unwrap()).acting_as(crate::holder::Actor::person());
+        person.answer_question(&[asked.to_string(), "yes".to_string()]).unwrap();
+        person.set_stashed(&["8".to_string()], true).unwrap();
+        person.set_trashed(&["9".to_string()], true).unwrap();
+
+        let mut draft = crate::ops::Draft::open(&ekko).unwrap();
+        draft.apply(&serde_json::from_value(serde_json::json!({"op": "set_state", "items": [3], "state": "paused"})).unwrap()).unwrap();
+        let written = draft.commit(false).unwrap().data;
+        let fields = |data: &ItemMap| serde_json::to_value(data).unwrap().to_string();
+        for field in ["fromALaterVersion", "heldBy", "doneBy", "createdBy", "question", "answer", "wait", "stashed", "trashed", "phase"] {
+            assert!(fields(&written).contains(&format!("\"{field}\"")), "the board holds {field}");
+        }
+        assert_eq!(read_map(&dir.join("storage").join("storage.json")).unwrap(), written);
 
         fs::remove_dir_all(&dir).ok();
     }
