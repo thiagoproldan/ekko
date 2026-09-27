@@ -215,6 +215,17 @@ pub struct Cli {
     #[arg(long)]
     pub destroy: bool,
 
+    /// Link this project's board and project NAME's, both ways: a Claude
+    /// Code session on either reaches the other's board through ekko's MCP,
+    /// without a prompt. The user's to make: from a session it is refused,
+    /// and ask proposes the link instead, in ekko's menu.
+    #[arg(long, value_name = "NAME")]
+    pub link_project: Option<String>,
+
+    /// Take away the link between this project's board and project NAME's.
+    #[arg(long, value_name = "NAME")]
+    pub unlink_project: Option<String>,
+
     /// List the projects that exist, with their item counts.
     #[arg(long)]
     pub projects: bool,

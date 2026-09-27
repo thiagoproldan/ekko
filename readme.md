@@ -121,6 +121,7 @@ $ ekko --help
       --force             Override the blocked-by rule or a running session's hold
       --help, -h          Display help message
       --json, -j          Output machine-readable JSON instead of formatted text
+      --link-project <NAME> Link this project's board and NAME's, for Claude Code sessions
       --list, -l          List items by attributes
       --mcp               Serve the board to an agent over MCP (stdio)
       --resources         With --mcp: serve only the board as @-mentionable resources
@@ -145,6 +146,7 @@ $ ekko --help
       --star, -s          Star/unstar item
       --stash [IDS]       Put items or a board away; no ids lists the stash
       --trash             Show the trash, and how long each thing has left
+      --unlink-project <NAME> Take away the link between this project's board and NAME's
       --unstash <IDS>     Bring items back out of the stash
       --untrash <IDS>     Bring items back out of the trash
       --ekko-dir          Define a custom ekko directory
@@ -241,13 +243,13 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 | `update` | boards, priority, due date, who a task is with, phase, star, a note's kind |
 | `link` | `blocked_by`, `attached_to`, or `supersedes` |
 | `batch` | several of the writes above in one write, all or nothing, with `$1`, `$2` naming the items earlier operations created, in the fields that take an item; a text keeps them as written, and the reply names the item each one is |
-| `ask`, `answer` | questions for the user, put to them in Ekko's menu and kept on the board until each reply is recorded; see Questions below. With `cue` or `allow`, a question proposes a gotcha's cue or asks to let a refused call through; see Guards below |
+| `ask`, `answer` | questions for the user, put to them in Ekko's menu and kept on the board until each reply is recorded; see Questions below. With `cue` or `allow`, a question proposes a gotcha's cue or asks to let a refused call through; see Guards below. With `link_project`, it proposes linking two projects; see Linked projects below |
 | `wait` | wait on a task another session or the user holds, or on a question, and be told once it is over; see Waiting below |
 | `stash`, `trash` | put items away, or bring them back |
 | `away` | what is put away: the stash, and the trash with the days each item has left, one line per item |
 | `phases` | declare the project's phases in order, replacing the sequence; answers with the roadmap |
 
-There is no `clear` and no `destroy`: an agent that needs either asks the user to run it. Nor does any tool take `project`, or list the projects: a session works on its own board, the one its folder finds or `EKKO_PROJECT` names at launch, and another project's board is the user's to open, with `ekko --project` in a command they see.
+There is no `clear` and no `destroy`: an agent that needs either asks the user to run it. Nor does any tool list the projects: a session works on its own board, the one its folder finds or `EKKO_PROJECT` names at launch, and on the boards the user linked to it (see Linked projects below), which every tool but `wait` reaches with `project`. Any other project's board is the user's to open, with `ekko --project` in a command they see, and a call naming one is refused before either board is read.
 
 **Handoffs.** A long session is cheaper to clear and resume than to carry, as long as what it knows survives the clear. `create` with `kind: "handoff"` writes that: a note on the open task the session was working, saying where it stopped, what it decided and why, the files and lines, the next step and the open questions. The next prime quotes a handoff on open work in a section of its own -- the one this session wrote, when it wrote one (see Several sessions), else the newest -- line by line, up to 3,500 characters on top of the prime's 6,000, so the whole still fits the 10,000 characters Claude Code keeps of a hook -- and `context` reads a longer one whole. Under a handoff, the prime lists only the loose notes changed after it: the older ones are history the handoff had the chance to take in, so a note the next session must read is named in the handoff by id. A new handoff on the same task demotes the one before to an ordinary note, unless another session that still runs wrote it, and one moved to another task, or detached, is an ordinary note too. The server also offers `handoff` as an MCP prompt, which Claude Code lists as a slash command: it asks the agent to write the handoff now, naming the task in progress and the handoff it replaces.
 
@@ -657,6 +659,23 @@ $ ekko --projects
 - **A project that moved is reported as moved.** `ekko init` in its new folder records where it went; nothing is looked up and rewritten behind your back, because a read never writes.
 - **The listing says what each project holds and where it is**, counted the way the project's own stats line counts it, and marks a project its folder no longer holds, with the way back.
 - **Home is not a project.** `~/.ekko/` is the default board, and `ekko init` in home is refused.
+
+#### Linked projects
+
+Two projects whose work crosses -- a library and the app that uses it, a tool and the project planned with it -- can be linked, so that a Claude Code session on either reads and writes the other's board through Ekko's MCP, with no prompt. A link is not a merge: each board keeps its items, ids, history and prime.
+
+```
+$ ekko --link-project graff                    # inside ~/Projetos/ekko
+ ✔  Linked projects: ekko and graff
+  a Claude Code session on either, one running now included, reaches the other's board through ekko's MCP, with project
+$ ekko --unlink-project graff                  # in either folder
+```
+
+- **Only the user makes a link.** `--link-project` from inside a Claude Code session is refused, `!` commands included. A session proposes one instead, with `ask` and `link_project`, and only the answer "Link" given in Ekko's menu makes it; a session's own answer to that question is refused, as for a cue. Taking a link away is anyone's.
+- **Both ways, one record.** A link joins two projects by their ids in `~/.ekko/projects.json`, so it survives a rename or a move, and leaves with either project when it is destroyed or forgotten. It is not passed on: linking A to B and B to C does not link A to C.
+- **The tools name the linked boards.** On a board with links, every tool but `wait` takes `project`, whose schema lists the linked names, and the server tells the client its tools changed when a link is made or taken away. `wait` takes none, since the hook that wakes a session watches only its own board. On a board without links the tools are what they were.
+- **Nothing of a linked board enters a session unasked.** The prime names the linked boards on one line, and none of their items. `ask` with `project` puts its questions on that board, in a menu opened on it, and a write there is the session's, as on its own board.
+- **Only projects link.** The default board and a board opened through `EKKO_DIR` are not registered projects, and link to none.
 
 #### A copy outside the folder
 

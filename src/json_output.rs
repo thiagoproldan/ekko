@@ -68,6 +68,14 @@ fn success_value(outcome: &Outcome) -> Value {
             // other way to work out where the project went.
             "trash": trash.display().to_string(),
         }),
+        Outcome::Linked { name, other, linked, changed } => json!({
+            "ok": true,
+            "command": command,
+            "project": name,
+            "other": other,
+            "linked": linked,
+            "changed": changed,
+        }),
         Outcome::Forgotten(forgotten) => json!({
             "ok": true,
             "command": command,

@@ -129,14 +129,14 @@ pub struct Window {
 
 impl Window {
     /// Opens a menu on `spec` at `place`, for the board the server finds from
-    /// `cwd`.
-    pub fn open(place: &Place, spec: &Spec, cwd: &Path) -> io::Result<Window> {
+    /// `cwd`, or for the linked `project`'s (task 811).
+    pub fn open(place: &Place, spec: &Spec, cwd: &Path, project: Option<&str>) -> io::Result<Window> {
         static OPENED: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let file = dir.join(format!("ekko-menu-{}-{}.json", std::process::id(), OPENED.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_file(pid_file(&file));
         std::fs::write(&file, serde_json::to_vec(spec)?)?;
-        let line = command_line(&std::env::current_exe()?, &file, cwd);
+        let line = command_line(&std::env::current_exe()?, &file, cwd, project);
         let mut command = match place {
             Place::Window(terminal) => {
                 let mut command = Command::new(&terminal[0]);
@@ -227,12 +227,18 @@ fn alive(pid: i32) -> bool {
 /// variables that pick the board, and without CLAUDECODE, so the answers are
 /// recorded as the user's -- which they are -- and not the asking session's.
 /// Through `env` and `sh`, since a tmux popup runs it in tmux's environment,
-/// and a terminal may start it in a folder of its own.
-fn command_line(exe: &Path, file: &Path, cwd: &Path) -> Vec<String> {
+/// and a terminal may start it in a folder of its own. For a linked board's
+/// questions, `project` names it, and EKKO_PROJECT picks it over the rest.
+fn command_line(exe: &Path, file: &Path, cwd: &Path, project: Option<&str>) -> Vec<String> {
     let mut line: Vec<String> = ["env", "-u", "CLAUDECODE"].map(str::to_string).to_vec();
-    for name in ["EKKO_DIR", "EKKO_PROJECT"] {
-        if let Ok(value) = std::env::var(name) {
-            line.push(format!("{name}={value}"));
+    match project {
+        Some(name) => line.push(format!("EKKO_PROJECT={name}")),
+        None => {
+            for name in ["EKKO_DIR", "EKKO_PROJECT"] {
+                if let Ok(value) = std::env::var(name) {
+                    line.push(format!("{name}={value}"));
+                }
+            }
         }
     }
     line.extend(["sh", "-c", "cd \"$0\" && exec \"$@\""].map(str::to_string));
@@ -1115,11 +1121,15 @@ mod tests {
 
     #[test]
     fn the_menu_runs_in_the_servers_folder_as_the_user_quoted_for_tmux() {
-        let line = command_line(Path::new("/nix/store/x/bin/ekko"), Path::new("/run/ekko-menu-1-0.json"), Path::new("/home/it's a b"));
+        let line = command_line(Path::new("/nix/store/x/bin/ekko"), Path::new("/run/ekko-menu-1-0.json"), Path::new("/home/it's a b"), None);
         let at = line.iter().position(|word| word == "sh").unwrap();
         assert_eq!(&line[..3], ["env", "-u", "CLAUDECODE"]);
         assert_eq!(&line[at..], ["sh", "-c", "cd \"$0\" && exec \"$@\"", "/home/it's a b", "/nix/store/x/bin/ekko", "--menu", "/run/ekko-menu-1-0.json"]);
         assert!(shell_line(&line).contains(" '/home/it'\\''s a b' "), "{}", shell_line(&line));
+        // A linked board's questions: its name picks the board, whatever
+        // the server's own variables say.
+        let linked = command_line(Path::new("/nix/store/x/bin/ekko"), Path::new("/run/ekko-menu-1-0.json"), Path::new("/home/a"), Some("graff"));
+        assert_eq!(&linked[..5], ["env", "-u", "CLAUDECODE", "EKKO_PROJECT=graff", "sh"]);
         let spec = Spec { questions: vec![posed(1, "Q?", yes_no(), false)] };
         let words = sized(&["konsole".to_string(), "--separate".to_string(), "-e".to_string()], &spec);
         assert_eq!(words[0], "--separate");

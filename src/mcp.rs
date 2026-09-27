@@ -110,10 +110,11 @@ pub struct Server {
     /// Whether a client opened with the handshake, whose revisions hear of
     /// changes untagged: a 2026-07-28 client hears only on a stream it opened.
     handshake: AtomicBool,
-    /// The day prime and next last answered in full, by tool, or the day the
+    /// The day prime and next last answered in full, by tool and board -- a
+    /// linked one by name -- or for the session's own board the day the
     /// server started, which is when the SessionStart hook handed the session
     /// its prime: `if_rev` is answered as unchanged only on that same day.
-    answered: Mutex<HashMap<&'static str, chrono::NaiveDate>>,
+    answered: Mutex<HashMap<(&'static str, Option<String>), chrono::NaiveDate>>,
     started: chrono::NaiveDate,
     /// How this process was started, to tell when an upgrade has replaced
     /// its binary (see `Launch`).
@@ -126,6 +127,9 @@ pub struct Server {
     /// The board's revision when this session was last told what it had
     /// not been (see `told`): nothing new to tell until it moves.
     told_at: Mutex<Option<u64>>,
+    /// The linked boards the client's tool list names, as it last read it
+    /// (task 811). None until it asks for the list.
+    tools_listed: Mutex<Option<Vec<String>>>,
 }
 
 /// A binary as a file: where its name resolves, every link followed, and
@@ -217,11 +221,27 @@ const POLL: Duration = Duration::from_secs(2);
 /// the board, or the window closed.
 const WATCH: Duration = Duration::from_secs(1);
 
-/// What ask's reply says of questions left without an answer.
-const OPEN: &str = "the questions without an answer stay open: the user can answer each with `ekko --answer <id>` in a terminal, or ask them in chat and record the replies with answer";
-
-/// The same, for questions with cue or allow, which only the user answers.
-const GUARDED_OPEN: &str = "the questions without an answer stay open: the user answers each with `ekko --answer <id>` in a terminal, which opens ekko's menu on it. One with cue or allow counts only answered there, never recorded by a session";
+/// What ask's reply says of questions left without an answer, asked on the
+/// session's board or with project on a linked one: how each can still be
+/// answered there. Those with cue, allow or link_project only the user
+/// answers, in ekko's menu.
+fn stays_open(guarded: bool, project: Option<&str>) -> String {
+    let command = match project {
+        Some(name) => format!("`ekko --project {name} --answer <id>`"),
+        None => "`ekko --answer <id>`".to_string(),
+    };
+    if guarded {
+        return format!(
+            "the questions without an answer stay open: the user answers each with {command} in a terminal, which opens ekko's menu on it. \
+             One with cue, allow or link_project counts only answered there, never recorded by a session"
+        );
+    }
+    let on = project.map(|name| format!(" and project {name}")).unwrap_or_default();
+    format!(
+        "the questions without an answer stay open: the user can answer each with {command} in a terminal, \
+         or ask them in chat and record the replies with answer{on}"
+    )
+}
 
 /// The prime as a resource. Not `prime://`: Claude Code 2.1.278 extracts a
 /// mention with a pattern that ends in `\b`, so a URI ending in a symbol is
@@ -296,7 +316,11 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
         let (server, stdout) = (Arc::clone(&server), Arc::clone(&stdout));
         thread::spawn(move || loop {
             thread::sleep(WATCH);
-            let settled = server.watch();
+            let mut settled = server.watch();
+            // A question with link_project answered Link changes the tools.
+            if !settled.is_empty() {
+                settled.extend(server.tools_changed());
+            }
             if !settled.is_empty() && send(&stdout, settled).is_err() {
                 break;
             }
@@ -311,7 +335,7 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
         // The reply first, then any notice: a write's list_changed follows
         // the answer to the write.
         let messages = server.handle_line(&line);
-        let notice = server.list_changed();
+        let notice = server.list_changed().into_iter().chain(server.tools_changed());
         if send(&stdout, messages.into_iter().chain(notice)).is_err() {
             break;
         }
@@ -339,6 +363,7 @@ impl Server {
             actor,
             dialogs: Mutex::new(Dialogs::default()),
             told_at: Mutex::new(None),
+            tools_listed: Mutex::new(None),
         }
     }
 
@@ -357,18 +382,21 @@ impl Server {
         }
     }
 
-    /// One line in place of `tool`'s answer when the cursor held is still
-    /// current (see `still_current`).
-    fn unchanged(&self, tool: &'static str, ekko: &Ekko, if_rev: Option<i64>) -> Result<Option<String>, ToolError> {
+    /// One line in place of `tool`'s answer on the board `project` names
+    /// when the cursor held is still current (see `still_current`). A linked
+    /// board this session never read in full is answered in full.
+    fn unchanged(&self, tool: &'static str, project: Option<&str>, ekko: &Ekko, if_rev: Option<i64>) -> Result<Option<String>, ToolError> {
         let Some(held) = if_rev else { return Ok(None) };
         let revision = ekko.storage.get_counters().map_err(EkkoError::from)?.revision as i64;
-        let read_on = self.answered.lock().unwrap_or_else(PoisonError::into_inner).get(tool).copied().unwrap_or(self.started);
+        let read = self.answered.lock().unwrap_or_else(PoisonError::into_inner).get(&(tool, project.map(str::to_string))).copied();
+        let Some(read_on) = read.or(project.is_none().then_some(self.started)) else { return Ok(None) };
         let today = chrono::Local::now().date_naive();
         Ok(still_current(held, revision, read_on, today).then(|| format!("unchanged since cursor {revision}\n")))
     }
 
-    fn answered_today(&self, tool: &'static str) {
-        self.answered.lock().unwrap_or_else(PoisonError::into_inner).insert(tool, chrono::Local::now().date_naive());
+    fn answered_today(&self, tool: &'static str, project: Option<&str>) {
+        let key = (tool, project.map(str::to_string));
+        self.answered.lock().unwrap_or_else(PoisonError::into_inner).insert(key, chrono::Local::now().date_naive());
     }
 
     /// The notifications that the resource list changed, when it has since
@@ -383,19 +411,22 @@ impl Server {
         if !self.changed() {
             return Vec::new();
         }
+        self.notify("notifications/resources/list_changed")
+    }
+
+    /// A list's change, `method`, as a client hears of it: once on each
+    /// `subscriptions/listen` stream open, tagged with its id, or untagged
+    /// to a client of the handshake that opened none. A 2026-07-28 client
+    /// that opened none hears nothing, since that revision sends only what
+    /// a client asked for.
+    fn notify(&self, method: &str) -> Vec<Value> {
         let listening = self.listening.lock().unwrap_or_else(PoisonError::into_inner);
         if listening.is_empty() && self.handshake.load(Ordering::Relaxed) {
-            return vec![json!({"jsonrpc": "2.0", "method": "notifications/resources/list_changed"})];
+            return vec![json!({"jsonrpc": "2.0", "method": method})];
         }
         listening
             .iter()
-            .map(|id| {
-                json!({
-                    "jsonrpc": "2.0",
-                    "method": "notifications/resources/list_changed",
-                    "params": {"_meta": {"io.modelcontextprotocol/subscriptionId": id}},
-                })
-            })
+            .map(|id| json!({"jsonrpc": "2.0", "method": method, "params": {"_meta": {"io.modelcontextprotocol/subscriptionId": id}}}))
             .collect()
     }
 
@@ -484,14 +515,13 @@ impl Server {
             Some(Value::Object(map)) => map.clone(),
             Some(_) => return vec![error_reply(call, RpcError::new(-32602, "Invalid params: arguments must be an object"))],
         };
-        let recorded = refuse_project(&args).and_then(|()| {
-            let (ekko, _) = self.open()?;
+        let recorded = self.open_for(&mut args).and_then(|(ekko, _, project)| {
             let spec: ops::Ask = parse(&mut args)?;
-            let guarded = spec.questions.iter().any(|inquiry| inquiry.cue.is_some() || inquiry.allow.is_some());
+            let guarded = spec.questions.iter().any(|inquiry| inquiry.cue.is_some() || inquiry.allow.is_some() || inquiry.link_project.is_some());
             let (recorded, questions) = record(&ekko, &spec, &self.home)?;
-            Ok((recorded, questions, guarded))
+            Ok((recorded, questions, guarded, project))
         });
-        let (recorded, questions, guarded) = match recorded {
+        let (recorded, questions, guarded, project) = match recorded {
             Err(error) => return vec![self.tool_reply(call, format!("{}: {}", error.code, error.message), true, modern)],
             Ok(recorded) => recorded,
         };
@@ -519,9 +549,11 @@ impl Server {
             beats: 0,
             window: None,
             modern,
+            guarded,
+            project,
         };
         let why = match menu::place() {
-            Some(place) => match menu::Window::open(&place, &menu::Spec { questions: posed }, &self.cwd) {
+            Some(place) => match menu::Window::open(&place, &menu::Spec { questions: posed }, &self.cwd, pending.project.as_deref()) {
                 Ok(window) => {
                     self.dialogs().watch(Pending { window: Some(window), ..pending });
                     return Vec::new();
@@ -537,9 +569,9 @@ impl Server {
             return vec![self.put(pending)];
         }
         self.left_open(pending.questions.iter().map(String::as_str));
+        let stays = stays_open(pending.guarded, pending.project.as_deref());
         let mut reply = pending.recorded;
-        let open = if guarded { GUARDED_OPEN } else { OPEN };
-        reply["unanswered"] = json!(format!("{why}; {open}"));
+        reply["unanswered"] = json!(format!("{why}; {stays}"));
         vec![self.tool_reply(pending.call, reply.to_string(), false, modern)]
     }
 
@@ -592,8 +624,7 @@ impl Server {
             dialog::Outcome::Answer(answer) => {
                 let question = Ref::Text(pending.questions[0].clone());
                 let written = self
-                    .open()
-                    .map_err(ToolError::from)
+                    .board(pending.project.as_deref())
                     .and_then(|(ekko, _)| write(&ekko, false, |draft| draft.answer(&question, &answer).map(|id| vec![id])));
                 vec![match written {
                     Ok(_) => {
@@ -609,8 +640,9 @@ impl Server {
             }
             dialog::Outcome::Unanswered(why) => {
                 self.left_open(pending.questions.iter().map(String::as_str));
+                let stays = stays_open(pending.guarded, pending.project.as_deref());
                 let mut reply = pending.recorded;
-                reply["unanswered"] = json!(format!("{why}; {OPEN}"));
+                reply["unanswered"] = json!(format!("{why}; {stays}"));
                 vec![self.tool_reply(pending.call, reply.to_string(), false, pending.modern)]
             }
         }
@@ -642,23 +674,31 @@ impl Server {
 
     /// `subscriptions/listen`, 2026-07-28's way to hear of changes:
     /// acknowledged with what this server honors of what the client asked --
-    /// the resource list's changes, on the resources server; nothing else
-    /// changes here -- then held open, every notification on it tagged with
-    /// its id, until the client cancels it.
+    /// the resource list's changes, on the resources server, and the tool
+    /// list's, which the session's links change (task 811), on the board
+    /// server; nothing else changes here -- then held open, every
+    /// notification on it tagged with its id, until the client cancels it.
     fn listen(&self, id: Value, params: &Value) -> Vec<Value> {
-        let asked = params.get("notifications").and_then(|n| n.get("resourcesListChanged")) == Some(&json!(true));
-        let honored = if asked && self.mode == Mode::Resources {
-            // Changes from now on are news, whether or not the list was read yet.
+        let asked = |kind: &str| params.get("notifications").and_then(|n| n.get(kind)) == Some(&json!(true));
+        // Changes from now on are news, whether or not the list was read yet.
+        let honored = if asked("resourcesListChanged") && self.mode == Mode::Resources {
             let mut listed = self.listed.lock().unwrap_or_else(PoisonError::into_inner);
             if listed.is_none() {
                 *listed = self.open().ok().and_then(|(ekko, _)| Some((ekko.storage.get_counters().ok()?.revision, resource_list(&ekko).ok()?)));
             }
-            drop(listed);
-            self.listening.lock().unwrap_or_else(PoisonError::into_inner).push(id.clone());
             json!({"resourcesListChanged": true})
+        } else if asked("toolsListChanged") && self.mode == Mode::Board {
+            let mut listed = self.tools_listed.lock().unwrap_or_else(PoisonError::into_inner);
+            if listed.is_none() {
+                *listed = Some(self.linked_names());
+            }
+            json!({"toolsListChanged": true})
         } else {
             json!({})
         };
+        if honored != json!({}) {
+            self.listening.lock().unwrap_or_else(PoisonError::into_inner).push(id.clone());
+        }
         vec![json!({
             "jsonrpc": "2.0",
             "method": "notifications/subscriptions/acknowledged",
@@ -671,16 +711,16 @@ impl Server {
     /// left open by a menu that closed or never opened. Checked every `WATCH`,
     /// which also reminds a user who has not answered for a while.
     pub fn watch(&self) -> Vec<Value> {
-        let open: Vec<(String, Vec<String>)> = self
+        let open: Vec<(String, Vec<String>, Option<String>)> = self
             .dialogs()
             .pending
             .iter()
             .filter(|(_, pending)| pending.window.is_some())
-            .map(|(id, pending)| (id.clone(), pending.questions.clone()))
+            .map(|(id, pending)| (id.clone(), pending.questions.clone(), pending.project.clone()))
             .collect();
         let mut replies = Vec::new();
-        for (id, questions) in open {
-            let why = if self.answers_to(&questions).iter().all(Option::is_some) {
+        for (id, questions, project) in open {
+            let why = if self.answers_to(&questions, project.as_deref()).iter().all(Option::is_some) {
                 None
             } else {
                 let mut dialogs = self.dialogs();
@@ -698,7 +738,8 @@ impl Server {
                 window.close();
             }
             // Read again: the menu may have closed just after the answers landed.
-            let answers = self.answers_to(&questions);
+            let answers = self.answers_to(&questions, project.as_deref());
+            let stays = stays_open(pending.guarded, pending.project.as_deref());
             let mut reply = pending.recorded;
             let items = reply["items"].as_array().cloned().unwrap_or_default();
             let given: Vec<Value> = items.iter().zip(&answers).filter_map(|(item, answer)| Some(json!({"id": item["id"], "answer": answer.as_ref()?}))).collect();
@@ -708,16 +749,17 @@ impl Server {
             if answers.iter().any(Option::is_none) {
                 self.left_open(questions.iter().zip(&answers).filter(|(_, answer)| answer.is_none()).map(|(uid, _)| uid.as_str()));
                 let why = why.unwrap_or_else(|| "the menu closed".to_string());
-                reply["unanswered"] = json!(format!("{why}; {OPEN}"));
+                reply["unanswered"] = json!(format!("{why}; {stays}"));
             }
             replies.push(self.tool_reply(pending.call, reply.to_string(), false, pending.modern));
         }
         replies
     }
 
-    /// The answer recorded to each question, by uid, where it has one.
-    fn answers_to(&self, uids: &[String]) -> Vec<Option<String>> {
-        let data = self.open().ok().and_then(|(ekko, _)| ekko.storage.get_shared().ok());
+    /// The answer recorded to each question, by uid, where it has one, on
+    /// the board they were asked on.
+    fn answers_to(&self, uids: &[String], project: Option<&str>) -> Vec<Option<String>> {
+        let data = self.board(project).ok().and_then(|(ekko, _)| ekko.storage.get_shared().ok());
         uids.iter()
             .map(|uid| {
                 let item = data.as_ref()?.values().find(|item| item.uid.as_deref() == Some(uid.as_str()))?;
@@ -777,7 +819,7 @@ impl Server {
             "server/discover" if modern => self.discover(),
             // 2026-07-28 dropped ping.
             "ping" if !modern => json!({}),
-            "tools/list" if board => json!({"tools": tool_definitions()}),
+            "tools/list" if board => json!({"tools": self.tools()}),
             "tools/call" if board => self.call(params)?,
             "prompts/list" if board => json!({"prompts": prompt_definitions()}),
             "prompts/get" if board => self.prompt(params)?,
@@ -816,7 +858,7 @@ impl Server {
         let mut offer = Map::new();
         match self.mode {
             Mode::Board => {
-                offer.insert("capabilities".into(), json!({"tools": {}, "prompts": {}}));
+                offer.insert("capabilities".into(), json!({"tools": {"listChanged": true}, "prompts": {}}));
                 offer.insert("instructions".into(), json!(INSTRUCTIONS));
             }
             Mode::Resources => {
@@ -903,38 +945,103 @@ impl Server {
     /// The session's board, resolved afresh each time: the same one
     /// `--prime` found at session start, from the folder or the project
     /// `EKKO_PROJECT` named at launch, and a project made with `ekko init`
-    /// mid-session is the one the next call sees. No call names another
-    /// (task 697): see `refuse_project`.
+    /// mid-session is the one the next call sees. A call names another only
+    /// when the user linked it to this one (tasks 697 and 811): see `board`.
     fn open(&self) -> Result<(Ekko, directory::Location), EkkoError> {
         let location = directory::locate(&self.home, &self.cwd, None, self.ekko_dir_env.as_deref(), self.project_env.as_deref())?;
         let folder = location.project.as_ref().and_then(|project| project.root.clone());
         Ok((Ekko::at(&location)?.acting_as(self.actor.clone()).in_folder(folder), location))
     }
 
+    /// The board a call works on, taking its project: the session's own,
+    /// or with project a board the user linked to it (task 811).
+    fn open_for(&self, args: &mut Map<String, Value>) -> Result<(Ekko, directory::Location, Option<String>), ToolError> {
+        let project = take(args, "project", |v| v.as_str().map(str::to_string), "a linked project's name")?;
+        let (ekko, location) = self.board(project.as_deref())?;
+        Ok((ekko, location, project))
+    }
+
+    /// The session's own board, or `project`'s when the user linked it to
+    /// the session's. A name it is not linked to is refused before either
+    /// board is read, as every name was before links (task 697): whatever
+    /// the user has not linked stays theirs to open, in a command they see.
+    fn board(&self, project: Option<&str>) -> Result<(Ekko, directory::Location), ToolError> {
+        let (own, location) = self.open()?;
+        let Some(name) = project else { return Ok((own, location)) };
+        let linked = own.linked();
+        let Some(there) = linked.iter().find(|linked| linked.name == name) else {
+            return Err(unlinked(name, &location, &linked));
+        };
+        let location = directory::locate(&self.home, &self.cwd, None, None, Some(&there.name)).map_err(EkkoError::from)?;
+        Ok((Ekko::at(&location)?.acting_as(self.actor.clone()).in_folder(there.root.clone()), location))
+    }
+
+    /// The names of the boards linked to the session's (task 811), which the
+    /// tools' project takes.
+    fn linked_names(&self) -> Vec<String> {
+        self.open().map(|(ekko, _)| ekko.linked().into_iter().map(|project| project.name).collect()).unwrap_or_default()
+    }
+
+    /// The tool list, remembered with the linked boards it names for
+    /// `tools_changed` to compare against.
+    fn tools(&self) -> Value {
+        let linked = self.linked_names();
+        let tools = tool_definitions(&linked);
+        *self.tools_listed.lock().unwrap_or_else(PoisonError::into_inner) = Some(linked);
+        tools
+    }
+
+    /// Tells the client its tool list is out of date once the user links or
+    /// unlinks the session's board, from a terminal or in ekko's menu: the
+    /// list it reads again names the boards project takes. A link is rare
+    /// and the user's own act, so the prefix it moves is moved seldom.
+    /// Claude Code 2.1.283 opens a stream for it under 2026-07-28, since
+    /// the server declares the list changes, and reads the list again.
+    pub fn tools_changed(&self) -> Vec<Value> {
+        if self.mode != Mode::Board {
+            return Vec::new();
+        }
+        let mut listed = self.tools_listed.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(names) = listed.as_mut() else { return Vec::new() };
+        let now = self.linked_names();
+        if now == *names {
+            return Vec::new();
+        }
+        *names = now;
+        drop(listed);
+        self.notify("notifications/tools/list_changed")
+    }
+
     fn tool(&self, name: &str, args: &mut Map<String, Value>) -> Result<String, ToolError> {
-        refuse_project(args)?;
-        let (ekko, location) = self.open()?;
+        if name == "wait" && args.contains_key("project") {
+            return Err(invalid(
+                "wait takes no project: the hook that wakes a session watches only its own board. \
+                 On a linked board, read what moved with changes and project",
+            ));
+        }
+        let (ekko, location, project) = self.open_for(args)?;
+        let project = project.as_deref();
 
         match name {
             "prime" => {
                 let if_rev = take(args, "if_rev", Value::as_i64, "an integer")?;
                 finish(args)?;
-                if let Some(line) = self.unchanged("prime", &ekko, if_rev)? {
+                if let Some(line) = self.unchanged("prime", project, &ekko, if_rev)? {
                     return Ok(line);
                 }
                 let text = agent::prime(&ekko, &location.label())?.text();
-                self.answered_today("prime");
+                self.answered_today("prime", project);
                 Ok(text)
             }
             "next" => {
                 let limit = positive(take(args, "limit", Value::as_u64, "a positive integer")?)?;
                 let if_rev = take(args, "if_rev", Value::as_i64, "an integer")?;
                 finish(args)?;
-                if let Some(line) = self.unchanged("next", &ekko, if_rev)? {
+                if let Some(line) = self.unchanged("next", project, &ekko, if_rev)? {
                     return Ok(line);
                 }
                 let (entries, total) = agent::next_listed(&ekko, Some(limit.unwrap_or(agent::SEARCH_LIMIT)))?;
-                self.answered_today("next");
+                self.answered_today("next", project);
                 // Work another session still runs is not work to take up, so
                 // a second session is not steered into the first one's task.
                 let (elsewhere, entries): (Vec<agent::Entry>, Vec<agent::Entry>) =
@@ -1221,7 +1328,7 @@ fn wait(ekko: &Ekko, spec: &ops::WaitOn) -> Result<String, ToolError> {
 /// Records ask's questions, each with the options it offers under it: the
 /// reply to the write, as JSON, its items in the order of the questions,
 /// and the questions as put to the user -- ekko's own text and answers under
-/// one with cue or allow.
+/// one with cue, allow or link_project.
 fn record(ekko: &Ekko, spec: &ops::Ask, home: &std::path::Path) -> Result<(Value, Vec<ops::Inquiry>), ToolError> {
     if spec.questions.is_empty() || spec.questions.len() > 4 {
         return Err(invalid("questions holds 1 to 4 questions"));
@@ -1242,18 +1349,22 @@ fn record(ekko: &Ekko, spec: &ops::Ask, home: &std::path::Path) -> Result<(Value
     Ok((serde_json::from_str(&reply).expect("a write replies in JSON"), posed))
 }
 
-/// A session works on its own board (task 697): a board another project
-/// holds is the user's to open, in a command they see, so no tool takes
-/// project. A call that names one anyway is refused with the rule, before
-/// anything is read.
-fn refuse_project(args: &Map<String, Value>) -> Result<(), ToolError> {
-    if !args.contains_key("project") {
-        return Ok(());
-    }
-    Err(invalid(
-        "no tool takes project: a session works on its own board, the one prime names on its first line. \
-         Another project's board is opened only when the user asks for it, with ekko --project NAME in a command they see; \
-         prose goes on stdin there (--note - <<'EOF'), since inline the CLI reads @word as a board and p:N and d:DATE as fields",
+/// The refusal of a call naming a board the user has not linked to the
+/// session's (tasks 697 and 811), with the rule and the ways it opens.
+fn unlinked(name: &str, location: &directory::Location, linked: &[crate::project::Project]) -> ToolError {
+    let reach = match (&location.project, linked) {
+        (None, _) => "this session's board is not a project's, and links to none".to_string(),
+        (Some(_), []) => "no board is linked to this session's".to_string(),
+        (Some(_), linked) => {
+            format!("project takes only {}", linked.iter().map(|project| project.name.as_str()).collect::<Vec<_>>().join(", "))
+        }
+    };
+    invalid(format!(
+        "{name} is not linked to this session's board: {reach}. A session works on its own board, the one prime names on its \
+         first line, and on those the user linked to it. The user links two projects with ekko --link-project NAME in a terminal \
+         of their own, or by answering Link to a question ask puts with link_project. Until then another project's board is the \
+         user's to open, with ekko --project NAME in a command they see; prose goes on stdin there (--note - <<'EOF'), since \
+         inline the CLI reads @word as a board and p:N and d:DATE as fields"
     ))
 }
 
@@ -1518,7 +1629,12 @@ fn prompt_definitions() -> Value {
     }])
 }
 
-fn tool_definitions() -> Value {
+/// Every tool, as `tools/list` lists them. On a board linked to others
+/// (task 811), each but wait also takes project, naming the linked boards; on
+/// one with no links the tools read as they did before links, so what a
+/// session without links is sent ahead of the conversation moved only with
+/// ask's link_project.
+fn tool_definitions(linked: &[String]) -> Value {
     let if_rev = json!({"type": "integer", "description": "The cursor from an earlier read: if the board has not moved since, the answer is one line saying so."});
     let item = json!({"type": ["integer", "string"], "description": "A display id, or a uid -- which never changes."});
     let items = json!({"type": "array", "items": item, "minItems": 1});
@@ -1555,7 +1671,8 @@ fn tool_definitions() -> Value {
             "options": {"type": "array", "minItems": 2, "maxItems": 6, "items": choice},
             "multiple": {"type": "boolean", "description": "The user may pick several options."},
             "cue": cue,
-            "allow": {"type": "string", "description": "The code a guard's refusal gave: asks the user to let that exact call through once."}
+            "allow": {"type": "string", "description": "The code a guard's refusal gave: asks the user to let that exact call through once."},
+            "link_project": {"type": "string", "description": "Proposes linking this board and that project's, both ways: once the user answers Link in ekko's menu, a session on either reaches the other's board with project."}
         }),
         &["text"],
     );
@@ -1673,7 +1790,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "ask",
-            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer. With cue or allow, ekko writes what the question quotes and offers, and only the user's answer in ekko's menu applies it.",
+            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer. With cue, allow or link_project, ekko writes what the question quotes and offers, and only the user's answer in ekko's menu applies it.",
             "inputSchema": object(json!({
                 "about": item,
                 "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": question}
@@ -1730,9 +1847,19 @@ fn tool_definitions() -> Value {
             "annotations": write,
         }
     ]);
+    let project = json!({
+        "type": "string",
+        "enum": linked,
+        "description": "A board the user linked to this one: work there instead of on this session's board."
+    });
     for tool in tools.as_array_mut().expect("an array") {
         if ALWAYS_LOADED.contains(&tool["name"].as_str().unwrap_or_default()) {
             tool["_meta"] = json!({"anthropic/alwaysLoad": true});
+        }
+        // wait watches this session's own board: the hook that tells it a wait
+        // is over reads no other (tasklist's watchPaths).
+        if !linked.is_empty() && tool["name"] != "wait" {
+            tool["inputSchema"]["properties"]["project"] = project.clone();
         }
     }
     tools

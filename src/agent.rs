@@ -792,6 +792,10 @@ pub(crate) fn ended_phrase(how: How, to_waiter: bool) -> &'static str {
 #[serde(rename_all = "camelCase")]
 pub struct Prime {
     pub board: String,
+    /// The boards the user linked to this one (task 811), by name: named
+    /// only, since none of their items enters a session unasked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub linked: Vec<String>,
     /// The board revision this read saw: pass it to `changes` later to hear
     /// only what moved since.
     pub cursor: i64,
@@ -1209,6 +1213,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
 
     Ok(Prime {
         board: board.to_string(),
+        linked: ekko.linked().into_iter().map(|project| project.name).collect(),
         cursor,
         stats: ekko.compute_stats(&all),
         roadmap,
@@ -2486,6 +2491,13 @@ impl Prime {
 
         if !self.roadmap.is_empty() {
             let _ = writeln!(out, "{}", roadmap_line(&self.roadmap, self.rootless));
+        }
+        if !self.linked.is_empty() {
+            let _ = writeln!(
+                out,
+                "Linked boards: {} -- every tool but wait works on one with project; none of their items is shown here.",
+                self.linked.join(", ")
+            );
         }
 
         let attention = self.attention();

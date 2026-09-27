@@ -60,6 +60,12 @@ struct Registered {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Registry {
     projects: Vec<Registered>,
+    /// The pairs of projects the user linked (task 811), by id, which a
+    /// rename or a move keeps: a session on either board reaches the other's
+    /// through ekko's MCP. A pair links both ways. Absent when there are
+    /// none, so a registry without links is written as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    links: Vec<[String; 2]>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -307,6 +313,90 @@ pub(crate) fn registry_file(home: &Path) -> PathBuf {
 pub fn boards(home: &Path) -> Vec<(PathBuf, PathBuf)> {
     let Ok(registry) = read_registry(home) else { return Vec::new() };
     registry.projects.iter().filter(|entry| !missing(entry)).map(|entry| (entry.path.clone(), entry.path.join(EKKO_DIR_NAME))).collect()
+}
+
+/// The projects linked to `project` (task 811), in name order: each still
+/// registered and in its folder, where a session reaches its board. None for
+/// a project without an id, a legacy one `ekko init` has not adopted.
+pub fn linked(home: &Path, project: &Project) -> Vec<Project> {
+    let Some(id) = project.id.as_deref() else { return Vec::new() };
+    let Ok(registry) = read_registry(home) else { return Vec::new() };
+    let mut found: Vec<Project> = registry
+        .links
+        .iter()
+        .filter_map(|[a, b]| if a == id { Some(b) } else if b == id { Some(a) } else { None })
+        .filter_map(|other| registry.projects.iter().find(|entry| &entry.id == other))
+        .filter_map(|entry| read_marker(&entry.path).filter(|marker| marker.id == entry.id).map(|marker| project_at(&entry.path, marker)))
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.dedup_by(|a, b| a.id == b.id);
+    found
+}
+
+/// The answer to a question proposing a link that makes it (task 811).
+pub const LINK: &str = "Link";
+/// The answer that leaves two projects unlinked.
+pub const DONT_LINK: &str = "Don't link";
+
+/// Links `a` and `b`, both ways (task 811); false when they were linked
+/// already. Only the user makes a link: the caller has made sure of that.
+pub fn link(home: &Path, a: &Project, b: &Project) -> Result<bool, DirectoryError> {
+    let [a_id, b_id] = linkable(a, b)?;
+    join(home, &a_id, &b_id)
+}
+
+/// Links the projects whose ids are `a` and `b`, as `link` does, for a
+/// question that named them when it was asked: each must still be
+/// registered, since one gone since would leave a link to nothing.
+pub fn join(home: &Path, a: &str, b: &str) -> Result<bool, DirectoryError> {
+    let _registry_lock = lock_registry(home)?;
+    let mut registry = read_registry(home)?;
+    if [a, b].iter().any(|id| !registry.projects.iter().any(|entry| entry.id == *id)) {
+        return Err(DirectoryError::Unlinkable("a project the link names is no longer registered: nothing was linked".to_string()));
+    }
+    if registry.links.iter().any(|pair| joins(pair, a, b)) {
+        return Ok(false);
+    }
+    registry.links.push([a.to_string(), b.to_string()]);
+    write_registry(home, &registry)?;
+    Ok(true)
+}
+
+/// Takes away the link between `a` and `b`; false when there was none.
+pub fn unlink(home: &Path, a: &Project, b: &Project) -> Result<bool, DirectoryError> {
+    let [a_id, b_id] = linkable(a, b)?;
+    let _registry_lock = lock_registry(home)?;
+    let mut registry = read_registry(home)?;
+    let before = registry.links.len();
+    registry.links.retain(|pair| !joins(pair, &a_id, &b_id));
+    if registry.links.len() == before {
+        return Ok(false);
+    }
+    write_registry(home, &registry)?;
+    Ok(true)
+}
+
+/// The ids of two projects a link can join: two registered projects, and
+/// two different ones.
+pub fn linkable(a: &Project, b: &Project) -> Result<[String; 2], DirectoryError> {
+    let id = |project: &Project| {
+        project.id.clone().ok_or_else(|| {
+            DirectoryError::Unlinkable(format!(
+                "{} is a legacy project, which a link cannot name: adopt it with ekko init in its folder first",
+                project.name
+            ))
+        })
+    };
+    let (a_id, b_id) = (id(a)?, id(b)?);
+    if a_id == b_id {
+        return Err(DirectoryError::Unlinkable(format!("{} is this project: a session reaches its own board already", b.name)));
+    }
+    Ok([a_id, b_id])
+}
+
+/// Whether `pair` is the link between the projects `a` and `b`, either way round.
+fn joins(pair: &[String; 2], a: &str, b: &str) -> bool {
+    (pair[0] == a && pair[1] == b) || (pair[0] == b && pair[1] == a)
 }
 
 fn read_registry(home: &Path) -> Result<Registry, DirectoryError> {
@@ -646,6 +736,7 @@ pub fn destroy(home: &Path, project: &Project, now_millis: i64) -> Result<PathBu
             let _registry_lock = lock_registry(home)?;
             let mut registry = read_registry(home)?;
             registry.projects.retain(|entry| &entry.id != id);
+            registry.links.retain(|pair| !pair.contains(id));
             write_registry(home, &registry)?;
         }
     }
@@ -672,6 +763,7 @@ pub fn forget(home: &Path, name: &str, now_millis: i64) -> Result<Forgotten, Dir
         None => None,
     };
     registry.projects.retain(|kept| kept.id != entry.id);
+    registry.links.retain(|pair| !pair.contains(&entry.id));
     write_registry(home, &registry)?;
     Ok(Forgotten { name: entry.name, path: entry.path, parked })
 }
@@ -1060,5 +1152,104 @@ mod tests {
         crate::json::assert_keeps_what_it_does_not_know::<Registry>(serde_json::json!({
             "projects": [{"name": "ekko", "id": "18d74dd807e6db5a-4c0c6", "path": "/home/roldant/Projetos/ekko"}]
         }));
+    }
+
+    /// A link joins two projects both ways (task 811): each lists the other
+    /// -- and nothing further, since a link is not passed on -- until either
+    /// side takes it away or either project leaves. A project links neither
+    /// to itself nor to a legacy one, and a question naming a project gone
+    /// since links nothing.
+    #[test]
+    fn a_link_joins_two_projects_both_ways_until_either_leaves() {
+        let home = temp("links");
+        for name in ["site", "blog", "shop"] {
+            init(&home, &folder(&home, name), None, None, NOW).unwrap();
+        }
+        let project = |name: &str| resolve_named(&home, name).unwrap();
+        let names = |name: &str| linked(&home, &project(name)).into_iter().map(|p| p.name).collect::<Vec<_>>();
+        let refused = |result: Result<bool, DirectoryError>| result.unwrap_err().to_string();
+        assert!(names("site").is_empty());
+
+        assert!(link(&home, &project("site"), &project("shop")).unwrap());
+        assert!(link(&home, &project("site"), &project("blog")).unwrap());
+        assert!(!link(&home, &project("blog"), &project("site")).unwrap(), "linked already, either way round");
+        assert_eq!(names("site"), ["blog", "shop"]);
+        assert_eq!(names("blog"), ["site"]);
+        assert_eq!(names("shop"), ["site"]);
+
+        assert!(refused(link(&home, &project("site"), &project("site"))).contains("is this project"));
+        let legacy = Project { name: "old".into(), root: None, dir: home.join("old"), id: None };
+        assert!(refused(link(&home, &project("site"), &legacy)).contains("old is a legacy project"));
+        let site_id = project("site").id.unwrap();
+        assert!(refused(join(&home, &site_id, "18d0000000000000-00000")).contains("no longer registered"));
+
+        assert!(unlink(&home, &project("blog"), &project("site")).unwrap());
+        assert!(!unlink(&home, &project("site"), &project("blog")).unwrap());
+        assert_eq!(names("site"), ["shop"]);
+
+        destroy(&home, &project("shop"), NOW).unwrap();
+        assert!(names("site").is_empty());
+        link(&home, &project("site"), &project("blog")).unwrap();
+        fs::remove_dir_all(home.join("blog")).unwrap();
+        assert!(names("site").is_empty(), "a project whose folder lost its board is left out");
+        forget(&home, "blog", NOW).unwrap();
+        assert!(read_registry(&home).unwrap().links.is_empty(), "every link leaves with its project");
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// Only the user makes a link (task 811): a session's --link-project is
+    /// refused, and so is its answer to the question proposing one, which
+    /// ask records with the answers ekko offers; the user's Link makes it,
+    /// and Don't link leaves the two as they were. A link that exists is not
+    /// proposed again, and taking one away is anyone's.
+    #[test]
+    fn only_the_user_makes_a_link_and_a_session_proposes_one_with_ask() {
+        use crate::holder::{test_sessions, Actor};
+        use crate::ops::{Draft, Ref};
+        let home = temp("proposal");
+        for name in ["site", "blog"] {
+            init(&home, &folder(&home, name), None, None, NOW).unwrap();
+        }
+        let (session, _, _) = test_sessions();
+        let open = |actor: &Actor| {
+            let location = crate::directory::locate(&home, &home.join("site"), None, None, None).unwrap();
+            crate::ekko::Ekko::at(&location).unwrap().acting_as(actor.clone())
+        };
+        let names = || linked(&home, &resolve_named(&home, "site").unwrap()).into_iter().map(|p| p.name).collect::<Vec<_>>();
+        let propose = || {
+            let ekko = open(&session);
+            let mut draft = Draft::open(&ekko)?;
+            let inquiry = serde_json::from_value(serde_json::json!({"text": "Ligo os quadros?", "link_project": "blog"})).unwrap();
+            let asked = draft.ask_inquiry(&inquiry, None, &home)?;
+            draft.commit(false)?;
+            Ok::<_, crate::ekko::EkkoError>(asked)
+        };
+        let answer = |actor: &Actor, question: u32, text: &str| {
+            let ekko = open(actor);
+            let mut draft = Draft::open(&ekko)?;
+            draft.answer(&Ref::Id(question), text)?;
+            draft.commit(false).map(|_| ())
+        };
+
+        let refused = open(&session).link_project("blog", true).unwrap_err().to_string();
+        assert!(refused.contains("a link is the user's to make, and this runs inside a Claude Code session"), "{refused}");
+        assert!(names().is_empty());
+
+        let (question, put) = propose().unwrap();
+        assert!(put.text.contains("The link proposed: the boards of projects site ("), "{}", put.text);
+        assert_eq!(put.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), [LINK, DONT_LINK]);
+        assert!(answer(&session, question, LINK).is_err(), "a session's answer never links");
+        assert!(names().is_empty());
+        let (declined, _) = propose().unwrap();
+        answer(&Actor::person(), declined, DONT_LINK).unwrap();
+        assert!(names().is_empty());
+        answer(&Actor::person(), question, LINK).unwrap();
+        assert_eq!(names(), ["blog"]);
+        assert!(propose().unwrap_err().to_string().contains("site and blog are linked already"));
+
+        open(&session).link_project("blog", false).unwrap();
+        assert!(names().is_empty());
+        fs::remove_dir_all(&home).ok();
     }
 }

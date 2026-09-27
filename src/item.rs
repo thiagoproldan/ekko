@@ -406,6 +406,22 @@ pub struct Question {
     /// A call a guard refused, which the user's answer lets through once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Allowance>,
+    /// Two projects a session proposes to link (task 811), which the user's
+    /// answer in ekko's menu links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<Linking>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// Two projects a question proposes to link, by id: its own board's first,
+/// then the one it names (task 811). The user's answer in ekko's menu links
+/// them, both ways; a session's answer never does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Linking {
+    pub projects: [String; 2],
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -1582,7 +1598,7 @@ mod tests {
         }
         assert!(missing.is_empty(), "no `unknown`, and no reason given here for none: {missing:?}");
         checked.sort();
-        let expected = ["Allowance", "Answer", "Counters", "Cue", "Holder", "Item", "Over", "Proposal", "Question", "Refused", "Registered", "Registry", "Used", "Wait"];
+        let expected = ["Allowance", "Answer", "Counters", "Cue", "Holder", "Item", "Linking", "Over", "Proposal", "Question", "Refused", "Registered", "Registry", "Used", "Wait"];
         assert_eq!(checked, expected, "the scan finds the structs it should");
     }
 

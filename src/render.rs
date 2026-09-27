@@ -1211,6 +1211,21 @@ impl<'a> Renderer<'a> {
         self.emit(" ", None, &self.painter.grey(&format!("moved to {}", trash.display())), "");
     }
 
+    /// What `--link-project` or `--unlink-project` did to two projects.
+    pub fn success_linked(&mut self, name: &str, other: &str, linked: bool, changed: bool) {
+        let pair = format!("{name} and {other}");
+        match (linked, changed) {
+            (true, true) => {
+                self.success("\n", "Linked projects:", &self.painter.grey(&pair));
+                let reach = "a Claude Code session on either, one running now included, reaches the other's board through ekko's MCP, with project";
+                self.emit(" ", None, &self.painter.grey(reach), "");
+            }
+            (true, false) => self.success("\n", "Linked already:", &self.painter.grey(&pair)),
+            (false, true) => self.success("\n", "Unlinked projects:", &self.painter.grey(&pair)),
+            (false, false) => self.success("\n", "Not linked:", &self.painter.grey(&pair)),
+        }
+    }
+
     /// What `--destroy` did to a project whose folder no longer held its
     /// board: forgot it, and parked its copy in the trash if it had one.
     pub fn success_forgotten(&mut self, forgotten: &crate::project::Forgotten) {

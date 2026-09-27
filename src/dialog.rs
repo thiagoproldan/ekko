@@ -66,6 +66,12 @@ pub struct Pending {
     /// results, and its dialog is a result asking for one, which the client
     /// answers by retrying the call, since it takes no request from a server.
     pub modern: bool,
+    /// Whether a question carries cue, allow or link_project, which only the
+    /// user's answer in ekko's menu applies.
+    pub guarded: bool,
+    /// The linked board the questions were asked on (task 811), where
+    /// their answers are recorded and read; None for the session's own.
+    pub project: Option<String>,
 }
 
 /// The dialogs of one server: whether its client shows them, and the ones

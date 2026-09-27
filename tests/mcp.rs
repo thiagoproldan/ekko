@@ -31,13 +31,26 @@ fn session(home: &PathBuf, lines: &[String]) -> HashMap<String, Value> {
 
 /// Every message the server wrote, in order, notifications included.
 fn transcript(home: &PathBuf, lines: &[String]) -> Vec<Value> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+    served(home, None, lines)
+}
+
+/// A session in a project's `folder` (task 811): its board is the one found
+/// from there, with no EKKO_DIR to pick another.
+fn session_in(home: &PathBuf, folder: &Path, lines: &[String]) -> HashMap<String, Value> {
+    served(home, Some(folder), lines).into_iter().map(|reply| (reply["id"].to_string(), reply)).collect()
+}
+
+fn served(home: &PathBuf, folder: Option<&Path>, lines: &[String]) -> Vec<Value> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
+    match folder {
+        Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
+        None => command.env("EKKO_DIR", home).current_dir(home),
+    };
+    let mut child = command
         .arg("--mcp")
         .env("HOME", home)
-        .env("EKKO_DIR", home)
         .env("EKKO_TERMINAL", "none")
         .env_remove("EKKO_PROJECT")
-        .current_dir(home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -255,7 +268,7 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
     let discovered = &replies["1"]["result"];
     assert_eq!(discovered["resultType"], "complete", "{}", replies["1"]);
     assert_eq!(discovered["supportedVersions"], json!(["2026-07-28"]));
-    assert_eq!(discovered["capabilities"], json!({"tools": {}, "prompts": {}}));
+    assert_eq!(discovered["capabilities"], json!({"tools": {"listChanged": true}, "prompts": {}}));
     assert!(discovered["instructions"].as_str().is_some_and(|s| s.contains("shared with the user")), "{discovered}");
 
     assert_eq!(replies["2"]["result"]["resultType"], "complete");
@@ -525,13 +538,21 @@ struct Live {
 
 impl Live {
     fn start(home: &PathBuf, args: &[&str]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        Live::start_in(home, None, args)
+    }
+
+    /// The same, in a project's `folder`, whose board it works on.
+    fn start_in(home: &PathBuf, folder: Option<&Path>, args: &[&str]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
+        match folder {
+            Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
+            None => command.env("EKKO_DIR", home).current_dir(home),
+        };
+        let mut child = command
             .args(args)
             .env("HOME", home)
-            .env("EKKO_DIR", home)
             .env("EKKO_TERMINAL", "none")
             .env_remove("EKKO_PROJECT")
-            .current_dir(home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -771,7 +792,12 @@ impl Held {
     /// `ekko --mcp` whose menu opens with `terminal`, a script standing in
     /// for the terminal, opened with the handshake.
     fn start(home: &PathBuf, terminal: &str) -> Held {
-        let mut live = Held::spawn(home, terminal);
+        Held::start_in(home, None, terminal)
+    }
+
+    /// The same, in a project's `folder`, whose board it works on.
+    fn start_in(home: &PathBuf, folder: Option<&Path>, terminal: &str) -> Held {
+        let mut live = Held::spawn_in(home, folder, terminal);
         live.send(&request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})));
         live.reply(1);
         live
@@ -780,24 +806,32 @@ impl Held {
     /// The same server, with no handshake: a 2026-07-28 client's. The script
     /// gets ekko's command line as its arguments.
     fn spawn(home: &PathBuf, terminal: &str) -> Held {
+        Held::spawn_in(home, None, terminal)
+    }
+
+    fn spawn_in(home: &PathBuf, folder: Option<&Path>, terminal: &str) -> Held {
         let script = home.join("terminal.sh");
         // The arguments end in `<ekko> --menu <file>`: the script finds both,
-        // and the pid file beside the questions, as $exe, $spec and $pid.
-        let prelude = "spec=; exe=; prev=\nfor a in \"$@\"; do\n  [ \"$prev\" = --menu ] && spec=$a\n  [ \"$a\" = --menu ] && exe=$prev\n  prev=$a\ndone\npid=\"${spec%.json}.pid\"\n";
+        // and the pid file beside the questions, as $exe, $spec and $pid. The
+        // variables that pick the board it takes as the command line sets them.
+        let prelude = "spec=; exe=; prev=\nfor a in \"$@\"; do\n  [ \"$prev\" = --menu ] && spec=$a\n  [ \"$a\" = --menu ] && exe=$prev\n  case \"$a\" in EKKO_DIR=*|EKKO_PROJECT=*) export \"$a\";; esac\n  prev=$a\ndone\npid=\"${spec%.json}.pid\"\n";
         let log = home.join("terminal.log");
         fs::write(&script, format!("#!/bin/sh\necho \"$@\" >> \"{}\"\n{prelude}{terminal}\n", log.display())).unwrap();
         fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
+        match folder {
+            Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
+            None => command.env("EKKO_DIR", home).current_dir(home),
+        };
+        let mut child = command
             .arg("--mcp")
             .env("HOME", home)
-            .env("EKKO_DIR", home)
             .env("EKKO_TERMINAL", &script)
             // As in a session of its own: the command line is what removes it
             // from the menu, and the fake terminal skips the command line.
             .env_remove("CLAUDECODE")
             .env("XDG_RUNTIME_DIR", home)
             .env_remove("EKKO_PROJECT")
-            .current_dir(home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1012,7 +1046,8 @@ fn a_modern_client_answers_the_dialog_by_retrying_the_call() {
 /// stream (task 708): acknowledged first, with what the server honors of what
 /// was asked, then each change tagged with the stream's id, until the client
 /// cancels it. A 2026-07-28 client that opened no stream hears nothing, since
-/// that revision sends only what a client asked for.
+/// that revision sends only what a client asked for. The board server's tool
+/// list changes the same way, with the session's links (task 811).
 #[test]
 fn a_modern_client_hears_of_changes_on_the_stream_it_opened() {
     let home = temp_home();
@@ -1045,18 +1080,28 @@ fn a_modern_client_hears_of_changes_on_the_stream_it_opened() {
     assert_eq!(live.next(quiet), None, "told of a change on a stream the client cancelled, or answered its request");
     live.stop();
 
-    // The board server's lists do not change: it honors nothing.
-    let mut board = Live::start(&home, &["--mcp"]);
-    assert_eq!(board.ask(listen("listen:1"))["params"]["notifications"], json!({}));
+    // The board server honors only the tool list's changes, which a link
+    // to the session's board makes.
+    let folders = projects(&home, &["site", "blog"]);
+    let mut board = Live::start_in(&home, Some(&folders[0]), &["--mcp"]);
+    assert_eq!(board.ask(listen("listen:1"))["params"]["notifications"], json!({"toolsListChanged": true}));
+    board.ask(request(2, "tools/call", json!({"name": "next", "arguments": {}, "_meta": meta})));
+    assert_eq!(board.next(quiet), None, "told of a change before any");
+    cli_in(&home, &folders[0], &["--link-project", "blog"]);
+    assert_eq!(board.ask(request(3, "tools/call", json!({"name": "next", "arguments": {}, "_meta": meta})))["id"], 3);
+    let notice = board.next(std::time::Duration::from_secs(5)).expect("no tools list_changed after the link");
+    let tagged = json!({"_meta": {"io.modelcontextprotocol/subscriptionId": "listen:1"}});
+    assert_eq!(notice, json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": tagged}));
     board.stop();
 
     fs::remove_dir_all(&home).ok();
 }
 
-/// A session works on its own board (task 697): no tool or prompt takes
-/// project, no tool lists the other projects, and every tool the server
-/// lists -- so one added later too -- refuses a call that names another
-/// project with the rule, before reading or writing either board.
+/// A session works on its own board (task 697), and on none other the user
+/// has not linked to it (task 811): on a board without links no tool or
+/// prompt takes project, no tool lists the other projects, and every tool
+/// the server lists -- so one added later too -- refuses a call that names
+/// another project with the rule, before reading or writing either board.
 #[test]
 fn no_tool_reaches_another_projects_board() {
     let home = temp_home();
@@ -1097,7 +1142,11 @@ fn no_tool_reaches_another_projects_board() {
     for (name, id) in names.iter().zip(first..) {
         let reply = &replies[&id.to_string()];
         assert_eq!(reply["result"]["isError"], true, "{name}: {reply}");
-        assert!(text(reply).starts_with("INVALID_INPUT: no tool takes project: a session works on its own board"), "{name}: {}", text(reply));
+        let rule = match *name {
+            "wait" => "INVALID_INPUT: wait takes no project: the hook that wakes a session watches only its own board",
+            _ => "INVALID_INPUT: other is not linked to this session's board: this session's board is not a project's, and links to none. A session works on its own board",
+        };
+        assert!(text(reply).starts_with(rule), "{name}: {}", text(reply));
     }
     assert!(replies["99"]["error"]["message"].as_str().unwrap().contains("Unknown tool: projects"), "{}", replies["99"]);
     let searched = text(&replies["100"]);
@@ -1109,13 +1158,193 @@ fn no_tool_reaches_another_projects_board() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// The CLI in `folder`, as the user runs it in a terminal of their own: its
+/// output, once it succeeded.
+fn cli_in(home: &PathBuf, folder: &Path, args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        .args(args)
+        .current_dir(folder)
+        .env("HOME", home)
+        .env_remove("EKKO_DIR")
+        .env_remove("EKKO_PROJECT")
+        .env_remove("CLAUDECODE")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ekko {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Projects made with `ekko init` in folders of `home` named after them.
+fn projects(home: &PathBuf, names: &[&str]) -> Vec<PathBuf> {
+    names
+        .iter()
+        .map(|name| {
+            let folder = home.join(name);
+            fs::create_dir_all(&folder).unwrap();
+            cli_in(home, &folder, &["init"]);
+            folder
+        })
+        .collect()
+}
+
+/// The tools of a tools/list reply that take project, with its schema.
+fn taking_project(reply: &Value) -> Vec<(String, Value)> {
+    let tools = reply["result"]["tools"].as_array().unwrap();
+    tools.iter().filter_map(|tool| Some((tool["name"].as_str()?.to_string(), tool["inputSchema"]["properties"].get("project")?.clone()))).collect()
+}
+
+/// A session reaches the boards the user linked to its own, and only those
+/// (task 811). Before the link, a call naming the other project is refused
+/// and no tool takes project. Once the user links the two in a terminal,
+/// every tool but wait works on the other board with project -- reads and
+/// writes, both ways, with no prompt -- and the tools and the prime name
+/// it; a project not linked is still refused. Taken away again, from
+/// either side, it is refused as before.
+#[test]
+fn a_session_reaches_the_board_the_user_linked_and_no_other() {
+    let home = temp_home();
+    let folders = projects(&home, &["site", "blog", "shop"]);
+    let (site, blog) = (&folders[0], &folders[1]);
+    cli_in(&home, blog, &["--task", "a task of the blog"]);
+    let listing = [
+        request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})),
+        request(2, "tools/list", json!({})),
+    ];
+    let with = |calls: Vec<String>| listing.iter().cloned().chain(calls).collect::<Vec<_>>();
+
+    let before = session_in(&home, site, &with(vec![call(3, "search", json!({"text": "blog", "project": "blog"}))]));
+    assert!(taking_project(&before["2"]).is_empty());
+    assert!(
+        text(&before["3"]).starts_with("INVALID_INPUT: blog is not linked to this session's board: no board is linked to this session's."),
+        "{}",
+        text(&before["3"])
+    );
+
+    assert!(cli_in(&home, site, &["--link-project", "blog"]).contains("Linked projects:"));
+    let primed = cli_in(&home, blog, &["--prime"]);
+    let cursor: i64 = primed.lines().next().unwrap().rsplit("cursor ").next().unwrap().trim().parse().unwrap();
+    let linked = session_in(
+        &home,
+        site,
+        &with(vec![
+            call(3, "search", json!({"text": "blog", "project": "blog"})),
+            // A linked board this session never read in full is read in full.
+            call(10, "prime", json!({"project": "blog", "if_rev": cursor})),
+            call(11, "prime", json!({"project": "blog", "if_rev": cursor})),
+            call(4, "create", json!({"text": "written from the site's session", "project": "blog"})),
+            call(5, "prime", json!({"project": "blog"})),
+            call(6, "prime", json!({})),
+            call(7, "wait", json!({"on": 1, "until": "done", "then": "carry on", "project": "blog"})),
+            call(8, "search", json!({"text": "blog", "project": "shop"})),
+            call(9, "search", json!({"text": "written"})),
+        ]),
+    );
+    let tools = taking_project(&linked["2"]);
+    assert_eq!(tools.len(), linked["2"]["result"]["tools"].as_array().unwrap().len() - 1, "every tool but wait: {tools:?}");
+    assert!(tools.iter().all(|(name, project)| name != "wait" && project["enum"] == json!(["blog"])), "{tools:?}");
+    assert!(text(&linked["3"]).contains("a task of the blog"), "{}", text(&linked["3"]));
+    assert!(text(&linked["10"]).starts_with("ekko \u{b7} project blog"), "{}", text(&linked["10"]));
+    assert_eq!(text(&linked["11"]), format!("unchanged since cursor {cursor}\n"));
+    assert_eq!(linked["4"]["result"]["isError"], false, "{}", text(&linked["4"]));
+    assert!(text(&linked["5"]).starts_with("ekko \u{b7} project blog \u{b7} cursor "), "{}", text(&linked["5"]));
+    assert!(text(&linked["6"]).contains("\nLinked boards: blog -- every tool but wait works on one with project;"), "{}", text(&linked["6"]));
+    assert!(!text(&linked["6"]).contains("a task of the blog"), "none of the linked board's items enters the prime");
+    assert!(text(&linked["7"]).starts_with("INVALID_INPUT: wait takes no project"), "{}", text(&linked["7"]));
+    assert!(
+        text(&linked["8"]).starts_with("INVALID_INPUT: shop is not linked to this session's board: project takes only blog."),
+        "{}",
+        text(&linked["8"])
+    );
+    assert!(!text(&linked["9"]).contains("written from"), "the write went to the site's own board: {}", text(&linked["9"]));
+    assert!(cli_in(&home, blog, &["--list"]).contains("written from the site's session"));
+
+    let back = session_in(&home, blog, &with(vec![call(3, "create", json!({"text": "written from the blog's session", "project": "site"}))]));
+    assert_eq!(back["3"]["result"]["isError"], false, "{}", text(&back["3"]));
+    assert_eq!(taking_project(&back["2"])[0].1["enum"], json!(["site"]));
+    assert!(cli_in(&home, site, &["--list"]).contains("written from the blog's session"));
+
+    assert!(cli_in(&home, blog, &["--unlink-project", "site"]).contains("Unlinked projects:"));
+    let after = session_in(&home, site, &with(vec![call(3, "search", json!({"text": "blog", "project": "blog"}))]));
+    assert!(taking_project(&after["2"]).is_empty());
+    assert!(text(&after["3"]).starts_with("INVALID_INPUT: blog is not linked to this session's board"), "{}", text(&after["3"]));
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// ask proposes a link, and only the user's answer in ekko's menu makes it
+/// (task 811): the question left open is the user's to answer, and the
+/// session's own answer to it is refused. Answered Link in the menu, the
+/// two are linked, and the session's client is told its tool list changed,
+/// which now takes project. ask with project puts its questions on the
+/// linked board, in a menu opened on it, and reads the answers there.
+#[test]
+fn a_link_ask_proposes_is_made_only_by_the_users_answer_in_ekkos_menu() {
+    let home = temp_home();
+    let folders = projects(&home, &["site", "blog"]);
+    let (site, blog) = (&folders[0], &folders[1]);
+
+    let mut failed = Held::start_in(&home, Some(site), "exit 3");
+    failed.send(&call(2, "ask", json!({"questions": [{"text": "Ligo os quadros?", "link_project": "blog"}]})));
+    let reply: Value = serde_json::from_str(text(&failed.reply(2))).unwrap();
+    assert!(reply["unanswered"].as_str().unwrap().contains("One with cue, allow or link_project counts only answered there"), "{reply}");
+    failed.send(&call(3, "answer", json!({"question": 1, "text": "Link"})));
+    let refused = failed.reply(3);
+    assert!(text(&refused).contains("1 is the user's to answer, in ekko's menu"), "{refused}");
+    assert!(text(&refused).contains("They can open it with ekko --project site --answer 1 in a terminal"), "{refused}");
+    failed.stop();
+    assert!(cli_in(&home, site, &["--list"]).contains("The link proposed: the boards of projects site"));
+
+    // The menu, less the keys: every question answered Link, by the user.
+    let answer = "echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" Link; done";
+    let mut live = Held::start_in(&home, Some(site), answer);
+    live.send(&request(2, "tools/list", json!({})));
+    assert!(taking_project(&live.reply(2)).is_empty());
+    live.send(&call(3, "ask", json!({"questions": [{"text": "E agora?", "link_project": "blog"}]})));
+    let answered: Value = serde_json::from_str(text(&live.reply(3))).unwrap();
+    assert_eq!(answered["answers"][0]["answer"], "Link", "{answered}");
+    let told = std::time::Instant::now();
+    while !live.seen.iter().any(|m| m["method"] == "notifications/tools/list_changed") {
+        assert!(told.elapsed().as_secs() < 10, "the client is never told its tools changed: {:?}", live.seen);
+        if let Ok(message) = live.messages.recv_timeout(std::time::Duration::from_millis(200)) {
+            live.seen.push(message);
+        }
+    }
+    live.send(&request(4, "tools/list", json!({})));
+    assert_eq!(taking_project(&live.reply(4))[0].1["enum"], json!(["blog"]));
+
+    live.send(&call(5, "ask", json!({"project": "blog", "questions": [{"text": "Qual quadro?"}]})));
+    let there: Value = serde_json::from_str(text(&live.reply(5))).unwrap();
+    assert_eq!(there["answers"][0]["answer"], "Link", "{there}");
+    // Taken away in a terminal: the client is told with its next call's reply.
+    let told = live.seen.len();
+    cli_in(&home, blog, &["--unlink-project", "site"]);
+    live.send(&call(6, "prime", json!({})));
+    live.reply(6);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !live.seen[told..].iter().any(|m| m["method"] == "notifications/tools/list_changed") {
+        assert!(std::time::Instant::now() < deadline, "the client is never told its tools changed back: {:?}", &live.seen[told..]);
+        if let Ok(message) = live.messages.recv_timeout(std::time::Duration::from_millis(200)) {
+            live.seen.push(message);
+        }
+    }
+    live.send(&request(7, "tools/list", json!({})));
+    assert!(taking_project(&live.reply(7)).is_empty());
+    live.stop();
+    let log = fs::read_to_string(home.join("terminal.log")).unwrap();
+    assert!(log.lines().last().unwrap().starts_with("env -u CLAUDECODE EKKO_PROJECT=blog sh -c "), "{log}");
+    assert!(cli_in(&home, blog, &["--list"]).contains("Qual quadro?"));
+    assert!(!cli_in(&home, site, &["--list"]).contains("Qual quadro?"));
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// What Claude Code puts ahead of every conversation from this server: its
 /// instructions and the always-loaded tool definitions. A byte changed there
 /// makes every session resumed after an upgrade write its whole context again
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0xddded8e4bb5460d2;
+const PREFIX_FINGERPRINT: u64 = 0x0e74f0e82406c4b8;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {

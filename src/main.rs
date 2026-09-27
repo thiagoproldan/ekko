@@ -53,6 +53,7 @@ const HELP: &str = r#"
       --force             Override the blocked-by rule or a running session's hold
       --help, -h          Display help message
       --json, -j          Output machine-readable JSON instead of formatted text
+      --link-project <NAME> Link this project's board and NAME's, for Claude Code sessions
       --list, -l          List items by attributes
       --mcp               Serve the board to an agent over MCP (stdio)
       --resources         With --mcp: serve only the board as @-mentionable resources
@@ -79,6 +80,7 @@ const HELP: &str = r#"
       --star, -s          Star/unstar item
       --stash [IDS]       Put items or a board away; no ids lists the stash
       --trash             Show the trash, and how long each thing has left
+      --unlink-project <NAME> Take away the link between this project's board and NAME's
       --unstash <IDS>     Bring items back out of the stash
       --untrash <IDS>     Bring items back out of the trash
       --ekko-dir          Define a custom ekko directory
@@ -471,6 +473,12 @@ fn dispatch(
             return Err(directory::DirectoryError::DestroyNeedsProject.into());
         };
         return Ok(vec![ekko.destroy_project(home_dir, project, chrono::Local::now().timestamp_millis())?]);
+    }
+    if let Some(name) = cli.link_project.as_deref() {
+        return Ok(vec![ekko.link_project(name, true)?]);
+    }
+    if let Some(name) = cli.unlink_project.as_deref() {
+        return Ok(vec![ekko.link_project(name, false)?]);
     }
     if cli.projects {
         return Ok(vec![Outcome::Projects(project::list(home_dir))]);

@@ -419,6 +419,9 @@ pub enum Outcome {
     Destroyed { name: String, tasks: u32, notes: u32, trash: std::path::PathBuf },
     /// `--destroy` on a project whose folder no longer held its board.
     Forgotten(crate::project::Forgotten),
+    /// `--link-project` or `--unlink-project`: the two projects, whether the
+    /// command links or unlinks them, and whether that changed anything.
+    Linked { name: String, other: String, linked: bool, changed: bool },
     Init(Box<crate::project::Initialized>),
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
@@ -467,6 +470,7 @@ impl Outcome {
             Outcome::List(_) => "list",
             Outcome::Projects(_) => "projects",
             Outcome::Destroyed { .. } | Outcome::Forgotten(_) => "destroy",
+            Outcome::Linked { linked, .. } => if *linked { "link-project" } else { "unlink-project" },
             Outcome::Init(_) => "init",
             Outcome::Phases(_) => "phases",
             Outcome::Blocked { .. } => "blocked",
@@ -542,6 +546,7 @@ impl Outcome {
                 out.success_destroy(name, *tasks, *notes, trash)
             }
             Outcome::Forgotten(forgotten) => out.success_forgotten(forgotten),
+            Outcome::Linked { name, other, linked, changed } => out.success_linked(name, other, *linked, *changed),
             Outcome::Phases(names) => out.display_phases(names),
             Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
             Outcome::Attached { item, target } => out.success_attached(item.id, *target),
@@ -572,6 +577,11 @@ pub struct Ekko {
     /// naming its items are read (`crate::commits`); `None` for the default
     /// board, which belongs to no folder.
     pub(crate) folder: Option<PathBuf>,
+    /// The user's home and the project whose board this is, where the board
+    /// is a project's: where the boards linked to it are read, and where an
+    /// answer linking two projects is written (task 811). `None` for the
+    /// default board and one opened through EKKO_DIR, which link to nothing.
+    pub(crate) linkable: Option<(PathBuf, crate::project::Project)>,
 }
 
 /// What the words given to `--task` or `--note` say: the `@boards`, the
@@ -587,7 +597,7 @@ struct Created {
 
 impl Ekko {
     pub fn new(storage: Storage) -> Self {
-        Ekko { storage, actor: None, folder: None }
+        Ekko { storage, actor: None, folder: None, linkable: None }
     }
 
     /// This handle, writing for `actor`.
@@ -611,7 +621,15 @@ impl Ekko {
     /// Opens the board wherever `directory::locate` said this invocation's
     /// board lives, copying it at every write when it is a project's.
     pub fn at(location: &crate::directory::Location) -> Result<Self, EkkoError> {
-        Ok(Self::new(Storage::new(&location.dir)?.copied_to(location.copy.clone())))
+        let mut ekko = Self::new(Storage::new(&location.dir)?.copied_to(location.copy.clone()));
+        ekko.linkable = location.project.clone().map(|project| (location.home.clone(), project));
+        Ok(ekko)
+    }
+
+    /// The projects whose boards are linked to this one (task 811), in name
+    /// order: a session on this board reaches each through ekko's MCP.
+    pub fn linked(&self) -> Vec<crate::project::Project> {
+        self.linkable.as_ref().map(|(home, project)| crate::project::linked(home, project)).unwrap_or_default()
     }
 
     // ---- id / option parsing -------------------------------------------
@@ -1804,6 +1822,32 @@ impl Ekko {
         }
         let uid = task.uid.clone().ok_or(EkkoError::AttachTargetHasNoUid(target_id))?;
         Ok(Some((target_id, uid)))
+    }
+
+    /// `--link-project NAME` and `--unlink-project NAME` (task 811): links
+    /// this project's board and NAME's both ways, or takes the link away. A
+    /// link lets every session on either board reach the other without a
+    /// prompt, so it is the user's to make: from a Claude Code session,
+    /// linking is refused and points to ask, whose answer in ekko's menu is
+    /// the user's. Taking a link away only narrows what a session reaches.
+    pub fn link_project(&self, name: &str, link: bool) -> Result<Outcome, EkkoError> {
+        let Some((home, here)) = &self.linkable else {
+            return Err(DirectoryError::Unlinkable(
+                "only a project's board links to another: this is the default board, or one opened through EKKO_DIR".to_string(),
+            )
+            .into());
+        };
+        if link && self.actor.as_ref().is_some_and(|actor| !actor.is_person()) {
+            return Err(EkkoError::InvalidInput(format!(
+                "a link is the user's to make, and this runs inside a Claude Code session, ! commands included: \
+                 propose it with ask (a question with link_project: {name}), which the user answers in ekko's menu, \
+                 or they run ekko --link-project {name} in a terminal of their own"
+            )));
+        }
+        let there = crate::project::resolve_named(home, name)?;
+        let changed =
+            if link { crate::project::link(home, here, &there)? } else { crate::project::unlink(home, here, &there)? };
+        Ok(Outcome::Linked { name: here.name.clone(), other: there.name, linked: link, changed })
     }
 
     /// Moves a whole project to the trash, reporting what went with it.

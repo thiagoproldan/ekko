@@ -23,7 +23,7 @@ use crate::ekko::{
     Linked,
 };
 use crate::holder::Whose;
-use crate::item::{Answer, Cue, CueOn, How, Item, Knowledge, Proposal, Question, Setting, State, Until, Wait};
+use crate::item::{Answer, Cue, CueOn, How, Item, Knowledge, Linking, Proposal, Question, Setting, State, Until, Wait};
 use crate::storage::{ItemMap, LockGuard};
 
 /// An item as a caller names it: a display id, a uid, or `$N` for the item
@@ -203,6 +203,11 @@ pub struct Inquiry {
     /// that call through once, and ekko quotes the call as refused.
     #[serde(default)]
     pub allow: Option<String>,
+    /// A project to link this board's project with, both ways (task 811):
+    /// ekko writes what the link does, and the user's answer in ekko's menu
+    /// makes it.
+    #[serde(default)]
+    pub link_project: Option<String>,
 }
 
 /// A cue proposed through ask: for `gotcha`, refuse the calls of `command`
@@ -645,7 +650,7 @@ impl<'a> Draft<'a> {
         let now = chrono::Local::now().timestamp_millis();
         let asked_by = self.ekko.actor.as_ref().filter(|actor| !actor.is_person()).map(|actor| actor.holder(now));
         // The revision is the write's own, stamped as it is saved.
-        self.item(id).question = Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, unknown: Default::default() }));
+        self.item(id).question = Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, link: None, unknown: Default::default() }));
         Ok(id)
     }
 
@@ -665,22 +670,30 @@ impl<'a> Draft<'a> {
         if let Some(given) = &asked.answer {
             return Err(invalid(format!("{id} was already answered: {}", given.text)));
         }
-        // A cue or a refused call is the user's to settle (task 805): an
-        // answer a session wrote would lift a guard on its own calls.
+        // A cue, a refused call or a link is the user's to settle (tasks 805 and
+        // 811): an answer a session wrote would lift a guard on its own calls,
+        // or open another board to it.
         let person = self.ekko.actor.as_ref().is_none_or(|actor| actor.is_person());
-        if (asked.cue.is_some() || asked.allow.is_some()) && !person {
+        if (asked.cue.is_some() || asked.allow.is_some() || asked.link.is_some()) && !person {
+            // Named, since the question may be on a board linked to the
+            // session's, and the same id on another board is another item.
+            let board = self.ekko.linkable.as_ref().map(|(_, project)| format!("--project {} ", project.name)).unwrap_or_default();
             return Err(invalid(format!(
-                "{id} is the user's to answer, in ekko's menu: an answer a session records never turns a cue on \
-                 nor lets a refused call through. They can open it with ekko --answer {id} in a terminal"
+                "{id} is the user's to answer, in ekko's menu: an answer a session records never turns a cue on, \
+                 lets a refused call through nor links two boards. They can open it with ekko {board}--answer {id} in a terminal"
             )));
         }
         let now = chrono::Local::now().timestamp_millis();
         let by = self.ekko.actor.as_ref().map(|actor| actor.holder(now));
         let answer = Answer { text: text.to_string(), by, at: now, rev: 0, unknown: Default::default() };
         let proposal = asked.cue.clone();
+        let linking = asked.link.clone();
         self.item(id).question = Some(Box::new(Question { answer: Some(answer), ..*asked }));
         if let Some(proposal) = proposal {
             self.settle_proposal(id, &proposal, text, now);
+        }
+        if let Some(linking) = linking {
+            self.settle_link(&linking, text);
         }
         Ok(id)
     }
@@ -703,11 +716,44 @@ impl<'a> Draft<'a> {
         self.item(gotcha).cue = cue.map(|cue| CueOn { cue, question, at: now });
     }
 
+    /// Links the two projects `linking` names when the user's answer is Link
+    /// (task 811); any other answer changes nothing. The link is written to
+    /// the registry, outside the board, as the answer is recorded: a write
+    /// that then fails leaves the link made and the question open.
+    fn settle_link(&mut self, linking: &Linking, answer: &str) {
+        if answer != crate::project::LINK {
+            return;
+        }
+        let Some((home, _)) = &self.ekko.linkable else {
+            self.notices.push("this board is not a project's, so nothing was linked".to_string());
+            return;
+        };
+        let [a, b] = &linking.projects;
+        match crate::project::join(home, a, b) {
+            Ok(_) => self.notices.push("the two projects are linked: a session on either, this one included, reaches the other's board with project".to_string()),
+            Err(error) => self.notices.push(format!("nothing was linked: {error}")),
+        }
+    }
+
     /// Asks `inquiry`, as `ask` does, with what ekko adds to a question that
     /// proposes a cue or asks to let a refused call through (task 805): the
     /// text it quotes and the answers it offers, which the session does not
     /// write. The question as put to the user comes back with its id.
     pub fn ask_inquiry(&mut self, inquiry: &Inquiry, about: Option<&Ref>, home: &Path) -> Result<(u32, Inquiry), EkkoError> {
+        if let Some(name) = &inquiry.link_project {
+            if inquiry.cue.is_some() || inquiry.allow.is_some() {
+                return Err(invalid("a question takes one of cue, allow and link_project"));
+            }
+            if !inquiry.options.is_empty() || inquiry.multiple {
+                return Err(invalid("a question with link_project takes no options: ekko offers the answers, and only the first does anything"));
+            }
+            let (block, linking) = self.linking(name)?;
+            let options = [
+                choice(crate::project::LINK, "a session on either board reaches the other's through ekko's MCP, with no prompt"),
+                choice(crate::project::DONT_LINK, "nothing changes"),
+            ];
+            return self.ask_proposing(inquiry, &block, options, about, |question| question.link = Some(linking));
+        }
         let (block, options, proposal, allowance) = match (&inquiry.cue, &inquiry.allow) {
             (None, None) => {
                 let id = self.ask(&crate::dialog::noted(&inquiry.text, &inquiry.options, inquiry.multiple), about)?;
@@ -764,13 +810,60 @@ impl<'a> Draft<'a> {
                 (block, options, None, Some(allowance))
             }
         };
+        self.ask_proposing(inquiry, &block, options, about, |question| {
+            question.cue = proposal;
+            question.allow = allowance;
+        })
+    }
+
+    /// Records `inquiry` with `block` after its text and `options` as its
+    /// answers, then sets on the question what `propose` does: what ekko
+    /// adds to a question whose answer applies something, and the question
+    /// as put to the user, with its id.
+    fn ask_proposing(
+        &mut self,
+        inquiry: &Inquiry,
+        block: &str,
+        options: [Choice; 2],
+        about: Option<&Ref>,
+        propose: impl FnOnce(&mut Question),
+    ) -> Result<(u32, Inquiry), EkkoError> {
         let text = format!("{}{block}", inquiry.text.trim_end());
         let id = self.ask(&crate::dialog::noted(&text, &options, false), about)?;
         if let Some(question) = self.item(id).question.as_mut() {
-            question.cue = proposal;
-            question.allow = allowance;
+            propose(question);
         }
-        Ok((id, Inquiry { text, options: options.to_vec(), multiple: false, cue: None, allow: None }))
+        Ok((id, Inquiry { text, options: options.to_vec(), multiple: false, cue: None, allow: None, link_project: None }))
+    }
+
+    /// What a question proposing to link this board's project and `name`'s
+    /// records and quotes (task 811): the two projects, by id, and what the
+    /// link would do, which the user reads before answering.
+    fn linking(&self, name: &str) -> Result<(String, Linking), EkkoError> {
+        let Some((home, here)) = &self.ekko.linkable else {
+            return Err(invalid("only a project's board links to another: this is the default board, or one opened through EKKO_DIR"));
+        };
+        let there = crate::project::resolve_named(home, name.trim())?;
+        let projects = crate::project::linkable(here, &there)?;
+        if self.ekko.linked().iter().any(|linked| linked.name == there.name) {
+            return Err(invalid(format!("{} and {} are linked already: every tool but wait takes project: {} here", here.name, there.name, there.name)));
+        }
+        let named = |project: &crate::project::Project| match &project.root {
+            Some(root) => format!("{} ({})", project.name, root.display()),
+            None => project.name.clone(),
+        };
+        let block = format!(
+            "\n\nThe link proposed: the boards of projects {} and {}, both ways. A Claude Code session on either would read and write \
+             the other's through ekko's MCP, without a prompt: every tool but wait takes project: {} on {}'s board, and \
+             project: {} on {}'s. ekko --unlink-project, in either folder, takes it away.",
+            named(here),
+            named(&there),
+            there.name,
+            here.name,
+            here.name,
+            there.name
+        );
+        Ok((block, Linking { projects, unknown: Default::default() }))
     }
 
     /// Records on question `uid` that the tool call `tool_use_id` went

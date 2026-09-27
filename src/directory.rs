@@ -47,6 +47,8 @@ pub enum DirectoryError {
     /// `ekko init --name` on a folder that is already a project by another name.
     AlreadyProject { name: String, root: PathBuf },
     NotAFolder(String),
+    /// Two projects `ekko --link-project` or ask cannot join, and why (task 811).
+    Unlinkable(String),
     Io(String),
 }
 
@@ -107,6 +109,7 @@ impl std::fmt::Display for DirectoryError {
                 root.display()
             ),
             DirectoryError::NotAFolder(path) => write!(f, "No such folder: {path}"),
+            DirectoryError::Unlinkable(why) => write!(f, "{why}"),
             DirectoryError::Io(message) => write!(f, "{message}"),
             DirectoryError::Trash(detail) => {
                 write!(f, "Could not move the project to the trash: {detail}")
@@ -162,12 +165,15 @@ pub struct Location {
     /// On the default board, the project registered for this folder when the
     /// folder no longer holds its board.
     pub lost: Option<project::Lost>,
+    /// The user's home, whose registry holds the links a project's board has
+    /// (task 811).
+    pub home: PathBuf,
 }
 
 impl Location {
     fn new(home_dir: &Path, dir: PathBuf, project: Option<Project>, discovered: bool) -> Self {
         let copy = project::copy_dir(home_dir, &dir);
-        Location { dir, project, discovered, copy, lost: None }
+        Location { dir, project, discovered, copy, lost: None, home: home_dir.to_path_buf() }
     }
 
     /// How the prime, the sessions and the hooks name this board. On the
