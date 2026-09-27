@@ -382,8 +382,9 @@ fn refused_dir(home: &Path) -> PathBuf {
 }
 
 /// Records that `seen` was refused, with `reasons` beside any another guard
-/// gave for it; records older than a day go on the way past.
-fn record(home: &Path, seen: &Seen, session: Option<&Process>, code: &str, reasons: &[String], now: i64) -> std::io::Result<()> {
+/// gave for it, and gives back all of them; records older than a day go on
+/// the way past.
+fn record(home: &Path, seen: &Seen, session: Option<&Process>, code: &str, reasons: &[String], now: i64) -> std::io::Result<Vec<String>> {
     let dir = refused_dir(home);
     std::fs::create_dir_all(&dir)?;
     let _lock = crate::storage::lock_path(&dir.join(".lock")).map_err(std::io::Error::other)?;
@@ -416,7 +417,7 @@ fn record(home: &Path, seen: &Seen, session: Option<&Process>, code: &str, reaso
             let _ = std::fs::remove_file(entry.path());
         }
     }
-    Ok(())
+    Ok(refused.reasons)
 }
 
 /// The refusal `code` names, when a guard made it in the last day for
@@ -440,8 +441,9 @@ pub fn refusal(home: &Path, code: &str, session: Option<&Process>, now: i64) -> 
 enum Verdict {
     /// The user's answer to question `id` lets it through.
     Through(u32),
-    /// Refused, and recorded under this code.
-    Refused(String),
+    /// Refused, and recorded under this code, with every reason a guard has
+    /// given for it so far: this one's and any another recorded first.
+    Refused(String, Vec<String>),
 }
 
 /// Whether `seen` goes through on the user's answer, or else is refused,
@@ -458,8 +460,8 @@ fn decide(home: &Path, index: &Index, seen: &Seen, reasons: &[String], actor: &A
             None => continue,
         }
     }
-    let _ = record(home, seen, session, &code, reasons, now);
-    Verdict::Refused(code)
+    let all = record(home, seen, session, &code, reasons, now).unwrap_or_else(|_| reasons.to_vec());
+    Verdict::Refused(code, all)
 }
 
 /// Records on `grant`'s question that this tool call used it, unless
@@ -506,16 +508,32 @@ fn hook_reply(home: &Path, input: &str, actor: &Actor) -> Option<Value> {
     let seen = seen(&event).filter(|seen| seen.tool == "Bash")?;
     let now = chrono::Local::now().timestamp_millis();
     let index = current(home, now);
-    // Most calls name no cue's command at all, and need no parse.
-    if !index.cues.iter().any(|cue| seen.call.contains(cue.cue.command.as_str())) {
+    let reasons = cue_reasons(home, &index, &seen);
+    if reasons.is_empty() {
         return None;
+    }
+    Some(match decide(home, &index, &seen, &reasons, actor, now) {
+        Verdict::Through(question) => json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": format!("ekko: the user's answer to question {question} let this call through, once, past the cue that refuses it."),
+        }}),
+        Verdict::Refused(code, all) => json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": clipped(&format!("{}{}", reasons.join("\n\n"), ending(&code, &all, &reasons)), 9_000),
+        }}),
+    })
+}
+
+/// The reasons of the cues that are on and name the Bash call `seen`.
+fn cue_reasons(home: &Path, index: &Index, seen: &Seen) -> Vec<String> {
+    // Most calls name no cue's command at all, and need no parse.
+    if seen.tool != "Bash" || !index.cues.iter().any(|cue| seen.call.contains(cue.cue.command.as_str())) {
+        return Vec::new();
     }
     let found = hits(&index.cues, &seen.call, Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd }));
-    if found.is_empty() {
-        return None;
-    }
     let folders = boards(home);
-    let reasons: Vec<String> = found
+    found
         .iter()
         .map(|cue| {
             let folder = folders.iter().find(|board| board.dir == cue.board).and_then(|board| board.folder.as_deref());
@@ -526,25 +544,26 @@ fn hook_reply(home: &Path, input: &str, actor: &Actor) -> Option<Value> {
                 clipped(&cue.text, 3_000)
             )
         })
-        .collect();
-    Some(match decide(home, &index, &seen, &reasons, actor, now) {
-        Verdict::Through(question) => json!({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "additionalContext": format!("ekko: the user's answer to question {question} let this call through, once, past the cue that refuses it."),
-        }}),
-        Verdict::Refused(code) => json!({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": clipped(&format!("{}\n\n{}", reasons.join("\n\n"), how_to_ask(&code)), 9_000),
-        }}),
-    })
+        .collect()
+}
+
+/// What a guard's refusal ends with, after its own `reasons`: those of
+/// `all` another guard gave, then how to ask. Claude Code runs the hooks at
+/// once and shows the model only the reason of the last to finish refusing
+/// (2.1.283, read off its bundle), so each guard's carries every reason
+/// recorded by then (task 839).
+fn ending(code: &str, all: &[String], reasons: &[String]) -> String {
+    let others: String = all.iter().filter(|reason| !reasons.contains(reason)).map(|other| format!("\n\n{other}")).collect();
+    format!("{others}\n\n{}", how_to_ask(code))
 }
 
 /// `ekko --guard --refuse REASON`, for another guard about to refuse the
 /// call on stdin, a PreToolUse event: exits 0, printing nothing, when the
 /// user let this call through; else records the refusal with `reason`,
-/// prints the sentence the refusal should end with, and exits 1. Anything
-/// it cannot read exits 2, and the other guard refuses as it would have.
+/// prints what the refusal should end with -- the reasons of ekko's cues
+/// and of any other guard that refused the call, then how to ask -- and
+/// exits 1. Anything it cannot read exits 2, and the other guard refuses as
+/// it would have.
 pub fn refuse(home: &Path, input: &str, reason: &str) -> ExitCode {
     match refuse_reply(home, input, reason, &Actor::of_this_command()) {
         None => ExitCode::from(2),
@@ -557,15 +576,17 @@ pub fn refuse(home: &Path, input: &str, reason: &str) -> ExitCode {
 }
 
 /// `refuse`'s answer for the session `actor`: `None` for input it cannot
-/// read, else the sentence a refusal ends with, or `None` inside for a call
-/// the user let through.
+/// read, else what a refusal ends with, or `None` inside for a call the
+/// user let through.
 fn refuse_reply(home: &Path, input: &str, reason: &str, actor: &Actor) -> Option<Option<String>> {
     let seen = seen(&serde_json::from_str::<Value>(input).ok()?)?;
     let now = chrono::Local::now().timestamp_millis();
     let index = current(home, now);
-    Some(match decide(home, &index, &seen, &[reason.trim().to_string()], actor, now) {
+    let given = vec![reason.trim().to_string()];
+    let reasons = [given.clone(), cue_reasons(home, &index, &seen)].concat();
+    Some(match decide(home, &index, &seen, &reasons, actor, now) {
         Verdict::Through(_) => None,
-        Verdict::Refused(code) => Some(how_to_ask(&code)),
+        Verdict::Refused(code, all) => Some(ending(&code, &all, &given).trim_start().to_string()),
     })
 }
 
@@ -823,6 +844,43 @@ mod tests {
         let allow = ekko_at(&dir, None).storage.get().unwrap()[&asked].question.clone().unwrap().allow.unwrap();
         assert_eq!(allow.used.unwrap().tool_use_id, "t4");
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// When ekko's cue and another guard refuse one call, the model reads
+    /// only the reason of the last to finish refusing (task 839), and each
+    /// guard's text is made as it records. ctx's carries ekko's cues'
+    /// reasons in either order, since `--refuse` works them out; ekko's
+    /// carries ctx's once ctx has recorded it. Left open: ekko records
+    /// first yet finishes last, in the moment between its record and its
+    /// exit.
+    #[test]
+    fn two_guards_refusing_one_call_each_carry_both_reasons() {
+        let (session, _, _) = test_sessions();
+        let command = "gh api graphql -f query='mutation { updateProjectV2Field }'";
+        let (lesson, ctx) = ("The Status field lesson.", "ctx: it would lose work");
+        for ekko_first in [true, false] {
+            let home = home(if ekko_first { "both-ekko-first" } else { "both-ctx-first" });
+            cued(&home.join(".ekko"), lesson, cue("gh", &["updateProjectV2Field"], None));
+            let input = event(command, Path::new("/r"), "t1");
+            // As ctx refuses: its reason, then what ekko told it to end with.
+            let from_ctx = || format!("{ctx}\n\n{}", refuse_reply(&home, &input, ctx, &session).unwrap().unwrap());
+            let from_ekko = || refused(&hook_reply(&home, &input, &session)).unwrap();
+            let (ekko_text, ctx_text) = if ekko_first {
+                let ekko_text = from_ekko();
+                (ekko_text, from_ctx())
+            } else {
+                let ctx_text = from_ctx();
+                (from_ekko(), ctx_text)
+            };
+            let order = if ekko_first { "ekko records first" } else { "ctx records first" };
+            let both = |text: &str| (text.matches(lesson).count(), text.matches(ctx).count());
+            assert_eq!(both(&ctx_text), (1, 1), "{order}, ctx's: {ctx_text}");
+            if !ekko_first {
+                assert_eq!(both(&ekko_text), (1, 1), "{order}, ekko's: {ekko_text}");
+            }
+            assert_eq!(code_in(&ekko_text), code_in(&ctx_text), "{order}");
+            std::fs::remove_dir_all(&home).ok();
+        }
     }
 
     #[test]
