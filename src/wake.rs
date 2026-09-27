@@ -94,12 +94,14 @@ fn forget_ended(home: &Path) {
 pub fn untold(ekko: &Ekko, me: &Actor, told: &Told, since: u64, holding: bool) -> Result<Vec<String>, EkkoError> {
     let all = ekko.storage.get_shared()?;
     let registry = me.registry.as_ref();
-    // Its own, or its conversation's from before a restart, as a question's
-    // answer is (`agent::prime`).
+    // Its own, or its conversation's from before a restart or from the
+    // process Claude Code moved it out of, as a question's answer is
+    // (`agent::prime`).
     let mine = |holder: &Holder| {
         me.is(holder)
             || (!holder.alive()
                 && me.conversation().is_some_and(|now| holder.conversation_in(registry).as_deref() == Some(now.as_str())))
+            || me.continues(holder)
     };
     let by_uid: HashMap<&str, &Item> = all.values().filter_map(|item| Some((item.uid.as_deref()?, item))).collect();
     let name = |holder: &Holder| holder.label_in(registry);

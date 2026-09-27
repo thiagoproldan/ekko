@@ -1137,12 +1137,14 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
 
     // Questions in their own sections: the open ones for the user, whoever
     // asked, and the answers this session is waiting for -- its own, or its
-    // conversation's from before a restart. An open one is not quoted again
-    // under its task.
+    // conversation's from before a restart or from the process Claude Code
+    // moved it out of. An open one is not quoted again under its task.
     let registry = reader.me.as_ref().and_then(|me| me.registry.as_ref());
     let mine = |asker: &crate::holder::Holder| {
         reader.me.as_ref().is_some_and(|me| {
-            me.is(asker) || (!asker.alive() && me.conversation().is_some_and(|now| asker.conversation_in(registry).as_deref() == Some(now.as_str())))
+            me.is(asker)
+                || (!asker.alive() && me.conversation().is_some_and(|now| asker.conversation_in(registry).as_deref() == Some(now.as_str())))
+                || me.continues(asker)
         })
     };
     let day_ago = chrono::Local::now().timestamp_millis() - 86_400_000;
@@ -2039,6 +2041,8 @@ pub fn changes_within(ekko: &Ekko, since: i64, board: &str) -> Result<String, Ek
 pub struct SessionEvent {
     pub source: String,
     pub session_id: Option<String>,
+    /// Where Claude Code writes the session's transcript.
+    pub transcript: Option<PathBuf>,
 }
 
 impl SessionEvent {
@@ -2049,6 +2053,7 @@ impl SessionEvent {
         SessionEvent {
             source: event["source"].as_str().unwrap_or("startup").to_string(),
             session_id: event["session_id"].as_str().map(str::to_string),
+            transcript: event["transcript_path"].as_str().filter(|path| !path.is_empty()).map(PathBuf::from),
         }
     }
 }
@@ -2084,11 +2089,12 @@ pub fn processes_dir(home: &Path) -> PathBuf {
 /// session this hook never served is pointed at the prime it already holds.
 pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Path) -> Result<String, EkkoError> {
     // The conversation now running in this session's process: what its
-    // claims name, and how a conversation resumed after a restart knows the
-    // ones it made before, which it takes back.
+    // claims name, and how a conversation resumed after a restart, or moved
+    // here out of another process, knows the ones it made before, which it
+    // takes back.
     let mut taken = Vec::new();
     if let (Some(actor), Some(conversation)) = (&ekko.actor, &event.session_id) {
-        actor.record(conversation, ekko.storage.storage_path());
+        actor.record(conversation, ekko.storage.storage_path(), event.transcript.as_deref());
         taken = ekko.take_back(conversation).unwrap_or_else(|error| {
             eprintln!("ekko: what this conversation held before was not taken back: {error}");
             Vec::new()
@@ -4062,7 +4068,7 @@ mod tests {
         let (ekko, dir) = board("session");
         let state = dir.join("state");
         ekko.create_task(&words(&["first"])).unwrap();
-        let event = |source: &str| SessionEvent { source: source.to_string(), session_id: Some("abc-123".to_string()) };
+        let event = |source: &str| SessionEvent { source: source.to_string(), session_id: Some("abc-123".to_string()), transcript: None };
 
         let started = session_start(&ekko, "default board", &event("startup"), &state).unwrap();
         assert!(started.contains("Ready, best first (1)"), "{started}");
@@ -4074,7 +4080,7 @@ mod tests {
         let moved = session_start(&ekko, "default board", &event("resume"), &state).unwrap();
         assert!(moved.contains("   2. [pending] second"), "{moved}");
 
-        let stranger = SessionEvent { source: "fork".to_string(), session_id: Some("never-served".to_string()) };
+        let stranger = SessionEvent { source: "fork".to_string(), session_id: Some("never-served".to_string()), transcript: None };
         assert_eq!(session_start(&ekko, "default board", &stranger, &state).unwrap().lines().count(), 1);
 
         let cleared = session_start(&ekko, "default board", &event("clear"), &state).unwrap();
@@ -4083,7 +4089,7 @@ mod tests {
         assert_eq!(SessionEvent::from_hook_input("not json").source, "startup");
         assert_eq!(
             SessionEvent::from_hook_input(r#"{"source":"resume","session_id":"s1"}"#),
-            SessionEvent { source: "resume".to_string(), session_id: Some("s1".to_string()) }
+            SessionEvent { source: "resume".to_string(), session_id: Some("s1".to_string()), transcript: None }
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -4323,7 +4329,7 @@ mod tests {
             Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
         };
         let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
-            let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()) };
+            let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()), transcript: None };
             session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
         };
         let hand_off = |actor: &crate::holder::Actor, text: &str, task: u32| {
@@ -4436,7 +4442,7 @@ mod tests {
             Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
         };
         let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
-            let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()) };
+            let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()), transcript: None };
             session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
         };
         start(&me, "startup", "c1-mine");
@@ -4469,7 +4475,7 @@ mod tests {
             Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
         };
         let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
-            let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()) };
+            let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()), transcript: None };
             session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap()
         };
         start(&gone, "startup", "c-before-the-restart");
@@ -4494,6 +4500,112 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A conversation Claude Code moved out of a process that still runs --
+    /// to a background session -- keeps what it made there (task 862): its
+    /// claims, its handoffs, the answers to its questions and its waits. Its
+    /// claims are taken back at SessionStart, and not refused before that,
+    /// since Claude Code may write the move down after the session started.
+    /// Until the move is written, or when a message follows it, it is a fork
+    /// that left the conversation where it was, and keeps none of it. Seen
+    /// on 2026-09-27: the continuing session was refused HELD on its own task.
+    #[test]
+    fn a_conversation_moved_out_of_its_process_keeps_what_it_made() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let (_, dir) = board("moved");
+        let registry = crate::holder::Registry::at(dir.join("processes"));
+        let transcripts = dir.join("transcripts");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let as_ = |actor: &crate::holder::Actor| {
+            Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
+        };
+        let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
+            let transcript = Some(transcripts.join(format!("{conversation}.jsonl")));
+            let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()), transcript };
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap()
+        };
+        let terminal = |records: &[&serde_json::Value]| {
+            let text: String = records.iter().map(|record| format!("{record}\n")).collect();
+            std::fs::write(transcripts.join("c-terminal.jsonl"), text).unwrap();
+        };
+        let message = serde_json::json!({"type": "user", "message": {"role": "user", "content": "go on"}});
+        let moved = serde_json::json!({"type": "continued-in", "sessionId": "c-terminal", "continuedInSessionId": "c-background"});
+        let after = serde_json::json!({"type": "cost-state", "sessionId": "c-terminal"});
+
+        start(&other, "startup", "c-terminal");
+        for name in ["the work", "their dependency", "more work", "another wait's", "held too"] {
+            as_(&other).create_task(&words(&[name])).unwrap();
+        }
+        for id in ["@1", "@3", "@5"] {
+            as_(&other).set_state(&words(&[id, "progress"]), false).unwrap();
+        }
+        let theirs = as_(&other);
+        let mut draft = crate::ops::Draft::open(&theirs).unwrap();
+        let op = serde_json::json!({"op": "create", "kind": "handoff", "text": "stopped mid-move", "attached_to": 3});
+        draft.apply(&serde_json::from_value(op).unwrap()).unwrap();
+        let asked = draft.ask("Merge now?", Some(&crate::ops::Ref::Id(1))).unwrap();
+        let spec = crate::ops::WaitOn { item: crate::ops::Ref::Id(2), until: None, text: Some("merge after it".into()), cancel: false };
+        let crate::ops::Waited::Recorded(_) = draft.wait(&spec).unwrap() else { panic!("a wait recorded") };
+        let spec = crate::ops::WaitOn { item: crate::ops::Ref::Id(4), until: None, text: Some("ship it".into()), cancel: false };
+        let crate::ops::Waited::Recorded(ended) = draft.wait(&spec).unwrap() else { panic!("a wait recorded") };
+        draft.commit(false).unwrap();
+        as_(&crate::holder::Actor::person()).answer_question(&words(&[&asked.to_string(), "yes"])).unwrap();
+        as_(&crate::holder::Actor::person()).set_state(&words(&["@4", "done"]), false).unwrap();
+
+        // What makes it the continuing session's, each checked, in one place.
+        let refused = |text: &str| {
+            let refusal = as_(&me).set_state(&words(&["@1", "paused"]), false).unwrap_err().to_string();
+            assert!(refusal.contains("default on pts/2 \u{b7} c-termin, since"), "{text}: {refusal}");
+        };
+        let reader = me.clone().with_registry(registry.clone());
+        let owned = |text: &str, yes: bool| {
+            let prime = prime(&as_(&me), "default board").unwrap().text();
+            let told = crate::wake::Told::of(&dir.join("home"), me.process.as_ref().unwrap());
+            let woken = crate::wake::untold(&as_(&me), &reader, &told, 0, false).unwrap().join("\n");
+            let checks = [
+                ("the handoff", prime.contains(" by this session\n")),
+                ("not another's handoff", !prime.contains("which still runs: its own, not this session's")),
+                ("the answer", prime.contains("\nAnswered, for this session (1)\n")),
+                ("the wait", prime.contains("\nThis session waits (1)\n")),
+                ("the wait's end", woken.contains(&format!("This session waited on it (note {ended}) to: ship it"))),
+            ];
+            for (what, holds) in checks {
+                assert_eq!(holds, yes, "{text}, {what}: {prime}\n{woken}");
+            }
+        };
+
+        terminal(&[&message]);
+        let forked = start(&me, "fork", "c-background");
+        assert!(!forked.contains("yours again"), "the move is not written yet: {forked}");
+        refused("a fork, or a move not written yet");
+        owned("a fork, or a move not written yet", false);
+
+        terminal(&[&message, &moved, &message]);
+        refused("a message after the move");
+        owned("a message after the move", false);
+
+        terminal(&[&message, &moved, &after]);
+        owned("moved here", true);
+        as_(&me).set_state(&words(&["@1", "done"]), false).expect("its own claim, before SessionStart took it back");
+        let mine = as_(&me);
+        let mut draft = crate::ops::Draft::open(&mine).unwrap();
+        draft.set_state(&[crate::ops::Ref::Id(5)], "progress").unwrap();
+        let notices = draft.commit(false).unwrap().notices;
+        let claimed = "5 was in progress under this conversation until Claude Code moved it out of default on pts/2 \u{b7} c-termin: yours again";
+        assert!(notices.iter().any(|notice| notice == claimed), "{notices:?}");
+        let compacted = start(&me, "compact", "c-background");
+        assert!(
+            compacted.starts_with(
+                "3 was held by this conversation until Claude Code moved it out of its process (default on pts/2 \u{b7} c-termin): yours again\n"
+            ),
+            "{compacted}"
+        );
+        let data = as_(&me).storage.get().unwrap();
+        let claim = data[&3].held_by.as_ref().unwrap();
+        assert!(me.is(claim) && claim.conversation.as_deref() == Some("c-background"), "{claim:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A question waits on the board, in every prime, until the user answers
     /// it -- here from the terminal -- and the answer then reaches the
     /// conversation that asked, resumed in a new process after a restart.
@@ -4508,7 +4620,7 @@ mod tests {
             Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
         };
         let start = |actor: &crate::holder::Actor, conversation: &str| {
-            let event = SessionEvent { source: "resume".to_string(), session_id: Some(conversation.to_string()) };
+            let event = SessionEvent { source: "resume".to_string(), session_id: Some(conversation.to_string()), transcript: None };
             session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap()
         };
         let _ = start(&gone, "c-asker");
@@ -4556,7 +4668,7 @@ mod tests {
             Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
         };
         for (actor, conversation) in [(&me, "c-mine"), (&other, "c-idle"), (&gone, "c-gone")] {
-            let event = SessionEvent { source: "startup".to_string(), session_id: Some(conversation.to_string()) };
+            let event = SessionEvent { source: "startup".to_string(), session_id: Some(conversation.to_string()), transcript: None };
             session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
         }
         for name in ["mine", "finished", "left behind"] {

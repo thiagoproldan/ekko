@@ -1004,17 +1004,24 @@ impl Ekko {
                 let holder = old.held_by.as_ref().filter(|_| State::of(old) == Some(State::Progress))?;
                 let touched = claims.contains(id)
                     || after.get(id).is_none_or(|new| State::of(new) != State::of(old) || put_away(old, new));
-                let mine = actor.is_some_and(|actor| actor.is(holder));
-                (touched && !mine && holder.alive()).then(|| (*id, actor.map_or_else(|| holder.label(), |actor| actor.name(holder)), holder.since))
+                // A conversation Claude Code moved here holds what it held
+                // there, taken back or not yet: Claude Code writes the move
+                // down after it starts the session, so SessionStart may have
+                // run before it.
+                let mine = || actor.is_some_and(|actor| actor.is(holder) || actor.continues(holder));
+                (touched && holder.alive() && !mine())
+                    .then(|| (*id, actor.map_or_else(|| holder.label(), |actor| actor.name(holder)), holder.since))
             })
             .collect()
     }
 
     /// Takes back for this session the tasks in progress that a Claude Code
-    /// process which has ended held while it ran `conversation`: the one this
-    /// session has just resumed, after a restart. Each is told in a notice.
-    /// A restart for an upgrade ends every session, and without this left
-    /// each claim 'gone', for the first session to set the task in progress.
+    /// process held while it ran `conversation`: the one this session has
+    /// just resumed, after that process ended, or the one Claude Code moved
+    /// here out of it, which may still run (task 862). Each is told in a
+    /// notice. A restart for an upgrade ends every session, and without this
+    /// left each claim 'gone', for the first session to set the task in
+    /// progress; a move left it held by the process the conversation left.
     pub fn take_back(&self, conversation: &str) -> Result<Vec<String>, EkkoError> {
         let Some(actor) = self.actor.as_ref().filter(|actor| !actor.is_person()) else { return Ok(Vec::new()) };
         let _lock = self.storage.acquire_lock()?;
@@ -1024,11 +1031,18 @@ impl Ekko {
         let mut notices = Vec::new();
         for (id, item) in data.iter_mut() {
             let Some(holder) = item.held_by.as_ref().filter(|_| State::of(item) == Some(State::Progress)) else { continue };
-            let held_here = holder.conversation_in(actor.registry.as_ref()).as_deref() == Some(conversation);
-            if !held_here || holder.alive() || actor.is(holder) {
+            if actor.is(holder) {
                 continue;
             }
-            notices.push(format!("{id} was held by this conversation until its process ended ({}): yours again", actor.name(holder)));
+            let resumed = !holder.alive() && holder.conversation_in(actor.registry.as_ref()).as_deref() == Some(conversation);
+            let until = if resumed {
+                "until its process ended"
+            } else if actor.continues(holder) {
+                "until Claude Code moved it out of its process"
+            } else {
+                continue;
+            };
+            notices.push(format!("{id} was held by this conversation {until} ({}): yours again", actor.name(holder)));
             item.held_by = Some(actor.holder(now));
         }
         if !notices.is_empty() {

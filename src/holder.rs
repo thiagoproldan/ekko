@@ -105,9 +105,10 @@ impl Actor {
     }
 
     /// Records that this actor's process now runs `conversation`, started on
-    /// the board whose storage is `board`. Best effort: the hook that
+    /// the board whose storage is `board`, with its transcript at
+    /// `transcript` when the hook was told. Best effort: the hook that
     /// records it answers whether or not it could.
-    pub fn record(&self, conversation: &str, board: &Path) {
+    pub fn record(&self, conversation: &str, board: &Path, transcript: Option<&Path>) {
         let (Some(registry), Some(process)) = (&self.registry, &self.process) else { return };
         let now = Running {
             pid: process.pid,
@@ -117,6 +118,7 @@ impl Actor {
             tty: self.tty.clone(),
             config_dir: std::env::var("CLAUDE_CONFIG_DIR").ok().filter(|dir| !dir.is_empty()),
             board: Some(board.to_path_buf()),
+            transcript: transcript.map(Path::to_path_buf),
             conversation: conversation.to_string(),
             earlier: Vec::new(),
             since: chrono::Local::now().timestamp_millis(),
@@ -150,6 +152,29 @@ impl Actor {
     /// Whether `holder` is this actor: the same process, or both a person.
     pub fn is(&self, holder: &Holder) -> bool {
         self.process == holder.process()
+    }
+
+    /// Whether this actor's conversation carries on the one `holder`'s
+    /// process ran, which Claude Code moved here -- to a background session
+    /// -- while that process may still run (task 862). What the conversation
+    /// held and wrote there goes with it, as it does when a resume carries it
+    /// into a new process after the old one ended.
+    pub fn continues(&self, holder: &Holder) -> bool {
+        let (Some(registry), Some(process)) = (&self.registry, &self.process) else { return false };
+        if holder.process().is_none_or(|theirs| &theirs == process) {
+            return false;
+        }
+        let Some(me) = registry.of(process) else { return false };
+        let Some(dir) = me.transcript.as_deref().and_then(Path::parent) else { return false };
+        // The one its process ran last, and the one the claim was made in,
+        // for a process that began another after the move.
+        let last = holder.conversation_in(Some(registry));
+        let made = holder.conversation.clone().filter(|made| Some(made) != last.as_ref());
+        [last, made]
+            .into_iter()
+            .flatten()
+            .filter(|ran| *ran != me.conversation)
+            .any(|ran| continued_in(dir, &ran).as_deref() == Some(me.conversation.as_str()))
     }
 }
 
@@ -222,20 +247,22 @@ impl Holder {
     /// Whose what this author wrote is, as `reader` sees it (task 514): the
     /// reader's own when its process wrote it -- before a /clear or a
     /// compaction -- or when the reader resumed the conversation that wrote
-    /// it, or the one its process ran last; else another session's, which
+    /// it, or the one its process ran last, or carries it on where Claude
+    /// Code moved it (`Actor::continues`); else another session's, which
     /// still runs or has ended. `None` for a person's.
     pub fn whose(&self, reader: Option<&Actor>) -> Option<Whose> {
         let process = self.process()?;
         if reader.is_some_and(|reader| reader.process.as_ref() == Some(&process)) {
             return Some(Whose::Yours);
         }
+        let continued = || reader.is_some_and(|reader| reader.continues(self));
         if process.alive() {
-            return Some(Whose::Running);
+            return Some(if continued() { Whose::Yours } else { Whose::Running });
         }
         let now = reader.and_then(Actor::conversation);
         let last = reader.and_then(|reader| self.conversation_in(reader.registry.as_ref()));
         let resumed = now.is_some_and(|now| self.conversation.as_ref() == Some(&now) || last == Some(now));
-        Some(if resumed { Whose::Yours } else { Whose::Ended })
+        Some(if resumed || continued() { Whose::Yours } else { Whose::Ended })
     }
 }
 
@@ -277,6 +304,11 @@ pub struct Running {
     /// The board its session started on, by its storage file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<PathBuf>,
+    /// The transcript of the conversation it runs, as the SessionStart hook
+    /// was given it. The transcripts beside it say which conversation was
+    /// moved to this one (`continued_in`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<PathBuf>,
     /// The conversation it runs now, or ran last.
     pub conversation: String,
     /// The ones it ran before, oldest first: each /clear adds one.
@@ -379,6 +411,42 @@ impl Registry {
             }
         }
     }
+}
+
+/// How much of a transcript's end `continued_in` reads: the record is the
+/// last Claude Code writes there, and nothing measured followed it.
+const TAIL: u64 = 16 * 1024;
+
+/// The session Claude Code continued `conversation` in, read off the end of
+/// its transcript in `dir`. Moving a conversation out of its process, to a
+/// background session, Claude Code 2.1.283 appends
+/// `{"type":"continued-in","continuedInSessionId":...}` to it, and reads it
+/// back from the end, where a message after it means the conversation went
+/// on where it was: then it continued nowhere.
+pub fn continued_in(dir: &Path, conversation: &str) -> Option<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    // An id names a file: nothing that could leave the directory.
+    if conversation.is_empty() || !conversation.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    let mut file = fs::File::open(dir.join(format!("{conversation}.jsonl"))).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(TAIL))).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
+    if !tail.contains("\"continued-in\"") {
+        return None;
+    }
+    for line in tail.lines().rev() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        match record["type"].as_str() {
+            Some("continued-in") => return record["continuedInSessionId"].as_str().map(str::to_string),
+            Some("user" | "assistant") => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// A claim's time as a person reads it: the hour today, the day and hour
@@ -498,12 +566,12 @@ mod tests {
         };
         assert_eq!(actor.holder(1).conversation, None, "nothing recorded yet");
 
-        actor.record("a6b026e6-85d5-4e5c-ae3b-e5a4a676878a", Path::new("/board"));
+        actor.record("a6b026e6-85d5-4e5c-ae3b-e5a4a676878a", Path::new("/board"), None);
         let claim = actor.holder(1);
         assert_eq!(claim.conversation.as_deref(), Some("a6b026e6-85d5-4e5c-ae3b-e5a4a676878a"));
         assert_eq!(claim.label(), "trabalho on pts/5 \u{b7} a6b026e6");
 
-        actor.record("e3011485-0b75-46ea-b411-2cdf3193e1d1", Path::new("/board"));
+        actor.record("e3011485-0b75-46ea-b411-2cdf3193e1d1", Path::new("/board"), None);
         assert_eq!(actor.name(&claim), "trabalho on pts/5 \u{b7} e3011485", "after a /clear, the one to resume");
         assert_eq!(claim.label(), "trabalho on pts/5 \u{b7} a6b026e6", "the claim keeps the one it was made in");
         let running = registry.of(&me).unwrap();
