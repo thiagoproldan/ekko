@@ -9,8 +9,9 @@
 //! read `storage.json`/`archive.json` files an existing JS install already
 //! produced, unchanged.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process;
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Local;
@@ -569,13 +570,13 @@ impl Wait {
                 Some(_) => None,
                 None => Some(How::Released),
             },
+            Until::Unknown(_) => None,
         }
     }
 }
 
 /// What a wait waits for; see `Wait`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Until {
     /// A task closing, done or cancelled.
     Done,
@@ -584,6 +585,10 @@ pub enum Until {
     Free,
     /// A question getting its answer.
     Answered,
+    /// What a later version waits for, kept as it stored it (task 845). This
+    /// one never finds it reached: only the item waited on leaving the board
+    /// ends the wait here.
+    Unknown(&'static str),
 }
 
 impl Until {
@@ -592,9 +597,12 @@ impl Until {
             Until::Done => "done",
             Until::Free => "free",
             Until::Answered => "answered",
+            Until::Unknown(word) => word,
         }
     }
 
+    /// What a word names, as a call gives it or a board stores it. Never
+    /// `Unknown`, which only a board a later version wrote holds.
     pub fn parse(word: &str) -> Option<Until> {
         match word {
             "done" => Some(Until::Done),
@@ -625,8 +633,7 @@ pub struct Over {
 }
 
 /// How a wait ended; see `Over`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum How {
     Done,
     Cancelled,
@@ -641,15 +648,53 @@ pub enum How {
     Removed,
     /// Dropped by the session that waited: nobody is told.
     Dropped,
+    /// A way of ending a later version added, kept as it stored it (task
+    /// 845). The wait is over all the same, and the session that waited is
+    /// told so.
+    Unknown(&'static str),
+}
+
+impl How {
+    /// The word for it, as stored.
+    pub fn word(self) -> &'static str {
+        match self {
+            How::Done => "done",
+            How::Cancelled => "cancelled",
+            How::Answered => "answered",
+            How::Released => "released",
+            How::Ended => "ended",
+            How::Yours => "yours",
+            How::Removed => "removed",
+            How::Dropped => "dropped",
+            How::Unknown(word) => word,
+        }
+    }
+
+    /// What a word names as stored. Never `Unknown`.
+    pub fn parse(word: &str) -> Option<How> {
+        match word {
+            "done" => Some(How::Done),
+            "cancelled" => Some(How::Cancelled),
+            "answered" => Some(How::Answered),
+            "released" => Some(How::Released),
+            "ended" => Some(How::Ended),
+            "yours" => Some(How::Yours),
+            "removed" => Some(How::Removed),
+            "dropped" => Some(How::Dropped),
+            _ => None,
+        }
+    }
 }
 
 /// The kinds of lasting knowledge a note can hold; see `Item::knowledge`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Knowledge {
     Decision,
     Gotcha,
     Procedure,
+    /// A kind a later version added, kept as it stored it (task 845): the
+    /// note shows that word, and nothing that reads a known kind takes it.
+    Unknown(&'static str),
 }
 
 impl Knowledge {
@@ -659,19 +704,64 @@ impl Knowledge {
             Knowledge::Decision => "decision",
             Knowledge::Gotcha => "gotcha",
             Knowledge::Procedure => "procedure",
+            Knowledge::Unknown(word) => word,
+        }
+    }
+
+    /// The kind a word names as stored. Never `Unknown`.
+    pub fn parse(word: &str) -> Option<Knowledge> {
+        match word {
+            "decision" => Some(Knowledge::Decision),
+            "gotcha" => Some(Knowledge::Gotcha),
+            "procedure" => Some(Knowledge::Procedure),
+            _ => None,
         }
     }
 
     /// The kind a word names, singular or plural, the way `--list` takes
     /// `note` and `notes` alike.
     pub fn from_word(word: &str) -> Option<Knowledge> {
-        match word {
-            "decision" | "decisions" => Some(Knowledge::Decision),
-            "gotcha" | "gotchas" => Some(Knowledge::Gotcha),
-            "procedure" | "procedures" => Some(Knowledge::Procedure),
-            _ => None,
-        }
+        Knowledge::parse(word.strip_suffix('s').unwrap_or(word))
     }
+}
+
+/// Stores a value of `Until`, `How` or `Knowledge` as its word, and reads a
+/// word this version does not know into `Unknown`, which writes it back as
+/// read (task 845). Refusing it instead, as the derived reader did, made the
+/// whole board unreadable to every older ekko -- each command and the MCP
+/// server -- over one item a later version wrote.
+macro_rules! stored_as_words {
+    ($($kind:ident),+) => {$(
+        impl Serialize for $kind {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.word())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $kind {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<$kind, D::Error> {
+                let word = String::deserialize(deserializer)?;
+                Ok($kind::parse(&word).unwrap_or_else(|| $kind::Unknown(kept(word))))
+            }
+        }
+    )+};
+}
+
+stored_as_words!(Until, How, Knowledge);
+
+/// A word read into an `Unknown`, made `'static` so the value holding it
+/// stays `Copy` and its word reads as every other one does. Each distinct
+/// word is leaked once however often a board is read -- the MCP server reads
+/// it on every call -- and a board holds few such words, often none.
+fn kept(word: String) -> &'static str {
+    static KEPT: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+    let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(&known) = kept.get(word.as_str()) {
+        return known;
+    }
+    let word: &'static str = word.leak();
+    kept.insert(word);
+    word
 }
 
 /// The six states a task can be in, as one value.
@@ -1494,5 +1584,134 @@ mod tests {
         checked.sort();
         let expected = ["Allowance", "Answer", "Counters", "Cue", "Holder", "Item", "Over", "Proposal", "Question", "Refused", "Registered", "Registry", "Used", "Wait"];
         assert_eq!(checked, expected, "the scan finds the structs it should");
+    }
+
+    /// A word a later version stores where this one knows only its own comes
+    /// through a read and a write as it was (task 845), in each of the three
+    /// places a board holds one: a note's kind, what a wait waits for and how
+    /// it ended. Before, `unknown variant` refused the whole board.
+    #[test]
+    fn words_from_a_later_version_survive_a_read_and_a_write() {
+        let holder = serde_json::json!({"pid": 1047920, "start": 10288721, "since": 1790488545583_i64});
+        let later = serde_json::json!({
+            "1": {"_id": 1, "_date": "Sun Sep 27 2026", "_timestamp": 1790488545583_i64, "description": "x",
+                "isStarred": false, "boards": ["My Board"], "_isTask": false, "knowledge": "lesson"},
+            "2": {"_id": 2, "_date": "Sun Sep 27 2026", "_timestamp": 1790488545583_i64, "description": "y",
+                "isStarred": false, "boards": ["My Board"], "_isTask": false,
+                "wait": {"on": "18d917d885e497e8-ffdc4", "until": "started", "by": holder, "rev": 903,
+                    "over": {"how": "expired", "at": 1790488580406_i64, "rev": 904}}}
+        });
+
+        let board: BTreeMap<u32, Item> = serde_json::from_value(later.clone()).expect("a later version's words do not stop a read");
+        let wait = board[&2].wait.as_deref().unwrap();
+
+        assert_eq!(board[&1].knowledge, Some(Knowledge::Unknown("lesson")));
+        assert_eq!((wait.until, wait.over.as_ref().map(|over| over.how)), (Until::Unknown("started"), Some(How::Unknown("expired"))));
+        assert_eq!(serde_json::to_value(&board).unwrap(), later, "each comes back as it was, where it was");
+    }
+
+    /// Every value of `Until`, `How` and `Knowledge` a version knows reads
+    /// back as itself, stored under the word the derived writer used before
+    /// task 845, and a word none of them is reads back as `Unknown` and is
+    /// written as read. A variant whose word `parse` missed would come back
+    /// `Unknown`: still written as it was, but meaning nothing here.
+    #[test]
+    fn every_stored_word_reads_back_as_the_value_that_wrote_it() {
+        fn reads_back<T>(known: &[T], unknown: fn(&'static str) -> T)
+        where
+            T: Copy + PartialEq + std::fmt::Debug + Serialize + serde::de::DeserializeOwned,
+        {
+            for &value in known {
+                let stored = serde_json::to_value(value).unwrap();
+                assert_eq!(stored, format!("{value:?}").to_lowercase(), "{value:?} is stored under another word");
+                assert_eq!(serde_json::from_value::<T>(stored).unwrap(), value);
+            }
+            let later: T = serde_json::from_value(serde_json::json!("lesson")).unwrap();
+            assert_eq!((later, serde_json::to_value(later).unwrap()), (unknown("lesson"), serde_json::json!("lesson")));
+        }
+        // No catch-all: a variant added to any of the three stops the build
+        // here until it is listed below as well.
+        let _ = |until: Until, how: How, kind: Knowledge| {
+            match until {
+                Until::Done | Until::Free | Until::Answered | Until::Unknown(_) => {}
+            }
+            match how {
+                How::Done | How::Cancelled | How::Answered | How::Released | How::Ended | How::Yours | How::Removed | How::Dropped | How::Unknown(_) => {}
+            }
+            match kind {
+                Knowledge::Decision | Knowledge::Gotcha | Knowledge::Procedure | Knowledge::Unknown(_) => {}
+            }
+        };
+
+        reads_back(&[Until::Done, Until::Free, Until::Answered], Until::Unknown);
+        reads_back(
+            &[How::Done, How::Cancelled, How::Answered, How::Released, How::Ended, How::Yours, How::Removed, How::Dropped],
+            How::Unknown,
+        );
+        reads_back(&[Knowledge::Decision, Knowledge::Gotcha, Knowledge::Procedure], Knowledge::Unknown);
+    }
+
+    /// A wait for what only a later version knows is never found reached
+    /// here, whatever the item it waits on does: only that item leaving the
+    /// board ends it, as it ends every wait (task 845).
+    #[test]
+    fn a_wait_for_what_only_a_later_version_knows_ends_only_when_its_item_leaves() {
+        let wait: Wait = serde_json::from_value(serde_json::json!({
+            "on": "18d917d885e497e8-ffdc4", "until": "started", "by": {"pid": 1047920, "since": 0}, "rev": 1
+        }))
+        .unwrap();
+
+        for state in State::ALL {
+            assert_eq!(wait.over_on(Some(&task_in(state))), None, "{state:?}");
+        }
+        let mut trashed = task_in(State::Done);
+        trashed.trashed = Some(1);
+        assert_eq!((wait.over_on(Some(&trashed)), wait.over_on(None)), (Some(How::Removed), Some(How::Removed)));
+    }
+
+    /// A note of a kind only a later version knows shows that word where a
+    /// kind goes, and is taken for none of the kinds this version knows.
+    #[test]
+    fn a_note_of_a_kind_only_a_later_version_knows_shows_its_word() {
+        let mut note = Item::new_note(1, "x".into(), vec![]);
+        note.knowledge = serde_json::from_value(serde_json::json!("lesson")).unwrap();
+
+        assert_eq!(note.mark(), Some("lesson"));
+        assert_eq!(Knowledge::from_word("lesson"), None, "a filter names only the kinds this version knows");
+    }
+
+    /// The rule `Unknown` keeps, over the whole class (task 845): no enum
+    /// serde reads from a file refuses a value it does not know. A derived
+    /// reader refuses a variant a later version added, and the whole board
+    /// with it, so no enum in the source derives `Deserialize` -- a call's
+    /// input aside -- and the ones stored go through `stored_as_words!`.
+    #[test]
+    fn every_enum_read_from_a_file_keeps_a_value_it_does_not_know() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut derived = Vec::new();
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            // A call's input, read from MCP or the command line and never stored.
+            if path.file_name().unwrap() == "ops.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (at, line) in lines.iter().enumerate() {
+                if !(line.starts_with("#[derive(") && line.contains("Deserialize")) {
+                    continue;
+                }
+                let Some(head) = lines[at + 1..].iter().find(|line| !line.starts_with("#[") && !line.starts_with("///")) else {
+                    continue;
+                };
+                if let Some(name) = head.trim_start_matches("pub ").strip_prefix("enum ").and_then(|rest| rest.split([' ', '{']).next()) {
+                    derived.push(format!("{name} in {}", path.display()));
+                }
+            }
+        }
+        assert!(derived.is_empty(), "store these through stored_as_words!, with an Unknown: {derived:?}");
+
+        let stored = include_str!("item.rs").lines().find_map(|line| line.strip_prefix("stored_as_words!("));
+        assert_eq!(stored, Some("Until, How, Knowledge);"), "each one stored is in the tests above");
     }
 }

@@ -783,6 +783,7 @@ pub(crate) fn ended_phrase(how: How, to_waiter: bool) -> &'static str {
         How::Yours => "is held by the session that waited",
         How::Removed => "is off the board",
         How::Dropped => "is no longer waited on",
+        How::Unknown(_) => "ended the wait, in a way only a later version of ekko names",
     }
 }
 
