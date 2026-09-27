@@ -409,6 +409,10 @@ pub struct Entry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<(usize, usize)>,
     pub updated_at: i64,
+    /// On a gotcha, the cue the user turned on, while it is on; see
+    /// `Item::cue`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cue: Option<crate::item::Cue>,
     /// Notes attached to this task.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<NoteRef>,
@@ -430,6 +434,9 @@ pub struct NoteRef {
     /// On a wait: whether it is still open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting: Option<bool>,
+    /// On a gotcha: whether its cue is on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cue: bool,
 }
 
 impl NoteRef {
@@ -446,7 +453,9 @@ impl NoteRef {
         match (self.knowledge, self.superseded_by.as_slice()) {
             (None, []) => String::new(),
             (None, newer) => format!("[handoff, replaced by {}] ", join(newer)),
+            (Some(kind), []) if self.cue => format!("[{}, cue on] ", kind.word()),
             (Some(kind), []) => format!("[{}] ", kind.word()),
+            (Some(kind), newer) if self.cue => format!("[{}, cue on, superseded by {}] ", kind.word(), join(newer)),
             (Some(kind), newer) => format!("[{}, superseded by {}] ", kind.word(), join(newer)),
         }
     }
@@ -472,6 +481,9 @@ struct Reader<'a> {
     /// Visible notes, by the uid of the task each is attached to.
     order: HashMap<&'a str, usize>,
     today: String,
+    /// The folder of the board's project, which a cue naming no folder of its
+    /// own guards; `None` on the default board, whose cues guard the machine.
+    folder: Option<std::path::PathBuf>,
 }
 
 impl<'a> Reader<'a> {
@@ -481,6 +493,7 @@ impl<'a> Reader<'a> {
             me: None,
             order: phase_order(phases),
             today: chrono::Local::now().format("%Y-%m-%d").to_string(),
+            folder: None,
         }
     }
 
@@ -492,6 +505,7 @@ impl<'a> Reader<'a> {
     /// This reader, reading for `ekko`'s actor.
     fn seen_by(mut self, ekko: &Ekko) -> Self {
         self.me = ekko.actor.clone();
+        self.folder = ekko.folder.clone();
         self
     }
 
@@ -542,6 +556,7 @@ impl<'a> Reader<'a> {
             superseded_by: self.superseded_by(note.id),
             answered: note.question.as_ref().map(|question| question.answer.is_some()),
             waiting: note.wait.as_ref().map(|wait| wait.over.is_none()),
+            cue: crate::guard::cue_of(note).is_some(),
         }
     }
 
@@ -587,6 +602,7 @@ impl<'a> Reader<'a> {
             held: self.held(item),
             knowledge: item.knowledge,
             supersedes: item.supersedes.as_deref().and_then(|uid| self.uid(uid)),
+            cue: crate::guard::cue_of(item).cloned(),
             superseded_by: self.superseded_by(item.id),
             step: {
                 let sequence = self.sequence(item.id);
@@ -1348,6 +1364,9 @@ pub struct Context {
     /// when one is not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// On a gotcha whose cue is on: what the cue refuses, in words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cue: Option<String>,
 }
 
 /// How many of an item's commits its context lists; the rest are counted.
@@ -1477,6 +1496,7 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         written_by: item.created_by.as_ref().map(crate::holder::Holder::label),
         commits: Vec::new(),
         branch: None,
+        cue: crate::guard::cue_of(item).map(|cue| crate::guard::described(cue, reader.folder.as_deref())),
     }
 }
 
@@ -2958,6 +2978,9 @@ impl Context {
             facts.push("in the trash".to_string());
         }
         let _ = writeln!(out, "      {}", facts.join(" \u{b7} "));
+        if let Some(cue) = &self.cue {
+            let _ = writeln!(out, "      cue on: refuses {cue}");
+        }
         let _ = writeln!(
             out,
             "      uid {} \u{b7} created {} \u{b7} updatedAt {}",

@@ -448,3 +448,59 @@ fn the_tasklist_hook_writes_the_sessions_list() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// The guard as Claude Code runs it (task 805): a PreToolUse event on stdin,
+/// a refusal on stdout, and silence for everything else -- a call no cue
+/// names, and input it cannot read, since a broken guard must not break the
+/// shell. `--refuse` answers another guard with its exit code.
+#[test]
+fn the_guard_answers_a_pre_tool_use_event_and_stays_silent_otherwise() {
+    use std::io::Write as _;
+    let home = temp_ekko_dir();
+    let ekko = |args: &[&str], stdin: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(&home)
+            .env("HOME", &home)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .env_remove("CLAUDECODE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to run ekko");
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    assert!(ekko(&["--note", "--kind", "gotcha", "Changing the Status field clears every item's status."], "").status.success());
+    // The user's answer in ekko's menu is what sets a cue; here, the board as it leaves it.
+    let file = home.join(".ekko").join("storage").join("storage.json");
+    let mut board: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    let gotcha = board.as_object_mut().unwrap().values_mut().find(|item| item["knowledge"] == "gotcha").unwrap();
+    gotcha["cue"] = serde_json::json!({"command": "gh", "words": ["updateProjectV2Field"], "question": "q", "at": 0});
+    fs::write(&file, board.to_string()).unwrap();
+
+    let event = |command: &str| serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": home, "tool_use_id": "t1"}).to_string();
+    let refused = ekko(&["--guard", "--hook"], &event("gh api graphql -f query='mutation { updateProjectV2Field }'"));
+    assert!(refused.status.success());
+    let reply: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&refused.stdout)));
+    assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny");
+    let reason = reply["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap();
+    assert!(reason.contains("clears every item's status") && reason.contains("allow set to \""), "{reason}");
+
+    for silent in [event("gh issue list"), event("echo updateProjectV2Field"), "not json".to_string(), String::new()] {
+        let passed = ekko(&["--guard", "--hook"], &silent);
+        assert!(passed.status.success() && passed.stdout.is_empty(), "{silent}: {}", String::from_utf8_lossy(&passed.stdout));
+    }
+
+    let read = serde_json::json!({"tool_name": "Read", "tool_input": {"file_path": "/x"}, "cwd": home, "tool_use_id": "t2"}).to_string();
+    let other = ekko(&["--guard", "--refuse", "ctx: it would bring secret material into the context"], &read);
+    assert_eq!(other.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&other.stdout).contains("allow set to \""));
+    assert_eq!(ekko(&["--guard", "--refuse", "ctx"], "not json").status.code(), Some(2));
+    let bare = ekko(&["--guard"], "");
+    assert!(!bare.status.success() && String::from_utf8_lossy(&bare.stderr).contains("--guard takes --hook"));
+
+    fs::remove_dir_all(&home).ok();
+}

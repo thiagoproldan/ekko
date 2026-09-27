@@ -13,6 +13,8 @@
 //! board the whole batch would leave, and any refusal leaves the file exactly
 //! as it was.
 
+use std::path::Path;
+
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
@@ -21,7 +23,7 @@ use crate::ekko::{
     Linked,
 };
 use crate::holder::Whose;
-use crate::item::{Answer, How, Item, Knowledge, Question, Setting, State, Until, Wait};
+use crate::item::{Answer, Cue, CueOn, How, Item, Knowledge, Proposal, Question, Setting, State, Until, Wait};
 use crate::storage::{ItemMap, LockGuard};
 
 /// An item as a caller names it: a display id, a uid, or `$N` for the item
@@ -192,6 +194,72 @@ pub struct Inquiry {
     /// The user may pick several of the options.
     #[serde(default)]
     pub multiple: bool,
+    /// Proposes a cue for a gotcha, or turning its cue off (task 805): ekko
+    /// writes what the question shows and offers, and the user's answer in
+    /// ekko's menu applies it.
+    #[serde(default)]
+    pub cue: Option<CueAsk>,
+    /// The code a guard's refusal gave: the question asks the user to let
+    /// that call through once, and ekko quotes the call as refused.
+    #[serde(default)]
+    pub allow: Option<String>,
+}
+
+/// A cue proposed through ask: for `gotcha`, refuse the calls of `command`
+/// whose arguments hold `words`, run in `folder` -- or, with `off`, turn the
+/// gotcha's cue off.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CueAsk {
+    pub gotcha: Ref,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub words: Vec<String>,
+    #[serde(default)]
+    pub folder: Option<String>,
+    #[serde(default)]
+    pub off: bool,
+}
+
+impl CueAsk {
+    /// The cue it proposes, checked; `None` with `off`.
+    fn cue(&self) -> Result<Option<Cue>, EkkoError> {
+        if self.off {
+            if self.command.is_some() || !self.words.is_empty() || self.folder.is_some() {
+                return Err(invalid("cue with off takes no command, words or folder: it turns the gotcha's cue off"));
+            }
+            return Ok(None);
+        }
+        let command = self.command.as_deref().map(str::trim).unwrap_or_default();
+        if command.is_empty() || command.contains(char::is_whitespace) || command.contains('/') {
+            return Err(invalid(
+                "cue needs command: one word, as a call names it with no directory -- gh, not /usr/bin/gh or gh api",
+            ));
+        }
+        let mut words = Vec::new();
+        for word in &self.words {
+            let word = word.trim();
+            if word.is_empty() {
+                return Err(invalid("cue's words are each a word its arguments hold, never empty"));
+            }
+            if !words.iter().any(|kept: &String| kept == word) {
+                words.push(word.to_string());
+            }
+        }
+        let folder = match self.folder.as_deref().map(str::trim).filter(|folder| !folder.is_empty()) {
+            None => None,
+            Some(folder) => {
+                let home = std::env::home_dir().unwrap_or_default();
+                let path = crate::paths::expand_tilde(&home, folder);
+                if !path.is_absolute() {
+                    return Err(invalid(format!("cue's folder is absolute, or starts with ~: {folder}")));
+                }
+                Some(crate::paths::resolve_path(&home, Path::new("/"), &path.to_string_lossy()).to_string_lossy().into_owned())
+            }
+        };
+        Ok(Some(Cue { command: command.to_string(), words, folder }))
+    }
 }
 
 /// One answer a question offers: a few words, what choosing it means, and
@@ -303,6 +371,11 @@ where
 
 fn invalid(message: impl Into<String>) -> EkkoError {
     EkkoError::InvalidInput(message.into())
+}
+
+/// An answer ekko offers under a question it composes.
+fn choice(label: &str, description: &str) -> Choice {
+    Choice { label: label.to_string(), description: Some(description.to_string()), preview: None }
 }
 
 /// The refusal of a note given someone to be with.
@@ -570,7 +643,7 @@ impl<'a> Draft<'a> {
         let now = chrono::Local::now().timestamp_millis();
         let asked_by = self.ekko.actor.as_ref().filter(|actor| !actor.is_person()).map(|actor| actor.holder(now));
         // The revision is the write's own, stamped as it is saved.
-        self.item(id).question = Some(Question { asked_by, rev: 0, answer: None });
+        self.item(id).question = Some(Question { asked_by, rev: 0, answer: None, cue: None, allow: None });
         Ok(id)
     }
 
@@ -590,11 +663,124 @@ impl<'a> Draft<'a> {
         if let Some(given) = &asked.answer {
             return Err(invalid(format!("{id} was already answered: {}", given.text)));
         }
+        // A cue or a refused call is the user's to settle (task 805): an
+        // answer a session wrote would lift a guard on its own calls.
+        let person = self.ekko.actor.as_ref().is_none_or(|actor| actor.is_person());
+        if (asked.cue.is_some() || asked.allow.is_some()) && !person {
+            return Err(invalid(format!(
+                "{id} is the user's to answer, in ekko's menu: an answer a session records never turns a cue on \
+                 nor lets a refused call through. They can open it with ekko --answer {id} in a terminal"
+            )));
+        }
         let now = chrono::Local::now().timestamp_millis();
         let by = self.ekko.actor.as_ref().map(|actor| actor.holder(now));
         let answer = Answer { text: text.to_string(), by, at: now, rev: 0 };
+        let proposal = asked.cue.clone();
         self.item(id).question = Some(Question { answer: Some(answer), ..asked });
+        if let Some(proposal) = proposal {
+            self.settle_proposal(id, &proposal, text, now);
+        }
         Ok(id)
+    }
+
+    /// Applies the cue `proposal` to its gotcha, when the user's answer to
+    /// question `id` says so: "Turn on" sets the cue proposed, "Turn off"
+    /// drops it, and any other answer changes nothing.
+    fn settle_proposal(&mut self, id: u32, proposal: &Proposal, answer: &str, now: i64) {
+        let cue = match (&proposal.cue, answer) {
+            (Some(cue), crate::guard::TURN_ON) => Some(cue.clone()),
+            (None, crate::guard::TURN_OFF) => None,
+            _ => return,
+        };
+        let gotcha = self.data.values().find(|item| item.uid.as_deref() == Some(proposal.gotcha.as_str())).map(|item| item.id);
+        let Some(gotcha) = gotcha.filter(|gotcha| self.data[gotcha].knowledge == Some(Knowledge::Gotcha)) else {
+            self.notices.push(format!("the gotcha question {id} is about is no longer on the board as a gotcha: its cue was left as it was"));
+            return;
+        };
+        let question = self.data[&id].uid.clone().unwrap_or_default();
+        self.item(gotcha).cue = cue.map(|cue| CueOn { cue, question, at: now });
+    }
+
+    /// Asks `inquiry`, as `ask` does, with what ekko adds to a question that
+    /// proposes a cue or asks to let a refused call through (task 805): the
+    /// text it quotes and the answers it offers, which the session does not
+    /// write. The question as put to the user comes back with its id.
+    pub fn ask_inquiry(&mut self, inquiry: &Inquiry, about: Option<&Ref>, home: &Path) -> Result<(u32, Inquiry), EkkoError> {
+        let (block, options, proposal, allowance) = match (&inquiry.cue, &inquiry.allow) {
+            (None, None) => {
+                let id = self.ask(&crate::dialog::noted(&inquiry.text, &inquiry.options, inquiry.multiple), about)?;
+                return Ok((id, inquiry.clone()));
+            }
+            (Some(_), Some(_)) => return Err(invalid("a question takes cue or allow, not both")),
+            _ if !inquiry.options.is_empty() || inquiry.multiple => {
+                return Err(invalid("a question with cue or allow takes no options: ekko offers the answers, and only the first does anything"));
+            }
+            (Some(spec), None) => {
+                let target = self.resolve(&spec.gotcha)?;
+                let gotcha = &self.data[&target];
+                if gotcha.is_task || gotcha.knowledge != Some(Knowledge::Gotcha) {
+                    return Err(invalid(format!("{target} is not a gotcha: a cue belongs to a gotcha, whose text is the refusal's reason")));
+                }
+                let cue = spec.cue()?;
+                if cue.is_some() && cue.as_ref() == gotcha.cue.as_ref().map(|on| &on.cue) {
+                    return Err(invalid(format!("gotcha {target}'s cue is that one already")));
+                }
+                let Some(uid) = gotcha.uid.clone() else {
+                    return Err(invalid(format!("{target} has no uid, which a proposal names it by")));
+                };
+                let proposal = Proposal { gotcha: uid, cue };
+                if proposal.cue.is_none() && gotcha.cue.is_none() {
+                    return Err(invalid(format!("gotcha {target} has no cue to turn off")));
+                }
+                let block = crate::guard::proposal_block(gotcha, &proposal, self.ekko.folder.as_deref());
+                let options = if proposal.cue.is_some() {
+                    [
+                        choice(crate::guard::TURN_ON, "the cue refuses those calls from now on, in every session"),
+                        choice(crate::guard::LEAVE_OFF, "nothing changes"),
+                    ]
+                } else {
+                    [choice(crate::guard::TURN_OFF, "those calls stop being refused"), choice(crate::guard::KEEP_ON, "nothing changes")]
+                };
+                (block, options, Some(proposal), None)
+            }
+            (None, Some(code)) => {
+                let session = self.ekko.actor.as_ref().and_then(|actor| actor.process.as_ref());
+                let now = chrono::Local::now().timestamp_millis();
+                let refused = crate::guard::refusal(home, code.trim(), session, now).map_err(invalid)?;
+                let (block, allowance) = crate::guard::allow_block(&refused);
+                let options = [
+                    choice(crate::guard::ALLOW_ONCE, "this exact call goes through once, from that folder and that session, within 24 hours"),
+                    choice(crate::guard::KEEP_REFUSED, "it stays refused"),
+                ];
+                (block, options, None, Some(allowance))
+            }
+        };
+        let text = format!("{}{block}", inquiry.text.trim_end());
+        let id = self.ask(&crate::dialog::noted(&text, &options, false), about)?;
+        if let Some(question) = self.item(id).question.as_mut() {
+            question.cue = proposal;
+            question.allow = allowance;
+        }
+        Ok((id, Inquiry { text, options: options.to_vec(), multiple: false, cue: None, allow: None }))
+    }
+
+    /// Records on question `uid` that the tool call `tool_use_id` went
+    /// through on the user's answer to it: true unless another call did
+    /// first. The same call again stays true, since ekko's guard and
+    /// another's each ask about it.
+    pub fn spend_allowance(&mut self, uid: &str, tool_use_id: &str) -> Result<bool, EkkoError> {
+        let id = self.resolve(&Ref::Text(uid.to_string()))?;
+        let Some(allow) = self.item(id).question.as_mut().and_then(|question| question.allow.as_mut()) else {
+            return Ok(false);
+        };
+        match &allow.used {
+            Some(used) => Ok(used.tool_use_id == tool_use_id),
+            None => {
+                let at = chrono::Local::now().timestamp_millis();
+                allow.used = Some(crate::item::Used { tool_use_id: tool_use_id.to_string(), at });
+                Ok(true)
+            }
+        }
     }
 
     /// The session this draft writes for, which alone can wait: the user at

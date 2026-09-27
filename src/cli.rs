@@ -21,7 +21,7 @@ pub struct InitCli {
 
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
-#[command(group(clap::ArgGroup::new("hooked").args(["prime", "tasklist", "wake"])))]
+#[command(group(clap::ArgGroup::new("hooked").args(["prime", "tasklist", "wake", "guard"])))]
 pub struct Cli {
     /// Attach a note to the task it explains, by id: the note first, then
     /// its task. No task detaches it.
@@ -155,7 +155,7 @@ pub struct Cli {
     #[arg(long)]
     pub sessions: bool,
 
-    /// With --prime, --tasklist or --wake: answer a Claude Code hook, whose event
+    /// With --prime, --tasklist, --wake or --guard: answer a Claude Code hook, whose event
     /// arrives as JSON on stdin. For --prime, a session that resumes or forks
     /// gets what moved since this hook last served it, not a second prime.
     #[arg(long, requires = "hooked")]
@@ -174,6 +174,18 @@ pub struct Cli {
     /// board's file changes, and exit 2 wakes a session sitting idle.
     #[arg(long, requires = "hook")]
     pub wake: bool,
+
+    /// With --hook: refuse the Bash calls a gotcha's cue names, as Claude
+    /// Code's PreToolUse -- see `guard`. With --refuse: answer another
+    /// guard about to refuse the call on stdin.
+    #[arg(long)]
+    pub guard: bool,
+
+    /// With --guard: the reason another guard -- ctx's -- refuses the call
+    /// on stdin, a PreToolUse event. Exits 0 when the user let the call
+    /// through, else 1, printing the sentence to end the reason with.
+    #[arg(long, value_name = "REASON", requires = "guard")]
+    pub refuse: Option<String>,
 
     /// What to take up next, best first, optionally only the first N.
     #[arg(long, num_args = 0..=1, value_name = "N")]

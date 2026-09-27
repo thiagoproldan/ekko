@@ -220,6 +220,9 @@ const WATCH: Duration = Duration::from_secs(1);
 /// What ask's reply says of questions left without an answer.
 const OPEN: &str = "the questions without an answer stay open: the user can answer each with `ekko --answer <id>` in a terminal, or ask them in chat and record the replies with answer";
 
+/// The same, for questions with cue or allow, which only the user answers.
+const GUARDED_OPEN: &str = "the questions without an answer stay open: the user answers each with `ekko --answer <id>` in a terminal, which opens ekko's menu on it. One with cue or allow counts only answered there, never recorded by a session";
+
 /// The prime as a resource. Not `prime://`: Claude Code 2.1.278 extracts a
 /// mention with a pattern that ends in `\b`, so a URI ending in a symbol is
 /// cut back to its last letter, `@ekko:prime://` is read as `ekko:prime`,
@@ -484,15 +487,16 @@ impl Server {
         let recorded = refuse_project(&args).and_then(|()| {
             let (ekko, _) = self.open()?;
             let spec: ops::Ask = parse(&mut args)?;
-            Ok((record(&ekko, &spec)?, spec))
+            let guarded = spec.questions.iter().any(|inquiry| inquiry.cue.is_some() || inquiry.allow.is_some());
+            let (recorded, questions) = record(&ekko, &spec, &self.home)?;
+            Ok((recorded, questions, guarded))
         });
-        let (recorded, spec) = match recorded {
+        let (recorded, questions, guarded) = match recorded {
             Err(error) => return vec![self.tool_reply(call, format!("{}: {}", error.code, error.message), true, modern)],
             Ok(recorded) => recorded,
         };
         let items = recorded["items"].as_array().cloned().unwrap_or_default();
-        let posed: Vec<menu::Posed> = spec
-            .questions
+        let posed: Vec<menu::Posed> = questions
             .iter()
             .zip(&items)
             .map(|(inquiry, item)| menu::Posed {
@@ -503,7 +507,7 @@ impl Server {
                 multiple: inquiry.multiple,
             })
             .collect();
-        let first = &spec.questions[0];
+        let first = &questions[0];
         let pending = Pending {
             call,
             questions: posed.iter().map(|question| question.uid.clone()).collect(),
@@ -526,13 +530,16 @@ impl Server {
             },
             None => "ekko's menu has nowhere to open here: no tmux, and no display".to_string(),
         };
-        // The client's dialog, the last resort: one question, one choice.
-        if form && spec.questions.len() == 1 && !first.multiple {
+        // The client's dialog, the last resort: one question, one choice. Not
+        // for a cue or a refused call, whose answer through it would be this
+        // session's, which never counts (task 805).
+        if form && questions.len() == 1 && !first.multiple && !guarded {
             return vec![self.put(pending)];
         }
         self.left_open(pending.questions.iter().map(String::as_str));
         let mut reply = pending.recorded;
-        reply["unanswered"] = json!(format!("{why}; {OPEN}"));
+        let open = if guarded { GUARDED_OPEN } else { OPEN };
+        reply["unanswered"] = json!(format!("{why}; {open}"));
         vec![self.tool_reply(pending.call, reply.to_string(), false, modern)]
     }
 
@@ -1212,18 +1219,27 @@ fn wait(ekko: &Ekko, spec: &ops::WaitOn) -> Result<String, ToolError> {
 }
 
 /// Records ask's questions, each with the options it offers under it: the
-/// reply to the write, as JSON, its items in the order of the questions.
-fn record(ekko: &Ekko, spec: &ops::Ask) -> Result<Value, ToolError> {
+/// reply to the write, as JSON, its items in the order of the questions,
+/// and the questions as put to the user -- ekko's own text and answers under
+/// one with cue or allow.
+fn record(ekko: &Ekko, spec: &ops::Ask, home: &std::path::Path) -> Result<(Value, Vec<ops::Inquiry>), ToolError> {
     if spec.questions.is_empty() || spec.questions.len() > 4 {
         return Err(invalid("questions holds 1 to 4 questions"));
     }
     if let Some(why) = spec.questions.iter().find_map(dialog::check) {
         return Err(invalid(why));
     }
+    let mut posed = Vec::new();
     let reply = write(ekko, false, |draft| {
-        spec.questions.iter().map(|q| draft.ask(&dialog::noted(&q.text, &q.options, q.multiple), spec.about.as_ref())).collect()
+        let mut ids = Vec::new();
+        for inquiry in &spec.questions {
+            let (id, put) = draft.ask_inquiry(inquiry, spec.about.as_ref(), home)?;
+            ids.push(id);
+            posed.push(put);
+        }
+        Ok(ids)
     })?;
-    Ok(serde_json::from_str(&reply).expect("a write replies in JSON"))
+    Ok((serde_json::from_str(&reply).expect("a write replies in JSON"), posed))
 }
 
 /// A session works on its own board (task 697): a board another project
@@ -1522,11 +1538,24 @@ fn tool_definitions() -> Value {
         }),
         &["label"],
     );
+    let mut cue = object(
+        json!({
+            "gotcha": item,
+            "command": {"type": "string", "description": "As a call names it: gh, cargo."},
+            "words": {"type": "array", "items": {"type": "string"}, "description": "What its arguments, or what is fed to it, must all hold."},
+            "folder": {"type": "string", "description": "Where it applies. Absent: this board's project folder, or the whole machine on the default board."},
+            "off": {"type": "boolean", "description": "Proposes turning the gotcha's cue off instead."}
+        }),
+        &["gotcha"],
+    );
+    cue["description"] = json!("Proposes a cue for a gotcha: once the user turns it on, it refuses the Bash calls it names, with the gotcha as the reason.");
     let question = object(
         json!({
             "text": {"type": "string", "description": "The question, with what the user needs to answer it."},
             "options": {"type": "array", "minItems": 2, "maxItems": 6, "items": choice},
-            "multiple": {"type": "boolean", "description": "The user may pick several options."}
+            "multiple": {"type": "boolean", "description": "The user may pick several options."},
+            "cue": cue,
+            "allow": {"type": "string", "description": "The code a guard's refusal gave: asks the user to let that exact call through once."}
         }),
         &["text"],
     );
@@ -1644,7 +1673,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "ask",
-            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer.",
+            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer. With cue or allow, ekko writes what the question quotes and offers, and only the user's answer in ekko's menu applies it.",
             "inputSchema": object(json!({
                 "about": item,
                 "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": question}

@@ -252,6 +252,13 @@ pub struct Item {
     /// set, so a board where nobody waits is stored exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<Wait>,
+    /// On a gotcha: the calls it refuses, which the user turned on (task
+    /// 805). A session proposes a cue through ask, and only the user's answer
+    /// in ekko's menu sets, changes or drops it, so the gotcha holds the cue
+    /// the user approved and nothing else. Absent unless set, so a board
+    /// without cues is stored exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cue: Option<CueOn>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -303,6 +310,7 @@ impl Item {
             supersedes: None,
             question: None,
             wait: None,
+            cue: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -342,6 +350,7 @@ impl Item {
             supersedes: None,
             question: None,
             wait: None,
+            cue: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -384,6 +393,81 @@ pub struct Question {
     pub rev: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<Answer>,
+    /// A cue a session proposes for a gotcha, which the user's answer turns
+    /// on, changes or drops (task 805).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cue: Option<Proposal>,
+    /// A call a guard refused, which the user's answer lets through once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Allowance>,
+}
+
+/// What a gotcha's cue refuses: a Bash call that runs `command` with all of
+/// `words` held by what it is given, in `folder` or under it (task 805).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cue {
+    /// The command as a call names it, with its directory cut off: `gh`.
+    pub command: String,
+    /// Words its arguments must all hold, each as a whole argument or a
+    /// whole word inside one -- a GraphQL query, say -- or in what is fed to
+    /// the call: a here-document, or the text of a `$(...)`. None guards
+    /// every call of the command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<String>,
+    /// The folder a call must run in or under, absolute. Absent, the folder
+    /// of the board's project, or the whole machine on the default board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+}
+
+/// A gotcha's cue, turned on by the user's answer to the question that
+/// proposed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CueOn {
+    #[serde(flatten)]
+    pub cue: Cue,
+    /// That question, by uid, and when the user answered it.
+    pub question: String,
+    pub at: i64,
+}
+
+/// A cue proposed for a gotcha; see `Question::cue`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Proposal {
+    /// The gotcha, by uid.
+    pub gotcha: String,
+    /// The cue it would carry; absent, the proposal is to turn its cue off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cue: Option<Cue>,
+}
+
+/// A call a guard refused, as the guard recorded it: the question quotes
+/// this, not what the session wrote, so the user answers about the call
+/// itself (task 805).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Allowance {
+    /// The code the refusal gave, which the session asked with.
+    pub code: String,
+    /// The tool, and the call: a Bash command, or another tool's input.
+    pub tool: String,
+    pub call: String,
+    /// The folder the call ran in.
+    pub cwd: String,
+    /// What each guard that refused it said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+    /// The tool call that went through on it, once one has: a guard seeing
+    /// the same one again -- ekko's and ctx's run on each call -- lets it
+    /// through too, and any other stays refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<Used>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Used {
+    #[serde(rename = "toolUseId")]
+    pub tool_use_id: String,
+    pub at: i64,
 }
 
 /// The user's answer to a question, and who recorded it.
@@ -398,6 +482,14 @@ pub struct Answer {
     /// it, stamped as the question's is.
     pub at: i64,
     pub rev: u64,
+}
+
+impl Answer {
+    /// Whether a person recorded it -- in ekko's menu, or at a terminal --
+    /// rather than a session, which records one with its process.
+    pub fn by_person(&self) -> bool {
+        self.by.as_ref().is_none_or(|by| by.pid.is_none())
+    }
 }
 
 /// A session waiting on an item until it reaches what the session needs;

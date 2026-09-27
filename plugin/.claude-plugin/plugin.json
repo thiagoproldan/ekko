@@ -1,6 +1,6 @@
 {
   "name": "ekko",
-  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes; the board's resume view added to context when a session starts; the board drawn in the session's task list under the spinner; and a session woken when what it waits on is over.",
+  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes; the board's resume view added to context when a session starts; the board drawn in the session's task list under the spinner; a session woken when what it waits on is over; and the Bash calls a gotcha's cue names refused, once the user turns the cue on.",
   "homepage": "https://github.com/thiagoproldan/ekko",
   "license": "MIT",
   "mcpServers": {
@@ -10,6 +10,17 @@
     }
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ekko --guard --hook"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

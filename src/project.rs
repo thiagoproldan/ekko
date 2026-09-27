@@ -287,8 +287,17 @@ pub fn resolve_named(home: &Path, name: &str) -> Result<Project, DirectoryError>
     Err(DirectoryError::UnknownProject(name.to_string()))
 }
 
-fn registry_file(home: &Path) -> PathBuf {
+pub(crate) fn registry_file(home: &Path) -> PathBuf {
     home.join(EKKO_DIR_NAME).join(REGISTRY)
+}
+
+/// Every registered project whose folder still holds its board, as the
+/// folder and the `.ekko/` holding the board: the boards whose cues the
+/// guard reads (task 805). A moved or lost project is left out, since the
+/// folder its cues guard is not where it was.
+pub fn boards(home: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let Ok(registry) = read_registry(home) else { return Vec::new() };
+    registry.projects.iter().filter(|entry| !missing(entry)).map(|entry| (entry.path.clone(), entry.path.join(EKKO_DIR_NAME))).collect()
 }
 
 fn read_registry(home: &Path) -> Result<Registry, DirectoryError> {

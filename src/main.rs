@@ -5,6 +5,7 @@ mod config;
 mod dialog;
 mod directory;
 mod ekko;
+mod guard;
 mod holder;
 mod item;
 mod json;
@@ -16,6 +17,7 @@ mod ops;
 mod project;
 mod paths;
 mod render;
+mod shell;
 mod storage;
 mod tasklist;
 mod wake;
@@ -62,8 +64,10 @@ const HELP: &str = r#"
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
       --prime             Summarise the board for picking work back up
-      --hook              With --prime or --tasklist: answer a Claude Code hook's event on stdin
+      --hook              With --prime, --tasklist or --guard: answer a Claude Code hook's event on stdin
       --tasklist          With --hook: draw the board in the session's Claude Code task list
+      --guard             With --hook: refuse the Bash calls a gotcha's cue names
+      --refuse <REASON>   With --guard: another guard's refusal, which the user may let through
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
@@ -182,6 +186,19 @@ fn main() -> ExitCode {
     // without a persistent "current project" file, which would change what
     // `ekko` shows from invisible state.
     let project_env = std::env::var("EKKO_PROJECT").ok();
+    // A PreToolUse hook on every Bash call, before any board is located or
+    // opened: it reads every board, through an index of its own.
+    if cli.guard {
+        let input = read_all_stdin();
+        return match (&cli.refuse, cli.hook) {
+            (Some(reason), _) => guard::refuse(&home_dir, &input, reason),
+            (None, true) => guard::hook(&home_dir, &input),
+            (None, false) => {
+                eprintln!("--guard takes --hook, as Claude Code's PreToolUse, or --refuse REASON");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // Before any board is opened: the server opens one per call, because each
     // call may name a different project.
     if cli.mcp {
@@ -337,6 +354,18 @@ fn run_init(args: &[String], json_first: bool) -> ExitCode {
         }
         Err(err) => finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
     }
+}
+
+/// All of stdin, for a guard: a Bash command can run past what
+/// `read_hook_input` takes, and a guard reading half of one would judge
+/// another command. Nothing from a terminal.
+fn read_all_stdin() -> String {
+    use std::io::{IsTerminal, Read as _};
+    let mut input = String::new();
+    if !std::io::stdin().is_terminal() {
+        let _ = std::io::stdin().lock().take(16 * 1024 * 1024).read_to_string(&mut input);
+    }
+    input
 }
 
 /// What a hook was handed on stdin, or nothing when stdin is a terminal: a

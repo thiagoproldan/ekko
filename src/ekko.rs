@@ -63,6 +63,9 @@ pub enum EkkoError {
     /// A flag that is gone with nothing under a new name, and what to do
     /// instead.
     RemovedFlag { old: &'static str, instead: &'static str },
+    /// Gotchas whose cue, which the user turned on, a session's write
+    /// would have changed, dropped or brought back (task 805).
+    CueIsUsers(Vec<u32>),
     InvalidCustomAppDir(String),
     MissingEkkoDirFlagValue,
     /// The lock's path, and who held it when the wait gave up.
@@ -104,6 +107,7 @@ impl EkkoError {
             EkkoError::AttachTargetHasNoUid(_) => "ATTACH_TARGET_HAS_NO_UID",
             EkkoError::RenamedFlag { .. } => "RENAMED_FLAG",
             EkkoError::RemovedFlag { .. } => "REMOVED_FLAG",
+            EkkoError::CueIsUsers(_) => "CUE_IS_USERS",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
             EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
             EkkoError::LockTimeout(..) => "LOCK_TIMEOUT",
@@ -146,7 +150,8 @@ impl EkkoError {
             | EkkoError::AttachTargetNotATask(_)
             | EkkoError::AttachTargetHasNoUid(_)
             | EkkoError::RenamedFlag { .. }
-            | EkkoError::RemovedFlag { .. } => out.generic_error(&self.to_string()),
+            | EkkoError::RemovedFlag { .. }
+            | EkkoError::CueIsUsers(_) => out.generic_error(&self.to_string()),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
             EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
             EkkoError::LockTimeout(path, holder) => out.lock_timeout(path, holder.as_deref()),
@@ -274,6 +279,16 @@ impl std::fmt::Display for EkkoError {
             ),
             EkkoError::RenamedFlag { old, new } => write!(f, "{old} was renamed to {new}"),
             EkkoError::RemovedFlag { old, instead } => write!(f, "{old} was removed. {instead}"),
+            EkkoError::CueIsUsers(ids) => {
+                let named = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+                let (which, carries) = if ids.len() == 1 { ("gotcha", "carries a cue") } else { ("gotchas", "carry cues") };
+                write!(
+                    f,
+                    "{which} {named} {carries} the user turned on, and only the user changes, drops or brings one back: \
+                     this write would have, so nothing was written. Propose the change through ask, with cue on the question; \
+                     the user's answer in ekko's menu applies it"
+                )
+            }
             EkkoError::UnknownState(term) => {
                 write!(f, "Unknown state: {term}. Expected one of: {}", Setting::ALL.map(Setting::word).join(", "))
             }
@@ -1013,10 +1028,33 @@ impl Ekko {
         Ok(counters.revision.max(carried).max(self.storage.last_journal_rev()?))
     }
 
+    /// Refuses a session's write that would change the cues that are on
+    /// (task 805), whatever the write is -- an edit, a trash, a stash, a
+    /// restore, a note turned into another kind. Only the user's answer in
+    /// ekko's menu turns a cue on, changes or drops it, and the user at the
+    /// terminal may trash, stash or restore a gotcha that has one: a guard a
+    /// session could lift is not one.
+    fn refuse_cue_changes(&self, before: &ItemMap, data: &ItemMap) -> Result<(), EkkoError> {
+        if self.actor.as_ref().is_none_or(|actor| actor.is_person()) {
+            return Ok(());
+        }
+        let (was, is) = (crate::guard::cues_on(before), crate::guard::cues_on(data));
+        if was == is {
+            return Ok(());
+        }
+        let changed = |uid: &&String| was.get(*uid) != is.get(*uid);
+        let id_of = |uid: &String| before.values().chain(data.values()).find(|item| item.uid.as_ref() == Some(uid)).map(|item| item.id);
+        let mut ids: Vec<u32> = was.keys().chain(is.keys()).filter(changed).filter_map(id_of).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        Err(EkkoError::CueIsUsers(ids))
+    }
+
     /// `save_touching` against the board as the caller read it, under the
     /// lock it still holds: a structured write already has that copy, and
     /// reading storage.json a second time only parses the whole board again.
     pub(crate) fn save_against(&self, before: &ItemMap, data: &mut ItemMap) -> Result<Saved, EkkoError> {
+        self.refuse_cue_changes(before, data)?;
         let now = chrono::Local::now().timestamp_millis();
 
         // The trash empties here, on the way past, and only here.
