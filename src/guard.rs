@@ -97,6 +97,14 @@ fn boards(home: &Path) -> Vec<Board> {
     found
 }
 
+/// Whether the guard reads the board whose storage file is `storage`: the
+/// default board, or a registered project's. One opened through EKKO_DIR or
+/// --ekko-dir is neither, so a cue on it would never refuse (task 827).
+pub fn reads(home: &Path, storage: &Path) -> bool {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    boards(home).iter().any(|board| real(&storage_file(&board.dir)) == real(storage))
+}
+
 /// Where the guard keeps its index and the calls it refused: beside the
 /// default board.
 fn state(home: &Path) -> PathBuf {
@@ -982,6 +990,29 @@ mod tests {
         fails(json!({"text": "?", "cue": {"gotcha": gotcha, "off": true, "command": "gh"}}), "takes no command");
         let error = ask(&ekko_at(&dir, Some(&other)), &home, json!({"text": "?", "allow": code})).unwrap_err().to_string();
         assert!(error.contains("another session made"), "{error}");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A cue is proposed only on a board the guard reads (task 827): on one
+    /// opened through EKKO_DIR it would never refuse, and the user would turn
+    /// on a guard that guards nothing.
+    #[test]
+    fn a_cue_is_proposed_only_on_a_board_the_guard_reads() {
+        let home = home("unread");
+        let (session, _, _) = test_sessions();
+        let elsewhere = home.join("hometasks");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        for (dir, read) in [(home.join(".ekko"), true), (elsewhere, false)] {
+            let as_session = ekko_at(&dir, Some(&session));
+            let gotcha = apply(&as_session, json!({"op": "create", "kind": "gotcha", "text": "a lesson"})).unwrap()[0];
+            let asked = ask(&as_session, &home, json!({"text": "?", "cue": {"gotcha": gotcha, "command": "gh"}}));
+            if read {
+                assert!(asked.is_ok(), "{}: {:?}", dir.display(), asked.err());
+            } else {
+                let error = asked.unwrap_err().to_string();
+                assert!(error.contains("does not read this board") && error.contains("never refuse"), "{error}");
+            }
+        }
         std::fs::remove_dir_all(&home).ok();
     }
 

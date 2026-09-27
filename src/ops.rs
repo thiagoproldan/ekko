@@ -732,6 +732,13 @@ impl<'a> Draft<'a> {
                 if proposal.cue.is_none() && gotcha.cue.is_none() {
                     return Err(invalid(format!("gotcha {target} has no cue to turn off")));
                 }
+                if proposal.cue.is_some() && !crate::guard::reads(home, self.ekko.storage.storage_path()) {
+                    return Err(invalid(format!(
+                        "ekko's guard does not read this board, {}: it reads the default board and the registered projects', \
+                         never one opened through EKKO_DIR or --ekko-dir, so a cue on gotcha {target} would never refuse",
+                        self.ekko.storage.storage_path().display()
+                    )));
+                }
                 let block = crate::guard::proposal_block(gotcha, &proposal, self.ekko.folder.as_deref());
                 let options = if proposal.cue.is_some() {
                     [
