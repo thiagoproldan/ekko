@@ -717,7 +717,7 @@ impl Server {
 
     /// The answer recorded to each question, by uid, where it has one.
     fn answers_to(&self, uids: &[String]) -> Vec<Option<String>> {
-        let data = self.open().ok().and_then(|(ekko, _)| ekko.storage.get().ok());
+        let data = self.open().ok().and_then(|(ekko, _)| ekko.storage.get_shared().ok());
         uids.iter()
             .map(|uid| {
                 let item = data.as_ref()?.values().find(|item| item.uid.as_deref() == Some(uid.as_str()))?;

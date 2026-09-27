@@ -705,7 +705,7 @@ pub fn run_file(ekko: &Ekko, file: &Path) -> Result<Vec<Outcome>, EkkoError> {
 pub fn run_one(ekko: &Ekko, reference: &str) -> Result<Vec<Outcome>, EkkoError> {
     // Read without the board's lock: the user takes their time, and every
     // other session's writes go on meanwhile.
-    let data = ekko.storage.get()?;
+    let data = ekko.storage.get_shared()?;
     let found = match reference.parse::<u32>() {
         Ok(id) => data.get(&id),
         Err(_) => data.values().find(|item| item.uid.as_deref() == Some(reference)),

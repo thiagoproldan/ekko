@@ -196,7 +196,7 @@ fn build(boards: &[Board], stamps: Vec<(PathBuf, Stamp)>, now: i64) -> Index {
         if !storage_file(&board.dir).is_file() {
             continue;
         }
-        let Ok(data) = Storage::new(&board.dir).and_then(|storage| storage.get()) else { continue };
+        let Ok(data) = Storage::new(&board.dir).and_then(|storage| storage.get_shared()) else { continue };
         for item in data.values() {
             if let (true, Some(cue)) = (on(item), &item.cue) {
                 let guards = cue.cue.folder.as_deref().map(PathBuf::from).or_else(|| board.folder.clone());

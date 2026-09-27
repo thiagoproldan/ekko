@@ -183,17 +183,15 @@ impl Storage {
         Ok(())
     }
 
-    /// The board, to change. A version this process already parsed is cloned
-    /// rather than parsed again; one it has not is parsed and not kept, so a
-    /// one-shot command pays nothing for a cache it would never read twice.
+    /// The board, to change: a copy of the version `get_shared` keeps, so a
+    /// command parses each version once however often it reads it. A command
+    /// reads more than once -- before it changes the board and again under
+    /// its lock, then for the view after -- and not keeping the first read
+    /// made `--list pending` parse the board five times and `--task` four
+    /// (task 844). A copy costs about a quarter of a parse; a read that
+    /// changes nothing takes `get_shared` and no copy at all.
     pub fn get(&self) -> Result<ItemMap, StorageError> {
-        let Some((file, version)) = open_versioned(&self.storage_file)? else {
-            return Ok(BTreeMap::new());
-        };
-        match kept_board(&self.storage_file, version) {
-            Some(board) => Ok(ItemMap::clone(&board)),
-            None => parse_map(file),
-        }
+        Ok(ItemMap::clone(&*self.get_shared()?))
     }
 
     /// The board, to read, shared with every other read of the same version
@@ -1205,5 +1203,34 @@ mod tests {
         storage.set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
         assert_eq!(storage.get().unwrap().len(), 1);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The rule `get` and `get_shared` split between them (task 844): a read
+    /// that changes nothing takes the version every read in the process
+    /// shares, and `get` copies it only for a caller that changes the copy.
+    /// So every `get` in the source binds a working copy, `let mut`; a read
+    /// calling it would pay a copy for nothing, as the CLI's views and a
+    /// write's `before` did -- on top of the parse each paid before.
+    #[test]
+    fn only_a_copy_to_change_is_taken_with_get() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut reads = Vec::new();
+        let mut copies = 0;
+        for entry in fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            let text = fs::read_to_string(&path).unwrap();
+            for (at, line) in text.lines().take_while(|line| *line != "mod tests {").enumerate() {
+                if !line.contains("storage.get()") {
+                    continue;
+                }
+                if line.trim_start().strip_prefix("let mut ").is_some_and(|rest| rest.ends_with("storage.get()?;")) {
+                    copies += 1;
+                } else {
+                    reads.push(format!("{}:{}: {}", path.display(), at + 1, line.trim()));
+                }
+            }
+        }
+        assert!(reads.is_empty(), "a read that changes nothing takes get_shared: {reads:#?}");
+        assert!(copies > 10, "the scan finds the working copies it should, not {copies}");
     }
 }

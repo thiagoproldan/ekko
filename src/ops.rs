@@ -446,7 +446,9 @@ impl Names {
 pub struct Draft<'a> {
     ekko: &'a Ekko,
     _lock: LockGuard<'a>,
-    before: ItemMap,
+    /// The board as the lock found it: the version every read shares, which
+    /// only `data` is copied from to change (task 844).
+    before: std::sync::Arc<ItemMap>,
     data: ItemMap,
     phases: Vec<String>,
     /// For each operation applied so far, the item it created, if any --
@@ -480,13 +482,13 @@ pub struct Committed {
 impl<'a> Draft<'a> {
     pub fn open(ekko: &'a Ekko) -> Result<Self, EkkoError> {
         let lock = ekko.storage.acquire_lock()?;
-        let data = ekko.storage.get()?;
+        let before = ekko.storage.get_shared()?;
         let phases = ekko.storage.get_phases()?;
         Ok(Draft {
             ekko,
             _lock: lock,
-            before: data.clone(),
-            data,
+            data: ItemMap::clone(&before),
+            before,
             phases,
             created: Vec::new(),
             texts: Vec::new(),

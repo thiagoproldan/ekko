@@ -959,7 +959,7 @@ impl Ekko {
     /// `save_touching` for --check and --set, whose `--force` pushes past
     /// another session's hold as it does past the dependency rule.
     pub(crate) fn save_touching_forced(&self, data: &mut ItemMap, force: bool) -> Result<Saved, EkkoError> {
-        let before = self.storage.get()?;
+        let before = self.storage.get_shared()?;
         let held = if force { Vec::new() } else { self.held_elsewhere(&before, data, &[]) };
         if !held.is_empty() {
             return Err(EkkoError::Held(held));
@@ -1000,8 +1000,8 @@ impl Ekko {
     pub fn take_back(&self, conversation: &str) -> Result<Vec<String>, EkkoError> {
         let Some(actor) = self.actor.as_ref().filter(|actor| !actor.is_person()) else { return Ok(Vec::new()) };
         let _lock = self.storage.acquire_lock()?;
-        let before = self.storage.get()?;
-        let mut data = before.clone();
+        let before = self.storage.get_shared()?;
+        let mut data = ItemMap::clone(&before);
         let now = chrono::Local::now().timestamp_millis();
         let mut notices = Vec::new();
         for (id, item) in data.iter_mut() {
@@ -1532,7 +1532,7 @@ impl Ekko {
 
     pub fn clear(&self) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
-        let data = self.storage.get()?;
+        let data = self.storage.get_shared()?;
         // Only what is actually on the board. Something already stashed has
         // been put away on purpose, and sweeping it into the archive would
         // both undo that and change its id on the way back -- a bulk
@@ -1561,7 +1561,7 @@ impl Ekko {
     where
         F: FnOnce(&str) -> Result<(), String>,
     {
-        let data = self.storage.get()?;
+        let data = self.storage.get_shared()?;
         let ids = self.validate_ids(ids, &data)?;
         let descriptions: Vec<String> = ids.iter().map(|id| data[id].description.clone()).collect();
         write_clipboard(&descriptions.join("\n")).map_err(EkkoError::Clipboard)?;
@@ -1577,9 +1577,15 @@ impl Ekko {
     /// something would require it to be visible, which is the one thing it
     /// is not.
     fn visible(&self) -> Result<ItemMap, EkkoError> {
-        let mut data = self.storage.get()?;
-        data.retain(|_, item| item.stashed.is_none() && item.trashed.is_none());
-        Ok(data)
+        self.board_where(|item| item.stashed.is_none() && item.trashed.is_none())
+    }
+
+    /// A copy of the items `keep` takes, out of the version of the board
+    /// every read in this process shares: a view copies what it shows, and
+    /// parses nothing a read before it already parsed (task 844).
+    fn board_where(&self, keep: impl Fn(&Item) -> bool) -> Result<ItemMap, EkkoError> {
+        let board = self.storage.get_shared()?;
+        Ok(board.iter().filter(|(_, item)| keep(item)).map(|(id, item)| (*id, item.clone())).collect())
     }
 
     pub fn display_by_board(&self) -> Result<Outcome, EkkoError> {
@@ -1601,7 +1607,7 @@ impl Ekko {
     }
 
     pub fn display_stats(&self) -> Result<Outcome, EkkoError> {
-        let data = self.storage.get()?;
+        let data = self.storage.get_shared()?;
         Ok(Outcome::Stats(self.compute_stats(&data)))
     }
 
@@ -1726,16 +1732,14 @@ impl Ekko {
     /// note explaining four tasks is only useful next to them, and taking
     /// a finished area out of the way should not shred it on the way.
     pub fn display_stash(&self) -> Result<Outcome, EkkoError> {
-        let mut data = self.storage.get()?;
-        data.retain(|_, item| item.stashed.is_some());
+        let data = self.board_where(|item| item.stashed.is_some())?;
         let boards = self.get_boards(&data);
         Ok(Outcome::Stash(self.group_by_board(&data, &boards)))
     }
 
     /// What is in the trash, and how long it has left.
     pub fn display_trash(&self) -> Result<Outcome, EkkoError> {
-        let mut data = self.storage.get()?;
-        data.retain(|_, item| item.trashed.is_some());
+        let data = self.board_where(|item| item.trashed.is_some())?;
         let mut items: Vec<Item> = data.into_values().collect();
         items.sort_by_key(|item| item.trashed);
         Ok(Outcome::Trash(items))
@@ -1829,7 +1833,7 @@ impl Ekko {
         now_millis: i64,
     ) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
-        let data = self.storage.get()?;
+        let data = self.storage.get_shared()?;
 
         let tasks = data.values().filter(|item| item.is_task).count() as u32;
         let notes = data.len() as u32 - tasks;
@@ -1901,10 +1905,10 @@ impl Ekko {
 
     /// Unmet blockers for every item that has any, keyed by display id.
     pub fn blocker_map(&self) -> Result<std::collections::HashMap<u32, Vec<u32>>, EkkoError> {
-        let data = self.storage.get()?;
+        let data = self.storage.get_shared()?;
         let index = uid_index(&data);
         let mut map = std::collections::HashMap::new();
-        for (id, item) in &data {
+        for (id, item) in data.iter() {
             let unmet = Self::unmet_blockers_indexed(&index, &data, item);
             if !unmet.is_empty() {
                 map.insert(*id, unmet);
@@ -2162,7 +2166,7 @@ impl Ekko {
         // Every item's phase is a declared one -- create and update refuse
         // any other -- so a phase leaves the sequence only once it holds
         // nothing, or its items would drop out of the roadmap and the filters.
-        let data = self.storage.get()?;
+        let data = self.storage.get_shared()?;
         let mut held: Vec<(&str, u32)> = data
             .values()
             .filter(|item| item.trashed.is_none())
@@ -2187,7 +2191,7 @@ impl Ekko {
             // The order work is taken up in moved though no item did: the
             // revision says so, published after the phases it covers.
             let mut counters = self.storage.get_counters()?;
-            counters.revision = self.healed_revision(&self.storage.get()?, &counters)? + 1;
+            counters.revision = self.healed_revision(&*self.storage.get_shared()?, &counters)? + 1;
             // No item carries this revision, so the journal does: a lost
             // counters.json heals past it instead of handing it out again.
             let at = chrono::Local::now().timestamp_millis();
@@ -2253,9 +2257,7 @@ impl Ekko {
         // out: with it the listing starts from all but the trash, so a board
         // that only the stash still holds is a board here too.
         let data = if terms.iter().any(|term| term == STASHED) {
-            let mut data = self.storage.get()?;
-            data.retain(|_, item| item.trashed.is_none());
-            data
+            self.board_where(|item| item.trashed.is_none())?
         } else {
             self.visible()?
         };
@@ -2304,7 +2306,7 @@ impl Ekko {
         let boards = remove_duplicates(boards);
         let attributes = remove_duplicates(attributes);
 
-        let all = self.storage.get()?;
+        let all = self.storage.get_shared()?;
         let filtered = Self::filter_by_attributes(&attributes, data, &all);
         Ok(Outcome::List(self.group_by_board(&filtered, &boards)))
     }
