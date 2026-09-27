@@ -19,6 +19,7 @@
 //! into a new process. So a claim names the conversation to resume, and a
 //! conversation resumed after a restart can tell the claims it made before.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -136,6 +137,7 @@ impl Actor {
             tty: self.tty.clone(),
             conversation: self.conversation(),
             since,
+            unknown: BTreeMap::new(),
         }
     }
 
@@ -171,6 +173,10 @@ pub struct Holder {
     pub conversation: Option<String>,
     /// When the claim was made, in milliseconds.
     pub since: i64,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 impl Holder {
@@ -295,6 +301,7 @@ impl Running {
             tty: self.tty.clone(),
             conversation: Some(self.conversation.clone()),
             since: self.since,
+            unknown: BTreeMap::new(),
         };
         holder.label()
     }

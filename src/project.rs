@@ -22,6 +22,7 @@
 //! the rule every view in Ekko keeps: a project whose folder moved is reported
 //! as moved, and `ekko init` in its new folder records where it went.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -50,11 +51,19 @@ struct Registered {
     name: String,
     id: String,
     path: PathBuf,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Registry {
     projects: Vec<Registered>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, serde_json::Value>,
 }
 
 /// A project, resolved to where its board lives.
@@ -339,6 +348,7 @@ fn register(registry: &mut Registry, marker: &Marker, root: &Path) {
         name: marker.name.clone(),
         id: marker.id.clone(),
         path: root.to_path_buf(),
+        unknown: BTreeMap::new(),
     });
     registry.projects.sort_by(|a, b| a.name.cmp(&b.name));
 }
@@ -1040,5 +1050,15 @@ mod tests {
         assert!(!copies(&home, &id).unwrap().exists(), "the copy outlived the destroyed board");
 
         fs::remove_dir_all(&home).ok();
+    }
+
+    /// The project registry keeps a later version's fields, on itself and
+    /// on each project (task 829): every ekko that registers a project
+    /// rewrites it whole.
+    #[test]
+    fn the_registry_keeps_what_it_does_not_know() {
+        crate::json::assert_keeps_what_it_does_not_know::<Registry>(serde_json::json!({
+            "projects": [{"name": "ekko", "id": "18d74dd807e6db5a-4c0c6", "path": "/home/roldant/Projetos/ekko"}]
+        }));
     }
 }

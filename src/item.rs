@@ -241,8 +241,12 @@ pub struct Item {
     /// when the session clears or restarts, and the user's answer given in
     /// another session never reaches it; on the board it does. Absent unless
     /// set, so a board that asks nothing is stored exactly as before.
+    /// Boxed, as `wait` is, since few items hold one: inline, the two made
+    /// every item 1,144 bytes larger, and moving items is much of reading a
+    /// board. Measured in task 829, `ekko --list pending` over 838 items:
+    /// 33.2 ms before it, 35.5 ms with its fields inline, 30.5 ms boxed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub question: Option<Question>,
+    pub question: Option<Box<Question>>,
     /// On a note that records a Claude Code session waiting on another item
     /// -- a task another session or the user holds, or a question -- until
     /// it reaches what the session needs (task 389). A session that waited
@@ -250,8 +254,9 @@ pub struct Item {
     /// knew of it; on the board it outlives the session, the holder and the
     /// user see it, and the write that ends it records how. Absent unless
     /// set, so a board where nobody waits is stored exactly as before.
+    /// Boxed; see `question`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wait: Option<Wait>,
+    pub wait: Option<Box<Wait>>,
     /// On a gotcha: the calls it refuses, which the user turned on (task
     /// 805). A session proposes a cue through ask, and only the user's answer
     /// in ekko's menu sets, changes or drops it, so the gotcha holds the cue
@@ -400,6 +405,10 @@ pub struct Question {
     /// A call a guard refused, which the user's answer lets through once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Allowance>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 /// What a gotcha's cue refuses: a Bash call that runs `command` with all of
@@ -418,10 +427,15 @@ pub struct Cue {
     /// of the board's project, or the whole machine on the default board.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 /// A gotcha's cue, turned on by the user's answer to the question that
-/// proposed it.
+/// proposed it. It has no `unknown` of its own: its `cue`'s takes every
+/// field neither of them knows, and a second map would write each twice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CueOn {
     #[serde(flatten)]
@@ -439,6 +453,10 @@ pub struct Proposal {
     /// The cue it would carry; absent, the proposal is to turn its cue off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cue: Option<Cue>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 /// A call a guard refused, as the guard recorded it: the question quotes
@@ -461,6 +479,10 @@ pub struct Allowance {
     /// through too, and any other stays refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used: Option<Used>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -468,6 +490,10 @@ pub struct Used {
     #[serde(rename = "toolUseId")]
     pub tool_use_id: String,
     pub at: i64,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 /// The user's answer to a question, and who recorded it.
@@ -482,6 +508,10 @@ pub struct Answer {
     /// it, stamped as the question's is.
     pub at: i64,
     pub rev: u64,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 impl Answer {
@@ -509,6 +539,10 @@ pub struct Wait {
     /// How it ended, once it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub over: Option<Over>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 impl Wait {
@@ -584,6 +618,10 @@ pub struct Over {
     /// is saved.
     pub at: i64,
     pub rev: u64,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 /// How a wait ended; see `Over`.
@@ -1372,5 +1410,89 @@ mod tests {
         assert_eq!(written["checkBack"], "2026-10-01");
         assert_eq!(item.priority, Some(1), "the known fields around them are still read");
         assert_eq!(serde_json::from_value::<Item>(written).unwrap(), item);
+    }
+
+    /// What an item holds keeps a later version's fields as the item does
+    /// (task 829): the question, its answer, the cue it proposes and the call
+    /// it allows, the wait and how it ended, the cue that is on, and every
+    /// holder. Before, a v0.24.0 write dropped every question's cue and allow.
+    #[test]
+    fn every_object_an_item_holds_keeps_what_it_does_not_know() {
+        let holder = serde_json::json!({"pid": 1047920, "start": 10288721, "boot": "016877cc", "profile": "trabalho",
+            "tty": "pts/0", "conversation": "8e199d1a", "since": 1790488545583_i64});
+        crate::json::assert_keeps_what_it_does_not_know::<Item>(serde_json::json!({
+            "_id": 1, "_date": "Sun Sep 27 2026", "_timestamp": 1790488545583_i64, "description": "x",
+            "isStarred": false, "boards": ["My Board"], "_isTask": true, "isComplete": false, "inProgress": true,
+            "uid": "18d917d885e497e8-ffdc4", "updatedAt": 1790488580406_i64, "rev": 902,
+            "heldBy": holder, "doneBy": holder, "createdBy": holder,
+            "question": {
+                "askedBy": holder, "rev": 901,
+                "answer": {"text": "Allow once", "by": {"since": 1790488577665_i64}, "at": 1790488577665_i64, "rev": 902},
+                "cue": {"gotcha": "18d917b69b8bd112-ffdc4", "cue": {"command": "git", "words": ["reset", "--hard"], "folder": "/tmp"}},
+                "allow": {"code": "bv762s", "tool": "Bash", "call": "git reset --hard", "cwd": "/tmp", "reasons": ["a gotcha"],
+                    "used": {"toolUseId": "toolu_01Ptw84Fh7BCgVdBoivkzhZd", "at": 1790488580406_i64}}
+            },
+            "wait": {"on": "18d917d885e497e8-ffdc4", "until": "answered", "by": holder, "rev": 903,
+                "over": {"how": "answered", "by": holder, "at": 1790488580406_i64, "rev": 904}},
+            "cue": {"command": "gh", "words": ["api", "graphql"], "folder": "/", "question": "18d917bcc68eee96-ffdc4",
+                "at": 1790488518284_i64},
+            "priority": 1
+        }));
+    }
+
+    /// The rule `unknown` keeps, over the whole class (task 829): every
+    /// struct serde reads from a file and writes back keeps the fields it
+    /// does not know. A write rewrites the whole file, so a struct with no
+    /// `unknown` drops what a later version added to it the moment an older
+    /// ekko writes anything, as `Question` dropped every cue and allow. Each
+    /// struct in the source that derives `Deserialize` holds one, or is
+    /// named here with why it needs none.
+    #[test]
+    fn every_struct_read_from_a_file_and_written_back_keeps_what_it_does_not_know() {
+        let cache = "the guard's index, rebuilt from the boards whenever one changes";
+        let exempt = [
+            ("CueOn", "it flattens `Cue`, whose `unknown` takes the fields neither knows"),
+            ("Index", cache),
+            ("Indexed", cache),
+            ("Granted", cache),
+            ("Running", "a process's file in the registry, written only by that process's own hook"),
+            ("Marker", "written once, as the project is made or restored, and never rewritten"),
+            ("Config", "written only where there is none, and never rewritten"),
+            ("Session", "written once, as a session's task list starts, and never rewritten"),
+            ("Task", "Claude Code's task list, which ekko writes whole from the board"),
+            ("Spec", "handed to the menu this same binary starts"),
+            ("Posed", "handed to the menu this same binary starts"),
+        ];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut checked = Vec::new();
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            // A call's input, read from MCP or the command line and never stored.
+            if path.file_name().unwrap() == "ops.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (at, line) in lines.iter().enumerate() {
+                if !(line.starts_with("#[derive(") && line.contains("Deserialize")) {
+                    continue;
+                }
+                let Some(head) = lines[at + 1..].iter().find(|line| !line.starts_with("#[")) else { continue };
+                let Some(name) = head.trim_start_matches("pub ").strip_prefix("struct ").and_then(|rest| rest.split([' ', '(']).next()) else {
+                    continue;
+                };
+                let body = lines[at + 1..].iter().take_while(|line| **line != "}");
+                if body.clone().any(|line| line.trim_start().trim_start_matches("pub ").starts_with("unknown: BTreeMap<String, serde_json::Value>")) {
+                    checked.push(name.to_string());
+                } else if !exempt.iter().any(|(exempt, _)| *exempt == name) {
+                    missing.push(format!("{} in {}", name, path.display()));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "no `unknown`, and no reason given here for none: {missing:?}");
+        checked.sort();
+        let expected = ["Allowance", "Answer", "Counters", "Cue", "Holder", "Item", "Over", "Proposal", "Question", "Refused", "Registered", "Registry", "Used", "Wait"];
+        assert_eq!(checked, expected, "the scan finds the structs it should");
     }
 }

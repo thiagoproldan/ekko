@@ -258,7 +258,7 @@ impl CueAsk {
                 Some(crate::paths::resolve_path(&home, Path::new("/"), &path.to_string_lossy()).to_string_lossy().into_owned())
             }
         };
-        Ok(Some(Cue { command: command.to_string(), words, folder }))
+        Ok(Some(Cue { command: command.to_string(), words, folder, unknown: Default::default() }))
     }
 }
 
@@ -643,7 +643,7 @@ impl<'a> Draft<'a> {
         let now = chrono::Local::now().timestamp_millis();
         let asked_by = self.ekko.actor.as_ref().filter(|actor| !actor.is_person()).map(|actor| actor.holder(now));
         // The revision is the write's own, stamped as it is saved.
-        self.item(id).question = Some(Question { asked_by, rev: 0, answer: None, cue: None, allow: None });
+        self.item(id).question = Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, unknown: Default::default() }));
         Ok(id)
     }
 
@@ -674,9 +674,9 @@ impl<'a> Draft<'a> {
         }
         let now = chrono::Local::now().timestamp_millis();
         let by = self.ekko.actor.as_ref().map(|actor| actor.holder(now));
-        let answer = Answer { text: text.to_string(), by, at: now, rev: 0 };
+        let answer = Answer { text: text.to_string(), by, at: now, rev: 0, unknown: Default::default() };
         let proposal = asked.cue.clone();
-        self.item(id).question = Some(Question { answer: Some(answer), ..asked });
+        self.item(id).question = Some(Box::new(Question { answer: Some(answer), ..*asked }));
         if let Some(proposal) = proposal {
             self.settle_proposal(id, &proposal, text, now);
         }
@@ -728,7 +728,7 @@ impl<'a> Draft<'a> {
                 let Some(uid) = gotcha.uid.clone() else {
                     return Err(invalid(format!("{target} has no uid, which a proposal names it by")));
                 };
-                let proposal = Proposal { gotcha: uid, cue };
+                let proposal = Proposal { gotcha: uid, cue, unknown: Default::default() };
                 if proposal.cue.is_none() && gotcha.cue.is_none() {
                     return Err(invalid(format!("gotcha {target} has no cue to turn off")));
                 }
@@ -777,7 +777,7 @@ impl<'a> Draft<'a> {
             Some(used) => Ok(used.tool_use_id == tool_use_id),
             None => {
                 let at = chrono::Local::now().timestamp_millis();
-                allow.used = Some(crate::item::Used { tool_use_id: tool_use_id.to_string(), at });
+                allow.used = Some(crate::item::Used { tool_use_id: tool_use_id.to_string(), at, unknown: Default::default() });
                 Ok(true)
             }
         }
@@ -834,7 +834,7 @@ impl<'a> Draft<'a> {
 
         let waiter = self.waiter()?;
         let now = chrono::Local::now().timestamp_millis();
-        let wait = Wait { on, until, by: waiter.holder(now), rev: 0, over: None };
+        let wait = Wait { on, until, by: waiter.holder(now), rev: 0, over: None, unknown: Default::default() };
         if let Some(how) = wait.over_on(Some(item)) {
             return Ok(Waited::Met(target, how));
         }
@@ -867,7 +867,7 @@ impl<'a> Draft<'a> {
             starred: false,
         };
         let id = self.create(&spec)?;
-        self.item(id).wait = Some(wait);
+        self.item(id).wait = Some(Box::new(wait));
         Ok(Waited::Recorded(id))
     }
 
@@ -889,7 +889,7 @@ impl<'a> Draft<'a> {
         mine.sort_unstable();
         for id in &mine {
             if let Some(wait) = self.item(*id).wait.as_mut() {
-                wait.over = Some(crate::item::Over { how: How::Dropped, by: Some(waiter.holder(now)), at: now, rev: 0 });
+                wait.over = Some(crate::item::Over { how: How::Dropped, by: Some(waiter.holder(now)), at: now, rev: 0, unknown: Default::default() });
             }
         }
         Ok(mine)

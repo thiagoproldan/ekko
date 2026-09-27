@@ -363,6 +363,10 @@ pub struct Refused {
     pub cwd: String,
     pub session: Option<(u32, u64, String)>,
     pub reasons: Vec<String>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 fn refused_dir(home: &Path) -> PathBuf {
@@ -387,6 +391,7 @@ fn record(home: &Path, seen: &Seen, session: Option<&Process>, code: &str, reaso
         cwd: seen.cwd.clone(),
         session,
         reasons: Vec::new(),
+        unknown: BTreeMap::new(),
     });
     refused.at = now;
     for reason in reasons {
@@ -587,6 +592,7 @@ pub fn allow_block(refused: &Refused) -> (String, Allowance) {
         cwd: refused.cwd.clone(),
         reasons: refused.reasons.clone(),
         used: None,
+        unknown: BTreeMap::new(),
     };
     (text, allowance)
 }
@@ -650,6 +656,7 @@ mod tests {
             command: command.into(),
             words: words.iter().map(|word| word.to_string()).collect(),
             folder: folder.map(|folder| folder.to_string_lossy().into_owned()),
+            unknown: BTreeMap::new(),
         }
     }
 
@@ -1013,5 +1020,16 @@ mod tests {
         assert!(read.contains("cue on: refuses `cargo` calls holding `fmt` and `--all`, run in /projects/winwayland or under it"), "{read}");
         assert!(!crate::agent::context(&ekko, &plain.to_string()).unwrap().text().contains("cue on"));
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A refusal's record keeps a later version's fields (task 829): the
+    /// hook a session started with and the ekko ctx runs can be two
+    /// versions, and each rewrites the record to add its reason.
+    #[test]
+    fn a_refusal_s_record_keeps_what_it_does_not_know() {
+        crate::json::assert_keeps_what_it_does_not_know::<Refused>(serde_json::json!({
+            "code": "bv762s", "at": 1790488528484_i64, "tool": "Bash", "call": "git reset --hard", "cwd": "/tmp",
+            "session": [1047920, 10288721, "016877cc"], "reasons": ["a gotcha", "ctx's work-loss guard"]
+        }));
     }
 }

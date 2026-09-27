@@ -1198,7 +1198,7 @@ impl Ekko {
         for (id, how) in &ending {
             if let Some(wait) = data.get_mut(id).and_then(|note| note.wait.as_mut()) {
                 let by = if *how == How::Ended { None } else { writer.clone() };
-                wait.over = Some(Over { how: *how, by, at: now, rev: 0 });
+                wait.over = Some(Over { how: *how, by, at: now, rev: 0, unknown: BTreeMap::new() });
             }
         }
         ending.into_iter().map(|(id, _)| id).collect()
@@ -4873,6 +4873,7 @@ mod tests {
             tty: Some("pts/1".into()),
             conversation: Some("874cd2ed-5f00-4a1b-9c3d-000000000000".into()),
             since: 0,
+            unknown: BTreeMap::new(),
         });
         for name in ["trabalho", "TRABALHO", "874cd2ed", "874c"] {
             assert!(is_by(&item, name), "{name} did not name the session");
@@ -4880,7 +4881,7 @@ mod tests {
         for name in ["874", "user", "default", "pts/1"] {
             assert!(!is_by(&item, name), "{name} named the session");
         }
-        item.created_by = Some(crate::holder::Holder { pid: None, start: None, boot: None, profile: None, tty: None, conversation: None, since: 0 });
+        item.created_by = Some(crate::holder::Holder { pid: None, start: None, boot: None, profile: None, tty: None, conversation: None, since: 0, unknown: BTreeMap::new() });
         assert!(is_by(&item, "user") && !is_by(&item, "default"));
     }
 }
