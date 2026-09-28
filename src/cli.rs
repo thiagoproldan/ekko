@@ -21,7 +21,7 @@ pub struct InitCli {
 
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
-#[command(group(clap::ArgGroup::new("hooked").args(["prime", "tasklist", "wake", "guard"])))]
+#[command(group(clap::ArgGroup::new("hooked").args(["prime", "memory", "tasklist", "wake", "guard"])))]
 pub struct Cli {
     /// Attach a note to the task it explains, by id: the note first, then
     /// its task. No task detaches it.
@@ -155,11 +155,17 @@ pub struct Cli {
     #[arg(long)]
     pub sessions: bool,
 
-    /// With --prime, --tasklist, --wake or --guard: answer a Claude Code hook, whose event
-    /// arrives as JSON on stdin. For --prime, a session that resumes or forks
-    /// gets what moved since this hook last served it, not a second prime.
+    /// With --prime, --memory, --tasklist, --wake or --guard: answer a Claude Code hook, whose
+    /// event arrives as JSON on stdin. For --prime, a session that resumes or
+    /// forks gets what moved since this hook last served it, not a second prime.
     #[arg(long, requires = "hooked")]
     pub hook: bool,
+
+    /// With --hook: put the project's memory page, memory.md in the board's
+    /// folder, in the context of a Claude Code session that starts, clears or
+    /// compacts -- see `memory`. The plugin runs it beside --prime.
+    #[arg(long, requires = "hook")]
+    pub memory: bool,
 
     /// With --hook: draw the board in the session's own Claude Code task
     /// list, the one under the spinner -- see `tasklist`. The plugin runs it

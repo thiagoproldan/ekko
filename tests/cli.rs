@@ -449,6 +449,55 @@ fn the_tasklist_hook_writes_the_sessions_list() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// The memory hook as the plugin runs it at SessionStart (task 885): the
+/// page in the project's board folder for a session that starts, and nothing
+/// for one that resumes, nor on a board without a page -- plain text with no
+/// project header above it, since all of stdout becomes context.
+#[test]
+fn the_memory_hook_gives_a_starting_session_the_project_page() {
+    use std::io::Write as _;
+    let dir = temp_ekko_dir();
+    let app = dir.join("app");
+    fs::create_dir_all(&app).unwrap();
+    let ekko = |args: &[&str], stdin: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(&app)
+            .env("HOME", &dir)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to run ekko");
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let hook = |source: &str| {
+        let output = ekko(&["--memory", "--hook"], &format!(r#"{{"session_id":"s-1","hook_event_name":"SessionStart","source":"{source}"}}"#));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    assert!(ekko(&["init"], "").status.success());
+    assert_eq!(hook("startup"), "", "a board without a page put something in context");
+    fs::write(app.join(".ekko").join("memory.md"), "# app\n\nWhat app is, as a whole.\n").unwrap();
+    let started = hook("startup");
+    let page = app.join(".ekko").join("memory.md");
+    assert_eq!(
+        started,
+        format!(
+            "ekko memory \u{b7} project app, found from this folder \u{b7} {} \u{b7} the user keeps this page: a change to it is theirs to make or approve\n# app\n\nWhat app is, as a whole.\n",
+            page.display()
+        )
+    );
+    assert_eq!(hook("resume"), "", "a resumed session was given the page it holds");
+    assert!(!ekko(&["--memory"], "").status.success(), "--memory without --hook was accepted");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// The guard as Claude Code runs it (task 805): a PreToolUse event on stdin,
 /// a refusal on stdout, and silence for everything else -- a call no cue
 /// names, and input it cannot read, since a broken guard must not break the

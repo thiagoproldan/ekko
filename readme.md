@@ -51,6 +51,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Errors instead of silence** when a filter term matches nothing
 - **A `flock` lock and atomic writes**, so concurrent invocations queue rather than lose updates
 - **Stash and trash**: put finished work out of the way and keep it reachable, or remove it with 30 days to change your mind
+- **A project memory**: `memory.md` in the board's folder, one page on what the project is as a whole, which you keep and the plugin adds to each session's context when it starts, clears or compacts; a longer page is cut at 6,000 characters with a line saying so
 - **An agent frontend**: `ekko --mcp`, a Model Context Protocol server with the resume view, the work order and structured writes, packaged as a Claude Code plugin that starts each session with the board in context
 - **A reproducible `nix develop` shell**, and a flake package you can `nix run` without cloning
 

@@ -12,6 +12,7 @@ mod json;
 mod json_output;
 mod lexical;
 mod mcp;
+mod memory;
 mod menu;
 mod ops;
 mod project;
@@ -65,7 +66,8 @@ const HELP: &str = r#"
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
       --prime             Summarise the board for picking work back up
-      --hook              With --prime, --tasklist or --guard: answer a Claude Code hook's event on stdin
+      --hook              With --prime, --memory, --tasklist or --guard: answer a Claude Code hook's event on stdin
+      --memory            With --hook: put the project's memory page in a starting session's context
       --tasklist          With --hook: draw the board in the session's Claude Code task list
       --guard             With --hook: refuse the Bash calls a gotcha's cue names
       --refuse <REASON>   With --guard: another guard's refusal, which the user may let through
@@ -250,6 +252,12 @@ fn main() -> ExitCode {
             Err(err) => return finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
         };
     let board_label = location.label();
+    // A page beside the board, read without opening the board.
+    if cli.memory {
+        let event = agent::SessionEvent::from_hook_input(&read_hook_input());
+        print!("{}", memory::hook(&location.dir, &board_label, &event.source));
+        return ExitCode::SUCCESS;
+    }
     // A command run by an agent through Bash, or by a hook, acts for the
     // Claude Code session it runs under; one typed at a terminal, for the user.
     let ekko = match Ekko::at(&location) {
