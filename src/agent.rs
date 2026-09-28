@@ -1919,6 +1919,10 @@ pub struct Removed {
     pub id: u32,
     pub uid: Option<String>,
     pub text: String,
+    /// Where it went, when it moved to another board rather than leaving
+    /// for the archive or out of the trash (task 897).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moved: Option<crate::storage::Moved>,
 }
 
 /// A cursor below this is a board revision; one at or above it is a
@@ -1972,6 +1976,8 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
         }
     };
     let (mut released, mut blocked, mut removed) = (BTreeSet::new(), BTreeSet::new(), Vec::new());
+    // Read once, and only when something left storage.
+    let mut redirects: Option<Vec<crate::storage::Moved>> = None;
     for entry in journal.iter().filter(|entry| after(entry)) {
         for id in entry["released"].as_array().into_iter().flatten().filter_map(&resolve) {
             blocked.remove(&id);
@@ -1982,10 +1988,17 @@ pub fn changes(ekko: &Ekko, since: i64) -> Result<Changes, EkkoError> {
             blocked.insert(id);
         }
         for gone in entry["removed"].as_array().into_iter().flatten() {
+            let uid = gone["uid"].as_str().map(str::to_string);
+            if redirects.is_none() {
+                redirects = Some(ekko.storage.get_moved()?);
+            }
+            let id = gone["id"].as_u64().unwrap_or_default() as u32;
+            let went = redirects.iter().flatten().find(|left| left.id == id && uid.as_deref() == Some(left.uid.as_str())).cloned();
             removed.push(Removed {
-                id: gone["id"].as_u64().unwrap_or_default() as u32,
-                uid: gone["uid"].as_str().map(str::to_string),
+                id,
+                uid,
                 text: gone["text"].as_str().unwrap_or_default().to_string(),
+                moved: went,
             });
         }
     }
@@ -2360,7 +2373,14 @@ impl Changes {
             let _ = writeln!(out, "{:>4}. [{state}{away}] {}{answer}{now}", entry.id, headline(&entry.description, entry.state.is_some(), TASK_CLIP));
         }
         for gone in &self.removed {
-            let _ = writeln!(out, "{:>4}. [removed] {}", gone.id, gone.text);
+            let how = match &gone.moved {
+                Some(to) => {
+                    let board = crate::move_to::board_name(to.project.as_deref());
+                    format!("moved to {board} as {}", to.as_id)
+                }
+                None => "removed".to_string(),
+            };
+            let _ = writeln!(out, "{:>4}. [{how}] {}", gone.id, gone.text);
         }
         // Said only when it is so, naming what fell short: the board's revision
         // behind the cursor, or the journal no longer reaching it.

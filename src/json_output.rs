@@ -76,6 +76,8 @@ fn success_value(outcome: &Outcome) -> Value {
             "linked": linked,
             "changed": changed,
         }),
+        // `project` null for the default board, as `moved` records it.
+        Outcome::MovedTo { project, items } => json!({"ok": true, "command": command, "project": project, "items": items}),
         Outcome::Forgotten(forgotten) => json!({
             "ok": true,
             "command": command,
@@ -145,6 +147,11 @@ fn error_value(error: &EkkoError) -> Value {
         EkkoError::Stale { current, .. } => Some(("current", json!(current))),
         EkkoError::EditMatch { found, .. } => Some(("found", json!(found))),
         EkkoError::PhaseOrder(inversion) => Some(("inversion", json!(inversion))),
+        EkkoError::Moved { to, .. } => Some(("moved", json!(to))),
+        EkkoError::SplitLinks(splits) => Some(("links", json!(splits))),
+        EkkoError::Watched(watched) => {
+            Some(("watched", Value::Array(watched.iter().map(|(id, what)| json!({"id": id, "what": what})).collect())))
+        }
         _ => None,
     };
     if let (Some((key, val)), Value::Object(map)) = (extra, &mut value) {

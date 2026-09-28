@@ -1598,7 +1598,7 @@ mod tests {
         }
         assert!(missing.is_empty(), "no `unknown`, and no reason given here for none: {missing:?}");
         checked.sort();
-        let expected = ["Allowance", "Answer", "Counters", "Cue", "Holder", "Item", "Linking", "Over", "Proposal", "Question", "Refused", "Registered", "Registry", "Used", "Wait"];
+        let expected = ["Allowance", "Answer", "Counters", "Cue", "Holder", "Item", "Linking", "Moved", "Over", "Proposal", "Question", "Refused", "Registered", "Registry", "Used", "Wait"];
         assert_eq!(checked, expected, "the scan finds the structs it should");
     }
 

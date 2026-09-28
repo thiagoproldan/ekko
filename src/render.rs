@@ -1226,6 +1226,22 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// What `--move-to` did: where the items went, and the id each has
+    /// there. A note that went with its task, not by name, says so.
+    pub fn success_moved_to(&mut self, project: Option<&str>, items: &[crate::move_to::Carried]) {
+        let board = crate::move_to::board_name(project);
+        let message = format!("Moved {} {} to {board}:", items.len(), if items.len() == 1 { "item" } else { "items" });
+        let ids = items
+            .iter()
+            .map(|item| match item.note_of {
+                Some(task) => format!("{} as {} (a note on {task})", item.id, item.as_id),
+                None => format!("{} as {}", item.id, item.as_id),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.success("\n", &message, &self.painter.grey(&ids));
+    }
+
     /// What `--destroy` did to a project whose folder no longer held its
     /// board: forgot it, and parked its copy in the trash if it had one.
     pub fn success_forgotten(&mut self, forgotten: &crate::project::Forgotten) {

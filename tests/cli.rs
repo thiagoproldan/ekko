@@ -553,3 +553,62 @@ fn the_guard_answers_a_pre_tool_use_event_and_stays_silent_otherwise() {
 
     fs::remove_dir_all(&home).ok();
 }
+
+/// `--move-to` through the real parser (task 897): a project by name, the
+/// default board as `~`, a folder by its path; the reply gives each item's id
+/// there, a note that went with its task says so, and the id it had answers
+/// MOVED, naming where it went. `--force` is accepted beside it.
+#[test]
+fn move_to_takes_items_to_another_board_and_the_old_id_says_where() {
+    let home = temp_ekko_dir();
+    let notes = home.join("work").join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    let ekko = |cwd: &PathBuf, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &home)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .env_remove("CLAUDECODE")
+            .output()
+            .expect("failed to run ekko")
+    };
+    let reply = |output: &process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stdout)))
+    };
+    let ids = |moved: &serde_json::Value| -> Vec<(u64, u64)> {
+        moved["items"].as_array().unwrap().iter().map(|item| (item["id"].as_u64().unwrap(), item["as"].as_u64().unwrap())).collect()
+    };
+
+    assert!(ekko(&notes, &["init"]).status.success());
+    assert!(ekko(&home, &["--task", "belongs to notes"]).status.success());
+    assert!(ekko(&home, &["--note", "why it does"]).status.success());
+    assert!(ekko(&home, &["--attached-to", "@2", "1"]).status.success());
+
+    let moved = reply(&ekko(&home, &["--json", "--move-to", "notes", "1"]));
+    assert_eq!((&moved["command"], &moved["project"]), (&serde_json::json!("move-to"), &serde_json::json!("notes")), "{moved}");
+    assert_eq!(ids(&moved), [(1, 1), (2, 2)]);
+    assert_eq!(moved["items"][1]["noteOf"], 1);
+
+    let gone = reply(&ekko(&home, &["--json", "--context", "1"]));
+    assert_eq!(gone["code"], "MOVED", "{gone}");
+    assert_eq!((&gone["moved"]["project"], &gone["moved"]["as"]), (&serde_json::json!("notes"), &serde_json::json!(1)));
+    let said = String::from_utf8_lossy(&ekko(&home, &["--context", "1"]).stdout).into_owned();
+    assert!(said.contains("Item 1 moved to project notes at ") && said.contains(", where it is 1"), "{said}");
+
+    let back = reply(&ekko(&notes, &["--json", "--move-to", "~", "1", "--force"]));
+    assert_eq!((&back["ok"], &back["project"]), (&serde_json::json!(true), &serde_json::Value::Null), "{back}");
+    assert_eq!(ids(&back), [(1, 3), (2, 4)]);
+
+    let text = String::from_utf8_lossy(&ekko(&home, &["--move-to", "work/notes", "3"]).stdout).into_owned();
+    assert!(text.contains("Moved 2 items to project notes:") && text.contains("3 as 3, 4 as 4 (a note on 3)"), "{text}");
+
+    let nowhere = reply(&ekko(&home, &["--json", "--move-to", "/nowhere/at/all", "1"]));
+    assert!(nowhere["error"].as_str().unwrap().contains("No such folder: /nowhere/at/all"), "{nowhere}");
+    let unknown = reply(&ekko(&home, &["--json", "--move-to", "elsewhere", "1"]));
+    assert!(unknown["error"].as_str().unwrap().starts_with("No such project: elsewhere"), "{unknown}");
+
+    fs::remove_dir_all(&home).ok();
+}

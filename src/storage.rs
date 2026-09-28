@@ -462,6 +462,51 @@ impl Storage {
     }
 }
 
+/// Where an item that left this board for another went (task 897), kept in
+/// `moved.json` beside `storage.json` for the reason `phases.json` is. The
+/// display id it had here is never handed out again, so the old number keeps
+/// naming it: a lookup of it, or of its uid, says where it is now, the way an
+/// issue moved in Jira or transferred on GitHub redirects.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Moved {
+    /// Its display id here.
+    pub id: u32,
+    pub uid: String,
+    /// The project it went to; `None`, the default board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Its display id there, as it arrived.
+    #[serde(rename = "as")]
+    pub as_id: u32,
+    pub at: i64,
+    /// Whatever a later version keeps here, written back as read; see
+    /// `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+impl Storage {
+    fn moved_file(&self) -> PathBuf {
+        self.storage_file.with_file_name("moved.json")
+    }
+
+    /// Every item that left, in the order they left; empty when none has.
+    pub fn get_moved(&self) -> Result<Vec<Moved>, StorageError> {
+        let path = self.moved_file();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(serde_json::from_str(&fs::read_to_string(&path)?)?)
+    }
+
+    /// Written through the same temp-file and rename dance as everything else.
+    pub fn set_moved(&self, moved: &[Moved]) -> Result<(), StorageError> {
+        replace_durably(&self.moved_file(), &self.temp_dir, serde_json::to_string_pretty(moved)?.as_bytes())?;
+        self.copy_out(&self.moved_file());
+        Ok(())
+    }
+}
+
 /// The board's counters, kept in `counters.json` beside `storage.json` for
 /// the reason `phases.json` is: storage is a flat map of numeric item ids that
 /// taskbook iterates, with no room for board-level fields.
@@ -955,6 +1000,27 @@ mod tests {
 
         let written: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(written, serde_json::json!({"revision": 4, "highestId": 5, "journalFrom": 2}));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Where an item went reads as none until an item leaves, and a later
+    /// version's fields on it survive this version's rewrite of moved.json.
+    #[test]
+    fn moved_reads_as_none_until_written_and_keeps_what_a_later_version_added() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        assert!(storage.get_moved().unwrap().is_empty());
+        crate::json::assert_keeps_what_it_does_not_know::<Moved>(serde_json::json!({
+            "id": 3, "uid": "18d99814e1b8c099-1a6885", "project": "notes", "as": 7, "at": 1790629542310_i64
+        }));
+        let file = dir.join("storage").join("moved.json");
+        fs::write(&file, r#"[{"id": 3, "uid": "u", "as": 7, "at": 1, "reason": "later"}]"#).unwrap();
+        let moved = storage.get_moved().unwrap();
+        assert_eq!((moved[0].project.as_deref(), moved[0].as_id), (None, 7), "no project: the default board");
+        storage.set_moved(&moved).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(written, serde_json::json!([{"id": 3, "uid": "u", "as": 7, "at": 1, "reason": "later"}]));
 
         fs::remove_dir_all(&dir).ok();
     }

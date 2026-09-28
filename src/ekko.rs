@@ -66,6 +66,17 @@ pub enum EkkoError {
     /// Gotchas whose cue, which the user turned on, a session's write
     /// would have changed, dropped or brought back (task 805).
     CueIsUsers(Vec<u32>),
+    /// An item asked for by the id or uid it had before it moved to another
+    /// board (task 897), and where it went.
+    Moved { asked: String, to: Box<crate::storage::Moved> },
+    /// Links `--move-to` would have split between two boards: each item, how
+    /// it names the other, the other, and whether the first is the one that
+    /// moves.
+    SplitLinks(Vec<crate::move_to::Split>),
+    /// What a running Claude Code session watches on this board, which
+    /// `--move-to` would have taken out from under it: each item, and what
+    /// the session waits there for.
+    Watched(Vec<(u32, String)>),
     InvalidCustomAppDir(String),
     MissingEkkoDirFlagValue,
     /// The lock's path, and who held it when the wait gave up.
@@ -108,6 +119,9 @@ impl EkkoError {
             EkkoError::RenamedFlag { .. } => "RENAMED_FLAG",
             EkkoError::RemovedFlag { .. } => "REMOVED_FLAG",
             EkkoError::CueIsUsers(_) => "CUE_IS_USERS",
+            EkkoError::Moved { .. } => "MOVED",
+            EkkoError::SplitLinks(_) => "SPLIT_LINKS",
+            EkkoError::Watched(_) => "WATCHED",
             EkkoError::InvalidCustomAppDir(_) => "INVALID_CUSTOM_APP_DIR",
             EkkoError::MissingEkkoDirFlagValue => "MISSING_EKKO_DIR_FLAG_VALUE",
             EkkoError::LockTimeout(..) => "LOCK_TIMEOUT",
@@ -151,7 +165,10 @@ impl EkkoError {
             | EkkoError::AttachTargetHasNoUid(_)
             | EkkoError::RenamedFlag { .. }
             | EkkoError::RemovedFlag { .. }
-            | EkkoError::CueIsUsers(_) => out.generic_error(&self.to_string()),
+            | EkkoError::CueIsUsers(_)
+            | EkkoError::Moved { .. }
+            | EkkoError::SplitLinks(_)
+            | EkkoError::Watched(_) => out.generic_error(&self.to_string()),
             EkkoError::InvalidCustomAppDir(path) => out.invalid_custom_app_dir(path),
             EkkoError::MissingEkkoDirFlagValue => out.missing_ekko_dir_flag_value(),
             EkkoError::LockTimeout(path, holder) => out.lock_timeout(path, holder.as_deref()),
@@ -203,7 +220,7 @@ impl std::fmt::Display for EkkoError {
             },
             EkkoError::ForceWithoutCompleting => write!(
                 f,
-                "--force only applies to --check and --set, where it completes a task that is still blocked or reopens one that completed work depends on"
+                "--force only applies to --check and --set, where it completes a task that is still blocked or reopens one that completed work depends on, and to --move-to, where it moves what a running session holds or watches"
             ),
             EkkoError::CompletedDependents(found) => match found.as_slice() {
                 [(id, dependents)] => write!(
@@ -249,7 +266,7 @@ impl std::fmt::Display for EkkoError {
             ),
             EkkoError::Held(held) => write!(
                 f,
-                "{}, and still running, so nothing was written. Ask the user before touching it; with their word, --set or --check with --force changes it anyway",
+                "{}, and still running, so nothing was written. Ask the user before touching it; with their word, --force beside --set, --check or --move-to changes it anyway",
                 held_elsewhere_text(held, &|id| id.to_string())
             ),
             EkkoError::EditMatch { id, found: 0 } => write!(
@@ -289,6 +306,26 @@ impl std::fmt::Display for EkkoError {
                      the user's answer in ekko's menu applies it"
                 )
             }
+            EkkoError::Moved { asked, to } => {
+                let board = crate::move_to::board_name(to.project.as_deref());
+                write!(f, "Item {asked} moved to {board} at {}, where it is {}", crate::holder::when(to.at), to.as_id)
+            }
+            EkkoError::SplitLinks(splits) => write!(
+                f,
+                "Moving would split {} between two boards, so nothing moved: {}. Name the other {} too, or take the link away first; \
+                 --blocked-by @ID with no ids clears what blocks ID",
+                if splits.len() == 1 { "a link" } else { "links" },
+                splits.iter().map(crate::move_to::Split::text).collect::<Vec<_>>().join("; "),
+                if splits.len() == 1 { "item" } else { "items" }
+            ),
+            EkkoError::Watched(watched) => write!(
+                f,
+                "A Claude Code session that still runs watches {} on this board, and would not see {} move: {}. \
+                 Nothing moved. Answer the question or let the wait end first; with the user's word, --force moves it anyway",
+                if watched.len() == 1 { "this" } else { "these" },
+                if watched.len() == 1 { "it" } else { "them" },
+                watched.iter().map(|(id, what)| format!("{id} is {what}")).collect::<Vec<_>>().join("; ")
+            ),
             EkkoError::UnknownState(term) => {
                 write!(f, "Unknown state: {term}. Expected one of: {}", Setting::ALL.map(Setting::word).join(", "))
             }
@@ -422,6 +459,9 @@ pub enum Outcome {
     /// `--link-project` or `--unlink-project`: the two projects, whether the
     /// command links or unlinks them, and whether that changed anything.
     Linked { name: String, other: String, linked: bool, changed: bool },
+    /// `--move-to`: the project the items went to, `None` for the default
+    /// board, and each item's id here and there.
+    MovedTo { project: Option<String>, items: Vec<crate::move_to::Carried> },
     Init(Box<crate::project::Initialized>),
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
@@ -471,6 +511,7 @@ impl Outcome {
             Outcome::Projects(_) => "projects",
             Outcome::Destroyed { .. } | Outcome::Forgotten(_) => "destroy",
             Outcome::Linked { linked, .. } => if *linked { "link-project" } else { "unlink-project" },
+            Outcome::MovedTo { .. } => "move-to",
             Outcome::Init(_) => "init",
             Outcome::Phases(_) => "phases",
             Outcome::Blocked { .. } => "blocked",
@@ -547,6 +588,7 @@ impl Outcome {
             }
             Outcome::Forgotten(forgotten) => out.success_forgotten(forgotten),
             Outcome::Linked { name, other, linked, changed } => out.success_linked(name, other, *linked, *changed),
+            Outcome::MovedTo { project, items } => out.success_moved_to(project.as_deref(), items),
             Outcome::Phases(names) => out.display_phases(names),
             Outcome::Blocked { item, blockers } => out.success_blocked(item.id, blockers),
             Outcome::Attached { item, target } => out.success_attached(item.id, *target),
@@ -656,7 +698,31 @@ impl Ekko {
     /// display id and anything else is looked up as a uid. Both miss the
     /// same way, as `INVALID_ID`, because a caller branching on the code
     /// should not have to care which spelling it used.
+    ///
+    /// Either spelling of an item that moved to another board misses as
+    /// `MOVED`, naming where it went (task 897).
     pub(crate) fn validate_ids(&self, raw_ids: &[String], existing: &ItemMap) -> Result<Vec<u32>, EkkoError> {
+        self.resolve_ids(raw_ids, existing).map_err(|error| self.moved_away(error))
+    }
+
+    /// `error`, or `MOVED` where it missed an id or uid that left this board
+    /// for another. Storage never hands a display id out again, so the old
+    /// number names the item that left and no other.
+    fn moved_away(&self, error: EkkoError) -> EkkoError {
+        let EkkoError::InvalidId(raw) = &error else { return error };
+        let Ok(moved) = self.storage.get_moved() else { return error };
+        // By id, the one entry for it; by uid, the last time it left.
+        let id = raw.parse::<u32>().ok();
+        match moved.into_iter().rfind(|left| id == Some(left.id) || left.uid == *raw) {
+            Some(to) => EkkoError::Moved { asked: raw.clone(), to: Box::new(to) },
+            None => error,
+        }
+    }
+
+    /// `validate_ids` without the redirect, for the archive: it numbers its
+    /// items apart from storage, so a number that left storage names another
+    /// item there.
+    fn resolve_ids(&self, raw_ids: &[String], existing: &ItemMap) -> Result<Vec<u32>, EkkoError> {
         if raw_ids.is_empty() {
             return Err(EkkoError::MissingId);
         }
@@ -1086,6 +1152,15 @@ impl Ekko {
     /// lock it still holds: a structured write already has that copy, and
     /// reading storage.json a second time only parses the whole board again.
     pub(crate) fn save_against(&self, before: &ItemMap, data: &mut ItemMap) -> Result<Saved, EkkoError> {
+        self.save_arriving(before, data, &ItemMap::new())
+    }
+
+    /// `save_against` for a write that brings items from another board
+    /// (`crate::move_to`): `arrived` holds each, by its id here, as it left
+    /// the other one. Its holder and whose work it was stay as they were
+    /// there, rather than being taken for a task entering progress or done
+    /// in this write.
+    pub(crate) fn save_arriving(&self, before: &ItemMap, data: &mut ItemMap, arrived: &ItemMap) -> Result<Saved, EkkoError> {
         self.refuse_cue_changes(before, data)?;
         let now = chrono::Local::now().timestamp_millis();
 
@@ -1112,7 +1187,7 @@ impl Ekko {
         // records whose work it was: the session holding it, or else the
         // session doing it.
         for id in &changed {
-            let old = before.get(id);
+            let old = before.get(id).or_else(|| arrived.get(id));
             let entering = old.is_none_or(|old| State::of(old) != Some(State::Progress));
             if let Some(item) = data.get_mut(id) {
                 if State::of(item) != Some(State::Done) {
@@ -1450,7 +1525,7 @@ impl Ekko {
     pub fn restore_items(&self, ids: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let mut archive = self.storage.get_archive()?;
-        let archive_ids = self.validate_ids(ids, &archive)?;
+        let archive_ids = self.resolve_ids(ids, &archive)?;
         let mut data = self.storage.get()?;
 
         let mut results = Vec::new();

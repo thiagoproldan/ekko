@@ -116,6 +116,12 @@ pub struct Cli {
     pub list: bool,
     #[arg(long = "move", short = 'm')]
     pub r#move: bool,
+    /// Move items to another board, the ids following: a project's, by
+    /// name, or the one ekko finds in a folder, `~` for the default board.
+    /// Each task takes its notes, keeps its uid and takes the next id there,
+    /// and its old id says where it went.
+    #[arg(long = "move-to", value_name = "PROJECT|FOLDER")]
+    pub move_to: Option<String>,
     #[arg(long, short = 'n')]
     pub note: bool,
     /// With --note: the lasting kind of note it is -- decision (what was

@@ -127,6 +127,7 @@ $ ekko --help
       --mcp               Serve the board to an agent over MCP (stdio)
       --resources         With --mcp: serve only the board as @-mentionable resources
       --move, -m          Move item between boards
+      --move-to <PROJECT> Move items to another project's board, or ~ for the default one
       --next [N]          List what to take up next, best first
       --note, -n          Create note
       --kind <KIND>       With --note: a decision, gotcha or procedure
@@ -173,6 +174,7 @@ $ ekko --help
       $ ekko --json --task @coding Review PR #42
       $ ekko --list pending coding
       $ ekko --move @1 cooking
+      $ ekko --move-to zettelkasten 3 5
       $ ekko --next 5
       $ ekko --note @coding Mergesort worse-case O(nlogn)
       $ ekko --note --kind gotcha Run the migrations before the tests
@@ -678,6 +680,28 @@ $ ekko --unlink-project graff                  # in either folder
 - **Nothing of a linked board enters a session unasked.** The prime names the linked boards on one line, and none of their items. `ask` with `project` puts its questions on that board, in a menu opened on it, and a write there is the session's, as on its own board.
 - **Only projects link.** The default board and a board opened through `EKKO_DIR` are not registered projects, and link to none.
 
+#### Moving items to another project
+
+An item filed on the wrong board moves with `--move-to`, which takes a project's name, or a folder -- whose board is the one `ekko` finds there, so `~` is the default board:
+
+```
+$ ekko --move-to zettelkasten 1                # on the default board
+ ✔  Moved 2 items to project zettelkasten: 1 as 1, 3 as 2 (a note on 1)
+$ ekko --context 1
+ ✖  Item 1 moved to project zettelkasten at 18:28, where it is 1
+```
+
+It works the way an issue moves between Jira projects or GitHub repositories:
+
+- **It stays the same item.** Its uid, dates, author, state, holders, boards and text go with it; its id is the next one there. The revisions it carries count the other board's writes, so the write there stamps them anew. Text is kept exactly as written, so a `#3` in a description still says 3: the reply gives each item's new id.
+- **A task takes its notes.** Every note attached to it goes along -- handoffs, questions and the ones in the trash included -- as a sub-task goes with its parent in Jira. A note attached to a task moves only with its task, and nothing in the trash moves by name.
+- **No link is split.** What blocks what, the note a decision supersedes, what a wait waits on, the question that turned a cue on, the gotcha a question proposes a cue for: each has to stay on one board, or that board drops it without a word -- a blocker that is not there blocks nothing, and an older decision becomes current again. A move that would split one is refused with `SPLIT_LINKS`, naming it: name the other item too, or take the link away first.
+- **A phase goes only where it is declared**, and a cue the user turned on guards the same place after the move: one that names no folder is written out with the folder it guarded, the project's or, from the default board, `/`.
+- **What a running session holds or watches stays**, short of `--force`: a task it holds in progress, a wait it keeps, a question it asked that has no answer yet. Its wake hook follows its own board's file, and would never see them move.
+- **The old id says where it went.** The board keeps `moved.json`, and a lookup of the old id or uid answers `MOVED` with the project and the new id; `changes` lists the item as moved, not removed. An item that moves on again leaves a redirect on each board it left, as Jira stacks the keys an issue had.
+- **A failure halfway loses nothing.** The board the items go to is written first, then the redirect, then the board they leave. Run again, the move finds each item already there by its uid and takes it off this board once.
+- **It is a command, not a tool.** A session reaches another board through MCP only where the user linked the two, and the default board links to none, so `--move-to` is run in a terminal, or through a session's shell, where it is that session's write.
+
 #### A copy outside the folder
 
 The board lives in its folder, so whatever takes the folder's untracked files takes the board: `git clean -fdx`, whose `-x` removes what `.git/info/exclude` keeps out of git, removing the folder, or cloning it again. So every write also copies the board's files to `~/.ekko/copies/<project id>/` -- the board as its `.ekko/` holds it, without the history of its versions. On one filesystem the copy is a hard link and costs nothing: a write replaces a file by rename, never in place, so a version once linked never changes. Across filesystems, or btrfs subvolumes, it is a copy, which btrfs makes a clone.
@@ -835,7 +859,7 @@ An agent is told the line as it takes a task up: `set_state` putting a task in p
 
 The next display id is `max + 1`, so deleting the highest-numbered item and creating another hands that number straight back out. For someone typing at a terminal that is fine -- the id you use is the one on screen in front of you. For anything holding a reference between one command and the next, it is a trap.
 
-Every item therefore carries a `uid` in `--json`: never recycled, and unchanged when an item is archived and restored. It is accepted **anywhere a display id is** -- `--set`, `--edit`, `--move`, `--priority`, `--delete`, `--blocked-by`, `--restore`, and the toggles.
+Every item therefore carries a `uid` in `--json`: never recycled, and unchanged when an item is archived and restored. It is accepted **anywhere a display id is** -- `--set`, `--edit`, `--move`, `--move-to`, `--priority`, `--delete`, `--blocked-by`, `--restore`, and the toggles.
 
 ```
 $ ekko --set @18cfa4987d5ce3-1043bc done    # `@` marks the id, as always

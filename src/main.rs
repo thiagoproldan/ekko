@@ -14,6 +14,7 @@ mod lexical;
 mod mcp;
 mod memory;
 mod menu;
+mod move_to;
 mod ops;
 mod project;
 mod paths;
@@ -59,6 +60,7 @@ const HELP: &str = r#"
       --mcp               Serve the board to an agent over MCP (stdio)
       --resources         With --mcp: serve only the board as @-mentionable resources
       --move, -m          Move item between boards
+      --move-to <PROJECT> Move items to another project's board, or ~ for the default one
       --next [N]          List what to take up next, best first
       --note, -n          Create note
       --kind <KIND>       With --note: a decision, gotcha or procedure
@@ -110,6 +112,7 @@ const HELP: &str = r#"
       $ ekko --list pending coding
       $ ekko --list with:rodrigo
       $ ekko --move @1 cooking
+      $ ekko --move-to zettelkasten 3 5
       $ ekko --next 5
       $ ekko --note @coding Mergesort worse-case O(nlogn)
       $ ekko --note --kind gotcha Run the migrations before the tests
@@ -218,10 +221,11 @@ fn main() -> ExitCode {
         return finish_with_error(&err, json_mode, &home_dir);
     }
     // `--force` overrides one rule, from either side: completing a blocked
-    // task, or reopening one that completed work depends on.
+    // task, or reopening one that completed work depends on. Beside
+    // --move-to, it moves what a running session holds or watches.
     // Anywhere else it would be accepted and do nothing, and a flag that
     // silently does nothing is one somebody eventually believes did something.
-    if cli.force && !(cli.check || cli.set) {
+    if cli.force && !(cli.check || cli.set || cli.move_to.is_some()) {
         return finish_with_error(&EkkoError::ForceWithoutCompleting, json_mode, &home_dir);
     }
 
@@ -273,7 +277,7 @@ fn main() -> ExitCode {
         return wake::hook(&ekko, &read_hook_input(), &home_dir, &board_label);
     }
 
-    match dispatch(&cli, &ekko, location.project.as_ref(), &home_dir, &board_label) {
+    match dispatch(&cli, &ekko, location.project.as_ref(), &home_dir, &cwd, &board_label) {
         Ok(outcomes) => {
             if json_mode {
                 for outcome in &outcomes {
@@ -423,6 +427,7 @@ fn dispatch(
     ekko: &Ekko,
     project: Option<&project::Project>,
     home_dir: &Path,
+    cwd: &Path,
     board_label: &str,
 ) -> Result<Vec<Outcome>, EkkoError> {
     if let Some(args) = cli.attached_to.as_deref() {
@@ -487,6 +492,9 @@ fn dispatch(
     }
     if let Some(name) = cli.unlink_project.as_deref() {
         return Ok(vec![ekko.link_project(name, false)?]);
+    }
+    if let Some(destination) = cli.move_to.as_deref() {
+        return Ok(vec![move_to::move_to(ekko, home_dir, cwd, destination, &cli.input, cli.force)?]);
     }
     if cli.projects {
         return Ok(vec![Outcome::Projects(project::list(home_dir))]);
