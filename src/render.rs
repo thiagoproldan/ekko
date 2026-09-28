@@ -1240,6 +1240,13 @@ impl<'a> Renderer<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         self.success("\n", &message, &self.painter.grey(&ids));
+        let place = |folder: &str| if folder == "/" { "the whole machine".to_string() } else { folder.to_string() };
+        for item in items {
+            if let Some(cue) = &item.cue {
+                let now = format!("{}'s cue now guards {}, not {}", item.id, place(&cue.guards), place(&cue.guarded));
+                self.emit(" ", None, &self.painter.grey(&now), "");
+            }
+        }
     }
 
     /// What `--destroy` did to a project whose folder no longer held its

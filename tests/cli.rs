@@ -605,6 +605,19 @@ fn move_to_takes_items_to_another_board_and_the_old_id_says_where() {
     let text = String::from_utf8_lossy(&ekko(&home, &["--move-to", "work/notes", "3"]).stdout).into_owned();
     assert!(text.contains("Moved 2 items to project notes:") && text.contains("3 as 3, 4 as 4 (a note on 3)"), "{text}");
 
+    // A cue that is on and names no folder guards the board it is on, and
+    // the reply says where it guards after the move. Only ekko's menu turns
+    // one on, so the file is written as the user's answer would leave it.
+    assert!(ekko(&home, &["--note", "--kind", "gotcha", "a trap"]).status.success());
+    let storage = home.join(".ekko").join("storage").join("storage.json");
+    let mut board: serde_json::Value = serde_json::from_slice(&fs::read(&storage).unwrap()).unwrap();
+    let (id, gotcha) = board.as_object_mut().unwrap().iter_mut().find(|(_, item)| item["description"] == "a trap").unwrap();
+    let id = id.clone();
+    gotcha["cue"] = serde_json::json!({"command": "cargo", "words": ["fmt"], "question": "q", "at": 1});
+    fs::write(&storage, serde_json::to_vec(&board).unwrap()).unwrap();
+    let text = String::from_utf8_lossy(&ekko(&home, &["--move-to", "notes", &id]).stdout).into_owned();
+    assert!(text.contains(&format!("{id}'s cue now guards {}, not the whole machine", notes.display())), "{text}");
+
     let nowhere = reply(&ekko(&home, &["--json", "--move-to", "/nowhere/at/all", "1"]));
     assert!(nowhere["error"].as_str().unwrap().contains("No such folder: /nowhere/at/all"), "{nowhere}");
     let unknown = reply(&ekko(&home, &["--json", "--move-to", "elsewhere", "1"]));

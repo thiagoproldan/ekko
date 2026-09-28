@@ -23,8 +23,12 @@
 //!   decision becomes current again -- so a link between an item that moves
 //!   and one that stays is refused;
 //! - a place: its phase, which the board it goes to must declare, and the
-//!   folder a cue guards, which a cue naming none takes from the board it is
-//!   on, and so is written out before it leaves.
+//!   folder a cue guards. A cue naming none guards the board it is on, so
+//!   after the move the board it went to. No folder is written out for it:
+//!   a path written out outlives its board -- the project's folder moves,
+//!   `--destroy` forgets the project -- and would guard a place no board
+//!   stands for. The reply names each cue that is on and now guards another
+//!   place.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -48,6 +52,19 @@ pub struct Carried {
     pub uid: String,
     #[serde(rename = "noteOf", skip_serializing_if = "Option::is_none")]
     pub note_of: Option<u32>,
+    /// Where its cue guarded and guards now, when the cue is on and names no
+    /// folder, and the board it went to guards another place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cue: Option<Rescoped>,
+}
+
+/// The place a cue that names no folder guarded on the board it left and
+/// guards on the one it went to: a project's folder, or `/`, the whole
+/// machine, from the default board.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Rescoped {
+    pub guarded: String,
+    pub guards: String,
 }
 
 /// A link a move would split between two boards: `from` names `to` as `how`
@@ -155,10 +172,15 @@ pub fn move_to(
         left.retain(|id, _| !moving.contains_key(id));
     }
 
-    // A cue that names no folder guards the board's: this project's folder,
-    // or the whole machine from the default board. Written out, it guards the
-    // same after the move as before it.
-    let guarded = ekko.folder.as_ref().map_or_else(|| "/".to_string(), |folder| folder.display().to_string());
+    // A cue that names no folder guards the board's: a project's folder, or
+    // the whole machine from the default board. It goes as it is, and the
+    // reply says where it guards now.
+    let place = |folder: &Option<PathBuf>| folder.as_ref().map_or_else(|| "/".to_string(), |folder| folder.display().to_string());
+    let (guarded, guards) = (place(&ekko.folder), place(&there.folder));
+    let rescoped = |item: &Item| {
+        let moved = crate::guard::cue_of(item).is_some_and(|cue| cue.folder.is_none());
+        moved.then(|| Rescoped { guarded: guarded.clone(), guards: guards.clone() })
+    };
     let there_before = there.storage.get_shared()?;
     let mut arrived_at = ItemMap::clone(&there_before);
     let mut arrived = ItemMap::new();
@@ -170,13 +192,13 @@ pub fn move_to(
             Some((as_id, _)) => *as_id,
             None => {
                 let as_id = there.generate_id(&arrived_at);
-                let copy = arriving(item, as_id, &guarded);
+                let copy = arriving(item, as_id);
                 arrived_at.insert(as_id, copy.clone());
                 arrived.insert(as_id, copy);
                 as_id
             }
         };
-        carried.push(Carried { id: *id, as_id, uid, note_of: *note_of });
+        carried.push(Carried { id: *id, as_id, uid, note_of: *note_of, cue: rescoped(item) });
     }
     there.save_arriving(&there_before, &mut arrived_at, &arrived)?;
 
@@ -329,9 +351,8 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
     found
 }
 
-/// `item` as it arrives on the other board, as `id`, with a cue naming no
-/// folder written out as `guarded`, the folder it guards here.
-fn arriving(item: &Item, id: u32, guarded: &str) -> Item {
+/// `item` as it arrives on the other board, as `id`.
+fn arriving(item: &Item, id: u32) -> Item {
     let Item {
         // The board's: the next id there, and the revision and time of the
         // write there, which stamps a field left empty.
@@ -399,9 +420,7 @@ fn arriving(item: &Item, id: u32, guarded: &str) -> Item {
     });
     let cue = cue.as_ref().map(|on| {
         let CueOn { cue, question, at } = on;
-        let mut cue = cue.clone();
-        cue.folder.get_or_insert_with(|| guarded.to_string());
-        CueOn { cue, question: question.clone(), at: *at }
+        CueOn { cue: cue.clone(), question: question.clone(), at: *at }
     });
     Item {
         id,
@@ -588,9 +607,9 @@ mod tests {
         assert_eq!(
             moved,
             [
-                Carried { id: 2, as_id: 3, uid: uid(&before, 2), note_of: None },
-                Carried { id: 3, as_id: 4, uid: uid(&before, 3), note_of: Some(2) },
-                Carried { id: 4, as_id: 5, uid: uid(&before, 4), note_of: Some(2) },
+                Carried { id: 2, as_id: 3, uid: uid(&before, 2), note_of: None, cue: None },
+                Carried { id: 3, as_id: 4, uid: uid(&before, 3), note_of: Some(2), cue: None },
+                Carried { id: 4, as_id: 5, uid: uid(&before, 4), note_of: Some(2), cue: None },
             ]
         );
         let (left, arrived) = (board(&here), board(&there));
@@ -709,11 +728,12 @@ mod tests {
         assert_eq!(board(&here)[&1].phase.as_deref(), Some("build"));
     }
 
-    /// A cue the user turned on guards the same after a move as before: one
-    /// naming no folder guards the whole machine from the default board and
-    /// the project's folder from a project's, and is written out so.
+    /// A cue the user turned on that names no folder guards the board it is
+    /// on, so after a move the board it went to, and the reply says so; one
+    /// with a folder of its own guards that folder wherever it goes. No
+    /// folder is written out for the first.
     #[test]
-    fn a_cue_that_is_on_guards_what_it_guarded() {
+    fn a_cue_naming_no_folder_guards_the_board_it_went_to() {
         let home = Home::new("cues");
         let person = Actor::person();
         let (here, there) = (home.default_board(&person), home.project(&person));
@@ -731,13 +751,23 @@ mod tests {
             data.get_mut(&2).unwrap().cue = Some(cue(Some("/srv")));
         });
 
-        home.move_to(&here, "notes", &["1"]).unwrap();
-        home.move_to(&there, "~", &["1", "2"]).unwrap();
-        let folder = |ekko: &Ekko, id: u32| board(ekko)[&id].cue.as_ref().unwrap().cue.folder.clone();
-        assert_eq!(folder(&there, 3).as_deref(), Some("/"), "the whole machine, from the default board");
         let project = home.folder.display().to_string();
-        assert_eq!(folder(&here, 2).as_deref(), Some(project.as_str()), "the project's folder, from its board");
+        let rescoped = |guarded: &str, guards: &str| Some(Rescoped { guarded: guarded.into(), guards: guards.into() });
+        let went = home.move_to(&here, "notes", &["1"]).unwrap();
+        assert_eq!(went[0].cue, rescoped("/", &project), "from the whole machine to the project's folder");
+        let back = home.move_to(&there, "~", &["1", "2"]).unwrap();
+        assert_eq!(back[0].cue, rescoped(&project, "/"), "from the project's folder to the whole machine");
+        assert_eq!(back[1].cue, None, "a folder of its own guards the same place");
+        let folder = |ekko: &Ekko, id: u32| board(ekko)[&id].cue.as_ref().unwrap().cue.folder.clone();
+        assert_eq!(folder(&there, 3), None, "none written out on the way to the project");
+        assert_eq!(folder(&here, 2), None, "none written out on the way back");
         assert_eq!(folder(&here, 3).as_deref(), Some("/srv"), "a folder of its own stays its own");
+
+        // A cue that is not on -- its gotcha stashed -- guards nothing here,
+        // so the reply says nothing of it.
+        write(&here, |data| data.get_mut(&2).unwrap().stashed = Some(NOW));
+        let stashed = home.move_to(&here, "notes", &["2"]).unwrap();
+        assert_eq!(stashed[0].cue, None, "a cue that is off");
     }
 
     /// A task a running session holds stays, for another session, as any
@@ -887,7 +917,7 @@ mod tests {
         let item: Item = serde_json::from_value(value).unwrap();
         assert_eq!(item.unknown.keys().collect::<Vec<_>>(), ["a later field"], "every other key is a field");
 
-        let arrived = arriving(&item, 99, "/guarded");
+        let arrived = arriving(&item, 99);
         let board_s = |item: &Item| {
             let mut value = serde_json::to_value(item).unwrap();
             for key in ["_id", "rev", "updatedAt"] {
@@ -896,7 +926,6 @@ mod tests {
             for path in ["/question", "/question/answer", "/wait", "/wait/over"] {
                 value.pointer_mut(path).unwrap().as_object_mut().unwrap().remove("rev");
             }
-            value.pointer_mut("/cue").unwrap().as_object_mut().unwrap().remove("folder");
             value
         };
         assert_eq!(board_s(&arrived), board_s(&item), "all but the board's fields arrive as they left");
@@ -907,7 +936,7 @@ mod tests {
             [0; 4],
             "left for the write there to stamp"
         );
-        assert_eq!(arrived.cue.as_ref().unwrap().cue.folder.as_deref(), Some("/guarded"));
+        assert_eq!(arrived.cue.as_ref().unwrap().cue.folder, None, "a cue naming no folder arrives naming none");
         assert_eq!(
             references(&item),
             [
