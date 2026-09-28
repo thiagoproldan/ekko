@@ -74,6 +74,7 @@ const ALWAYS_LOADED: &[&str] = &["context", "search", "create", "set_state", "ed
 const TOOLS: &[&str] = &[
     "prime", "next", "context", "search", "changes", "roadmap", "create", "set_state",
     "force_state", "edit", "update", "link", "ask", "answer", "wait", "batch", "stash", "trash", "away", "phases",
+    "move_to",
 ];
 
 const INSTRUCTIONS: &str = "\
@@ -976,6 +977,36 @@ impl Server {
         Ok((Ekko::at(&location)?.acting_as(self.actor.clone()).in_folder(there.root.clone()), location))
     }
 
+    /// Whether this session may move items to `destination` (task 909): at
+    /// once to its own board or one the user linked to it, which it writes
+    /// already; to any other, the default board included, which links to
+    /// none, only once the user lets that exact move through in ekko's menu,
+    /// as a guard's refused call is let through.
+    fn may_move_to(&self, project: Option<&str>, destination: &str, items: &[String]) -> Result<(), ToolError> {
+        let there = crate::move_to::located(&self.home, &self.cwd, destination)?;
+        let (own, here) = self.open()?;
+        let reached = match (&there.project, &here.project) {
+            (None, here) => here.is_none(),
+            (Some(there), here) => {
+                here.as_ref().is_some_and(|here| here.name == there.name) || own.linked().iter().any(|linked| linked.name == there.name)
+            }
+        };
+        if reached {
+            return Ok(());
+        }
+        let board = crate::move_to::board_name(there.project.as_ref().map(|project| project.name.as_str()));
+        let reason = format!(
+            "{board} is not linked to this session's board, so nothing moved: a session moves items at once only between its \
+             own board and those the user linked to it, and the default board links to none."
+        );
+        let input = json!({"project": project, "destination": destination, "items": items});
+        let call = format!("mcp:{}", crate::item::new_uid());
+        match crate::guard::gate(&self.home, "move_to", &input, &self.cwd, &call, &reason, &self.actor) {
+            None => Ok(()),
+            Some(ending) => Err(ToolError { code: "NOT_LINKED", message: format!("{reason}{ending}") }),
+        }
+    }
+
     /// The names of the boards linked to the session's (task 811), which the
     /// tools' project takes.
     fn linked_names(&self) -> Vec<String> {
@@ -1162,6 +1193,15 @@ impl Server {
                 finish(args)?;
                 let outcome =
                     if name == "stash" { ekko.set_stashed(&items, away)? } else { ekko.set_trashed(&items, away)? };
+                Ok(render(&self.home, &outcome))
+            }
+            "move_to" => {
+                let destination = take(args, "destination", |v| v.as_str().map(str::to_string), "a project's name, or ~")?
+                    .ok_or_else(|| invalid("destination is required: a project's name, or ~ for the default board"))?;
+                let items = take_items(args)?;
+                finish(args)?;
+                self.may_move_to(project, &destination, &items)?;
+                let outcome = crate::move_to::move_to(&ekko, &self.home, &self.cwd, &destination, &items, false)?;
                 Ok(render(&self.home, &outcome))
             }
             _ => unreachable!("tool names are checked against TOOLS, and ask's calls take their own way (puts_to_user)"),
@@ -1457,6 +1497,13 @@ fn agent_message(error: &EkkoError, name: &dyn Fn(u32) -> String) -> String {
         EkkoError::Directory(directory::DirectoryError::MissingProjectName) => {
             "EKKO_PROJECT is empty at this session's launch; the user unsets it, or names a project".to_string()
         }
+        EkkoError::Watched(watched) => format!(
+            "A Claude Code session that still runs watches {}, and its wake hook reads only this board: {}. Nothing moved. \
+             Answer the question or let the wait end first; with their word, the user can move it anyway with ekko --move-to \
+             and --force in a terminal of their own",
+            if watched.len() == 1 { "this" } else { "these" },
+            watched.iter().map(|(id, what)| format!("{} is {what}", name(*id))).collect::<Vec<_>>().join("; "),
+        ),
         other => other.to_string(),
     }
 }
@@ -1835,6 +1882,12 @@ fn tool_definitions(linked: &[String]) -> Value {
             "annotations": json!({"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false}),
         },
         {
+            "name": "move_to",
+            "description": "Move items to another board, keeping who they are -- uid, dates, author, state, text -- with a task's notes; each takes the next id there, and its old id answers MOVED, naming where it went. destination is a project's name, or ~ for the default board. To a board the user linked to this one it moves at once; to any other, the default board included, it is refused with a code: ask the user with allow set to it, and their answer in ekko's menu lets that exact move through once. A link between an item that moves and one that stays is refused (SPLIT_LINKS), and a gotcha whose cue is on is the user's to move.",
+            "inputSchema": object(json!({"destination": {"type": "string", "description": "A project's name, or ~ for the default board."}, "items": items}), &["destination", "items"]),
+            "annotations": write,
+        },
+        {
             "name": "away",
             "description": "What is put away: the stash, and the trash with the days each item has left there, one line per item with its state, at most limit (default 20) of each. which narrows it to one of them.",
             "inputSchema": object(json!({"which": {"type": "string", "enum": ["stash", "trash"]}, "limit": {"type": "integer", "minimum": 1}}), &[]),
@@ -1868,6 +1921,18 @@ fn tool_definitions(linked: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A move refused for what a running session watches (task 909) says so
+    /// in an agent's words: --force is the user's, in a terminal, since the
+    /// tool has none.
+    #[test]
+    fn a_watched_item_is_refused_in_an_agents_words() {
+        let error = EkkoError::Watched(vec![(3, "a question a running session asked, with no answer yet".into())]);
+        let message = agent_message(&error, &|id| id.to_string());
+        assert!(message.contains("3 is a question a running session asked"), "{message}");
+        assert!(message.contains("--force in a terminal of their own"), "{message}");
+        assert!(!message.contains("--force moves it anyway"), "{message}");
+    }
 
     /// A cursor read yesterday is not current today, even if nothing was
     /// written: a task can have become overdue at midnight.

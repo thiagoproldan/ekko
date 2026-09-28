@@ -251,6 +251,7 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 | `stash`, `trash` | put items away, or bring them back |
 | `away` | what is put away: the stash, and the trash with the days each item has left, one line per item |
 | `phases` | declare the project's phases in order, replacing the sequence; answers with the roadmap |
+| `move_to` | as `--move-to`, to a project by name or `~`: at once to a board the user linked, and to any other only once the user lets that exact move through; see Moving items to another project |
 
 There is no `clear` and no `destroy`: an agent that needs either asks the user to run it. Nor does any tool list the projects: a session works on its own board, the one its folder finds or `EKKO_PROJECT` names at launch, and on the boards the user linked to it (see Linked projects below), which every tool but `wait` reaches with `project`. Any other project's board is the user's to open, with `ekko --project` in a command they see, and a call naming one is refused before either board is read.
 
@@ -701,7 +702,7 @@ It works the way an issue moves between Jira projects or GitHub repositories:
 - **What a running session holds or watches stays**, short of `--force`: a task it holds in progress, a wait it keeps, a question it asked that has no answer yet. Its wake hook follows its own board's file, and would never see them move.
 - **The old id says where it went.** The board keeps `moved.json`, and a lookup of the old id or uid answers `MOVED` with the project and the new id; `changes` lists the item as moved, not removed. An item that moves on again leaves a redirect on each board it left, as Jira stacks the keys an issue had.
 - **A failure halfway loses nothing.** The board the items go to is written first, then the redirect, then the board they leave. Run again, the move finds each item already there by its uid and takes it off this board once.
-- **It is a command, not a tool.** A session reaches another board through MCP only where the user linked the two, and the default board links to none, so `--move-to` is run in a terminal, or through a session's shell, where it is that session's write.
+- **A session moves where it may write.** The MCP tool `move_to` does what `--move-to` does, with `destination` a project's name or `~`. Like GitHub, which asks for write access to both repositories, and Jira, which asks for permission on both projects, it moves at once only between boards a session already writes: its own and those the user linked to it. Any other destination is refused with `NOT_LINKED` and a code, and that includes the default board, which links to none. The session asks with `allow` set to the code, and the user's "Allow once" in Ekko's menu lets that exact move through once, from the same folder and session, within 24 hours, just as it lets a call a guard refused through. A gotcha whose cue is on is the user's to move (`CUE_IS_USERS`). A task another running session holds stays where it is, and so does a wait or an unanswered question a running session keeps, since the tool has no `--force`.
 
 #### A copy outside the folder
 

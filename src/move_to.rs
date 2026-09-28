@@ -225,7 +225,7 @@ pub fn move_to(
 /// The board `destination` names: a project by its name, or a folder --
 /// anything with a slash, `~`, `.` or `..`, which no project name can be --
 /// read the way `ekko` run in it would read it: `~` is the default board.
-fn located(home: &Path, cwd: &Path, destination: &str) -> Result<Location, EkkoError> {
+pub(crate) fn located(home: &Path, cwd: &Path, destination: &str) -> Result<Location, EkkoError> {
     let folder = destination.contains('/') || matches!(destination, "~" | "." | "..");
     if !folder {
         return Ok(directory::locate(home, cwd, None, None, Some(destination))?);

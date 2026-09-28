@@ -116,7 +116,7 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
     assert!(init["instructions"].as_str().is_some_and(|s| s.contains("shared with the user")));
 
     let tools = replies["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 20);
+    assert_eq!(tools.len(), 21);
     // The five nearly every session calls, and ask, load at session start; the rest stay behind ToolSearch.
     let loaded: Vec<&str> =
         tools.iter().filter(|tool| tool["_meta"]["anthropic/alwaysLoad"] == true).map(|tool| tool["name"].as_str().unwrap()).collect();
@@ -1583,4 +1583,45 @@ fn commits_name_their_tasks_and_context_lists_them() {
     assert!(terminal.contains(&line(&first)) && terminal.contains(&line(&both)), "{terminal}");
 
     fs::remove_dir_all(&home).ok();
+}
+
+/// move_to over MCP (task 909): to a board the user linked it moves at once;
+/// to any other -- the default board, which links to none -- it is refused
+/// with a code, and the user's "Allow once" in ekko's menu lets that exact
+/// move through once, so the same call again is refused.
+#[test]
+fn a_session_moves_items_at_once_where_linked_and_elsewhere_once_the_user_allows() {
+    let home = temp_home();
+    let folders = projects(&home, &["site", "blog"]);
+    let site = &folders[0];
+    cli_in(&home, site, &["--link-project", "blog"]);
+    for task in ["goes to the blog", "goes home", "stays"] {
+        cli_in(&home, site, &["--task", task]);
+    }
+
+    // The menu, less the keys: every question answered "Allow once", by the user.
+    let answer = "echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" 'Allow once'; done";
+    let mut live = Held::start_in(&home, Some(site), answer);
+    live.send(&call(2, "move_to", json!({"destination": "blog", "items": [1]})));
+    let linked = text(&live.reply(2)).to_string();
+    assert!(linked.contains("Moved 1 item to project blog: 1 as 1"), "{linked}");
+
+    let home_bound = json!({"destination": "~", "items": [2]});
+    live.send(&call(3, "move_to", home_bound.clone()));
+    let refused = text(&live.reply(3)).to_string();
+    assert!(refused.starts_with("NOT_LINKED: the default board is not linked to this session's board"), "{refused}");
+    let code = refused.rsplit("allow set to \"").next().unwrap().split('"').next().unwrap().to_string();
+
+    live.send(&call(4, "ask", json!({"questions": [{"text": "Movo a 2 para o quadro padrão?", "allow": code}]})));
+    let answered: Value = serde_json::from_str(text(&live.reply(4))).unwrap();
+    assert_eq!(answered["answers"][0]["answer"], "Allow once", "{answered}");
+    live.send(&call(5, "move_to", home_bound.clone()));
+    let through = text(&live.reply(5)).to_string();
+    assert!(through.contains("Moved 1 item to the default board: 2 as 1"), "{through}");
+
+    live.send(&call(6, "move_to", home_bound));
+    let again = text(&live.reply(6)).to_string();
+    assert!(again.starts_with("NOT_LINKED: ") && again.contains(&format!("allow set to \"{code}\"")), "once: {again}");
+    live.stop();
+    assert!(cli_in(&home, site, &["--list"]).contains("stays"));
 }

@@ -590,6 +590,16 @@ fn refuse_reply(home: &Path, input: &str, reason: &str, actor: &Actor) -> Option
     })
 }
 
+/// A call ekko's MCP server makes only once the user lets it through (task
+/// 909): `tool` with `input`, from `cwd`, by `actor`'s session, with `call`
+/// naming this call alone, as a tool use id does. `None` when the user's
+/// answer lets it through, once; else it is recorded as a guard's refusal
+/// is, with `reason`, and this is what the refusal ends with.
+pub fn gate(home: &Path, tool: &str, input: &Value, cwd: &Path, call: &str, reason: &str, actor: &Actor) -> Option<String> {
+    let event = serde_json::json!({"tool_name": tool, "tool_input": input, "cwd": cwd.display().to_string(), "tool_use_id": call});
+    refuse_reply(home, &event.to_string(), reason, actor).unwrap_or_else(|| Some(String::new()))
+}
+
 fn clipped(text: &str, most: usize) -> String {
     let length = text.chars().count();
     if length <= most {
