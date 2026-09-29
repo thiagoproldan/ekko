@@ -5,9 +5,11 @@ cost instead (note 407's orientation, 331k units).
     nix develop -c python3 evals/recall/cold.py [--since 2026-08-25] [--until 2026-09-27T22:33:16] [--list]
 
 Task 540 re-counts these after ctx's cold-return guard went live: --since its
-go-live, --until another change's go-live to split the count (note 864)."""
+go-live, --until another change's go-live to split the count (note 864). Task
+929 added the returns after an hour idle at any size, and the period's bill:
+a return to a session auto-reset has already cleared is small and cheap."""
 import sys, datetime, statistics, collections, argparse
-from replay import scan, calls_left, LOCAL, W_CW1H, W_CW5M, ekko_op
+from replay import scan, calls_left, LOCAL, W_CR, W_CW1H, W_CW5M, W_IN, W_OUT, ekko_op
 parser = argparse.ArgumentParser()
 parser.add_argument("--since", default="2026-08-25", help="local time")
 parser.add_argument("--until", help="local time: only the rewrites before it")
@@ -16,6 +18,8 @@ opts = parser.parse_args()
 since = datetime.datetime.fromisoformat(opts.since).replace(tzinfo=LOCAL)
 until = datetime.datetime.fromisoformat(opts.until).replace(tzinfo=LOCAL) if opts.until else None
 events_out = []
+returns = []  # the context at each return after 60+ minutes idle, of any size
+bill = 0.0
 for path, events in scan(since):
     calls_left(events)
     prev = None; handoff_at = None; prompted = False
@@ -28,6 +32,10 @@ for path, events in scan(since):
             prompted = True
         elif ev[0] == "call":
             call = ev[1]
+            if until is None or call.at < until:
+                bill += W_IN * call.inp + W_CW1H * call.cw1h + W_CW5M * call.cw5m + W_CR * call.cr + W_OUT * call.out
+                if prev is not None and (call.at - prev.at).total_seconds() >= 3600:
+                    returns.append(call.ctx)
             for name, _, args in call.uses:
                 if ekko_op(name) in ("create", "batch") and "handoff" in str(args).lower()[:4000]:
                     handoff_at = call.at
@@ -47,11 +55,13 @@ median = f"{statistics.median(e[1] for e in cold)/1e3:.0f}k" if cold else "-"
 print(f"after 60+ minutes idle: {len(cold)}, {sum(e[2] for e in cold)/1e6:.1f}M units, median context {median}")
 print(f"   with a handoff written in the 3h before going idle: {sum(1 for e in cold if e[3])}")
 print(f"   the rewrite came with a typed prompt: {sum(1 for e in cold if e[4])}")
-print(f"   at 250k or more, ctx's cold-return threshold: {sum(1 for e in cold if e[1] >= 250_000)}")
+print(f"   at 250k or more, the Stop hook's threshold: {sum(1 for e in cold if e[1] >= 250_000)}")
 if opts.list:
     for gap, ctx, cost, recent, prompted, path, at in cold:
         print(f"   {at.astimezone(LOCAL):%m-%d %H:%M} idle {gap:.0f}m, {ctx/1e3:.0f}k, {cost/1e3:.0f}k units, handoff {'yes' if recent else 'no'}, prompt {'yes' if prompted else 'no'}, {path.rsplit('/', 1)[-1][:8]}")
 warm = [e for e in events_out if e[0] < 60]
+print(f"returns after 60+ minutes idle at any size: {len(returns)}, median context {f'{statistics.median(returns)/1e3:.0f}k' if returns else '-'}")
+print(f"main-thread bill: {bill/1e6:.0f}M units, {100 * sum(e[2] for e in cold) / bill if bill else 0:.1f}% of it in the cold rewrites")
 print(f"under 60 minutes: {len(warm)}, {sum(e[2] for e in warm)/1e6:.1f}M units (a model or tool change, a 5-minute cache that lapsed, a resume)")
 # what starting over from a prime would have cost instead: a fresh prefix of ~45k written, plus note 407's orientation
 fresh = 2 * 45_000 + 331_000
