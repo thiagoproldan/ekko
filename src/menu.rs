@@ -6,16 +6,18 @@
 //! Claude Code's own menu (2026-09-24, note 480). An MCP server cannot draw
 //! inside Claude Code's screen, so ask opens a terminal of its own: a popup
 //! over the pane inside tmux, or else a window. It runs `ekko --menu <file>`,
-//! which lists each question's options to pick with the arrows or a number,
-//! several with the space bar where the question allows, a preview beside
-//! the focused option, "Other answer…" to write one, and Tab for a note. The
+//! which shows each question with its explanation under it, and lists its
+//! options to pick with the arrows or a number, several with the space bar
+//! where the question allows. It opens on the recommended option, and beside
+//! the focused one shows why one would pick it, an example and a preview;
+//! "Other answer…" writes one, and Tab adds a note. The
 //! answers go on the board, where the server that opened the menu reads them
 //! and answers ask's call. Esc leaves every question open. A key counts only
 //! once the menu has been up, or back in focus, for a second and the keyboard
 //! has been quiet, so typing meant for another window never answers.
 //!
-//! The file holds the questions, previews included, which the board does not
-//! keep. The menu writes its pid beside it: a pid gone with the answers not
+//! The file holds the questions, why, example and preview included, which
+//! the board does not keep. The menu writes its pid beside it: a pid gone with the answers not
 //! on the board means the user closed the menu, and no pid at all, that the
 //! menu never opened. `ekko --answer <id>` alone opens the same menu on one
 //! question, read back from the board, in whatever terminal it runs.
@@ -79,6 +81,9 @@ pub struct Posed {
     pub uid: String,
     pub id: u32,
     pub text: String,
+    /// What the question is about, shown under it (task 979).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain: Option<String>,
     #[serde(default)]
     pub options: Vec<Choice>,
     #[serde(default)]
@@ -267,23 +272,29 @@ fn sized(terminal: &[String], spec: &Spec) -> Vec<String> {
 
 /// Columns and rows that hold the menu's longest page.
 fn size(spec: &Spec) -> (usize, usize) {
-    let previews: Vec<&str> = spec.questions.iter().flat_map(|q| &q.options).filter_map(|o| o.preview.as_deref()).collect();
-    let preview_width = previews.iter().flat_map(|p| p.lines()).map(|l| l.chars().count()).max().unwrap_or(0);
+    let options = || spec.questions.iter().flat_map(|q| &q.options);
+    let shown = options().any(aided);
+    let preview_width = options().filter_map(|o| o.preview.as_deref()).flat_map(str::lines).map(|l| l.chars().count()).max().unwrap_or(0);
+    // Why and example wrap to the box: it takes what a preview needs, and at
+    // least AIDS.
+    let panel = if options().any(|o| o.why.is_some() || o.example.is_some()) { preview_width.max(AIDS) } else { preview_width };
     let widest = spec
         .questions
         .iter()
         .flat_map(|q| q.text.lines().map(|l| l.chars().count()).chain(q.options.iter().map(|o| o.label.chars().count().max(o.description.as_deref().map_or(0, |d| d.chars().count())) + 5)))
         .max()
         .unwrap_or(0);
-    let columns = if previews.is_empty() { (widest + 4).clamp(72, 110) } else { (LEFT + 3 + preview_width + 4).clamp(100, 160) };
+    let columns = if shown { (LEFT + 3 + panel + 4).clamp(100, 160) } else { (widest + 4).clamp(72, 110) };
+    let inner = (columns - LEFT - 3).saturating_sub(4).max(1);
     let rows = spec
         .questions
         .iter()
         .map(|q| {
             let text: usize = q.text.lines().map(|l| l.chars().count() / columns + 1).sum();
+            let explain = q.explain.as_deref().map_or(0, |explain| wrap(explain, explained(columns)).len() + 1);
             let options: usize = q.options.iter().map(|o| 1 + usize::from(o.description.is_some())).sum::<usize>() + 1;
-            let preview = q.options.iter().filter_map(|o| o.preview.as_deref()).map(|p| p.lines().count() + 2).max().unwrap_or(0);
-            text + options.max(preview) + 9
+            let beside = q.options.iter().filter(|o| aided(o)).map(|o| aids(o, inner).len() + 2).max().unwrap_or(0);
+            text + explain + options.max(beside) + 9
         })
         .max()
         .unwrap_or(0);
@@ -340,7 +351,10 @@ pub struct Page {
 impl Page {
     fn new(posed: Posed) -> Page {
         let marked = vec![false; posed.options.len()];
-        Page { posed, cursor: 0, marked, other: None, note: None, answer: None }
+        // The menu opens on the recommended answer (task 979), which Enter
+        // takes once keys count (SETTLE).
+        let cursor = posed.options.iter().position(|option| option.recommended).unwrap_or(0);
+        Page { posed, cursor, marked, other: None, note: None, answer: None }
     }
 
     /// The answer as the board records it: with the note, if there is one.
@@ -570,6 +584,12 @@ impl Menu {
         }
         let page = &self.pages[self.current];
         out.push_str(&format!("\x1b[1m{}\x1b[0m\r\n", page.posed.text.trim().replace('\n', "\r\n")));
+        if let Some(explain) = page.posed.explain.as_deref().map(str::trim).filter(|explain| !explain.is_empty()) {
+            out.push_str("\r\n");
+            for line in wrap(explain, explained(width)) {
+                out.push_str(&format!("{line}\r\n"));
+            }
+        }
         if page.posed.multiple {
             out.push_str("\x1b[2mAny number: Space marks, Enter confirms\x1b[0m\r\n");
         }
@@ -599,14 +619,15 @@ impl Menu {
         out
     }
 
-    /// The options, and beside them -- or under them, in a narrow terminal --
-    /// the preview of the focused one, when any option has one.
+    /// The options, the recommended one marked, and beside them -- or under
+    /// them, in a narrow terminal -- why pick the focused one, an example of
+    /// it and its preview, when any option has one of those.
     fn options(&self, page: &Page, width: usize) -> String {
-        let previews = page.posed.options.iter().any(|option| option.preview.is_some());
-        let beside = previews && width >= 90;
+        let shown = page.posed.options.iter().any(aided);
+        let beside = shown && width >= 90;
         let room = if beside { LEFT } else { width };
         let mut lines: Vec<(String, String)> = Vec::new();
-        let other = Choice { label: "Other answer…".to_string(), description: None, preview: None };
+        let other = Choice { label: "Other answer…".to_string(), ..Choice::default() };
         for (n, option) in page.posed.options.iter().chain(std::iter::once(&other)).enumerate() {
             let focused = n == page.cursor && self.editing.is_none();
             let label = match (n == page.posed.options.len(), &page.other) {
@@ -620,7 +641,8 @@ impl Menu {
                 _ => "[ ] ".to_string(),
             };
             let chosen = page.answer.as_deref() == Some(option.label.trim()) && !page.posed.multiple;
-            let plain = fit(&format!("{}. {mark}{label}{}", n + 1, if chosen { " ✓" } else { "" }), room.saturating_sub(2));
+            let recommended = if option.recommended { dialog::RECOMMENDED } else { "" };
+            let plain = fit(&format!("{}. {mark}{label}{recommended}{}", n + 1, if chosen { " ✓" } else { "" }), room.saturating_sub(2));
             let styled = if focused { format!("\x1b[36m❯ \x1b[1m{plain}\x1b[0m") } else { format!("  {plain}") };
             lines.push((format!("  {plain}"), styled));
             if let Some(description) = option.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
@@ -628,8 +650,10 @@ impl Menu {
                 lines.push((format!("     {plain}"), format!("     \x1b[2m{plain}\x1b[0m")));
             }
         }
-        let preview = page.posed.options.get(page.cursor).and_then(|option| option.preview.as_deref());
-        let boxed = previews.then(|| framed(preview.unwrap_or("(no preview)"), if beside { width - LEFT - 3 } else { width.min(100) }));
+        let boxing = if beside { width - LEFT - 3 } else { width.min(100) };
+        let focused = page.posed.options.get(page.cursor).map(|option| aids(option, boxing.saturating_sub(4).max(1))).unwrap_or_default();
+        let focused = if focused.is_empty() { vec!["(no preview)".to_string()] } else { focused };
+        let boxed = shown.then(|| framed(&focused, boxing));
         let mut out = String::new();
         if beside {
             let boxed = boxed.unwrap_or_default();
@@ -653,6 +677,59 @@ impl Menu {
 /// How wide the options run when a preview sits beside them.
 const LEFT: usize = 46;
 
+/// How wide why and example run beside the options, at the least.
+const AIDS: usize = 56;
+
+/// Whether an option has anything to show beside the options.
+fn aided(option: &Choice) -> bool {
+    option.preview.is_some() || option.why.is_some() || option.example.is_some()
+}
+
+/// What sits beside the options while `option` is focused, `inner` columns
+/// wide: why one would pick it, an example, and its preview. Why and example
+/// are prose, wrapped; a preview is a mockup or a snippet, cut.
+fn aids(option: &Choice, inner: usize) -> Vec<String> {
+    let prose = |text: &Option<String>| text.as_deref().map(str::trim).filter(|text| !text.is_empty()).map(str::to_string);
+    let mut parts: Vec<Vec<String>> = Vec::new();
+    if let Some(why) = prose(&option.why) {
+        parts.push(wrap(&why, inner));
+    }
+    if let Some(example) = prose(&option.example) {
+        parts.push(std::iter::once("Example:".to_string()).chain(wrap(&example, inner)).collect());
+    }
+    if let Some(preview) = option.preview.as_deref() {
+        parts.push(preview.lines().map(|line| fit(line, inner)).collect());
+    }
+    parts.join(&String::new())
+}
+
+/// How wide a question's explanation runs, in a terminal `width` wide.
+fn explained(width: usize) -> usize {
+    width.saturating_sub(2).min(100)
+}
+
+/// `text` wrapped at spaces to lines of at most `width` characters, its own
+/// line breaks kept, a word longer than a line cut.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for paragraph in text.lines() {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let word = fit(word, width);
+            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(&word);
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 /// `text` cut to `width` characters, an ellipsis marking the cut.
 fn fit(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
@@ -661,36 +738,47 @@ fn fit(text: &str, width: usize) -> String {
     text.chars().take(width.saturating_sub(1)).chain(std::iter::once('…')).collect()
 }
 
-/// `text` in a box `width` characters wide.
-fn framed(text: &str, width: usize) -> Vec<String> {
+/// `lines` in a box `width` characters wide.
+fn framed(lines: &[String], width: usize) -> Vec<String> {
     let inner = width.saturating_sub(4).max(1);
-    let mut lines = vec![format!("┌{}┐", "─".repeat(inner + 2))];
-    for line in text.lines() {
+    let mut boxed = vec![format!("┌{}┐", "─".repeat(inner + 2))];
+    for line in lines {
         let line = fit(line, inner);
-        lines.push(format!("│ {line}{} │", " ".repeat(inner - line.chars().count())));
+        boxed.push(format!("│ {line}{} │", " ".repeat(inner - line.chars().count())));
     }
-    lines.push(format!("└{}┘", "─".repeat(inner + 2)));
-    lines
+    boxed.push(format!("└{}┘", "─".repeat(inner + 2)));
+    boxed
 }
 
-/// The question's text, the options it offers and whether several may be
-/// chosen, read back from the note `dialog::noted` recorded: an options list
-/// last, one "- label: description" per line.
-pub fn parse(noted: &str) -> (String, Vec<Choice>, bool) {
+/// The question's text, its explanation, the options it offers and whether
+/// several may be chosen, read back from the note `dialog::noted` recorded:
+/// the explanation after the text, then an options list last, one
+/// "- label: description" per line, the recommended label marked.
+pub fn parse(noted: &str) -> (String, Option<String>, Vec<Choice>, bool) {
+    let explained = |text: &str| match text.rsplit_once(dialog::EXPLANATION) {
+        Some((text, explain)) => (text.to_string(), Some(explain.trim().to_string())),
+        None => (text.to_string(), None),
+    };
     for (header, multiple) in [(dialog::MULTIPLE, true), ("\nOptions:", false)] {
         let Some((text, list)) = noted.rsplit_once(header) else { continue };
         let lines: Vec<&str> = list.lines().filter(|line| !line.is_empty()).collect();
         let Some(options) = lines.iter().map(|line| line.strip_prefix("- ")).collect::<Option<Vec<_>>>() else { continue };
         let options = options
             .into_iter()
-            .map(|option| match option.split_once(": ") {
-                Some((label, description)) => Choice { label: label.to_string(), description: Some(description.to_string()), preview: None },
-                None => Choice { label: option.to_string(), description: None, preview: None },
+            .map(|option| {
+                let (label, description) = match option.split_once(": ") {
+                    Some((label, description)) => (label, Some(description.to_string())),
+                    None => (option, None),
+                };
+                let (label, recommended) = label.strip_suffix(dialog::RECOMMENDED).map_or((label, false), |label| (label, true));
+                Choice { label: label.to_string(), description, recommended, ..Choice::default() }
             })
             .collect();
-        return (text.to_string(), options, multiple);
+        let (text, explain) = explained(text);
+        return (text, explain, options, multiple);
     }
-    (noted.to_string(), Vec::new(), false)
+    let (text, explain) = explained(noted);
+    (text, explain, Vec::new(), false)
 }
 
 /// `ekko --menu <file>`: the menu ask opened, on the questions in `file`.
@@ -722,9 +810,9 @@ pub fn run_one(ekko: &Ekko, reference: &str) -> Result<Vec<Outcome>, EkkoError> 
         Some(asked) if asked.answer.is_some() => return Err(EkkoError::InvalidInput(format!("{} was already answered", item.id))),
         Some(_) => {}
     }
-    let (text, options, multiple) = parse(&item.description);
+    let (text, explain, options, multiple) = parse(&item.description);
     let uid = item.uid.clone().unwrap_or_else(|| item.id.to_string());
-    run(ekko, vec![Posed { uid, id: item.id, text, options, multiple }])
+    run(ekko, vec![Posed { uid, id: item.id, text, explain, options, multiple }])
 }
 
 fn run(ekko: &Ekko, questions: Vec<Posed>) -> Result<Vec<Outcome>, EkkoError> {
@@ -941,11 +1029,11 @@ mod tests {
     use super::*;
 
     fn choice(label: &str, description: Option<&str>) -> Choice {
-        Choice { label: label.to_string(), description: description.map(str::to_string), preview: None }
+        Choice { label: label.to_string(), description: description.map(str::to_string), ..Choice::default() }
     }
 
     fn posed(id: u32, text: &str, options: Vec<Choice>, multiple: bool) -> Posed {
-        Posed { uid: format!("uid-{id}"), id, text: text.to_string(), options, multiple }
+        Posed { uid: format!("uid-{id}"), id, text: text.to_string(), explain: None, options, multiple }
     }
 
     fn yes_no() -> Vec<Choice> {
@@ -962,18 +1050,23 @@ mod tests {
 
     #[test]
     fn the_options_are_read_back_from_the_recorded_note() {
-        let options = vec![choice("469 (recommended)", Some("the replaced-binary note: under Nix")), choice("396", None)];
-        let (text, read, multiple) = parse(&dialog::noted("Which next?\nOptions: none of these, in the text", &options, false));
+        let options = vec![Choice { recommended: true, ..choice("469", Some("the replaced-binary note: under Nix")) }, choice("396", None)];
+        let noted = dialog::noted("Which next?\nOptions: none of these, in the text", Some("Both are open."), &options, false);
+        let (text, explain, read, multiple) = parse(&noted);
         assert_eq!(text, "Which next?\nOptions: none of these, in the text");
+        assert_eq!(explain.as_deref(), Some("Both are open."));
         assert!(!multiple);
         assert_eq!(read.len(), 2);
-        assert_eq!((read[0].label.as_str(), read[0].description.as_deref()), ("469 (recommended)", Some("the replaced-binary note: under Nix")));
+        assert_eq!((read[0].label.as_str(), read[0].description.as_deref()), ("469", Some("the replaced-binary note: under Nix")));
+        assert!(read[0].recommended && !read[1].recommended);
         assert_eq!((read[1].label.as_str(), read[1].description.as_deref()), ("396", None));
-        let (_, read, multiple) = parse(&dialog::noted("Which ones?", &options, true));
-        assert!(multiple);
+        let (_, explain, read, multiple) = parse(&dialog::noted("Which ones?", None, &options, true));
+        assert!(multiple && explain.is_none());
         assert_eq!(read.len(), 2);
-        let (text, options, multiple) = parse("Just a question?");
-        assert_eq!((text.as_str(), options.len(), multiple), ("Just a question?", 0, false));
+        let (text, explain, options, multiple) = parse("Just a question?");
+        assert_eq!((text.as_str(), explain, options.len(), multiple), ("Just a question?", None, 0, false));
+        let (text, explain, _, _) = parse(&dialog::noted("Why?", Some("In a line."), &[], false));
+        assert_eq!((text.as_str(), explain.as_deref()), ("Why?", Some("In a line.")));
     }
 
     #[test]
@@ -1110,6 +1203,33 @@ mod tests {
         let at = |text: &str| narrow.find(text).unwrap_or_else(|| panic!("{text} not in {narrow}"));
         assert!(at("Other answer…") < at("│ fn main() {}"), "under the options when narrow");
         assert!(wide.contains("ekko · question 7"));
+    }
+
+    #[test]
+    fn a_question_shows_its_explanation_opens_on_the_recommended_and_says_why_beside() {
+        let aided = |label: &str, recommended: bool| Choice {
+            recommended,
+            why: Some(format!("Pick {label} when the pace matters more than the record.")),
+            example: Some(format!("ekko {label} 12")),
+            ..choice(label, None)
+        };
+        let question = Posed { explain: Some("The audit counted which features are used.".into()), ..posed(3, "Cut them?", vec![aided("Keep", false), aided("Cut", true)], false) };
+        let mut menu = Menu::new(vec![question]);
+        assert_eq!(menu.pages[0].cursor, 1, "opens on the recommended option");
+        let wide = menu.draw(120);
+        let at = |text: &str| wide.find(text).unwrap_or_else(|| panic!("{text} not in {wide}"));
+        assert!(at("Cut them?") < at("The audit counted") && at("The audit counted") < at("1. Keep"), "the explanation sits under the question");
+        assert!(wide.contains("2. Cut (recommended)"), "{wide}");
+        assert!(wide.contains("│ Pick Cut when the pace") && wide.contains("│ ekko Cut 12"), "why and example of the focused option: {wide}");
+        assert!(!wide.contains("Pick Keep"), "only the focused option's: {wide}");
+        menu.press(Key::Up);
+        assert!(menu.draw(120).contains("│ Pick Keep when"));
+        assert_eq!(menu.press(Key::Down), Step::Stay);
+        assert_eq!(menu.press(Key::Enter), Step::Done);
+        assert_eq!(menu.answers()[0].1, "Cut", "the recorded answer carries no mark");
+        let long = wrap("one two three four five six", 9);
+        assert_eq!(long, ["one two", "three", "four five", "six"]);
+        assert_eq!(wrap("a\n\nb", 5), ["a", "", "b"]);
     }
 
     #[test]

@@ -32,6 +32,13 @@ const OTHER: &str = "ekko:other";
 /// The line over the options of a question where several may be chosen.
 pub const MULTIPLE: &str = "\nOptions, any number of them:";
 
+/// What starts a question's explanation in the board's note.
+pub const EXPLANATION: &str = "\nExplanation: ";
+
+/// What marks the recommended option, after its label, in the board's note
+/// and in the client's form. No label ends with it.
+pub const RECOMMENDED: &str = " (recommended)";
+
 /// The most options one question offers.
 const MOST: usize = 6;
 
@@ -174,7 +181,55 @@ pub fn check(inquiry: &Inquiry) -> Option<String> {
     if inquiry.multiple && inquiry.options.is_empty() {
         return Some("multiple needs options to pick among".to_string());
     }
-    refuse(&inquiry.options)
+    if let Some(why) = refuse(&inquiry.options) {
+        return Some(why);
+    }
+    let composed = inquiry.cue.is_some() || inquiry.allow.is_some() || inquiry.link_project.is_some();
+    if inquiry.quick || composed {
+        return None;
+    }
+    unexplained(inquiry)
+}
+
+/// Why a question leaves the user to guess, if it does (task 979): the user
+/// asked on 2026-09-30 that no question assume they followed everything it
+/// asks about. So a question explains itself, recommends an answer, and says
+/// beside each option why one would pick it, with an example. A quick, direct
+/// question -- push this? commit that? -- is exempt, and so is one ekko
+/// composes itself, with cue, allow or link_project.
+fn unexplained(inquiry: &Inquiry) -> Option<String> {
+    let blank = |text: &Option<String>| text.as_deref().is_none_or(|text| text.trim().is_empty());
+    if blank(&inquiry.explain) {
+        return Some(
+            "each question needs explain: what it is about, the terms it uses and what the answer changes, \
+             for a user who has not followed the work -- or quick, for a direct question such as push this? or commit that?"
+                .to_string(),
+        );
+    }
+    if inquiry.options.is_empty() {
+        return None;
+    }
+    let recommended = inquiry.options.iter().filter(|option| option.recommended).count();
+    if recommended == 0 || (recommended > 1 && !inquiry.multiple) {
+        let how = if inquiry.multiple { "one or more of its options" } else { "exactly one of its options" };
+        return Some(format!("a question with options sets recommended on {how}, the answer the session recommends"));
+    }
+    for option in &inquiry.options {
+        let missing: Vec<&str> = [("why", &option.why), ("example", &option.example)]
+            .into_iter()
+            .filter(|(_, text)| blank(text))
+            .map(|(field, _)| field)
+            .collect();
+        if !missing.is_empty() {
+            return Some(format!(
+                "each option needs why (why pick it, and how it differs from the others) and example (what picking it looks like), \
+                 shown beside it while it is focused: {} has no {}",
+                option.label.trim(),
+                missing.join(" and no ")
+            ));
+        }
+    }
+    None
 }
 
 /// Why options cannot be offered, if they cannot.
@@ -193,15 +248,23 @@ pub fn refuse(options: &[Choice]) -> Option<String> {
         if options[..n].iter().any(|earlier| earlier.label.trim() == label) {
             return Some(format!("two options are labelled {label}"));
         }
+        if label.to_lowercase().ends_with(RECOMMENDED.trim_start()) {
+            return Some(format!("a label does not say it is recommended: set recommended on the option instead: {label}"));
+        }
     }
     None
 }
 
-/// The question as the board records it: the text, and the options offered
-/// under it, so a session reading it later knows what the user chose among,
-/// and whether several could be chosen.
-pub fn noted(text: &str, options: &[Choice], multiple: bool) -> String {
+/// The question as the board records it: the text, its explanation, and the
+/// options offered under it, the recommended one marked, so a session reading
+/// it later knows what the user chose among, and whether several could be
+/// chosen. Why and example stay with the menu, as previews do.
+pub fn noted(text: &str, explain: Option<&str>, options: &[Choice], multiple: bool) -> String {
     let mut noted = text.trim_end().to_string();
+    if let Some(explain) = explain.map(str::trim).filter(|explain| !explain.is_empty()) {
+        noted.push_str(EXPLANATION);
+        noted.push_str(explain);
+    }
     if !options.is_empty() {
         noted.push_str(if multiple { MULTIPLE } else { "\nOptions:" });
         for option in options {
@@ -212,9 +275,10 @@ pub fn noted(text: &str, options: &[Choice], multiple: bool) -> String {
 }
 
 fn title(option: &Choice) -> String {
+    let label = format!("{}{}", option.label.trim(), if option.recommended { RECOMMENDED } else { "" });
     match option.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-        Some(description) => format!("{}: {}", option.label.trim(), description.split_whitespace().collect::<Vec<_>>().join(" ")),
-        None => option.label.trim().to_string(),
+        Some(description) => format!("{label}: {}", description.split_whitespace().collect::<Vec<_>>().join(" ")),
+        None => label,
     }
 }
 
@@ -270,7 +334,17 @@ mod tests {
     use super::*;
 
     fn choice(label: &str, description: Option<&str>) -> Choice {
-        Choice { label: label.to_string(), description: description.map(str::to_string), preview: None }
+        Choice { label: label.to_string(), description: description.map(str::to_string), ..Choice::default() }
+    }
+
+    /// An option as a question that is not quick needs it: why and example.
+    fn aided(label: &str, recommended: bool) -> Choice {
+        Choice { recommended, why: Some(format!("why {label}")), example: Some(format!("{label}, say")), ..choice(label, None) }
+    }
+
+    fn inquiry(explain: Option<&str>, options: Vec<Choice>) -> Inquiry {
+        let spec = json!({"text": "Which?", "explain": explain, "options": options});
+        serde_json::from_value(spec).unwrap()
     }
 
     #[test]
@@ -322,9 +396,43 @@ mod tests {
 
     #[test]
     fn the_board_records_the_options_under_the_question() {
-        assert_eq!(noted("Mark them?", &[], false), "Mark them?");
+        assert_eq!(noted("Mark them?", None, &[], false), "Mark them?");
         let options = [choice("Yes", Some("all\nfour")), choice("No", None)];
-        assert_eq!(noted("Mark them?\n", &options, false), "Mark them?\nOptions:\n- Yes: all four\n- No");
-        assert_eq!(noted("Which?", &options, true), "Which?\nOptions, any number of them:\n- Yes: all four\n- No");
+        assert_eq!(noted("Mark them?\n", None, &options, false), "Mark them?\nOptions:\n- Yes: all four\n- No");
+        assert_eq!(noted("Which?", None, &options, true), "Which?\nOptions, any number of them:\n- Yes: all four\n- No");
+    }
+
+    #[test]
+    fn the_board_records_the_explanation_and_marks_the_recommended_option() {
+        let options = [Choice { recommended: true, ..choice("Yes", Some("all four")) }, choice("No", None)];
+        assert_eq!(
+            noted("Mark them?", Some(" They are done. "), &options, false),
+            "Mark them?\nExplanation: They are done.\nOptions:\n- Yes (recommended): all four\n- No"
+        );
+        assert_eq!(schema(&options, Stage::Asked)["properties"]["answer"]["oneOf"][0]["title"], "Yes (recommended): all four");
+    }
+
+    #[test]
+    fn a_question_explains_itself_recommends_one_option_and_says_why_beside_each() {
+        let both = || vec![aided("A", true), aided("B", false)];
+        assert_eq!(check(&inquiry(Some("What A and B are."), both())), None);
+        assert_eq!(check(&inquiry(Some("A free-text question."), vec![])), None);
+        let refused = |inquiry: Inquiry| check(&inquiry).unwrap_or_default();
+        assert!(refused(inquiry(None, both())).starts_with("each question needs explain"));
+        assert!(refused(inquiry(Some("  "), vec![])).starts_with("each question needs explain"));
+        assert!(refused(inquiry(Some("x"), vec![aided("A", false), aided("B", false)])).contains("exactly one"));
+        assert!(refused(inquiry(Some("x"), vec![aided("A", true), aided("B", true)])).contains("exactly one"));
+        let bare = Choice { why: None, ..aided("B", false) };
+        assert!(refused(inquiry(Some("x"), vec![aided("A", true), bare])).ends_with("shown beside it while it is focused: B has no why"));
+        let neither = Choice { why: None, example: Some(" ".into()), ..aided("B", false) };
+        assert!(refused(inquiry(Some("x"), vec![aided("A", true), neither])).ends_with("B has no why and no example"));
+        let several = |options| Inquiry { multiple: true, ..inquiry(Some("x"), options) };
+        assert_eq!(check(&several(vec![aided("A", true), aided("B", true)])), None);
+        assert!(check(&several(vec![aided("A", false), aided("B", false)])).unwrap_or_default().contains("one or more"));
+        let quick = Inquiry { quick: true, ..inquiry(None, vec![choice("Yes", None), choice("No", None)]) };
+        assert_eq!(check(&quick), None);
+        let allow = Inquiry { allow: Some("abc123".into()), ..inquiry(None, vec![]) };
+        assert_eq!(check(&allow), None);
+        assert!(refused(inquiry(Some("x"), vec![aided("A (Recommended)", true), aided("B", false)])).starts_with("a label does not say"));
     }
 }

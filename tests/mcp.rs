@@ -669,7 +669,7 @@ fn a_question_is_asked_and_answered_through_the_tools() {
         &home,
         &[
             call(1, "create", json!({"text": "the merge"})),
-            call(2, "ask", json!({"questions": [{"text": "Merge auditoria now?"}], "about": 1})),
+            call(2, "ask", json!({"questions": [{"quick": true, "text": "Merge auditoria now?"}], "about": 1})),
             call(3, "prime", json!({})),
             call(4, "answer", json!({"question": 2, "text": "yes, after the rebase"})),
             call(5, "answer", json!({"question": 2, "text": "no"})),
@@ -709,10 +709,10 @@ fn a_question_is_put_to_the_user_in_a_dialog_and_the_answer_recorded() {
         &home,
         &[
             elicitation_client(),
-            call(2, "ask", json!({"questions": [{"text": "Mark them?", "options": options}]})),
+            call(2, "ask", json!({"questions": [{"quick": true, "text": "Mark them?", "options": options}]})),
             request(3, "ping", json!({})),
             dialog_answer("ekko-ask-1", json!({"action": "accept", "content": {"answer": "Yes"}})),
-            call(4, "ask", json!({"questions": [{"text": "Why?", "options": options}]})),
+            call(4, "ask", json!({"questions": [{"quick": true, "text": "Why?", "options": options}]})),
             dialog_answer("ekko-ask-2", json!({"action": "accept", "content": {"answer": "ekko:other"}})),
             dialog_answer("ekko-ask-3", json!({"action": "accept", "content": {"answer": "only the ninth"}})),
             call(5, "context", json!({"items": [1, 2]})),
@@ -753,14 +753,15 @@ fn a_question_left_unanswered_stays_open_on_the_board() {
         &home,
         &[
             elicitation_client(),
-            call(2, "ask", json!({"questions": [{"text": "Declined?"}]})),
+            call(2, "ask", json!({"questions": [{"quick": true, "text": "Declined?"}]})),
             dialog_answer("ekko-ask-1", json!({"action": "decline"})),
-            call(3, "ask", json!({"questions": [{"text": "Dismissed?"}]})),
+            call(3, "ask", json!({"questions": [{"quick": true, "text": "Dismissed?"}]})),
             dialog_answer("ekko-ask-2", json!({"action": "cancel"})),
-            call(4, "ask", json!({"questions": [{"text": "Cancelled?"}]})),
+            call(4, "ask", json!({"questions": [{"quick": true, "text": "Cancelled?"}]})),
             json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 4}}).to_string(),
-            call(5, "ask", json!({"questions": [{"text": "One option?", "options": [{"label": "Only"}]}]})),
+            call(5, "ask", json!({"questions": [{"quick": true, "text": "One option?", "options": [{"label": "Only"}]}]})),
             call(6, "prime", json!({})),
+            call(7, "ask", json!({"questions": [{"text": "Unexplained?", "options": [{"label": "A"}, {"label": "B"}]}]})),
         ],
     );
     let reply = |id: u64| messages.iter().find(|m| m["id"] == id).unwrap_or_else(|| panic!("no reply {id}: {messages:?}"));
@@ -770,9 +771,10 @@ fn a_question_left_unanswered_stays_open_on_the_board() {
     assert!(messages.iter().any(|m| m["method"] == "notifications/cancelled" && m["params"]["requestId"] == "ekko-ask-3"), "{messages:?}");
     assert_eq!(reply(5)["result"]["isError"], true);
     assert!(text(reply(5)).starts_with("INVALID_INPUT: options offers 2 to 6 answers"), "{}", text(reply(5)));
+    assert!(text(reply(7)).starts_with("INVALID_INPUT: each question needs explain"), "{}", text(reply(7)));
     assert!(text(reply(6)).contains("\nWaiting on you (3)\n"), "{}", text(reply(6)));
 
-    let without = session(&home, &[request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})), call(2, "ask", json!({"questions": [{"text": "No forms?"}]}))]);
+    let without = session(&home, &[request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})), call(2, "ask", json!({"questions": [{"quick": true, "text": "No forms?"}]}))]);
     assert!(text(&without["2"]).contains("\"unanswered\":\"ekko's menu has nowhere to open here: no tmux, and no display; the questions"), "{}", without["2"]);
 
     fs::remove_dir_all(&home).ok();
@@ -891,13 +893,18 @@ fn questions_go_to_ekkos_menu_and_the_answers_come_back() {
     );
     let mut live = Held::start(&home, &answer);
     let options = json!([{"label": "Yes", "description": "all four", "preview": "fn yes() {}"}, {"label": "No"}]);
-    live.send(&call(2, "ask", json!({"questions": [{"text": "Mark them?", "options": options}, {"text": "And these?", "options": options, "multiple": true}]})));
+    let explained = json!([
+        {"label": "Yes", "description": "all four", "recommended": true, "why": "They are finished.", "example": "4 marked done", "preview": "fn yes() {}"},
+        {"label": "No", "why": "They wait for a review.", "example": "4 left open"}
+    ]);
+    let first = json!({"text": "Mark them?", "explain": "Four tasks passed their checks.", "options": explained});
+    live.send(&call(2, "ask", json!({"questions": [first, {"quick": true, "text": "And these?", "options": options, "multiple": true}]})));
     let answered: Value = serde_json::from_str(text(&live.reply(2))).unwrap();
     assert_eq!(answered["answers"], json!([{"id": 1, "answer": "Yes"}, {"id": 2, "answer": "Yes"}]), "{answered}");
     assert!(answered.get("unanswered").is_none(), "{answered}");
     live.send(&call(3, "context", json!({"items": [1, 2]})));
     let read = text(&live.reply(3)).to_string();
-    assert!(read.contains("Mark them?\nOptions:\n- Yes: all four\n- No"), "{read}");
+    assert!(read.contains("Mark them?\nExplanation: Four tasks passed their checks.\nOptions:\n- Yes (recommended): all four\n- No"), "{read}");
     assert!(read.contains("And these?\nOptions, any number of them:\n- Yes: all four"), "{read}");
     assert!(read.contains("recorded by the user: Yes\n"), "the answers are the user's, not the session's: {read}");
     assert!(!live.seen.iter().any(|m| m["method"] == "elicitation/create"), "{:?}", live.seen);
@@ -906,6 +913,9 @@ fn questions_go_to_ekkos_menu_and_the_answers_come_back() {
     assert!(log.starts_with("env -u CLAUDECODE ") && log.contains(" --menu "), "{log}");
     let spec: Value = serde_json::from_str(&fs::read_to_string(home.join("spec.json")).unwrap()).unwrap();
     assert_eq!(spec["questions"][0]["options"][0]["preview"], "fn yes() {}");
+    assert_eq!(spec["questions"][0]["explain"], "Four tasks passed their checks.");
+    let yes = &spec["questions"][0]["options"][0];
+    assert_eq!((&yes["recommended"], &yes["why"], &yes["example"]), (&json!(true), &json!("They are finished."), &json!("4 marked done")));
     assert_eq!(spec["questions"][1]["multiple"], true);
     let left = fs::read_dir(&home).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("ekko-menu-")).count();
     assert_eq!(left, 0, "the menu's files are cleaned up");
@@ -921,20 +931,20 @@ fn questions_left_in_ekkos_menu_stay_open() {
     let home = temp_home();
     // The first question answered, then the menu closed.
     let mut closed = Held::start(&home, "echo $$ > \"$pid\"\nuid=$(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | head -1 | cut -d'\"' -f4)\n\"$exe\" --answer \"$uid\" first");
-    closed.send(&call(2, "ask", json!({"questions": [{"text": "One?"}, {"text": "Two?"}]})));
+    closed.send(&call(2, "ask", json!({"questions": [{"quick": true, "text": "One?"}, {"quick": true, "text": "Two?"}]})));
     let reply: Value = serde_json::from_str(text(&closed.reply(2))).unwrap();
     assert_eq!(reply["answers"], json!([{"id": 1, "answer": "first"}]), "{reply}");
     assert!(reply["unanswered"].as_str().unwrap().starts_with("the user closed ekko's menu without answering; the questions without an answer stay open"), "{reply}");
     closed.stop();
 
     let mut failed = Held::start(&home, "exit 3");
-    failed.send(&call(2, "ask", json!({"questions": [{"text": "Failed?"}]})));
+    failed.send(&call(2, "ask", json!({"questions": [{"quick": true, "text": "Failed?"}]})));
     assert!(text(&failed.reply(2)).contains("ekko's menu could not open: the terminal exited with exit status: 3; the questions"), "{:?}", failed.seen);
     failed.stop();
 
     let menu_pid = home.join("menu.pid");
     let mut cancelled = Held::start(&home, &format!("echo $$ > \"$pid\"\necho $$ > \"{}\"\nexec sleep 30", menu_pid.display()));
-    cancelled.send(&call(2, "ask", json!({"questions": [{"text": "Cancelled?"}]})));
+    cancelled.send(&call(2, "ask", json!({"questions": [{"quick": true, "text": "Cancelled?"}]})));
     let up = std::time::Instant::now();
     while fs::read_to_string(&menu_pid).map_or(true, |p| p.trim().is_empty()) {
         assert!(up.elapsed().as_secs() < 10, "the menu never came up");
@@ -969,7 +979,7 @@ fn a_modern_call_of_ask_waits_for_the_answers_in_ekkos_menu() {
         "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}},
         "progressToken": 7,
     });
-    let question = json!({"questions": [{"text": "Mark them?", "options": [{"label": "Yes"}, {"label": "No"}]}]});
+    let question = json!({"questions": [{"quick": true, "text": "Mark them?", "options": [{"label": "Yes"}, {"label": "No"}]}]});
     live.send(&request(2, "tools/call", json!({"name": "ask", "arguments": question, "_meta": meta})));
     let reply = live.reply(2);
     assert_eq!(reply["result"]["resultType"], "complete", "{reply}");
@@ -995,7 +1005,7 @@ fn a_modern_client_answers_the_dialog_by_retrying_the_call() {
     let meta = |capabilities: Value| json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": capabilities});
     let forms = json!({"elicitation": {"form": {}, "url": {}}});
     let ask = |id: u64, retry: Value| {
-        let mut params = json!({"name": "ask", "arguments": {"questions": [{"text": "Mark them?", "options": [{"label": "Yes", "description": "all four"}, {"label": "No"}]}]}});
+        let mut params = json!({"name": "ask", "arguments": {"questions": [{"quick": true, "text": "Mark them?", "options": [{"label": "Yes", "description": "all four"}, {"label": "No"}]}]}});
         params["_meta"] = meta(forms.clone());
         params.as_object_mut().unwrap().extend(retry.as_object().unwrap().clone());
         request(id, "tools/call", params)
@@ -1029,7 +1039,7 @@ fn a_modern_client_answers_the_dialog_by_retrying_the_call() {
     let left = live.ask(ask(9, json!({"requestState": state(&declined), "inputResponses": {"answer": {"action": "decline"}}})));
     assert!(text(&left).contains("\"unanswered\":\"the user declined the dialog; the questions without an answer stay open"), "{left}");
 
-    let without = live.ask(request(10, "tools/call", json!({"name": "ask", "arguments": {"questions": [{"text": "No forms?"}]}, "_meta": meta(json!({}))})));
+    let without = live.ask(request(10, "tools/call", json!({"name": "ask", "arguments": {"questions": [{"quick": true, "text": "No forms?"}]}, "_meta": meta(json!({}))})));
     assert_eq!(without["result"]["resultType"], "complete", "{without}");
     assert!(text(&without).contains("\"unanswered\":\"ekko's menu has nowhere to open here"), "{without}");
 
@@ -1312,7 +1322,7 @@ fn a_link_ask_proposes_is_made_only_by_the_users_answer_in_ekkos_menu() {
     live.send(&request(4, "tools/list", json!({})));
     assert_eq!(taking_project(&live.reply(4))[0].1["enum"], json!(["blog"]));
 
-    live.send(&call(5, "ask", json!({"project": "blog", "questions": [{"text": "Qual quadro?"}]})));
+    live.send(&call(5, "ask", json!({"project": "blog", "questions": [{"quick": true, "text": "Qual quadro?"}]})));
     let there: Value = serde_json::from_str(text(&live.reply(5))).unwrap();
     assert_eq!(there["answers"][0]["answer"], "Link", "{there}");
     // Taken away in a terminal: the client is told with its next call's reply.
@@ -1344,7 +1354,7 @@ fn a_link_ask_proposes_is_made_only_by_the_users_answer_in_ekkos_menu() {
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0x0e74f0e82406c4b8;
+const PREFIX_FINGERPRINT: u64 = 0xa21cc5dcc4aea843;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {

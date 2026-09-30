@@ -534,6 +534,7 @@ impl Server {
                 uid: item["uid"].as_str().unwrap_or_default().to_string(),
                 id: item["id"].as_u64().and_then(|id| u32::try_from(id).ok()).unwrap_or_default(),
                 text: inquiry.text.trim_end().to_string(),
+                explain: inquiry.explain.clone(),
                 options: inquiry.options.clone(),
                 multiple: inquiry.multiple,
             })
@@ -543,7 +544,10 @@ impl Server {
             call,
             questions: posed.iter().map(|question| question.uid.clone()).collect(),
             recorded,
-            message: first.text.clone(),
+            message: match first.explain.as_deref().map(str::trim).filter(|explain| !explain.is_empty()) {
+                Some(explain) => format!("{}\n\n{explain}", first.text.trim_end()),
+                None => first.text.clone(),
+            },
             options: first.options.clone(),
             stage: Stage::Asked,
             progress,
@@ -1697,7 +1701,10 @@ fn tool_definitions(linked: &[String]) -> Value {
         json!({
             "label": {"type": "string"},
             "description": {"type": "string"},
-            "preview": {"type": "string", "description": "Shown beside the options while this one is focused: a mockup, a snippet, a config."}
+            "recommended": {"type": "boolean", "description": "The answer this session recommends: on exactly one option, or one or more with multiple. The menu opens on it."},
+            "why": {"type": "string", "description": "Shown beside the options while this one is focused: why one would pick it, and how it differs from the others, in a sentence or two."},
+            "example": {"type": "string", "description": "Shown beside, under why: what picking it looks like in practice -- a concrete case, a command, what changes."},
+            "preview": {"type": "string", "description": "Shown beside, under example: a mockup, a snippet, a config."}
         }),
         &["label"],
     );
@@ -1714,7 +1721,9 @@ fn tool_definitions(linked: &[String]) -> Value {
     cue["description"] = json!("Proposes a cue for a gotcha: once the user turns it on, it refuses the Bash calls it names, with the gotcha as the reason.");
     let question = object(
         json!({
-            "text": {"type": "string", "description": "The question, with what the user needs to answer it."},
+            "text": {"type": "string", "description": "The question, in a line or two."},
+            "explain": {"type": "string", "description": "Shown under the question: what it is about, the terms it uses and what the answer changes, for a user who has not followed the work."},
+            "quick": {"type": "boolean", "description": "A quick, direct question -- push this? commit that? -- which needs no explain, recommended, why or example."},
             "options": {"type": "array", "minItems": 2, "maxItems": 6, "items": choice},
             "multiple": {"type": "boolean", "description": "The user may pick several options."},
             "cue": cue,
@@ -1837,7 +1846,7 @@ fn tool_definitions(linked: &[String]) -> Value {
         },
         {
             "name": "ask",
-            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer. With cue, allow or link_project, ekko writes what the question quotes and offers, and only the user's answer in ekko's menu applies it.",
+            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. Unless quick, a question carries explain, and one option is recommended, each option with why and example, which the menu shows beside it. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer. With cue, allow or link_project, ekko writes what the question quotes and offers, and only the user's answer in ekko's menu applies it.",
             "inputSchema": object(json!({
                 "about": item,
                 "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": question}

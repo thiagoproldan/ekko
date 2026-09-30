@@ -189,6 +189,14 @@ pub struct Ask {
 #[serde(deny_unknown_fields)]
 pub struct Inquiry {
     pub text: String,
+    /// What the question is about, for a user who has not followed the work
+    /// (task 979): shown under it, and kept in the board's note.
+    #[serde(default)]
+    pub explain: Option<String>,
+    /// A quick, direct question -- push this? commit that? -- which needs no
+    /// explain, recommended option, why or example.
+    #[serde(default)]
+    pub quick: bool,
     #[serde(default)]
     pub options: Vec<Choice>,
     /// The user may pick several of the options.
@@ -268,8 +276,9 @@ impl CueAsk {
 }
 
 /// One answer a question offers: a few words, what choosing it means, and
-/// what to show beside the options while it is focused.
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+/// what to show beside the options while it is focused -- why pick it, an
+/// example of it, a preview.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Choice {
     pub label: String,
@@ -277,6 +286,16 @@ pub struct Choice {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// The answer the asking session recommends (task 979): the menu opens
+    /// on it, and the board's note marks it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
+    /// Why one would pick it, and how it differs from the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// What picking it looks like in practice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<String>,
 }
 
 /// The user's answer to a question.
@@ -380,7 +399,7 @@ fn invalid(message: impl Into<String>) -> EkkoError {
 
 /// An answer ekko offers under a question it composes.
 fn choice(label: &str, description: &str) -> Choice {
-    Choice { label: label.to_string(), description: Some(description.to_string()), preview: None }
+    Choice { label: label.to_string(), description: Some(description.to_string()), ..Choice::default() }
 }
 
 /// The refusal of a note given someone to be with.
@@ -756,7 +775,8 @@ impl<'a> Draft<'a> {
         }
         let (block, options, proposal, allowance) = match (&inquiry.cue, &inquiry.allow) {
             (None, None) => {
-                let id = self.ask(&crate::dialog::noted(&inquiry.text, &inquiry.options, inquiry.multiple), about)?;
+                let noted = crate::dialog::noted(&inquiry.text, inquiry.explain.as_deref(), &inquiry.options, inquiry.multiple);
+                let id = self.ask(&noted, about)?;
                 return Ok((id, inquiry.clone()));
             }
             (Some(_), Some(_)) => return Err(invalid("a question takes cue or allow, not both")),
@@ -829,11 +849,12 @@ impl<'a> Draft<'a> {
         propose: impl FnOnce(&mut Question),
     ) -> Result<(u32, Inquiry), EkkoError> {
         let text = format!("{}{block}", inquiry.text.trim_end());
-        let id = self.ask(&crate::dialog::noted(&text, &options, false), about)?;
+        let id = self.ask(&crate::dialog::noted(&text, None, &options, false), about)?;
         if let Some(question) = self.item(id).question.as_mut() {
             propose(question);
         }
-        Ok((id, Inquiry { text, options: options.to_vec(), multiple: false, cue: None, allow: None, link_project: None }))
+        let options = options.to_vec();
+        Ok((id, Inquiry { text, explain: None, quick: false, options, multiple: false, cue: None, allow: None, link_project: None }))
     }
 
     /// What a question proposing to link this board's project and `name`'s
