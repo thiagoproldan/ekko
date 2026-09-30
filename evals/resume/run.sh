@@ -24,8 +24,13 @@
 #   why    notes attached to a task in either set -- the reasons
 #
 # An id counts as delivered when the output has a line that starts with it,
-# the way the board prints items ("  93. ..."). Coverage of ids is necessary
-# and not sufficient: it shows the facts arrived, not that an agent used them.
+# the way the board prints items ("  93. ..."), or, for the handoff the prime
+# quotes in a section of its own, the line that opens it ("Where the last
+# session stopped: handoff 50 on task 49 ..."). Before that second form was
+# counted, no handoff ever was (task 954). 'Other handoffs in the last hour'
+# names handoffs without quoting them, and does not count. Coverage of ids is
+# necessary and not sufficient: it shows the facts arrived, not that an agent
+# used them.
 set -euo pipefail
 
 EKKO="${1:-ekko}"
@@ -74,7 +79,9 @@ covered() {
   local out="$1" hit=0 n=0 id
   for id in $2; do
     n=$((n + 1))
-    if grep -qE "^[[:space:]]*${id}\.[[:space:]]" <<<"$out"; then hit=$((hit + 1)); fi
+    if grep -qE "^[[:space:]]*${id}\.[[:space:]]|^Where the last session stopped: handoff ${id} on task " <<<"$out"; then
+      hit=$((hit + 1))
+    fi
   done
   echo "$hit/$n"
 }
