@@ -997,6 +997,7 @@ impl Ekko {
                     data.retain(|_, item| State::of(item) == Some(State::Cancelled));
                 }
                 "due" => data.retain(|_, item| item.due_date.is_some()),
+                "artifact" | "artifacts" => data.retain(|_, item| item.artifact.is_some()),
                 // `data` holds the stash only when `list_by_attributes` was
                 // given this term: every other view leaves it out.
                 STASHED => data.retain(|_, item| item.stashed.is_some()),
@@ -1243,6 +1244,9 @@ impl Ekko {
                 changed.push(*id);
             }
         }
+        // A plan this write changed is a new version of it (task 1019),
+        // whatever wrote the change: the artifact tool, edit, the CLI.
+        crate::artifact::keep_versions(before, data, &changed, now);
 
         let kept = self.storage.get_counters()?;
         let mut counters = kept.clone();
@@ -1284,6 +1288,8 @@ impl Ekko {
         // publishes both. A reader takes the revision first, so everything up
         // to it is already on disk when it reads the rest.
         self.storage.set(data)?;
+        // Each artifact's page open in a browser shows the board as it is now.
+        crate::artifact::refresh(self.storage.dir(), data, self.folder.as_deref());
 
         // What the write did that the items it left cannot show: work it set
         // free or left waiting, and what it took out of storage. Journaled
@@ -2822,6 +2828,8 @@ pub(crate) fn is_known_attribute(term: &str) -> bool {
             | "blocked"
             | "due"
             | "overdue"
+            | "artifact"
+            | "artifacts"
     ) || Knowledge::from_word(term).is_some()
         || term.starts_with(WITH)
         || term.starts_with(BY)

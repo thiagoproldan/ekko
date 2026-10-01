@@ -33,6 +33,24 @@ pub struct DocsCli {
     pub json: bool,
 }
 
+/// `ekko artifact <id> [--project <name>] [--no-open]` (task 1019): an
+/// artifact's page, written from the board and opened in the browser. A
+/// command word, as `docs` is.
+#[derive(Parser, Debug)]
+#[command(name = "ekko artifact", disable_help_flag = true, disable_version_flag = true)]
+pub struct ArtifactCli {
+    /// The artifact, by id or uid.
+    pub id: String,
+    /// A project's board other than the one found from the folder.
+    #[arg(long, value_name = "NAME")]
+    pub project: Option<String>,
+    /// Write the page, and leave opening it to the caller.
+    #[arg(long = "no-open")]
+    pub no_open: bool,
+    #[arg(long, short = 'j')]
+    pub json: bool,
+}
+
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 #[command(group(clap::ArgGroup::new("hooked").args(["prime", "memory", "tasklist", "wake", "guard"])))]

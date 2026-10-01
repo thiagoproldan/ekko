@@ -24,3 +24,6 @@ serde_json = { version = "1", features = ["preserve_order"] }
 chrono = "0.4"
 libc = "0.2"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+# The plan on an artifact's page, from Markdown (task 1019): the HTML
+# renderer alone, without the command-line tool's getopts.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

@@ -265,6 +265,15 @@ pub struct Item {
     /// without cues is stored exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cue: Option<CueOn>,
+    /// On a task that holds the plan for one goal, which lives across
+    /// sessions (task 1019): its steps, the tasks the user's approval made
+    /// of them, and the plan's earlier texts. The task's text is the plan,
+    /// in Markdown under `crate::artifact::HEADINGS`. A task rather than a
+    /// note, so the decisions and questions about the plan attach to it, and
+    /// the tasks its approval makes block it. Absent unless set, so a board
+    /// without artifacts is stored exactly as before. Boxed; see `question`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<Box<Artifact>>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -317,6 +326,7 @@ impl Item {
             question: None,
             wait: None,
             cue: None,
+            artifact: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -357,6 +367,7 @@ impl Item {
             question: None,
             wait: None,
             cue: None,
+            artifact: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -417,6 +428,96 @@ pub struct Question {
     /// Allow once or Link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applies: Option<String>,
+    /// An artifact's plan the session asks the user to approve (task 1019),
+    /// which the user's answer in ekko's menu makes tasks of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approve: Option<Approving>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+impl Question {
+    /// Whether it proposes what the user's answer applies -- a cue, a call
+    /// let through once, a link, an artifact's tasks -- which only their
+    /// answer in ekko's menu settles.
+    pub fn proposes(&self) -> bool {
+        self.cue.is_some() || self.allow.is_some() || self.link.is_some() || self.approve.is_some()
+    }
+}
+
+/// The plan of an artifact a question asks the user to approve: the steps
+/// the approval makes tasks of, as the plan stood when it was asked. The
+/// user's answer in ekko's menu creates them, unless the plan changed since.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Approving {
+    /// The artifact, by uid.
+    pub artifact: String,
+    /// The plan's version when the question was asked.
+    pub version: u32,
+    /// The steps the approval makes tasks of, by key, in the plan's order.
+    pub steps: Vec<String>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// The plan for one goal (task 1019); see `Item::artifact`. The task's text
+/// holds the plan itself; this holds what ekko acts on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Artifact {
+    /// The steps, in the plan's order.
+    #[serde(default)]
+    pub steps: Vec<Step>,
+    /// The plan's version: 1 as written, raised by every write that changes
+    /// its text or its steps.
+    pub version: u32,
+    /// The plan's texts before it changed, oldest first: the last
+    /// `crate::artifact::EARLIER_KEPT` of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<Earlier>,
+    /// The version the user last approved, answering in ekko's menu.
+    #[serde(rename = "approvedVersion", default, skip_serializing_if = "Option::is_none")]
+    pub approved_version: Option<u32>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// One step of an artifact's plan: what its task will say, and once the
+/// user approved it, that task.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Step {
+    /// Its name within the plan, which the session gives and other steps'
+    /// `after` names: a few lower-case letters, digits or dashes.
+    pub key: String,
+    /// The task's text: its title, then what the step is.
+    pub text: String,
+    /// When the step is done.
+    #[serde(rename = "doneWhen", default, skip_serializing_if = "Option::is_none")]
+    pub done_when: Option<String>,
+    /// The earlier steps it waits on, by key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
+    /// The task the user's approval made of it, by uid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// A text an artifact's plan had before a write changed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Earlier {
+    pub version: u32,
+    /// When the write that replaced it was saved, in epoch milliseconds.
+    pub at: i64,
+    pub text: String,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -1575,6 +1676,7 @@ mod tests {
             ("Task", "Claude Code's task list, which ekko writes whole from the board"),
             ("Spec", "handed to the menu this same binary starts"),
             ("Posed", "handed to the menu this same binary starts"),
+            ("StepSpec", "a call's input, which `crate::artifact::steps` makes a `Step` of"),
         ];
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut checked = Vec::new();
@@ -1605,7 +1707,10 @@ mod tests {
         }
         assert!(missing.is_empty(), "no `unknown`, and no reason given here for none: {missing:?}");
         checked.sort();
-        let expected = ["Allowance", "Answer", "Counters", "Cue", "Holder", "Item", "Linking", "Moved", "Over", "Proposal", "Question", "Refused", "Registered", "Registry", "Used", "Wait"];
+        let expected = [
+            "Allowance", "Answer", "Approving", "Artifact", "Counters", "Cue", "Earlier", "Holder", "Item", "Linking", "Moved", "Over", "Proposal",
+            "Question", "Refused", "Registered", "Registry", "Step", "Used", "Wait",
+        ];
         assert_eq!(checked, expected, "the scan finds the structs it should");
     }
 

@@ -116,7 +116,7 @@ fn a_legacy_client_initializes_lists_tools_and_writes_through_them() {
     assert!(init["instructions"].as_str().is_some_and(|s| s.contains("shared with the user")));
 
     let tools = replies["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 21);
+    assert_eq!(tools.len(), 22);
     // The five nearly every session calls, and ask, load at session start; the rest stay behind ToolSearch.
     let loaded: Vec<&str> =
         tools.iter().filter(|tool| tool["_meta"]["anthropic/alwaysLoad"] == true).map(|tool| tool["name"].as_str().unwrap()).collect();
@@ -1281,6 +1281,60 @@ fn a_session_reaches_the_board_the_user_linked_and_no_other() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// The artifact tool (task 1019): deferred, it writes an artifact from a plan
+/// with its page, whose path the reply gives; search's artifact filter finds
+/// it; given the artifact alone, it reads it as context does. `ekko artifact`
+/// writes the same page from a terminal, and refuses what is not one.
+#[test]
+fn an_artifact_is_written_with_its_page_and_read_back() {
+    let home = temp_home();
+    let plan = "Ship the page\n\n## Goal\nWhy.\n## What is known\nFacts.\n## Design\nHow.\n## Risks and open questions\nNone.";
+    let lines = vec![
+        request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}})),
+        request(2, "tools/list", json!({})),
+        call(3, "artifact", json!({"text": plan, "steps": [{"key": "one", "text": "The first step"}]})),
+        call(4, "artifact", json!({"artifact": 1})),
+        call(5, "search", json!({"filters": ["artifact"]})),
+        call(6, "artifact", json!({"text": "No plan here"})),
+        call(7, "create", json!({"text": "A plain task"})),
+        call(8, "artifact", json!({"artifact": 2})),
+    ];
+    let replies = session(&home, &lines);
+    let tools = replies["2"]["result"]["tools"].as_array().unwrap();
+    let tool = tools.iter().find(|tool| tool["name"] == "artifact").unwrap();
+    assert!(tool["_meta"].is_null(), "deferred, so it costs no session's prefix: {tool}");
+    assert!(tool["description"].as_str().unwrap().contains("not Claude Code's Artifact tool"), "{tool}");
+
+    let written: Value = serde_json::from_str(text(&replies["3"])).unwrap();
+    assert_eq!(written["standing"], "draft, 1 step", "{written}");
+    let page = written["page"].as_str().unwrap().to_string();
+    assert!(fs::read_to_string(&page).unwrap().contains("<h1>Ship the page</h1>"));
+    let read = text(&replies["4"]);
+    assert!(read.contains("artifact, a task pending") && read.contains("plan version 1: draft, 1 step"), "{read}");
+    assert!(read.contains(&format!("Its page: {page}")), "{read}");
+    assert!(text(&replies["5"]).contains("Ship the page"), "{}", text(&replies["5"]));
+    assert!(text(&replies["6"]).starts_with("INVALID_INPUT: an artifact's"), "{}", text(&replies["6"]));
+    assert!(text(&replies["8"]).contains("2 is not an artifact"), "{}", text(&replies["8"]));
+
+    let terminal = |id: &str| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(["artifact", id, "--no-open"])
+            .env("EKKO_DIR", &home)
+            .env("HOME", &home)
+            .env_remove("EKKO_PROJECT")
+            .current_dir(&home)
+            .output()
+            .unwrap()
+    };
+    let opened = terminal("1");
+    assert!(opened.status.success(), "{}", String::from_utf8_lossy(&opened.stderr));
+    assert_eq!(String::from_utf8_lossy(&opened.stdout).trim(), page);
+    let refused = terminal("2");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("2 is not an artifact") || String::from_utf8_lossy(&refused.stderr).contains("2 is not an artifact"));
+    fs::remove_dir_all(&home).ok();
+}
+
 /// The answer that applies what a question proposes -- the first of the two
 /// a session writes under it, in the user's language (task 1044).
 const APPLY: &str = "Sim";
@@ -1311,7 +1365,7 @@ fn a_link_ask_proposes_is_made_only_by_the_users_answer_in_ekkos_menu() {
     let mut failed = Held::start_in(&home, Some(site), "exit 3");
     failed.send(&call(2, "ask", json!({"questions": [proposing(json!({"text": "Ligo os quadros?", "link_project": "blog"}))]})));
     let reply: Value = serde_json::from_str(text(&failed.reply(2))).unwrap();
-    assert!(reply["unanswered"].as_str().unwrap().contains("One with cue, allow or link_project counts only answered there"), "{reply}");
+    assert!(reply["unanswered"].as_str().unwrap().contains("One with cue, allow, link_project or approve counts only answered there"), "{reply}");
     failed.send(&call(3, "answer", json!({"question": 1, "text": APPLY})));
     let refused = failed.reply(3);
     assert!(text(&refused).contains("1 is the user's to answer, in ekko's menu"), "{refused}");
@@ -1370,7 +1424,7 @@ fn a_link_ask_proposes_is_made_only_by_the_users_answer_in_ekkos_menu() {
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0x4f9c94c5706d873e;
+const PREFIX_FINGERPRINT: u64 = 0x9d7b17c05a149e3c;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {

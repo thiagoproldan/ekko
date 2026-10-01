@@ -74,7 +74,7 @@ const ALWAYS_LOADED: &[&str] = &["context", "search", "create", "set_state", "ed
 const TOOLS: &[&str] = &[
     "prime", "next", "context", "search", "changes", "roadmap", "create", "set_state",
     "force_state", "edit", "update", "link", "ask", "answer", "wait", "batch", "stash", "trash", "away", "phases",
-    "move_to",
+    "move_to", "artifact",
 ];
 
 const INSTRUCTIONS: &str = "\
@@ -224,8 +224,8 @@ const WATCH: Duration = Duration::from_secs(1);
 
 /// What ask's reply says of questions left without an answer, asked on the
 /// session's board or with project on a linked one: how each can still be
-/// answered there. Those with cue, allow or link_project only the user
-/// answers, in ekko's menu.
+/// answered there. Those with cue, allow, link_project or approve only the
+/// user answers, in ekko's menu.
 fn stays_open(guarded: bool, project: Option<&str>) -> String {
     let command = match project {
         Some(name) => format!("`ekko --project {name} --answer <id>`"),
@@ -234,7 +234,7 @@ fn stays_open(guarded: bool, project: Option<&str>) -> String {
     if guarded {
         return format!(
             "the questions without an answer stay open: the user answers each with {command} in a terminal, which opens ekko's menu on it. \
-             One with cue, allow or link_project counts only answered there, never recorded by a session"
+             One with cue, allow, link_project or approve counts only answered there, never recorded by a session"
         );
     }
     let on = project.map(|name| format!(" and project {name}")).unwrap_or_default();
@@ -519,7 +519,7 @@ impl Server {
         };
         let recorded = self.open_for(&mut args).and_then(|(ekko, _, project)| {
             let spec: ops::Ask = parse(&mut args)?;
-            let guarded = spec.questions.iter().any(|inquiry| inquiry.cue.is_some() || inquiry.allow.is_some() || inquiry.link_project.is_some());
+            let guarded = spec.questions.iter().any(ops::Inquiry::proposes);
             let (recorded, questions) = record(&ekko, &spec, &self.home)?;
             Ok((recorded, questions, guarded, project))
         });
@@ -1166,6 +1166,10 @@ impl Server {
                 let spec: ops::WaitOn = parse(args)?;
                 wait(&ekko, &spec)
             }
+            "artifact" => {
+                let spec: ops::ArtifactSpec = parse(args)?;
+                artifact(&ekko, &spec)
+            }
             "batch" => {
                 let ops = args.remove("ops").ok_or_else(|| invalid("batch needs ops"))?;
                 finish(args)?;
@@ -1327,6 +1331,54 @@ fn write(
 /// wait: records that this session waits on an item, or, with cancel, that
 /// it no longer does. An item already where the wait would end, or already
 /// waited on by this session for the same, writes nothing and says so.
+/// The MCP tool `artifact` (task 1019): writes an artifact and its page, or
+/// reads it as context does, with where its page is.
+fn artifact(ekko: &Ekko, spec: &ops::ArtifactSpec) -> Result<String, ToolError> {
+    let page = |item: &crate::item::Item, data: &crate::storage::ItemMap| {
+        crate::artifact::write(ekko.storage.dir(), item, data, ekko.folder.as_deref())
+    };
+    if let (Some(target), true) = (&spec.artifact, spec.reads()) {
+        let all = ekko.storage.get_shared().map_err(EkkoError::from)?;
+        let read = agent::contexts(ekko, &[ops_ref_text(target)])?;
+        let item = &all[&read[0].item.id];
+        if item.artifact.is_none() {
+            return Err(invalid(format!("{} is not an artifact: the artifact tool creates one from a plan", item.id)));
+        }
+        let mut text = read[0].text();
+        match page(item, &all) {
+            Ok(path) => text.push_str(&format!("Its page: {}\n", path.display())),
+            Err(error) => text.push_str(&format!("Its page could not be written: {error}\n")),
+        }
+        return Ok(text);
+    }
+    let mut draft = Draft::open(ekko)?;
+    let id = draft.artifact(spec).map_err(|error| refusal(&error, &draft.names()))?;
+    let names = draft.names();
+    let committed = draft.commit(false).map_err(|error| refusal(&error, &names))?;
+    let item = &committed.data[&id];
+    let mut reply = json!({"ok": true, "items": [ops::written(&committed.data, id)]});
+    if let Some(standing) = crate::artifact::Standing::of(item, &committed.data) {
+        reply["standing"] = json!(standing.words());
+    }
+    match page(item, &committed.data) {
+        Ok(path) => reply["page"] = json!(path.display().to_string()),
+        Err(error) => reply["pageError"] = json!(error.to_string()),
+    }
+    name_readiness(&mut reply, &committed);
+    if !committed.notices.is_empty() {
+        reply["notices"] = json!(committed.notices);
+    }
+    Ok(reply.to_string())
+}
+
+/// A reference as the board's commands take it: an id, or a uid.
+fn ops_ref_text(reference: &ops::Ref) -> String {
+    match reference {
+        ops::Ref::Id(id) => id.to_string(),
+        ops::Ref::Text(text) => text.clone(),
+    }
+}
+
 fn wait(ekko: &Ekko, spec: &ops::WaitOn) -> Result<String, ToolError> {
     let mut draft = Draft::open(ekko)?;
     let waited = if spec.cancel {
@@ -1372,8 +1424,8 @@ fn wait(ekko: &Ekko, spec: &ops::WaitOn) -> Result<String, ToolError> {
 
 /// Records ask's questions, each with the options it offers under it: the
 /// reply to the write, as JSON, its items in the order of the questions,
-/// and the questions as put to the user -- ekko's own text and answers under
-/// one with cue, allow or link_project.
+/// and the questions as put to the user -- with ekko's own text under the
+/// explanation of one with cue, allow, link_project or approve.
 fn record(ekko: &Ekko, spec: &ops::Ask, home: &std::path::Path) -> Result<(Value, Vec<ops::Inquiry>), ToolError> {
     if spec.questions.is_empty() || spec.questions.len() > 4 {
         return Err(invalid("questions holds 1 to 4 questions"));
@@ -1729,9 +1781,19 @@ fn tool_definitions(linked: &[String]) -> Value {
             "multiple": {"type": "boolean", "description": "The user may pick several options."},
             "cue": cue,
             "allow": {"type": "string", "description": "The code a guard's refusal gave: asks the user to let that exact call through once."},
-            "link_project": {"type": "string", "description": "Proposes linking this board and that project's, both ways: once the user picks the first option in ekko's menu, a session on either reaches the other's board with project."}
+            "link_project": {"type": "string", "description": "Proposes linking this board and that project's, both ways: once the user picks the first option in ekko's menu, a session on either reaches the other's board with project."},
+            "approve": {"type": ["integer", "string"], "description": "An artifact: asks the user to approve its plan, whose steps their first answer in ekko's menu makes tasks of."}
         }),
         &["text"],
+    );
+    let step = object(
+        json!({
+            "key": {"type": "string", "description": "A few lower-case letters, digits or dashes, once in the plan."},
+            "text": {"type": "string", "description": "What its task will say: a title of at most 80 characters, then the rest. An approved step takes none."},
+            "done_when": {"type": "string"},
+            "after": {"type": "array", "items": {"type": "string"}, "description": "The keys of earlier steps it waits on."}
+        }),
+        &["key"],
     );
 
     let mut tools = json!([
@@ -1755,7 +1817,7 @@ fn tool_definitions(linked: &[String]) -> Value {
         },
         {
             "name": "search",
-            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, waiting, done, cancelled, ready, blocked, due, overdue, star, task, note, decision, gotcha, procedure, with:NAME, by:NAME (who wrote it: user, a profile, a conversation's start), stashed (otherwise left out), or a board name -- as @name when a filter has the same one. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
+            "description": "Items holding the words of text -- any order, accents ignored, a word also matching longer words it starts -- ranked by relevance and shown where they matched, and/or passing filters: pending, progress, paused, waiting, done, cancelled, ready, blocked, due, overdue, star, task, note, decision, gotcha, procedure, artifact, with:NAME, by:NAME (who wrote it: user, a profile, a conversation's start), stashed (otherwise left out), or a board name -- as @name when a filter has the same one. Up to limit (default 20), with the total. Neither text nor filters gives counts.",
             "inputSchema": object(json!({"text": {"type": "string"}, "filters": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1}}), &[]),
             "annotations": read,
         },
@@ -1847,7 +1909,7 @@ fn tool_definitions(linked: &[String]) -> Value {
         },
         {
             "name": "ask",
-            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. Unless quick, a question carries explain, and one option is recommended, each option with why and example, which the menu shows beside it. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer. With cue, allow or link_project, give explain and two options, the first applying it: ekko adds what it applies under explain, and only the user's answer in ekko's menu counts.",
+            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. Unless quick, a question carries explain, and one option is recommended, each option with why and example, which the menu shows beside it. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer. With cue, allow, link_project or approve, give explain and two options, the first applying it: ekko adds what it applies under explain, and only the user's answer in ekko's menu counts.",
             "inputSchema": object(json!({
                 "about": item,
                 "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": question}
@@ -1907,6 +1969,19 @@ fn tool_definitions(linked: &[String]) -> Value {
             "name": "phases",
             "description": "Declare the project's phases in the order work goes through them, replacing the sequence: reordering is declaring it again. Answers with the roadmap.",
             "inputSchema": object(json!({"sequence": {"type": "array", "items": {"type": "string"}, "minItems": 1}}), &["sequence"]),
+            "annotations": write,
+        },
+        {
+            "name": "artifact",
+            "description": "The plan for one goal, which lives across sessions -- not Claude Code's Artifact tool, which publishes to claude.ai. An artifact is a task whose text is the plan: its title, then ## Goal, ## What is known, ## Design and ## Risks and open questions, each on a line of its own, with steps in order. Without artifact it creates one from text and steps; with artifact and steps it writes those over the plan's steps; with artifact alone it reads it. Its text changes with edit, each change a new version. Decisions and questions about it attach to it. The user reads it on a page ekko keeps current, whose path the reply gives; ask with approve puts the plan to them, and their answer in ekko's menu makes tasks of the steps not approved yet, which block the artifact.",
+            "inputSchema": object(json!({
+                "artifact": item,
+                "text": {"type": "string", "description": "To create one: the plan."},
+                "steps": {"type": "array", "items": step, "description": "Every step, in order, written over those there. An approved step stays as it is: give its key alone."},
+                "boards": {"type": "array", "items": {"type": "string"}},
+                "priority": {"type": "integer", "minimum": 1, "maximum": 3},
+                "phase": {"type": "string", "description": "A declared phase of the project."}
+            }), &[]),
             "annotations": write,
         }
     ]);

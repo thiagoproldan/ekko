@@ -23,7 +23,7 @@ use crate::ekko::{
     Linked,
 };
 use crate::holder::Whose;
-use crate::item::{Answer, Cue, CueOn, How, Item, Knowledge, Linking, Proposal, Question, Setting, State, Until, Wait};
+use crate::item::{Answer, Approving, Artifact, Cue, CueOn, How, Item, Knowledge, Linking, Proposal, Question, Setting, State, Until, Wait};
 use crate::storage::{ItemMap, LockGuard};
 
 /// An item as a caller names it: a display id, a uid, or `$N` for the item
@@ -217,6 +217,54 @@ pub struct Inquiry {
     /// user's first answer in ekko's menu makes it (task 1044).
     #[serde(default)]
     pub link_project: Option<String>,
+    /// An artifact whose plan the user is asked to approve (task 1019): ekko
+    /// adds the tasks it makes of the steps not approved yet under the
+    /// session's explain, and the user's first answer in ekko's menu makes
+    /// them.
+    #[serde(default)]
+    pub approve: Option<Ref>,
+}
+
+impl Inquiry {
+    /// Whether it proposes what the user's answer applies; see
+    /// `Question::proposes`.
+    pub fn proposes(&self) -> bool {
+        self.proposals() > 0
+    }
+
+    /// How many of cue, allow, link_project and approve it carries.
+    fn proposals(&self) -> usize {
+        [self.cue.is_some(), self.allow.is_some(), self.link_project.is_some(), self.approve.is_some()].into_iter().filter(|given| *given).count()
+    }
+}
+
+/// What the MCP tool `artifact` writes (task 1019): a new artifact, from its
+/// plan, or the steps of one there.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSpec {
+    /// The artifact to change; absent, one is created.
+    #[serde(default)]
+    pub artifact: Option<Ref>,
+    /// The plan, to create one: its title, then `crate::artifact::HEADINGS`.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Every step, in order, written over the steps there.
+    #[serde(default)]
+    pub steps: Option<Vec<crate::artifact::StepSpec>>,
+    #[serde(default)]
+    pub boards: Vec<String>,
+    #[serde(default)]
+    pub priority: Option<i64>,
+    #[serde(default)]
+    pub phase: Option<String>,
+}
+
+impl ArtifactSpec {
+    /// Whether it names an artifact and writes nothing: a read.
+    pub fn reads(&self) -> bool {
+        self.artifact.is_some() && self.text.is_none() && self.steps.is_none() && self.boards.is_empty() && self.priority.is_none() && self.phase.is_none()
+    }
 }
 
 /// A cue proposed through ask: for `gotcha`, refuse the calls of `command`
@@ -400,6 +448,10 @@ fn invalid(message: impl Into<String>) -> EkkoError {
 
 /// The refusal of a note given someone to be with.
 const NOTE_WITH: &str = "A note is with nobody; only a task is with someone";
+
+/// The refusal of a question proposing more than one thing for the user's
+/// answer to apply.
+const ONE_PROPOSAL: &str = "a question takes one of cue, allow, link_project and approve";
 
 /// A priority as given, read wide so that -1 or 300 is refused as a priority
 /// out of range, as 0 and 4 are, rather than as JSON that is not a u8.
@@ -673,7 +725,7 @@ impl<'a> Draft<'a> {
         let asked_by = self.ekko.actor.as_ref().filter(|actor| !actor.is_person()).map(|actor| actor.holder(now));
         // The revision is the write's own, stamped as it is saved.
         self.item(id).question =
-            Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, link: None, applies: None, unknown: Default::default() }));
+            Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, link: None, applies: None, approve: None, unknown: Default::default() }));
         Ok(id)
     }
 
@@ -697,7 +749,7 @@ impl<'a> Draft<'a> {
         // 811): an answer a session wrote would lift a guard on its own calls,
         // or open another board to it.
         let person = self.ekko.actor.as_ref().is_none_or(|actor| actor.is_person());
-        if (asked.cue.is_some() || asked.allow.is_some() || asked.link.is_some()) && !person {
+        if asked.proposes() && !person {
             // Named, since the question may be on a board linked to the
             // session's, and the same id on another board is another item.
             let board = self.ekko.linkable.as_ref().map(|(_, project)| format!("--project {} ", project.name)).unwrap_or_default();
@@ -712,12 +764,159 @@ impl<'a> Draft<'a> {
         let proposal = asked.cue.clone();
         let linking = asked.link.clone();
         let applies = asked.applies.clone();
+        let approving = asked.approve.clone();
         self.item(id).question = Some(Box::new(Question { answer: Some(answer), ..*asked }));
         if let Some(proposal) = proposal {
             self.settle_proposal(id, &proposal, applies.as_deref(), text, now);
         }
         if let Some(linking) = linking {
             self.settle_link(&linking, applies.as_deref(), text);
+        }
+        if let Some(approving) = approving {
+            self.settle_approval(id, &approving, applies.as_deref(), text);
+        }
+        Ok(id)
+    }
+
+    /// Makes tasks of the steps question `id` asked the user to approve
+    /// (task 1019), when their answer is the one that approves: `applies`,
+    /// or on a question without it `crate::artifact::APPROVE`, a note added
+    /// to it or not. Each step becomes a task, in the plan's order, blocked
+    /// by the tasks of the steps it waits on and blocking the artifact.
+    /// Nothing is made when the plan changed since the question was asked,
+    /// or the artifact is closed, and a notice says so; nor, all of it, when
+    /// a task cannot be made.
+    fn settle_approval(&mut self, id: u32, approving: &Approving, applies: Option<&str>, answer: &str) {
+        if crate::menu::picked(answer) != applies.unwrap_or(crate::artifact::APPROVE) {
+            return;
+        }
+        let target = self.data.values().find(|item| item.uid.as_deref() == Some(approving.artifact.as_str())).map(|item| item.id);
+        let Some((target, plan)) = target.and_then(|target| Some((target, self.data[&target].artifact.as_deref()?))) else {
+            self.notices.push(format!("the artifact question {id} asks to approve is no longer on the board as one: no task was made"));
+            return;
+        };
+        if plan.version != approving.version {
+            self.notices.push(format!(
+                "artifact {target}'s plan changed after question {id} was asked, from version {} to {}: no task was made, so ask again",
+                approving.version, plan.version
+            ));
+            return;
+        }
+        let state = State::of(&self.data[&target]);
+        if !state.is_some_and(State::is_open) {
+            self.notices.push(format!("artifact {target} is {}: no task was made", state.map_or("closed", State::word)));
+            return;
+        }
+        let saved = self.data.clone();
+        match self.make_steps(target, approving) {
+            Ok(made) if made.is_empty() => self.notices.push(format!("artifact {target} had no step left to make a task of")),
+            Ok(made) => {
+                let ids: Vec<String> = made.iter().map(u32::to_string).collect();
+                self.notices.push(format!(
+                    "artifact {target}'s plan is approved: its steps are tasks {}, in its order, and they block it",
+                    ids.join(", ")
+                ));
+            }
+            Err(error) => {
+                self.data = saved;
+                self.notices.push(format!("no task was made for artifact {target}'s plan: {error}"));
+            }
+        }
+    }
+
+    /// The tasks `approving` makes of artifact `target`'s steps, in order,
+    /// each recorded on its step and blocking the artifact.
+    fn make_steps(&mut self, target: u32, approving: &Approving) -> Result<Vec<u32>, EkkoError> {
+        let artifact = self.data[&target].clone();
+        let Some(plan) = artifact.artifact.as_deref() else { return Ok(Vec::new()) };
+        let mut tasks: std::collections::HashMap<String, String> =
+            plan.steps.iter().filter_map(|step| Some((step.key.clone(), step.task.clone()?))).collect();
+        let mut made: Vec<(String, u32, String)> = Vec::new();
+        for key in &approving.steps {
+            let Some(step) = plan.steps.iter().find(|step| &step.key == key && step.task.is_none()) else { continue };
+            let mut text = step.text.clone();
+            if let Some(done_when) = &step.done_when {
+                text.push_str(&format!("\nDone when: {done_when}"));
+            }
+            text.push_str(&format!("\nStep {} of artifact {target}.", step.key));
+            let blocked_by = step.after.iter().filter_map(|key| tasks.get(key)).map(|uid| Ref::Text(uid.clone())).collect();
+            let spec = Create {
+                kind: Some(Kind::Task),
+                text,
+                boards: artifact.boards.clone(),
+                priority: artifact.priority.map(i64::from),
+                due: None,
+                with: None,
+                phase: artifact.phase.clone(),
+                blocked_by,
+                attached_to: None,
+                supersedes: None,
+                starred: false,
+            };
+            let id = self.create(&spec)?;
+            let uid = self.data[&id].uid.clone().ok_or_else(|| invalid(format!("task {id} was made without a uid")))?;
+            tasks.insert(step.key.clone(), uid.clone());
+            made.push((step.key.clone(), id, uid));
+        }
+        let item = self.item(target);
+        if let Some(plan) = item.artifact.as_mut() {
+            for (key, _, uid) in &made {
+                if let Some(step) = plan.steps.iter_mut().find(|step| &step.key == key) {
+                    step.task = Some(uid.clone());
+                }
+            }
+            plan.approved_version = Some(approving.version);
+        }
+        let blockers = item.blocked_by.get_or_insert_with(Vec::new);
+        for (_, _, uid) in &made {
+            if !blockers.contains(uid) {
+                blockers.push(uid.clone());
+            }
+        }
+        Ok(made.into_iter().map(|(_, id, _)| id).collect())
+    }
+
+    /// Writes an artifact (task 1019): a new one from `spec.text`, its plan,
+    /// or the steps of `spec.artifact` over those it has. Its text changes
+    /// with edit, as any task's does, and each change is a new version of
+    /// the plan (`crate::artifact::keep_versions`).
+    pub fn artifact(&mut self, spec: &ArtifactSpec) -> Result<u32, EkkoError> {
+        let Some(target) = &spec.artifact else {
+            let text = spec.text.as_deref().map(str::trim).unwrap_or_default();
+            if let Some(why) = crate::artifact::unplanned(text) {
+                return Err(invalid(why));
+            }
+            let steps = crate::artifact::steps(&[], spec.steps.as_deref().unwrap_or_default()).map_err(invalid)?;
+            let create = Create {
+                kind: Some(Kind::Task),
+                text: text.to_string(),
+                boards: spec.boards.clone(),
+                priority: spec.priority,
+                due: None,
+                with: None,
+                phase: spec.phase.clone(),
+                blocked_by: Vec::new(),
+                attached_to: None,
+                supersedes: None,
+                starred: false,
+            };
+            let id = self.create(&create)?;
+            self.item(id).artifact =
+                Some(Box::new(Artifact { steps, version: 1, earlier: Vec::new(), approved_version: None, unknown: Default::default() }));
+            return Ok(id);
+        };
+        let id = self.resolve(target)?;
+        if spec.text.is_some() || !spec.boards.is_empty() || spec.priority.is_some() || spec.phase.is_some() {
+            return Err(invalid(
+                "the artifact tool changes an artifact's steps; its text changes with edit, and its boards, priority and phase with update, as any task's",
+            ));
+        }
+        let Some(plan) = self.data[&id].artifact.as_deref() else {
+            return Err(invalid(format!("{id} is not an artifact: the artifact tool creates one from a plan")));
+        };
+        let steps = crate::artifact::steps(&plan.steps, spec.steps.as_deref().unwrap_or_default()).map_err(invalid)?;
+        if let Some(plan) = self.item(id).artifact.as_mut() {
+            plan.steps = steps;
         }
         Ok(id)
     }
@@ -772,17 +971,23 @@ impl<'a> Draft<'a> {
     /// the two answers, in the user's language, and the first applies it
     /// (task 1044). The question as put to the user comes back with its id.
     pub fn ask_inquiry(&mut self, inquiry: &Inquiry, about: Option<&Ref>, home: &Path) -> Result<(u32, Inquiry), EkkoError> {
-        if inquiry.cue.is_some() || inquiry.allow.is_some() || inquiry.link_project.is_some() {
+        if inquiry.proposals() > 1 {
+            return Err(invalid(ONE_PROPOSAL));
+        }
+        if inquiry.proposes() {
             if let Some(why) = crate::dialog::check(inquiry) {
                 return Err(invalid(why));
             }
         }
         if let Some(name) = &inquiry.link_project {
-            if inquiry.cue.is_some() || inquiry.allow.is_some() {
-                return Err(invalid("a question takes one of cue, allow and link_project"));
-            }
             let (block, linking) = self.linking(name)?;
             return self.ask_proposing(inquiry, &block, about, |question| question.link = Some(linking));
+        }
+        if let Some(artifact) = &inquiry.approve {
+            let (block, approving, target) = self.approving(artifact)?;
+            // About the artifact unless the session says what else.
+            let about = about.cloned().unwrap_or(Ref::Id(target));
+            return self.ask_proposing(inquiry, &block, Some(&about), |question| question.approve = Some(approving));
         }
         let (block, proposal, allowance) = match (&inquiry.cue, &inquiry.allow) {
             (None, None) => {
@@ -790,7 +995,7 @@ impl<'a> Draft<'a> {
                 let id = self.ask(&noted, about)?;
                 return Ok((id, inquiry.clone()));
             }
-            (Some(_), Some(_)) => return Err(invalid("a question takes cue or allow, not both")),
+            (Some(_), Some(_)) => return Err(invalid(ONE_PROPOSAL)),
             (Some(spec), None) => {
                 let target = self.resolve(&spec.gotcha)?;
                 let gotcha = &self.data[&target];
@@ -850,7 +1055,48 @@ impl<'a> Draft<'a> {
             question.applies = applies;
             propose(question);
         }
-        Ok((id, Inquiry { explain: Some(explain), quick: false, cue: None, allow: None, link_project: None, ..inquiry.clone() }))
+        Ok((id, Inquiry { explain: Some(explain), quick: false, cue: None, allow: None, link_project: None, approve: None, ..inquiry.clone() }))
+    }
+
+    /// What a question asking the user to approve artifact `artifact`'s plan
+    /// records and quotes (task 1019): the steps not approved yet, which the
+    /// approval makes tasks of in the plan's order, and the version of the
+    /// plan they belong to; and the artifact, by id.
+    fn approving(&self, artifact: &Ref) -> Result<(String, Approving, u32), EkkoError> {
+        let target = self.resolve(artifact)?;
+        let item = &self.data[&target];
+        let Some(plan) = item.artifact.as_deref() else {
+            return Err(invalid(format!("{target} is not an artifact: approve takes one, which the artifact tool writes")));
+        };
+        let state = State::of(item);
+        if !state.is_some_and(State::is_open) {
+            return Err(invalid(format!("artifact {target} is {}: there is nothing to approve", state.map_or("closed", State::word))));
+        }
+        if let Some(asked) = crate::artifact::approval_asked(item, &self.data) {
+            return Err(invalid(format!(
+                "question {} asks to approve artifact {target} already: the user answers it in ekko's menu",
+                asked.id
+            )));
+        }
+        let proposed: Vec<&crate::item::Step> = plan.steps.iter().filter(|step| step.task.is_none()).collect();
+        if proposed.is_empty() {
+            return Err(invalid(format!("artifact {target} has no step left to approve: the artifact tool adds steps")));
+        }
+        let Some(uid) = item.uid.clone() else {
+            return Err(invalid(format!("{target} has no uid, which a question names it by")));
+        };
+        let mut block = format!(
+            "The approval proposed: artifact {target}, version {} of its plan, {}.\nIt makes these tasks, in the plan's order, each blocking the artifact:\n",
+            plan.version,
+            crate::ekko::title(&item.description).trim()
+        );
+        for step in &proposed {
+            let after = if step.after.is_empty() { String::new() } else { format!(" (after {})", step.after.join(", ")) };
+            block.push_str(&format!("- {}: {}{after}\n", step.key, crate::ekko::title(&step.text).trim()));
+        }
+        block.push_str(&format!("The plan in full is on its page, which ekko artifact {target} opens."));
+        let steps = proposed.iter().map(|step| step.key.clone()).collect();
+        Ok((block, Approving { artifact: uid, version: plan.version, steps, unknown: Default::default() }, target))
     }
 
     /// What a question proposing to link this board's project and `name`'s

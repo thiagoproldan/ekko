@@ -1149,7 +1149,7 @@ mod tests {
         fails(json!({"text": "?", "allow": code, "quick": true, "options": [aided("a", true), aided("b", false)]}), "each question needs explain");
         fails(json!({"text": "?", "allow": code, "explain": "x", "options": [aided("a", false), aided("b", false)]}), "sets recommended on exactly one");
         fails(json!({"text": "?", "allow": code, "explain": "x", "options": [aided("a", true), {"label": "b"}]}), "b has no why and no example");
-        fails(json!({"text": "?", "allow": code, "cue": {"gotcha": gotcha, "off": true}}), "cue or allow, not both");
+        fails(json!({"text": "?", "allow": code, "cue": {"gotcha": gotcha, "off": true}}), "takes one of cue, allow, link_project and approve");
         fails(json!({"text": "?", "cue": {"gotcha": note, "command": "gh"}}), "is not a gotcha");
         fails(json!({"text": "?", "cue": {"gotcha": gotcha, "command": "/usr/bin/gh"}}), "no directory");
         fails(json!({"text": "?", "cue": {"gotcha": gotcha, "command": "gh", "folder": "relative/path"}}), "absolute");

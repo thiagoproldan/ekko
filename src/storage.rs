@@ -342,6 +342,12 @@ impl Storage {
     pub fn storage_path(&self) -> &Path {
         &self.storage_file
     }
+
+    /// The board's directory, `.ekko/`, where files written from the board
+    /// beside it go: an artifact's page (`crate::artifact`).
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
 }
 
 /// What a timed-out wait tells the person or agent waiting. Never to delete

@@ -82,6 +82,11 @@ const BLOCKED_KEPT: usize = 5;
 const WAITING_KEPT: usize = 5;
 const WITH_KEPT: usize = 5;
 const NOTES_KEPT: usize = 3;
+/// Open artifacts a prime lists before the rest are counted (task 1019).
+const ARTIFACTS_KEPT: usize = 3;
+/// The heading of the open artifacts, and where the rest are.
+const ARTIFACTS_HEADING: &str = "Artifacts, open";
+const ARTIFACTS_REST: &str = "search with the artifact filter";
 /// The heading of the ready work that is with someone, and where the rest of
 /// it is, in the prime and in `next`.
 const WITH_HEADING: &str = "With someone, not to take up";
@@ -984,6 +989,18 @@ pub struct Prime {
     /// The waits other sessions keep open on work this session holds.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub waited_on: Vec<Waiting>,
+    /// The open artifacts, each in a line of where its plan stands (task
+    /// 1019), in place of its line among the ready or the blocked work.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactLine>,
+}
+
+/// An open artifact as the prime lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactLine {
+    pub id: u32,
+    pub title: String,
+    pub standing: String,
 }
 
 /// A wait as the views show it: its note, the item it is on, who waits and
@@ -1132,10 +1149,22 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
     let (next, _) = reader.next(None);
     let (mut doing, mut ready): (Vec<Entry>, Vec<Entry>) =
         next.into_iter().partition(|entry| entry.state == Some(State::Progress));
+    // An open artifact has a line of its own, saying where its plan stands.
+    let artifacts: Vec<ArtifactLine> = all
+        .values()
+        .filter(|item| visible(item))
+        .filter_map(|item| {
+            let standing = crate::artifact::Standing::of(item, &all).filter(crate::artifact::Standing::open)?;
+            let title = crate::ekko::title(&item.description).trim().to_string();
+            Some(ArtifactLine { id: item.id, title, standing: standing.words() })
+        })
+        .collect();
+    ready.retain(|entry| !artifacts.iter().any(|line| line.id == entry.id));
 
     let mut blocked: Vec<&Item> = all
         .values()
         .filter(|item| visible(item) && holds(item) && !matches!(State::of(item), Some(State::Progress | State::Waiting)))
+        .filter(|item| item.artifact.is_none())
         .filter(|item| !reader.graph.open_blockers(item.id).is_empty())
         .collect();
     blocked.sort_by_key(|item| (std::cmp::Reverse(item.priority.unwrap_or(1)), item.id));
@@ -1362,6 +1391,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         waits,
         waits_over,
         waited_on,
+        artifacts,
     })
 }
 
@@ -1494,6 +1524,13 @@ pub struct Context {
     /// On a gotcha whose cue is on: what the cue refuses, in words.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cue: Option<String>,
+    /// On an artifact: where its plan stands, and each step with the task
+    /// the user's approval made of it (task 1019).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<crate::artifact::Planned>,
+    /// On a task an artifact's approval made: which step of which artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_of: Option<crate::artifact::StepOf>,
 }
 
 /// How many of an item's commits its context lists; the rest are counted.
@@ -1624,6 +1661,8 @@ fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
         commits: Vec::new(),
         branch: None,
         cue: crate::guard::cue_of(item).map(|cue| crate::guard::described(cue, reader.folder.as_deref())),
+        artifact: crate::artifact::Planned::of(item, all),
+        step_of: crate::artifact::StepOf::of(item, all),
     }
 }
 
@@ -2678,12 +2717,14 @@ impl Prime {
         // the one of work with someone.
         let waiting_more = if self.waiting.is_empty() { 0 } else { MORE_LINE };
         let with_more = if self.with_someone.is_empty() { 0 } else { MORE_LINE };
+        let artifacts_more = if self.artifacts.is_empty() { 0 } else { MORE_LINE };
         let fixed = out.chars().count()
             + attention.chars().count()
             + close.chars().count()
             + 4 * MORE_LINE
             + waiting_more
             + with_more
+            + artifacts_more
             + knowledge_more;
         let mut room = Room(budget.saturating_sub(fixed));
         if let Some(handoff) = &self.handoff {
@@ -2769,6 +2810,18 @@ impl Prime {
 
         let sections = [
             Section::of_entries("In progress", &self.doing, usize::MAX, self.doing.len(), "context <id> reads one", usize::MAX, &today),
+            Section {
+                heading: format!("\n{ARTIFACTS_HEADING} ({})", self.artifacts.len()),
+                blocks: self
+                    .artifacts
+                    .iter()
+                    .map(|line| (format!("{:>4}. {} \u{b7} {}", line.id, clip(&line.title, TASK_CLIP), line.standing), Vec::new()))
+                    .collect(),
+                total: self.artifacts.len(),
+                rest: Some(ARTIFACTS_REST),
+                kept: ARTIFACTS_KEPT,
+                reserved: false,
+            },
             Section::of_entries("Ready, best first", &self.ready, READY_WITH_NOTES, self.ready.len(), "next lists them", READY_KEPT, &today),
             Section::of_entries("Blocked", &self.blocked, 0, self.blocked_total, "search with the blocked filter", BLOCKED_KEPT, &today),
             Section::of_entries("Waiting", &self.waiting, 0, self.waiting_total, "search with the waiting filter", WAITING_KEPT, &today),
@@ -3120,6 +3173,9 @@ impl Context {
         if let Some(held) = &item.held {
             facts[0] = format!("{}, {} since {}", facts[0], held.text(), crate::holder::when(held.since));
         }
+        if let (Some(_), Some(state)) = (&self.artifact, item.state) {
+            facts[0] = format!("artifact, a task {}", state.word());
+        }
         if let Some(asked) = &self.question {
             facts[0] = format!("note, a question asked by {}", asked.by);
         }
@@ -3151,6 +3207,14 @@ impl Context {
         let _ = writeln!(out, "      {}", facts.join(" \u{b7} "));
         if let Some(cue) = &self.cue {
             let _ = writeln!(out, "      cue on: refuses {cue}");
+        }
+        if let Some(planned) = &self.artifact {
+            for line in planned.lines() {
+                let _ = writeln!(out, "      {line}");
+            }
+        }
+        if let Some(step) = &self.step_of {
+            let _ = writeln!(out, "      step {} of artifact {}", step.key, step.artifact);
         }
         let _ = writeln!(
             out,

@@ -73,8 +73,8 @@ pub struct Pending {
     /// results, and its dialog is a result asking for one, which the client
     /// answers by retrying the call, since it takes no request from a server.
     pub modern: bool,
-    /// Whether a question carries cue, allow or link_project, which only the
-    /// user's answer in ekko's menu applies.
+    /// Whether a question carries cue, allow, link_project or approve, which
+    /// only the user's answer in ekko's menu applies.
     pub guarded: bool,
     /// The linked board the questions were asked on (task 811), where
     /// their answers are recorded and read; None for the session's own.
@@ -184,10 +184,10 @@ pub fn check(inquiry: &Inquiry) -> Option<String> {
     if let Some(why) = refuse(&inquiry.options) {
         return Some(why);
     }
-    let composed = inquiry.cue.is_some() || inquiry.allow.is_some() || inquiry.link_project.is_some();
+    let composed = inquiry.proposes();
     if composed && (inquiry.options.len() != 2 || inquiry.multiple) {
         return Some(
-            "a question with cue, allow or link_project offers exactly two options, written for the user in their language: \
+            "a question with cue, allow, link_project or approve offers exactly two options, written for the user in their language: \
              the first applies what it proposes, the second leaves things as they are"
                 .to_string(),
         );
@@ -202,9 +202,9 @@ pub fn check(inquiry: &Inquiry) -> Option<String> {
 /// asked on 2026-09-30 that no question assume they followed everything it
 /// asks about. So a question explains itself, recommends an answer, and says
 /// beside each option why one would pick it, with an example. A quick, direct
-/// question -- push this? commit that? -- is exempt; one with cue, allow or
-/// link_project is not, since what ekko quotes there did not tell the user
-/// what to decide (task 1044).
+/// question -- push this? commit that? -- is exempt; one with cue, allow,
+/// link_project or approve is not, since what ekko quotes there did not tell
+/// the user what to decide (task 1044).
 fn unexplained(inquiry: &Inquiry) -> Option<String> {
     let blank = |text: &Option<String>| text.as_deref().is_none_or(|text| text.trim().is_empty());
     if blank(&inquiry.explain) {
@@ -443,8 +443,9 @@ mod tests {
     }
 
     /// The class (task 1044): every question that proposes what the user's
-    /// answer applies -- a cue, a call let through once, a link -- explains
-    /// itself, quick or not, and offers exactly two answers, one recommended.
+    /// answer applies -- a cue, a call let through once, a link, an
+    /// artifact's tasks (task 1019) -- explains itself, quick or not, and
+    /// offers exactly two answers, one recommended.
     #[test]
     fn a_question_proposing_what_its_answer_applies_explains_itself_and_offers_two_answers() {
         let proposing = |asked: Inquiry| {
@@ -452,7 +453,8 @@ mod tests {
             [
                 Inquiry { cue: Some(cue), ..asked.clone() },
                 Inquiry { allow: Some("abc123".into()), ..asked.clone() },
-                Inquiry { link_project: Some("blog".into()), ..asked },
+                Inquiry { link_project: Some("blog".into()), ..asked.clone() },
+                Inquiry { approve: Some(crate::ops::Ref::Id(7)), ..asked },
             ]
         };
         let both = || vec![aided("Sim", true), aided("Não", false)];
@@ -463,7 +465,7 @@ mod tests {
         let three = [both(), vec![aided("Depois", false)]].concat();
         for (options, multiple) in [(vec![], false), (three, false), (both(), true)] {
             for asked in proposing(Inquiry { multiple, ..inquiry(Some("x"), options.clone()) }) {
-                assert!(refused(&asked).starts_with("a question with cue, allow or link_project offers exactly two options"), "{asked:?}");
+                assert!(refused(&asked).starts_with("a question with cue, allow, link_project or approve offers exactly two options"), "{asked:?}");
             }
         }
         for asked in proposing(inquiry(Some("x"), vec![aided("Sim", true)])) {

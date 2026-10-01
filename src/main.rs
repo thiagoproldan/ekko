@@ -1,4 +1,5 @@
 mod agent;
+mod artifact;
 mod cli;
 mod commits;
 mod config;
@@ -38,6 +39,7 @@ const HELP: &str = r#"
     $ ekko [<options> ...]
     $ ekko init [<folder>] [--name <name>]
     $ ekko docs [<folder>] [--project <name>]
+    $ ekko artifact <id> [--project <name>] [--no-open]
 
     Options
         none              Display board view
@@ -175,9 +177,12 @@ fn main() -> ExitCode {
     if args.get(leading_json).map(String::as_str) == Some("init") {
         return run_init(&args[leading_json + 1..], leading_json > 0);
     }
-    // `docs` too (task 915).
+    // `docs` too (task 915), and `artifact` (task 1019).
     if args.get(leading_json).map(String::as_str) == Some("docs") {
         return run_docs(&args[leading_json + 1..], leading_json > 0);
+    }
+    if args.get(leading_json).map(String::as_str) == Some("artifact") {
+        return run_artifact(&args[leading_json + 1..], leading_json > 0);
     }
 
     let cli = match cli::Cli::try_parse_from(std::iter::once("ekko".to_string()).chain(args)) {
@@ -422,6 +427,51 @@ fn run_docs(args: &[String], json_first: bool) -> ExitCode {
         }
         Err(err) => finish_with_error(&err, json_mode, &home_dir),
     }
+}
+
+/// `ekko artifact <id>`: the artifact's page, written from the board and
+/// opened in the default browser, where it keeps itself current.
+fn run_artifact(args: &[String], json_first: bool) -> ExitCode {
+    let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cli = match cli::ArtifactCli::try_parse_from(std::iter::once("ekko artifact".to_string()).chain(args.iter().cloned())) {
+        Ok(cli) => cli,
+        Err(e) => {
+            eprint!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let json_mode = json_first || cli.json;
+    let ekko_dir_env = std::env::var("EKKO_DIR").ok();
+    let project_env = std::env::var("EKKO_PROJECT").ok();
+    let project_name = cli.project.as_deref().or(project_env.as_deref());
+    let location = match directory::locate(&home_dir, &cwd, None, ekko_dir_env.as_deref(), project_name) {
+        Ok(location) => location,
+        Err(err) => return finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
+    };
+    let root = location.project.as_ref().and_then(|project| project.root.clone());
+    let written = Ekko::at(&location).and_then(|ekko| {
+        let all = ekko.storage.get_shared()?;
+        let id = ekko.validate_ids(std::slice::from_ref(&cli.id), &all)?[0];
+        let item = &all[&id];
+        if item.artifact.is_none() {
+            return Err(EkkoError::InvalidInput(format!("{id} is not an artifact: a session writes one with ekko's artifact tool")));
+        }
+        artifact::write(&location.dir, item, &all, root.as_deref()).map_err(|error| EkkoError::InvalidInput(format!("its page could not be written: {error}")))
+    });
+    let path = match written {
+        Ok(path) => path,
+        Err(err) => return finish_with_error(&err, json_mode, &home_dir),
+    };
+    let opened = !cli.no_open && artifact::open(&path).is_ok();
+    if json_mode {
+        println!("{}", serde_json::json!({"page": path.display().to_string(), "opened": opened}));
+    } else if opened {
+        println!("{} (opened in the browser)", path.display());
+    } else {
+        println!("{}", path.display());
+    }
+    ExitCode::SUCCESS
 }
 
 /// All of stdin, for a guard: a Bash command can run past what
