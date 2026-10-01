@@ -203,17 +203,18 @@ pub struct Inquiry {
     #[serde(default)]
     pub multiple: bool,
     /// Proposes a cue for a gotcha, or turning its cue off (task 805): ekko
-    /// writes what the question shows and offers, and the user's answer in
-    /// ekko's menu applies it.
+    /// adds what the cue refuses under the session's explain, and the user's
+    /// first answer in ekko's menu applies it (task 1044).
     #[serde(default)]
     pub cue: Option<CueAsk>,
     /// The code a guard's refusal gave: the question asks the user to let
-    /// that call through once, and ekko quotes the call as refused.
+    /// that call through once, and ekko quotes the call as refused under the
+    /// session's explain.
     #[serde(default)]
     pub allow: Option<String>,
     /// A project to link this board's project with, both ways (task 811):
-    /// ekko writes what the link does, and the user's answer in ekko's menu
-    /// makes it.
+    /// ekko adds what the link does under the session's explain, and the
+    /// user's first answer in ekko's menu makes it (task 1044).
     #[serde(default)]
     pub link_project: Option<String>,
 }
@@ -395,11 +396,6 @@ where
 
 fn invalid(message: impl Into<String>) -> EkkoError {
     EkkoError::InvalidInput(message.into())
-}
-
-/// An answer ekko offers under a question it composes.
-fn choice(label: &str, description: &str) -> Choice {
-    Choice { label: label.to_string(), description: Some(description.to_string()), ..Choice::default() }
 }
 
 /// The refusal of a note given someone to be with.
@@ -676,7 +672,8 @@ impl<'a> Draft<'a> {
         let now = chrono::Local::now().timestamp_millis();
         let asked_by = self.ekko.actor.as_ref().filter(|actor| !actor.is_person()).map(|actor| actor.holder(now));
         // The revision is the write's own, stamped as it is saved.
-        self.item(id).question = Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, link: None, unknown: Default::default() }));
+        self.item(id).question =
+            Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, link: None, applies: None, unknown: Default::default() }));
         Ok(id)
     }
 
@@ -714,25 +711,29 @@ impl<'a> Draft<'a> {
         let answer = Answer { text: text.to_string(), by, at: now, rev: 0, unknown: Default::default() };
         let proposal = asked.cue.clone();
         let linking = asked.link.clone();
+        let applies = asked.applies.clone();
         self.item(id).question = Some(Box::new(Question { answer: Some(answer), ..*asked }));
         if let Some(proposal) = proposal {
-            self.settle_proposal(id, &proposal, text, now);
+            self.settle_proposal(id, &proposal, applies.as_deref(), text, now);
         }
         if let Some(linking) = linking {
-            self.settle_link(&linking, text);
+            self.settle_link(&linking, applies.as_deref(), text);
         }
         Ok(id)
     }
 
     /// Applies the cue `proposal` to its gotcha, when the user's answer to
-    /// question `id` says so: "Turn on" sets the cue proposed, "Turn off"
-    /// drops it, and any other answer changes nothing.
-    fn settle_proposal(&mut self, id: u32, proposal: &Proposal, answer: &str, now: i64) {
-        let cue = match (&proposal.cue, answer) {
-            (Some(cue), crate::guard::TURN_ON) => Some(cue.clone()),
-            (None, crate::guard::TURN_OFF) => None,
-            _ => return,
-        };
+    /// question `id` is the one that applies it: `applies`, the first answer
+    /// the asking session offered, or on a question without it ekko's own
+    /// "Turn on" or "Turn off", a note added to it or not. The cue proposed
+    /// is set, or a proposal of none drops the gotcha's, and any other answer
+    /// changes nothing.
+    fn settle_proposal(&mut self, id: u32, proposal: &Proposal, applies: Option<&str>, answer: &str, now: i64) {
+        let own = if proposal.cue.is_some() { crate::guard::TURN_ON } else { crate::guard::TURN_OFF };
+        if crate::menu::picked(answer) != applies.unwrap_or(own) {
+            return;
+        }
+        let cue = proposal.cue.clone();
         let gotcha = self.data.values().find(|item| item.uid.as_deref() == Some(proposal.gotcha.as_str())).map(|item| item.id);
         let Some(gotcha) = gotcha.filter(|gotcha| self.data[gotcha].knowledge == Some(Knowledge::Gotcha)) else {
             self.notices.push(format!("the gotcha question {id} is about is no longer on the board as a gotcha: its cue was left as it was"));
@@ -742,12 +743,15 @@ impl<'a> Draft<'a> {
         self.item(gotcha).cue = cue.map(|cue| CueOn { cue, question, at: now });
     }
 
-    /// Links the two projects `linking` names when the user's answer is Link
-    /// (task 811); any other answer changes nothing. The link is written to
-    /// the registry, outside the board, as the answer is recorded: a write
-    /// that then fails leaves the link made and the question open.
-    fn settle_link(&mut self, linking: &Linking, answer: &str) {
-        if answer != crate::project::LINK {
+    /// Links the two projects `linking` names when the user's answer is the
+    /// one that applies it (task 811): `applies`, or on a question without it
+    /// ekko's own "Link", a note added to it or not. Any other answer changes
+    /// nothing. The link is
+    /// written to the registry, outside the board, as the answer is
+    /// recorded: a write that then fails leaves the link made and the
+    /// question open.
+    fn settle_link(&mut self, linking: &Linking, applies: Option<&str>, answer: &str) {
+        if crate::menu::picked(answer) != applies.unwrap_or(crate::project::LINK) {
             return;
         }
         let Some((home, _)) = &self.ekko.linkable else {
@@ -761,35 +765,32 @@ impl<'a> Draft<'a> {
         }
     }
 
-    /// Asks `inquiry`, as `ask` does, with what ekko adds to a question that
-    /// proposes a cue or asks to let a refused call through (task 805): the
-    /// text it quotes and the answers it offers, which the session does not
-    /// write. The question as put to the user comes back with its id.
+    /// Asks `inquiry`, as `ask` does. A question proposing what the user's
+    /// answer applies -- a cue (task 805), a refused call let through once,
+    /// two projects linked (task 811) -- gets the block ekko quotes, what
+    /// would be applied, after the session's explanation. The session writes
+    /// the two answers, in the user's language, and the first applies it
+    /// (task 1044). The question as put to the user comes back with its id.
     pub fn ask_inquiry(&mut self, inquiry: &Inquiry, about: Option<&Ref>, home: &Path) -> Result<(u32, Inquiry), EkkoError> {
+        if inquiry.cue.is_some() || inquiry.allow.is_some() || inquiry.link_project.is_some() {
+            if let Some(why) = crate::dialog::check(inquiry) {
+                return Err(invalid(why));
+            }
+        }
         if let Some(name) = &inquiry.link_project {
             if inquiry.cue.is_some() || inquiry.allow.is_some() {
                 return Err(invalid("a question takes one of cue, allow and link_project"));
             }
-            if !inquiry.options.is_empty() || inquiry.multiple {
-                return Err(invalid("a question with link_project takes no options: ekko offers the answers, and only the first does anything"));
-            }
             let (block, linking) = self.linking(name)?;
-            let options = [
-                choice(crate::project::LINK, "a session on either board reaches the other's through ekko's MCP, with no prompt"),
-                choice(crate::project::DONT_LINK, "nothing changes"),
-            ];
-            return self.ask_proposing(inquiry, &block, options, about, |question| question.link = Some(linking));
+            return self.ask_proposing(inquiry, &block, about, |question| question.link = Some(linking));
         }
-        let (block, options, proposal, allowance) = match (&inquiry.cue, &inquiry.allow) {
+        let (block, proposal, allowance) = match (&inquiry.cue, &inquiry.allow) {
             (None, None) => {
                 let noted = crate::dialog::noted(&inquiry.text, inquiry.explain.as_deref(), &inquiry.options, inquiry.multiple);
                 let id = self.ask(&noted, about)?;
                 return Ok((id, inquiry.clone()));
             }
             (Some(_), Some(_)) => return Err(invalid("a question takes cue or allow, not both")),
-            _ if !inquiry.options.is_empty() || inquiry.multiple => {
-                return Err(invalid("a question with cue or allow takes no options: ekko offers the answers, and only the first does anything"));
-            }
             (Some(spec), None) => {
                 let target = self.resolve(&spec.gotcha)?;
                 let gotcha = &self.data[&target];
@@ -815,53 +816,41 @@ impl<'a> Draft<'a> {
                     )));
                 }
                 let block = crate::guard::proposal_block(gotcha, &proposal, self.ekko.folder.as_deref());
-                let options = if proposal.cue.is_some() {
-                    [
-                        choice(crate::guard::TURN_ON, "the cue refuses those calls from now on, in every session"),
-                        choice(crate::guard::LEAVE_OFF, "nothing changes"),
-                    ]
-                } else {
-                    [choice(crate::guard::TURN_OFF, "those calls stop being refused"), choice(crate::guard::KEEP_ON, "nothing changes")]
-                };
-                (block, options, Some(proposal), None)
+                (block, Some(proposal), None)
             }
             (None, Some(code)) => {
                 let session = self.ekko.actor.as_ref().and_then(|actor| actor.process.as_ref());
                 let now = chrono::Local::now().timestamp_millis();
                 let refused = crate::guard::refusal(home, code.trim(), session, now).map_err(invalid)?;
                 let (block, allowance) = crate::guard::allow_block(&refused);
-                let options = [
-                    choice(crate::guard::ALLOW_ONCE, "this exact call goes through once, from that folder and that session, within 24 hours"),
-                    choice(crate::guard::KEEP_REFUSED, "it stays refused"),
-                ];
-                (block, options, None, Some(allowance))
+                (block, None, Some(allowance))
             }
         };
-        self.ask_proposing(inquiry, &block, options, about, |question| {
+        self.ask_proposing(inquiry, &block, about, |question| {
             question.cue = proposal;
             question.allow = allowance;
         })
     }
 
-    /// Records `inquiry` with `block` after its text and `options` as its
-    /// answers, then sets on the question what `propose` does: what ekko
-    /// adds to a question whose answer applies something, and the question
-    /// as put to the user, with its id.
+    /// Records `inquiry` with `block` after its explanation and the
+    /// session's two options as its answers, the first of which applies
+    /// what the question proposes; then sets on the question what `propose`
+    /// does. The question as put to the user comes back, with its id.
     fn ask_proposing(
         &mut self,
         inquiry: &Inquiry,
         block: &str,
-        options: [Choice; 2],
         about: Option<&Ref>,
         propose: impl FnOnce(&mut Question),
     ) -> Result<(u32, Inquiry), EkkoError> {
-        let text = format!("{}{block}", inquiry.text.trim_end());
-        let id = self.ask(&crate::dialog::noted(&text, None, &options, false), about)?;
+        let explain = format!("{}\n\n{}", inquiry.explain.as_deref().unwrap_or_default().trim(), block.trim());
+        let id = self.ask(&crate::dialog::noted(&inquiry.text, Some(&explain), &inquiry.options, false), about)?;
+        let applies = inquiry.options.first().map(|option| option.label.trim().to_string());
         if let Some(question) = self.item(id).question.as_mut() {
+            question.applies = applies;
             propose(question);
         }
-        let options = options.to_vec();
-        Ok((id, Inquiry { text, explain: None, quick: false, options, multiple: false, cue: None, allow: None, link_project: None }))
+        Ok((id, Inquiry { explain: Some(explain), quick: false, cue: None, allow: None, link_project: None, ..inquiry.clone() }))
     }
 
     /// What a question proposing to link this board's project and `name`'s

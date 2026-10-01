@@ -336,7 +336,7 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
     found.extend(attached_to.as_deref().map(|uid| ("is attached to", uid)));
     found.extend(supersedes.as_deref().map(|uid| ("supersedes", uid)));
     if let Some(question) = question.as_deref() {
-        let Question { cue: proposal, asked_by: _, rev: _, answer: _, allow: _, link: _, unknown: _ } = question;
+        let Question { cue: proposal, asked_by: _, rev: _, answer: _, allow: _, link: _, applies: _, unknown: _ } = question;
         if let Some(Proposal { gotcha, cue: _, unknown: _ }) = proposal {
             found.push(("proposes a cue for", gotcha));
         }
@@ -395,7 +395,7 @@ fn arriving(item: &Item, id: u32) -> Item {
         cue,
     } = item;
     let question = question.as_deref().map(|question| {
-        let Question { rev: _, answer, asked_by, cue, allow, link, unknown } = question;
+        let Question { rev: _, answer, asked_by, cue, allow, link, applies, unknown } = question;
         let answer = answer.as_ref().map(|answer| {
             let Answer { rev: _, text, by, at, unknown } = answer;
             Answer { rev: 0, text: text.clone(), by: by.clone(), at: *at, unknown: unknown.clone() }
@@ -407,6 +407,7 @@ fn arriving(item: &Item, id: u32) -> Item {
             cue: cue.clone(),
             allow: allow.clone(),
             link: link.clone(),
+            applies: applies.clone(),
             unknown: unknown.clone(),
         })
     });
@@ -597,7 +598,7 @@ mod tests {
         batch(&here, &[json!({"op": "create", "kind": "decision", "text": "settled", "attached_to": 2})]);
         write(&here, |data| {
             let answer = Answer { text: "yes".into(), by: None, at: NOW, rev: 0, unknown: BTreeMap::new() };
-            let question = Question { asked_by: None, rev: 0, answer: Some(answer), cue: None, allow: None, link: None, unknown: BTreeMap::new() };
+            let question = Question { asked_by: None, rev: 0, answer: Some(answer), cue: None, allow: None, link: None, applies: None, unknown: BTreeMap::new() };
             data.get_mut(&3).unwrap().question = Some(Box::new(question));
         });
         let before = board(&here);
@@ -795,7 +796,7 @@ mod tests {
         );
         write(&theirs, |data| {
             let by = running.holder(NOW);
-            let question = Question { asked_by: Some(by.clone()), rev: 0, answer: None, cue: None, allow: None, link: None, unknown: BTreeMap::new() };
+            let question = Question { asked_by: Some(by.clone()), rev: 0, answer: None, cue: None, allow: None, link: None, applies: None, unknown: BTreeMap::new() };
             data.get_mut(&2).unwrap().question = Some(Box::new(question));
             let on = data[&3].uid.clone().unwrap();
             let wait = Wait { on, until: crate::item::Until::Done, by, rev: 0, over: None, unknown: BTreeMap::new() };
@@ -910,12 +911,14 @@ mod tests {
             "answer": {"text": "yes", "by": holder, "at": 16, "rev": 17},
             "cue": {"gotcha": "g", "cue": {"command": "gh", "words": ["pr"], "folder": "/f"}},
             "allow": {"code": "c", "tool": "Bash", "call": "ls", "cwd": "/", "reasons": ["r"], "used": {"toolUseId": "x", "at": 18}},
-            "link": {"projects": ["p1", "p2"]}
+            "link": {"projects": ["p1", "p2"]},
+            "applies": "Sim"
         });
         value["wait"] = json!({"on": "w", "until": "done", "by": holder, "rev": 19, "over": {"how": "done", "by": holder, "at": 20, "rev": 21}});
         value["cue"] = json!({"command": "cargo", "words": ["fmt"], "question": "q", "at": 22});
         let item: Item = serde_json::from_value(value).unwrap();
         assert_eq!(item.unknown.keys().collect::<Vec<_>>(), ["a later field"], "every other key is a field");
+        assert!(item.question.as_ref().unwrap().unknown.is_empty(), "every key of the question is a field");
 
         let arrived = arriving(&item, 99);
         let board_s = |item: &Item| {

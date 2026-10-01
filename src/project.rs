@@ -333,10 +333,10 @@ pub fn linked(home: &Path, project: &Project) -> Vec<Project> {
     found
 }
 
-/// The answer to a question proposing a link that makes it (task 811).
+/// The answer that made the link a question proposed (task 811), before
+/// the asking session wrote the answers itself (task 1044): a question
+/// asked then records no `applies`, and still takes it.
 pub const LINK: &str = "Link";
-/// The answer that leaves two projects unlinked.
-pub const DONT_LINK: &str = "Don't link";
 
 /// Links `a` and `b`, both ways (task 811); false when they were linked
 /// already. Only the user makes a link: the caller has made sure of that.
@@ -1200,9 +1200,13 @@ mod tests {
 
     /// Only the user makes a link (task 811): a session's --link-project is
     /// refused, and so is its answer to the question proposing one, which
-    /// ask records with the answers ekko offers; the user's Link makes it,
-    /// and Don't link leaves the two as they were. A link that exists is not
-    /// proposed again, and taking one away is anyone's.
+    /// ask records with the two answers the session wrote (task 1044); the
+    /// user's first answer makes it, with a note or without, and the second
+    /// -- or ekko's own Link, which this question did not offer -- leaves the
+    /// two as they were. A
+    /// link that exists is not proposed again, and taking one away is
+    /// anyone's. A question asked before, which records no answer of its
+    /// own, still takes ekko's Link, and nothing else.
     #[test]
     fn only_the_user_makes_a_link_and_a_session_proposes_one_with_ask() {
         use crate::holder::{test_sessions, Actor};
@@ -1220,7 +1224,16 @@ mod tests {
         let propose = || {
             let ekko = open(&session);
             let mut draft = Draft::open(&ekko)?;
-            let inquiry = serde_json::from_value(serde_json::json!({"text": "Ligo os quadros?", "link_project": "blog"})).unwrap();
+            let inquiry = serde_json::from_value(serde_json::json!({
+                "text": "Ligo os quadros?",
+                "link_project": "blog",
+                "explain": "O que a ligação faz.",
+                "options": [
+                    {"label": "Ligar", "recommended": true, "why": "uma sessão alcança o outro quadro", "example": "project blog"},
+                    {"label": "Não ligar", "why": "nada muda", "example": "cada quadro fica só"}
+                ]
+            }))
+            .unwrap();
             let asked = draft.ask_inquiry(&inquiry, None, &home)?;
             draft.commit(false)?;
             Ok::<_, crate::ekko::EkkoError>(asked)
@@ -1237,19 +1250,36 @@ mod tests {
         assert!(names().is_empty());
 
         let (question, put) = propose().unwrap();
-        assert!(put.text.contains("The link proposed: the boards of projects site ("), "{}", put.text);
-        assert_eq!(put.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), [LINK, DONT_LINK]);
-        assert!(answer(&session, question, LINK).is_err(), "a session's answer never links");
+        let explain = put.explain.clone().unwrap_or_default();
+        assert!(explain.starts_with("O que a ligação faz.\n\nThe link proposed: the boards of projects site ("), "{explain}");
+        assert_eq!(put.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), ["Ligar", "Não ligar"]);
+        assert!(answer(&session, question, "Ligar").is_err(), "a session's answer never links");
         assert!(names().is_empty());
         let (declined, _) = propose().unwrap();
-        answer(&Actor::person(), declined, DONT_LINK).unwrap();
+        answer(&Actor::person(), declined, "Não ligar").unwrap();
         assert!(names().is_empty());
-        answer(&Actor::person(), question, LINK).unwrap();
+        let (old_word, _) = propose().unwrap();
+        answer(&Actor::person(), old_word, LINK).unwrap();
+        assert!(names().is_empty(), "ekko's own Link applies only a question that offered it");
+        answer(&Actor::person(), question, "Ligar — note: só o blog").unwrap();
         assert_eq!(names(), ["blog"]);
         assert!(propose().unwrap_err().to_string().contains("site and blog are linked already"));
 
         open(&session).link_project("blog", false).unwrap();
         assert!(names().is_empty());
+
+        let asked_before = || {
+            let (asked, _) = propose().unwrap();
+            let ekko = open(&Actor::person());
+            let mut data = ekko.storage.get().unwrap();
+            data.get_mut(&asked).unwrap().question.as_mut().unwrap().applies = None;
+            ekko.storage.set(&data).unwrap();
+            asked
+        };
+        answer(&Actor::person(), asked_before(), "Ligar").unwrap();
+        assert!(names().is_empty(), "the session's word, on a question that recorded none");
+        answer(&Actor::person(), asked_before(), LINK).unwrap();
+        assert_eq!(names(), ["blog"]);
         fs::remove_dir_all(&home).ok();
     }
 }

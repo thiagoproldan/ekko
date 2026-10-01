@@ -185,7 +185,14 @@ pub fn check(inquiry: &Inquiry) -> Option<String> {
         return Some(why);
     }
     let composed = inquiry.cue.is_some() || inquiry.allow.is_some() || inquiry.link_project.is_some();
-    if inquiry.quick || composed {
+    if composed && (inquiry.options.len() != 2 || inquiry.multiple) {
+        return Some(
+            "a question with cue, allow or link_project offers exactly two options, written for the user in their language: \
+             the first applies what it proposes, the second leaves things as they are"
+                .to_string(),
+        );
+    }
+    if inquiry.quick && !composed {
         return None;
     }
     unexplained(inquiry)
@@ -195,8 +202,9 @@ pub fn check(inquiry: &Inquiry) -> Option<String> {
 /// asked on 2026-09-30 that no question assume they followed everything it
 /// asks about. So a question explains itself, recommends an answer, and says
 /// beside each option why one would pick it, with an example. A quick, direct
-/// question -- push this? commit that? -- is exempt, and so is one ekko
-/// composes itself, with cue, allow or link_project.
+/// question -- push this? commit that? -- is exempt; one with cue, allow or
+/// link_project is not, since what ekko quotes there did not tell the user
+/// what to decide (task 1044).
 fn unexplained(inquiry: &Inquiry) -> Option<String> {
     let blank = |text: &Option<String>| text.as_deref().is_none_or(|text| text.trim().is_empty());
     if blank(&inquiry.explain) {
@@ -431,8 +439,44 @@ mod tests {
         assert!(check(&several(vec![aided("A", false), aided("B", false)])).unwrap_or_default().contains("one or more"));
         let quick = Inquiry { quick: true, ..inquiry(None, vec![choice("Yes", None), choice("No", None)]) };
         assert_eq!(check(&quick), None);
-        let allow = Inquiry { allow: Some("abc123".into()), ..inquiry(None, vec![]) };
-        assert_eq!(check(&allow), None);
         assert!(refused(inquiry(Some("x"), vec![aided("A (Recommended)", true), aided("B", false)])).starts_with("a label does not say"));
+    }
+
+    /// The class (task 1044): every question that proposes what the user's
+    /// answer applies -- a cue, a call let through once, a link -- explains
+    /// itself, quick or not, and offers exactly two answers, one recommended.
+    #[test]
+    fn a_question_proposing_what_its_answer_applies_explains_itself_and_offers_two_answers() {
+        let proposing = |asked: Inquiry| {
+            let cue = serde_json::from_value(json!({"gotcha": 1, "off": true})).unwrap();
+            [
+                Inquiry { cue: Some(cue), ..asked.clone() },
+                Inquiry { allow: Some("abc123".into()), ..asked.clone() },
+                Inquiry { link_project: Some("blog".into()), ..asked },
+            ]
+        };
+        let both = || vec![aided("Sim", true), aided("Não", false)];
+        for asked in proposing(inquiry(Some("What the answer changes."), both())) {
+            assert_eq!(check(&asked), None, "{asked:?}");
+        }
+        let refused = |asked: &Inquiry| check(asked).unwrap_or_default();
+        let three = [both(), vec![aided("Depois", false)]].concat();
+        for (options, multiple) in [(vec![], false), (three, false), (both(), true)] {
+            for asked in proposing(Inquiry { multiple, ..inquiry(Some("x"), options.clone()) }) {
+                assert!(refused(&asked).starts_with("a question with cue, allow or link_project offers exactly two options"), "{asked:?}");
+            }
+        }
+        for asked in proposing(inquiry(Some("x"), vec![aided("Sim", true)])) {
+            assert!(refused(&asked).starts_with("options offers 2 to"), "{asked:?}");
+        }
+        for asked in proposing(Inquiry { quick: true, ..inquiry(None, both()) }) {
+            assert!(refused(&asked).starts_with("each question needs explain"), "{asked:?}");
+        }
+        for asked in proposing(inquiry(Some("x"), vec![aided("Sim", false), aided("Não", false)])) {
+            assert!(refused(&asked).contains("exactly one"), "{asked:?}");
+        }
+        for asked in proposing(inquiry(Some("x"), vec![aided("Sim", true), choice("Não", None)])) {
+            assert!(refused(&asked).ends_with("Não has no why and no example"), "{asked:?}");
+        }
     }
 }

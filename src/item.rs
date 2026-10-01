@@ -410,6 +410,13 @@ pub struct Question {
     /// answer in ekko's menu links.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<Linking>,
+    /// The answer that applies what the question proposes -- the cue, the
+    /// call let through once, the link -- when the asking session wrote the
+    /// two answers itself, in the user's language: the first of them (task
+    /// 1044). Absent, ekko's own first answer applies: Turn on, Turn off,
+    /// Allow once or Link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applies: Option<String>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]

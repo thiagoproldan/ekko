@@ -18,8 +18,8 @@
 //! A refused call -- by a cue, or by another guard, such as ctx's, through
 //! `ekko --guard --refuse` -- is recorded under a code, which the reason
 //! gives. A session asks the user with that code (`ask` with `allow`), the
-//! question quotes the call as recorded, and the user's "Allow once" in
-//! ekko's menu lets the same call, from the same folder and the same
+//! question quotes the call as recorded, and the user's answer in ekko's
+//! menu, the first of the two the session offered, lets the same call, from the same folder and the same
 //! session, through once within a day: dcg's allow-once, answered where the
 //! user already answers. The tool call that used it is recorded on the
 //! question, so each guard that sees that call lets it through, and no other
@@ -41,14 +41,12 @@ use crate::holder::{Actor, Process};
 use crate::item::{Allowance, Cue, Item, Knowledge, Proposal};
 use crate::storage::{ItemMap, Storage};
 
-/// The answers ekko offers under a question it composes; only the first of
-/// each pair does anything.
+/// The answers that applied a question ekko offered its own answers under,
+/// before the asking session wrote them (task 1044): a question asked then
+/// records no `applies`, and still takes these.
 pub const TURN_ON: &str = "Turn on";
-pub const LEAVE_OFF: &str = "Leave off";
 pub const TURN_OFF: &str = "Turn off";
-pub const KEEP_ON: &str = "Keep on";
 pub const ALLOW_ONCE: &str = "Allow once";
-pub const KEEP_REFUSED: &str = "Keep refused";
 
 /// How long a refusal can be asked about, and how long the user's answer
 /// lets its call through.
@@ -148,7 +146,7 @@ struct Indexed {
     guards: Option<PathBuf>,
 }
 
-/// A refused call the user answered "Allow once" for.
+/// A refused call the user let through, answering its question in the menu.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Granted {
     board: PathBuf,
@@ -210,7 +208,8 @@ fn build(boards: &[Board], stamps: Vec<(PathBuf, Stamp)>, now: i64) -> Index {
             }
             let Some(question) = item.question.as_ref().filter(|_| item.trashed.is_none()) else { continue };
             let (Some(allow), Some(answer), Some(uid)) = (&question.allow, &question.answer, &item.uid) else { continue };
-            if answer.by_person() && answer.text == ALLOW_ONCE && now - answer.at < DAY {
+            let applies = question.applies.as_deref().unwrap_or(ALLOW_ONCE);
+            if answer.by_person() && crate::menu::picked(&answer.text) == applies && now - answer.at < DAY {
                 index.granted.push(Granted {
                     board: board.dir.clone(),
                     id: item.id,
@@ -483,8 +482,9 @@ fn spend(home: &Path, grant: &Granted, tool_use_id: &str, actor: &Actor) -> bool
 fn how_to_ask(code: &str) -> String {
     format!(
         "If the user wants this exact call made anyway, ask them through ekko's ask with allow set to \"{code}\" on the \
-         question. Only their answer in ekko's menu lets it through: once, from this folder and this session, within \
-         24 hours. An answer a session records does not count."
+         question, with explain and two options in their language, the first letting the call through. Only their answer \
+         in ekko's menu lets it through: once, from this folder and this session, within 24 hours. An answer a session \
+         records does not count."
     )
 }
 
@@ -724,7 +724,22 @@ mod tests {
         reason.split("allow set to \"").nth(1).unwrap()[..6].to_string()
     }
 
-    fn ask(ekko: &Ekko, home: &Path, question: Value) -> Result<(u32, Inquiry), EkkoError> {
+    /// The two answers a session writes under a question proposing what the
+    /// user's answer applies (task 1044): the first applies it.
+    const APPLY: &str = "Sim, aplica";
+    const KEEP: &str = "Não, deixa como está";
+
+    /// Asks `question` as a session writes one that proposes what the
+    /// user's answer applies: with an explanation and the two answers --
+    /// unless the question gives options of its own.
+    fn ask(ekko: &Ekko, home: &Path, mut question: Value) -> Result<(u32, Inquiry), EkkoError> {
+        if question.get("options").is_none() {
+            question["explain"] = json!("O que a resposta muda.");
+            question["options"] = json!([
+                {"label": APPLY, "recommended": true, "why": "aplica o que a pergunta propõe", "example": "a trava liga"},
+                {"label": KEEP, "why": "nada muda", "example": "tudo fica como está"}
+            ]);
+        }
         let mut draft = Draft::open(ekko)?;
         let asked = draft.ask_inquiry(&serde_json::from_value(question).unwrap(), None, home)?;
         draft.commit(false)?;
@@ -835,14 +850,16 @@ mod tests {
         let code = code_in(&refused(&call("/r", "t1", &session)).unwrap());
 
         let (asked, put) = ask(&ekko_at(&dir, Some(&session)), &home, json!({"text": "Posso rodar a mutação?", "allow": code})).unwrap();
-        assert!(put.text.starts_with("Posso rodar a mutação?\n\nThe call refused (Bash), from /r:\n"), "{}", put.text);
-        assert!(put.text.contains(command) && put.text.contains("The Status field lesson."), "{}", put.text);
-        assert_eq!(put.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), [ALLOW_ONCE, KEEP_REFUSED]);
+        let explain = put.explain.clone().unwrap_or_default();
+        assert_eq!(put.text, "Posso rodar a mutação?");
+        assert!(explain.starts_with("O que a resposta muda.\n\nThe call refused (Bash), from /r:\n"), "{explain}");
+        assert!(explain.contains(command) && explain.contains("The Status field lesson."), "{explain}");
+        assert_eq!(put.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), [APPLY, KEEP]);
         assert!(refused(&call("/r", "t2", &session)).is_some(), "unanswered, it stays refused");
 
-        let by_session = answer(&dir, &session, asked, ALLOW_ONCE).unwrap_err().to_string();
+        let by_session = answer(&dir, &session, asked, APPLY).unwrap_err().to_string();
         assert!(by_session.contains("is the user's to answer, in ekko's menu"), "{by_session}");
-        answer(&dir, &Actor::person(), asked, ALLOW_ONCE).unwrap();
+        answer(&dir, &Actor::person(), asked, APPLY).unwrap();
 
         assert!(refused(&call("/r", "t3", &other)).is_some(), "another session's same call");
         assert!(refused(&call("/elsewhere", "t3", &session)).is_some(), "the same call from another folder");
@@ -905,9 +922,10 @@ mod tests {
         let code = code_in(&sentence);
         assert!(refuse_reply(&home, &read("t2"), "ctx: it would bring secret material into the context", &session).unwrap().is_some());
         let (asked, put) = ask(&ekko_at(&dir, Some(&session)), &home, json!({"text": "Leio a chave?", "allow": code})).unwrap();
-        assert!(put.text.contains("The call refused (Read), from /r:\n{\"file_path\":\"/persist/secrets/key\"}"), "{}", put.text);
-        assert!(put.text.contains("- ctx: it would bring secret material into the context"), "{}", put.text);
-        answer(&dir, &Actor::person(), asked, ALLOW_ONCE).unwrap();
+        let explain = put.explain.unwrap_or_default();
+        assert!(explain.contains("The call refused (Read), from /r:\n{\"file_path\":\"/persist/secrets/key\"}"), "{explain}");
+        assert!(explain.contains("- ctx: it would bring secret material into the context"), "{explain}");
+        answer(&dir, &Actor::person(), asked, APPLY).unwrap();
         assert_eq!(refuse_reply(&home, &read("t3"), "ctx: again", &session), Some(None));
         assert_eq!(refuse_reply(&home, "not json", "ctx", &session), None, "unreadable input: the other guard refuses as it would have");
         std::fs::remove_dir_all(&home).ok();
@@ -923,13 +941,85 @@ mod tests {
         let read = json!({"tool_name": "Read", "tool_input": {"file_path": "/k"}, "cwd": "/r", "tool_use_id": "t1"}).to_string();
         let code = code_in(&refuse_reply(&home, &read, "ctx: a secret", &session).unwrap().unwrap());
         let (asked, _) = ask(&ekko_at(&dir, Some(&session)), &home, json!({"text": "Leio?", "allow": code})).unwrap();
-        answer(&dir, &Actor::person(), asked, ALLOW_ONCE).unwrap();
+        answer(&dir, &Actor::person(), asked, APPLY).unwrap();
         let grant = current(&home, chrono::Local::now().timestamp_millis()).granted.into_iter().find(|grant| grant.id == asked).unwrap();
         assert!(grant.used.is_none());
         assert!(spend(&home, &grant, "t2", &session), "the first guard of the call");
         assert!(spend(&home, &grant, "t2", &session), "the second guard of the same call, from the same stale index");
         assert!(!spend(&home, &grant, "t3", &session), "another call");
         assert!(!spend(&home, &grant, "", &session), "a call with no id");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The class (task 1044): each question proposing what the user's answer
+    /// applies -- a cue turned on, a cue turned off, a refused call let
+    /// through once -- shows the session's explanation with ekko's quote
+    /// under it, and the session's two answers; only the first applies it,
+    /// not the second, and not ekko's own word, which the question did not
+    /// offer. A note the user adds in the menu goes with the answer and
+    /// changes none of that. A question asked before, which records no
+    /// answer of its own, still takes ekko's word and nothing else. The
+    /// fourth, the link, is project.rs's.
+    #[test]
+    fn a_proposal_s_first_answer_applies_it_and_one_asked_before_takes_ekko_s_word() {
+        let home = home("class");
+        let dir = home.join(".ekko");
+        let (session, _, _) = test_sessions();
+        let as_session = ekko_at(&dir, Some(&session));
+        let turned_on = apply(&as_session, json!({"op": "create", "kind": "gotcha", "text": "cargo fmt --all reformats unrelated files"})).unwrap()[0];
+        let turned_off = cued(&dir, "gh pr merge skips the checks", cue("gh", &["merge"], None));
+        let write = |id: u32, change: &dyn Fn(&mut Item)| {
+            let ekko = ekko_at(&dir, None);
+            let mut data = ekko.storage.get().unwrap();
+            change(data.get_mut(&id).unwrap());
+            ekko.storage.set(&data).unwrap();
+        };
+        let has_cue = |gotcha: u32| ekko_at(&dir, None).storage.get().unwrap()[&gotcha].cue.is_some();
+        let reads = std::cell::Cell::new(0);
+        let question = |member: &str| match member {
+            "cue on" => json!({"text": "Ligo a trava?", "cue": {"gotcha": turned_on, "command": "cargo", "words": ["fmt"]}}),
+            "cue off" => json!({"text": "Desligo a trava?", "cue": {"gotcha": turned_off, "off": true}}),
+            _ => {
+                reads.set(reads.get() + 1);
+                let read = json!({"tool_name": "Read", "tool_input": {"file_path": format!("/k{}", reads.get())}, "cwd": "/r", "tool_use_id": "t"});
+                let code = code_in(&refuse_reply(&home, &read.to_string(), "ctx: a secret", &session).unwrap().unwrap());
+                json!({"text": "Leio?", "allow": code})
+            }
+        };
+        let applied = |member: &str, asked: u32| match member {
+            "cue on" => has_cue(turned_on),
+            "cue off" => !has_cue(turned_off),
+            _ => current(&home, chrono::Local::now().timestamp_millis()).granted.iter().any(|grant| grant.id == asked),
+        };
+        let reset = |member: &str| match member {
+            "cue on" => write(turned_on, &|gotcha| gotcha.cue = None),
+            "cue off" => write(turned_off, &|gotcha| gotcha.cue = Some(CueOn { cue: cue("gh", &["merge"], None), question: "q".into(), at: 0 })),
+            _ => {}
+        };
+        let members = [
+            ("cue on", TURN_ON, "The cue proposed for gotcha"),
+            ("cue off", TURN_OFF, "Proposed: turn off the cue of gotcha"),
+            ("allow", ALLOW_ONCE, "The call refused (Read)"),
+        ];
+        let noted = |answer: &str| format!("{answer} — note: só hoje");
+        for (member, word, quoted) in members {
+            for (given, applies) in [(KEEP, false), (word, false), (&noted(KEEP), false), (&noted(APPLY), true), (APPLY, true)] {
+                let (asked, put) = ask(&as_session, &home, question(member)).unwrap();
+                let explain = put.explain.unwrap_or_default();
+                assert!(explain.starts_with(&format!("O que a resposta muda.\n\n{quoted}")), "{member}: {explain}");
+                assert_eq!(put.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), [APPLY, KEEP], "{member}");
+                answer(&dir, &Actor::person(), asked, given).unwrap();
+                assert_eq!(applied(member, asked), applies, "{member}, answered {given}");
+                reset(member);
+            }
+            for (given, applies) in [(APPLY, false), (word, true), (&noted(word), true)] {
+                let (asked, _) = ask(&as_session, &home, question(member)).unwrap();
+                write(asked, &|asked| asked.question.as_mut().unwrap().applies = None);
+                answer(&dir, &Actor::person(), asked, given).unwrap();
+                assert_eq!(applied(member, asked), applies, "{member}, asked before task 1044, answered {given}");
+                reset(member);
+            }
+        }
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -963,24 +1053,25 @@ mod tests {
         let on = || cues_on(&ekko_at(&dir, None).storage.get().unwrap()).into_values().collect::<Vec<_>>();
 
         let (asked, put) = propose(json!({"gotcha": gotcha, "command": "cargo", "words": ["fmt", "--all"], "folder": "/projects/winwayland/"})).unwrap();
-        assert!(put.text.contains(&format!("The cue proposed for gotcha {gotcha}: refuse `cargo` calls holding `fmt` and `--all`, run in /projects/winwayland or under it")), "{}", put.text);
-        assert_eq!(put.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), [TURN_ON, LEAVE_OFF]);
+        let explain = put.explain.clone().unwrap_or_default();
+        assert!(explain.contains(&format!("The cue proposed for gotcha {gotcha}: refuse `cargo` calls holding `fmt` and `--all`, run in /projects/winwayland or under it")), "{explain}");
+        assert_eq!(put.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), [APPLY, KEEP]);
         assert!(on().is_empty(), "a proposal stays off");
-        assert!(answer(&dir, &session, asked, TURN_ON).is_err());
-        answer(&dir, &Actor::person(), asked, TURN_ON).unwrap();
+        assert!(answer(&dir, &session, asked, APPLY).is_err());
+        answer(&dir, &Actor::person(), asked, APPLY).unwrap();
         let winwayland = cue("cargo", &["fmt", "--all"], Some(Path::new("/projects/winwayland")));
         assert_eq!(on(), vec![winwayland.clone()]);
 
         let (change, _) = propose(json!({"gotcha": gotcha, "command": "cargo", "words": ["fmt"]})).unwrap();
-        answer(&dir, &Actor::person(), change, LEAVE_OFF).unwrap();
+        answer(&dir, &Actor::person(), change, KEEP).unwrap();
         assert_eq!(on(), vec![winwayland], "another answer changes nothing");
         let (change, _) = propose(json!({"gotcha": gotcha, "command": "cargo", "words": ["fmt"]})).unwrap();
-        answer(&dir, &Actor::person(), change, TURN_ON).unwrap();
+        answer(&dir, &Actor::person(), change, APPLY).unwrap();
         assert_eq!(on(), vec![cue("cargo", &["fmt"], None)]);
 
         let (off, put) = propose(json!({"gotcha": gotcha, "off": true})).unwrap();
-        assert_eq!(put.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), [TURN_OFF, KEEP_ON]);
-        answer(&dir, &Actor::person(), off, TURN_OFF).unwrap();
+        assert_eq!(put.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), [APPLY, KEEP]);
+        answer(&dir, &Actor::person(), off, APPLY).unwrap();
         assert!(on().is_empty());
         std::fs::remove_dir_all(&home).ok();
     }
@@ -1049,7 +1140,15 @@ mod tests {
             assert!(error.contains(why), "{question}: {error}");
         };
         fails(json!({"text": "?", "allow": "zzzzzz"}), "names no call a guard refused in the last day");
-        fails(json!({"text": "?", "allow": code, "options": [{"label": "a"}, {"label": "b"}]}), "takes no options");
+        let aided = |label: &str, recommended: bool| json!({"label": label, "recommended": recommended, "why": "w", "example": "e"});
+        fails(json!({"text": "?", "allow": code, "explain": "x", "options": [aided("a", true)]}), "options offers 2 to");
+        let three = [aided("a", true), aided("b", false), aided("c", false)];
+        fails(json!({"text": "?", "allow": code, "explain": "x", "options": three}), "offers exactly two options");
+        fails(json!({"text": "?", "allow": code, "explain": "x", "options": [aided("a", true), aided("b", false)], "multiple": true}), "offers exactly two options");
+        fails(json!({"text": "?", "allow": code, "options": [aided("a", true), aided("b", false)]}), "each question needs explain");
+        fails(json!({"text": "?", "allow": code, "quick": true, "options": [aided("a", true), aided("b", false)]}), "each question needs explain");
+        fails(json!({"text": "?", "allow": code, "explain": "x", "options": [aided("a", false), aided("b", false)]}), "sets recommended on exactly one");
+        fails(json!({"text": "?", "allow": code, "explain": "x", "options": [aided("a", true), {"label": "b"}]}), "b has no why and no example");
         fails(json!({"text": "?", "allow": code, "cue": {"gotcha": gotcha, "off": true}}), "cue or allow, not both");
         fails(json!({"text": "?", "cue": {"gotcha": note, "command": "gh"}}), "is not a gotcha");
         fails(json!({"text": "?", "cue": {"gotcha": gotcha, "command": "/usr/bin/gh"}}), "no directory");

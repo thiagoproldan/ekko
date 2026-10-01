@@ -318,7 +318,8 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
         thread::spawn(move || loop {
             thread::sleep(WATCH);
             let mut settled = server.watch();
-            // A question with link_project answered Link changes the tools.
+            // A question with link_project, answered with its first option,
+            // changes the tools.
             if !settled.is_empty() {
                 settled.extend(server.tools_changed());
             }
@@ -1406,7 +1407,7 @@ fn unlinked(name: &str, location: &directory::Location, linked: &[crate::project
     invalid(format!(
         "{name} is not linked to this session's board: {reach}. A session works on its own board, the one prime names on its \
          first line, and on those the user linked to it. The user links two projects with ekko --link-project NAME in a terminal \
-         of their own, or by answering Link to a question ask puts with link_project. Until then another project's board is the \
+         of their own, or by answering in ekko's menu a question ask puts with link_project. Until then another project's board is the \
          user's to open, with ekko --project NAME in a command they see; prose goes on stdin there (--note - <<'EOF'), since \
          inline the CLI reads @word as a board and p:N and d:DATE as fields"
     ))
@@ -1728,7 +1729,7 @@ fn tool_definitions(linked: &[String]) -> Value {
             "multiple": {"type": "boolean", "description": "The user may pick several options."},
             "cue": cue,
             "allow": {"type": "string", "description": "The code a guard's refusal gave: asks the user to let that exact call through once."},
-            "link_project": {"type": "string", "description": "Proposes linking this board and that project's, both ways: once the user answers Link in ekko's menu, a session on either reaches the other's board with project."}
+            "link_project": {"type": "string", "description": "Proposes linking this board and that project's, both ways: once the user picks the first option in ekko's menu, a session on either reaches the other's board with project."}
         }),
         &["text"],
     );
@@ -1846,7 +1847,7 @@ fn tool_definitions(linked: &[String]) -> Value {
         },
         {
             "name": "ask",
-            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. Unless quick, a question carries explain, and one option is recommended, each option with why and example, which the menu shows beside it. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer. With cue, allow or link_project, ekko writes what the question quotes and offers, and only the user's answer in ekko's menu applies it.",
+            "description": "Ask the user one to four questions and wait for the answers. Each is recorded first, as a note on the board about a task, so it outlives this session's /clear or restart and every session's prime lists it under 'Waiting on you'. Then ekko's menu puts them to the user, and their answers are recorded. With options, they pick one -- or several, with multiple -- or write another answer, and may add a note. Unless quick, a question carries explain, and one option is recommended, each option with why and example, which the menu shows beside it. A question without an answer (unanswered says why) stays open: ask it in chat and record the reply with answer. With cue, allow or link_project, give explain and two options, the first applying it: ekko adds what it applies under explain, and only the user's answer in ekko's menu counts.",
             "inputSchema": object(json!({
                 "about": item,
                 "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": question}

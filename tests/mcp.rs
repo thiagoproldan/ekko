@@ -1281,10 +1281,25 @@ fn a_session_reaches_the_board_the_user_linked_and_no_other() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// The answer that applies what a question proposes -- the first of the two
+/// a session writes under it, in the user's language (task 1044).
+const APPLY: &str = "Sim";
+
+/// A question proposing what the user's answer applies, as a session writes
+/// it: explained, with two answers, the first applying it.
+fn proposing(mut question: Value) -> Value {
+    question["explain"] = json!("O que a resposta muda.");
+    question["options"] = json!([
+        {"label": APPLY, "recommended": true, "why": "aplica o que ela propõe", "example": "feito"},
+        {"label": "Não", "why": "nada muda", "example": "fica como está"}
+    ]);
+    question
+}
+
 /// ask proposes a link, and only the user's answer in ekko's menu makes it
 /// (task 811): the question left open is the user's to answer, and the
-/// session's own answer to it is refused. Answered Link in the menu, the
-/// two are linked, and the session's client is told its tool list changed,
+/// session's own answer to it is refused. Answered in the menu with the
+/// first of the session's answers, the two are linked, and the session's client is told its tool list changed,
 /// which now takes project. ask with project puts its questions on the
 /// linked board, in a menu opened on it, and reads the answers there.
 #[test]
@@ -1294,24 +1309,25 @@ fn a_link_ask_proposes_is_made_only_by_the_users_answer_in_ekkos_menu() {
     let (site, blog) = (&folders[0], &folders[1]);
 
     let mut failed = Held::start_in(&home, Some(site), "exit 3");
-    failed.send(&call(2, "ask", json!({"questions": [{"text": "Ligo os quadros?", "link_project": "blog"}]})));
+    failed.send(&call(2, "ask", json!({"questions": [proposing(json!({"text": "Ligo os quadros?", "link_project": "blog"}))]})));
     let reply: Value = serde_json::from_str(text(&failed.reply(2))).unwrap();
     assert!(reply["unanswered"].as_str().unwrap().contains("One with cue, allow or link_project counts only answered there"), "{reply}");
-    failed.send(&call(3, "answer", json!({"question": 1, "text": "Link"})));
+    failed.send(&call(3, "answer", json!({"question": 1, "text": APPLY})));
     let refused = failed.reply(3);
     assert!(text(&refused).contains("1 is the user's to answer, in ekko's menu"), "{refused}");
     assert!(text(&refused).contains("They can open it with ekko --project site --answer 1 in a terminal"), "{refused}");
     failed.stop();
     assert!(cli_in(&home, site, &["--list"]).contains("The link proposed: the boards of projects site"));
 
-    // The menu, less the keys: every question answered Link, by the user.
-    let answer = "echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" Link; done";
+    // The menu, less the keys: every question answered with the first answer, by the user.
+    let answer = format!("echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" {APPLY}; done");
+    let answer = answer.as_str();
     let mut live = Held::start_in(&home, Some(site), answer);
     live.send(&request(2, "tools/list", json!({})));
     assert!(taking_project(&live.reply(2)).is_empty());
-    live.send(&call(3, "ask", json!({"questions": [{"text": "E agora?", "link_project": "blog"}]})));
+    live.send(&call(3, "ask", json!({"questions": [proposing(json!({"text": "E agora?", "link_project": "blog"}))]})));
     let answered: Value = serde_json::from_str(text(&live.reply(3))).unwrap();
-    assert_eq!(answered["answers"][0]["answer"], "Link", "{answered}");
+    assert_eq!(answered["answers"][0]["answer"], APPLY, "{answered}");
     let told = std::time::Instant::now();
     while !live.seen.iter().any(|m| m["method"] == "notifications/tools/list_changed") {
         assert!(told.elapsed().as_secs() < 10, "the client is never told its tools changed: {:?}", live.seen);
@@ -1324,7 +1340,7 @@ fn a_link_ask_proposes_is_made_only_by_the_users_answer_in_ekkos_menu() {
 
     live.send(&call(5, "ask", json!({"project": "blog", "questions": [{"quick": true, "text": "Qual quadro?"}]})));
     let there: Value = serde_json::from_str(text(&live.reply(5))).unwrap();
-    assert_eq!(there["answers"][0]["answer"], "Link", "{there}");
+    assert_eq!(there["answers"][0]["answer"], APPLY, "{there}");
     // Taken away in a terminal: the client is told with its next call's reply.
     let told = live.seen.len();
     cli_in(&home, blog, &["--unlink-project", "site"]);
@@ -1354,7 +1370,7 @@ fn a_link_ask_proposes_is_made_only_by_the_users_answer_in_ekkos_menu() {
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0xf73da63621507397;
+const PREFIX_FINGERPRINT: u64 = 0x4f9c94c5706d873e;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {
@@ -1597,7 +1613,7 @@ fn commits_name_their_tasks_and_context_lists_them() {
 
 /// move_to over MCP (task 909): to a board the user linked it moves at once;
 /// to any other -- the default board, which links to none -- it is refused
-/// with a code, and the user's "Allow once" in ekko's menu lets that exact
+/// with a code, and the user's first answer in ekko's menu lets that exact
 /// move through once, so the same call again is refused.
 #[test]
 fn a_session_moves_items_at_once_where_linked_and_elsewhere_once_the_user_allows() {
@@ -1609,9 +1625,9 @@ fn a_session_moves_items_at_once_where_linked_and_elsewhere_once_the_user_allows
         cli_in(&home, site, &["--task", task]);
     }
 
-    // The menu, less the keys: every question answered "Allow once", by the user.
-    let answer = "echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" 'Allow once'; done";
-    let mut live = Held::start_in(&home, Some(site), answer);
+    // The menu, less the keys: every question answered with the first answer, by the user.
+    let answer = format!("echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" {APPLY}; done");
+    let mut live = Held::start_in(&home, Some(site), &answer);
     live.send(&call(2, "move_to", json!({"destination": "blog", "items": [1]})));
     let linked = text(&live.reply(2)).to_string();
     assert!(linked.contains("Moved 1 item to project blog: 1 as 1"), "{linked}");
@@ -1622,9 +1638,9 @@ fn a_session_moves_items_at_once_where_linked_and_elsewhere_once_the_user_allows
     assert!(refused.starts_with("NOT_LINKED: the default board is not linked to this session's board"), "{refused}");
     let code = refused.rsplit("allow set to \"").next().unwrap().split('"').next().unwrap().to_string();
 
-    live.send(&call(4, "ask", json!({"questions": [{"text": "Movo a 2 para o quadro padrão?", "allow": code}]})));
+    live.send(&call(4, "ask", json!({"questions": [proposing(json!({"text": "Movo a 2 para o quadro padrão?", "allow": code}))]})));
     let answered: Value = serde_json::from_str(text(&live.reply(4))).unwrap();
-    assert_eq!(answered["answers"][0]["answer"], "Allow once", "{answered}");
+    assert_eq!(answered["answers"][0]["answer"], APPLY, "{answered}");
     live.send(&call(5, "move_to", home_bound.clone()));
     let through = text(&live.reply(5)).to_string();
     assert!(through.contains("Moved 1 item to the default board: 2 as 1"), "{through}");

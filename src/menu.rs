@@ -38,6 +38,17 @@ use crate::ops::{Choice, Draft, Ref};
 /// command line is appended to, such as `konsole -e`. `none` opens nothing.
 pub const TERMINAL: &str = "EKKO_TERMINAL";
 
+/// What joins the note the user adds with Tab to the answer it goes with,
+/// as the board records it.
+const NOTE: &str = " — note: ";
+
+/// The answer the user picked, without the note they added to it: what a
+/// question proposing a cue, a call let through or a link compares with the
+/// answer that applies it, so a note never undoes the pick.
+pub fn picked(answer: &str) -> &str {
+    answer.split_once(NOTE).map_or(answer, |(picked, _)| picked).trim()
+}
+
 /// How long the menu has to say it is up before it counts as never opened.
 const OPENING: Duration = Duration::from_secs(15);
 
@@ -361,7 +372,7 @@ impl Page {
     fn recorded(&self) -> Option<String> {
         let answer = self.answer.as_ref()?;
         Some(match &self.note {
-            Some(note) => format!("{answer} — note: {note}"),
+            Some(note) => format!("{answer}{NOTE}{note}"),
             None => answer.clone(),
         })
     }
