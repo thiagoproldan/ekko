@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::item::{Earlier, Item, State, Step};
+use crate::item::{Artifact, Earlier, Item, State, Step};
 use crate::storage::ItemMap;
 
 /// The headings a plan holds, in this order: what the goal is and why, what
@@ -359,128 +359,550 @@ pub fn approval_asked<'a>(item: &Item, all: &'a ItemMap) -> Option<&'a Item> {
 }
 
 /// The page of artifact `item` on the board `all`, whose project folder is
-/// `folder`, and the version it carries.
+/// `folder`, and the version it carries. Its look is the one the user picked
+/// from three mockups (task 1085, decision 1089): a sidebar and tabs, the
+/// plan's sections as cards beside its progress, its steps as a table and as
+/// the graph their `after` draws, its notes, and its earlier texts compared.
 pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, String) {
     let artifact = item.artifact.as_deref();
     let standing = Standing::of(item, all);
     let (title, plan) = item.description.split_once('\n').unwrap_or((item.description.as_str(), ""));
+    let title = title.trim();
     let board = folder.and_then(Path::file_name).map_or_else(|| "the default board".to_string(), |name| format!("project {}", name.to_string_lossy()));
-    let index = crate::ekko::uid_index(all);
-    let by_uid = |uid: &str| index.get(uid).and_then(|id| all.get(id));
+    let uid = item.uid.as_deref().unwrap_or_default();
+    let steps = artifact.map(|artifact| shown(artifact, all)).unwrap_or_default();
+    let sections = sections(plan);
+    let mut notes: Vec<&Item> =
+        all.values().filter(|note| !note.is_task && note.trashed.is_none() && !uid.is_empty() && note.attached_to.as_deref() == Some(uid)).collect();
+    notes.sort_by_key(|note| std::cmp::Reverse((note.timestamp, note.id)));
+    let open_questions: Vec<&Item> = notes.iter().copied().filter(|note| note.question.as_ref().is_some_and(|question| question.answer.is_none())).collect();
+    let tasks = steps.iter().filter(|step| step.task.is_some() && step.class != "cancelled").count();
+    let done = steps.iter().filter(|step| step.class == "done").count();
+    let version = artifact.map_or(0, |artifact| artifact.version);
+    let tabs = [
+        ("overview", "Overview", String::new()),
+        ("plan", "Plan", sections.iter().filter(|(heading, _)| !heading.is_empty()).count().to_string()),
+        ("steps", "Steps", if tasks > 0 { format!("{done}/{tasks}") } else { steps.len().to_string() }),
+        ("map", "Map", String::new()),
+        ("notes", "Notes", notes.len().to_string()),
+        ("history", "History", format!("v{version}")),
+    ];
 
     let mut body = String::new();
-    let _ = writeln!(body, "<header><p class=\"where\">ekko \u{b7} {} \u{b7} artifact {}</p>", esc(&board), item.id);
-    let _ = writeln!(body, "<h1>{}</h1>", esc(title.trim()));
+    // The sidebar: what the page is of, its tabs, and what waits on the user.
+    let _ = write!(
+        body,
+        "<aside class=\"side\"><div class=\"brand\"><span class=\"logo\">e</span><div><b>ekko</b><small>{} \u{b7} artifact {}</small></div></div><nav class=\"nav\"><div class=\"group\">Artifact {}</div>",
+        esc(&board),
+        item.id,
+        item.id
+    );
+    for (tab, name, count) in &tabs {
+        let _ = write!(body, "<a href=\"#{tab}\" data-tab=\"{tab}\">{name}<span class=\"count\">{}</span></a>", esc(count));
+    }
+    body.push_str("<div class=\"group\">Waiting on you</div>");
+    if open_questions.is_empty() {
+        body.push_str("<span class=\"none\">Nothing</span>");
+    }
+    for question in &open_questions {
+        let _ = write!(body, "<a href=\"#notes\" data-tab=\"notes\">Question {}<span class=\"count\">open</span></a>", question.id);
+    }
+    let _ = write!(body, "</nav><div class=\"side-foot\"><span class=\"live\"></span>Follows the board \u{b7} ekko {}</div></aside>", env!("CARGO_PKG_VERSION"));
+
+    // The head of the page: where it stands, and what asks for the user.
+    let _ = write!(
+        body,
+        "<main><div class=\"topbar\"><span class=\"crumb\">ekko \u{b7} {} \u{b7} artifact {}</span><span class=\"spacer\"></span><button class=\"btn\" data-copy=\"ekko artifact {}\">Copy command</button><button class=\"btn ghost\" id=\"theme\">Dark</button></div><div class=\"content\">",
+        esc(&board),
+        item.id,
+        item.id
+    );
+    let _ = write!(body, "<h1>{}</h1><div class=\"badges\">", esc(title));
     if let (Some(artifact), Some(standing)) = (artifact, &standing) {
+        let tone = if !standing.open() {
+            "outline"
+        } else if standing.waiting.is_some() || standing.changed {
+            "warn"
+        } else if standing.tasks > 0 {
+            "ok"
+        } else {
+            "plain"
+        };
+        let _ = write!(body, "<span class=\"badge {tone}\">{}</span>", esc(&standing.words()));
         let approved = match artifact.approved_version {
-            Some(version) => format!(", version {version} approved"),
+            Some(approved) if approved == artifact.version => " \u{b7} approved".to_string(),
+            Some(approved) => format!(" \u{b7} version {approved} approved"),
             None => String::new(),
         };
-        let _ = writeln!(
-            body,
-            "<p class=\"standing {}\">{} \u{b7} version {}{approved}</p>",
-            if standing.open() { "open" } else { "closed" },
-            esc(&standing.words()),
-            artifact.version
-        );
+        let _ = write!(body, "<span class=\"badge plain\">version {}{approved}</span>", artifact.version);
+        let _ = write!(body, "<span class=\"badge outline\">{}</span>", plural(artifact.steps.len(), "step"));
+    }
+    if let Some(priority) = item.priority.filter(|priority| *priority > 1) {
+        let _ = write!(body, "<span class=\"badge outline\">priority {priority}</span>");
+    }
+    let _ = write!(body, "<span class=\"muted small\">updated {}</span></div>", esc(&when(item.updated_at.unwrap_or(item.timestamp))));
+    if let (Some(artifact), Some(standing)) = (artifact, &standing) {
         if let Some(question) = standing.waiting {
-            let _ = writeln!(
+            let _ = write!(
                 body,
-                "<p class=\"banner\">Waiting on you: question {question}. Answer it in ekko's menu, or with <code>ekko --answer {question}</code> in a terminal.</p>"
+                "<p class=\"banner warn\">Waiting on you: question {question} asks you to approve this plan. Answer it in ekko's menu, or with <code>ekko --answer {question}</code> in a terminal.</p>"
             );
         }
         if standing.changed {
-            let _ = writeln!(
+            let _ = write!(
                 body,
-                "<p class=\"banner\">The plan changed after version {} was approved.</p>",
+                "<p class=\"banner\">The plan changed after version {} was approved: History shows how.</p>",
                 artifact.approved_version.unwrap_or_default()
             );
         }
     }
     if item.trashed.is_some() || item.stashed.is_some() {
         let away = if item.trashed.is_some() { "in the trash" } else { "stashed" };
-        let _ = writeln!(body, "<p class=\"banner\">This artifact is {away}.</p>");
+        let _ = write!(body, "<p class=\"banner\">This artifact is {away}.</p>");
     }
-    body.push_str("</header>\n");
-
-    if let Some(artifact) = artifact.filter(|artifact| !artifact.steps.is_empty()) {
-        body.push_str("<section><h2>Steps</h2>\n<ol class=\"steps\">\n");
-        for step in &artifact.steps {
-            let (step_title, rest) = step.text.split_once('\n').unwrap_or((step.text.as_str(), ""));
-            let (mark, status) = match step.task.as_deref() {
-                None => ("proposed", "to approve".to_string()),
-                Some(uid) => match by_uid(uid) {
-                    Some(task) => {
-                        let state = State::of(task).map_or("note", State::word);
-                        (state_class(state), format!("task {} \u{b7} {state}", task.id))
-                    }
-                    None => ("gone", "its task is not on this board".to_string()),
-                },
-            };
-            let _ = write!(body, "<li class=\"step {mark}\"><span class=\"status\">{}</span> <span class=\"key\">{}</span> {}", esc(&status), esc(&step.key), esc(step_title.trim()));
-            if !step.after.is_empty() {
-                let _ = write!(body, " <span class=\"after\">after {}</span>", esc(&step.after.join(", ")));
-            }
-            if let Some(done_when) = &step.done_when {
-                let _ = write!(body, "<div class=\"done-when\">Done when: {}</div>", esc(done_when));
-            }
-            if !rest.trim().is_empty() {
-                let _ = write!(body, "<div class=\"step-text\">{}</div>", esc(rest.trim()));
-            }
-            body.push_str("</li>\n");
-        }
-        body.push_str("</ol></section>\n");
+    body.push_str("<div class=\"tabs\" role=\"tablist\">");
+    for (tab, name, _) in &tabs {
+        let _ = write!(body, "<button data-tab=\"{tab}\">{name}</button>");
     }
+    body.push_str("</div>");
 
-    let _ = writeln!(body, "<section class=\"plan\"><h2>Plan</h2>\n{}</section>", markdown(plan));
-
-    let uid = item.uid.as_deref().unwrap_or_default();
-    let mut notes: Vec<&Item> = all.values().filter(|note| note.trashed.is_none() && note.attached_to.as_deref() == Some(uid)).collect();
-    notes.sort_by_key(|note| note.timestamp);
-    if !notes.is_empty() {
-        body.push_str("<section><h2>Notes</h2>\n");
-        for note in notes {
-            let kind = match (&note.question, note.mark()) {
-                (Some(question), _) if question.answer.is_none() => "question, open".to_string(),
-                (Some(_), _) => "question, answered".to_string(),
-                (None, Some(mark)) => mark.to_string(),
-                (None, None) => "note".to_string(),
-            };
-            let answer = note
-                .question
-                .as_ref()
-                .and_then(|question| question.answer.as_ref())
-                .map(|answer| format!("<div class=\"answer\">Answer: {}</div>", esc(&answer.text)))
-                .unwrap_or_default();
-            let _ = writeln!(
+    // Overview: the plan's sections but the research, beside its progress.
+    body.push_str("<section data-panel=\"overview\" class=\"grid\"><div class=\"stack\">");
+    let mut cards = sections.iter().filter(|(heading, _)| heading != "What is known").peekable();
+    if cards.peek().is_none() {
+        body.push_str("<div class=\"card\"><div class=\"card-b muted\">The plan has no text yet.</div></div>");
+    }
+    for (heading, text) in cards {
+        let heading = if heading.is_empty() { "Plan" } else { heading.as_str() };
+        let _ = write!(body, "<div class=\"card\"><div class=\"card-h\"><h3>{}</h3></div><div class=\"card-b prose\">{}</div></div>", esc(heading), markdown(text));
+    }
+    body.push_str("</div><div class=\"stack\">");
+    progress_card(&mut body, &steps, tasks, done);
+    if !steps.is_empty() {
+        body.push_str("<div class=\"card\"><div class=\"card-h\"><h3>Steps</h3><a href=\"#steps\" data-tab=\"steps\" class=\"small\">all</a></div><div class=\"card-b\">");
+        for step in &steps {
+            let task = step.task.map(|id| id.to_string()).unwrap_or_default();
+            let _ = write!(
                 body,
-                "<article class=\"note\"><p class=\"note-head\">{} \u{b7} {} \u{b7} {}</p><div class=\"note-text\">{}</div>{answer}</article>",
-                note.id,
-                esc(&kind),
-                esc(&note.date),
-                esc(note.description.trim())
+                "<div class=\"mini\"><span class=\"dot {}\" title=\"{}\"></span><span class=\"k\">{}</span><span class=\"t\">{}</span><span class=\"id\">{task}</span></div>",
+                step.class,
+                esc(&step.state),
+                esc(&step.step.key),
+                esc(step.title)
             );
         }
-        body.push_str("</section>\n");
+        body.push_str("</div></div>");
     }
-    let _ = writeln!(
+    if !notes.is_empty() {
+        body.push_str("<div class=\"card\"><div class=\"card-h\"><h3>Questions and decisions</h3><a href=\"#notes\" data-tab=\"notes\" class=\"small\">all notes</a></div><div class=\"card-b\">");
+        let listed: Vec<&&Item> = notes.iter().filter(|note| note.question.is_some() || note.mark() == Some("decision")).take(6).collect();
+        if listed.is_empty() {
+            body.push_str("<p class=\"muted\">None yet.</p>");
+        }
+        for note in listed {
+            let _ = write!(body, "<div class=\"mini wrap\"><span class=\"t\">{}</span>{}</div>", esc(crate::ekko::title(&note.description)), note_badge(note));
+        }
+        body.push_str("</div></div>");
+    }
+    if let Some(artifact) = artifact {
+        body.push_str("<div class=\"card\"><div class=\"card-h\"><h3>Versions</h3>");
+        if !artifact.earlier.is_empty() {
+            body.push_str("<a href=\"#history\" data-tab=\"history\" class=\"small\">compare</a>");
+        }
+        let current = if artifact.approved_version == Some(artifact.version) { "current \u{b7} approved" } else { "current" };
+        let _ = write!(body, "</div><div class=\"card-b\"><div class=\"mini\"><span class=\"badge ok\">v{}</span><span class=\"t\">{current}</span></div>", artifact.version);
+        for earlier in artifact.earlier.iter().rev() {
+            let approved = if artifact.approved_version == Some(earlier.version) { " \u{b7} approved" } else { "" };
+            let _ = write!(
+                body,
+                "<div class=\"mini\"><span class=\"badge outline\">v{}</span><span class=\"t\">replaced {}{approved}</span></div>",
+                earlier.version,
+                esc(&when(earlier.at))
+            );
+        }
+        body.push_str("</div></div>");
+    }
+    body.push_str("</div></section>");
+
+    // Plan: the whole text, to read.
+    let _ = write!(body, "<section data-panel=\"plan\" hidden><article class=\"prose doc\">{}</article></section>", markdown(plan));
+
+    // Steps: each with its task, what it waits on, and when it is done.
+    body.push_str("<section data-panel=\"steps\" hidden>");
+    if steps.is_empty() {
+        body.push_str("<p class=\"muted\">No steps yet: the artifact tool writes them.</p>");
+    } else {
+        body.push_str("<div class=\"card\"><table><thead><tr><th>Key</th><th>Step</th><th>After</th><th>Task</th><th>State</th></tr></thead><tbody>");
+        for step in &steps {
+            let _ = write!(body, "<tr id=\"step-{}\"><td><code>{}</code></td><td><div class=\"step-title\">{}</div>", esc(&step.step.key), esc(&step.step.key), esc(step.title));
+            step_details(&mut body, step);
+            let after = if step.step.after.is_empty() { "\u{2014}".to_string() } else { step.step.after.join(", ") };
+            let task = step.task.map_or_else(|| "\u{2014}".to_string(), |id| id.to_string());
+            let _ = write!(body, "</td><td class=\"muted\">{}</td><td>{task}</td><td><span class=\"badge {}\">{}</span></td></tr>", esc(&after), step.class, esc(&step.state));
+        }
+        body.push_str("</tbody></table></div>");
+    }
+    body.push_str("</section>");
+
+    // Map: the steps as the graph their `after` draws.
+    body.push_str("<section data-panel=\"map\" hidden>");
+    if steps.is_empty() {
+        body.push_str("<p class=\"muted\">No steps yet: the artifact tool writes them.</p>");
+    } else {
+        let _ = write!(body, "<div class=\"map-wrap\">{}</div>", map(&steps));
+        body.push_str("<div class=\"legend\"><span><span class=\"dot proposed\"></span>to approve</span><span><span class=\"dot open\"></span>pending</span><span><span class=\"dot progress\"></span>in progress</span><span><span class=\"dot done\"></span>done</span><span>an arrow: what a step waits on</span></div>");
+        body.push_str("<p class=\"muted hint\">Pick a step to see it.</p>");
+        for step in &steps {
+            let task = step.task.map(|id| format!(" \u{b7} task {id}")).unwrap_or_default();
+            let after = if step.step.after.is_empty() { String::new() } else { format!(" \u{b7} after {}", step.step.after.join(", ")) };
+            let _ = write!(
+                body,
+                "<div class=\"card detail\" id=\"detail-{}\" hidden><div class=\"card-h\"><h3>{}</h3><span class=\"badge {}\">{}</span></div><div class=\"card-b\"><p class=\"muted small\"><code>{}</code>{}{}</p>",
+                esc(&step.step.key),
+                esc(step.title),
+                step.class,
+                esc(&step.state),
+                esc(&step.step.key),
+                task,
+                esc(&after)
+            );
+            step_details(&mut body, step);
+            body.push_str("</div></div>");
+        }
+    }
+    body.push_str("</section>");
+
+    // Notes: the questions, decisions and notes attached, newest first.
+    body.push_str("<section data-panel=\"notes\" hidden>");
+    if notes.is_empty() {
+        body.push_str("<p class=\"muted\">No note is attached to this artifact.</p>");
+    }
+    for note in &notes {
+        let (head, rest) = note.description.trim().split_once('\n').unwrap_or((note.description.trim(), ""));
+        let _ = write!(
+            body,
+            "<article class=\"card note\"><div class=\"card-h\"><h3>{}</h3>{}</div><div class=\"card-b\"><p class=\"muted small\">{} \u{b7} {}</p>",
+            esc(head.trim()),
+            note_badge(note),
+            note.id,
+            esc(&when(note.timestamp))
+        );
+        if !rest.trim().is_empty() {
+            if note.question.is_some() {
+                let _ = write!(body, "<details><summary>What it explained and offered</summary><div class=\"note-text\">{}</div></details>", esc(rest.trim()));
+            } else {
+                let _ = write!(body, "<div class=\"note-text\">{}</div>", esc(rest.trim()));
+            }
+        }
+        body.push_str("</div></article>");
+    }
+    body.push_str("</section>");
+
+    // History: each earlier text against the one that replaced it.
+    body.push_str("<section data-panel=\"history\" hidden>");
+    match artifact {
+        Some(artifact) if !artifact.earlier.is_empty() => {
+            if let Some(approved) = artifact.approved_version {
+                let _ = write!(body, "<p class=\"muted\">Version {approved} is the one you approved.</p>");
+            }
+            let mut earlier: Vec<&Earlier> = artifact.earlier.iter().collect();
+            earlier.sort_by_key(|earlier| earlier.version);
+            for (at, old) in earlier.iter().enumerate().rev() {
+                let new = earlier.get(at + 1).map_or(item.description.as_str(), |next| next.text.as_str());
+                let _ = write!(
+                    body,
+                    "<div class=\"card\"><div class=\"card-h\"><h3>Version {} \u{2192} {}</h3><span class=\"muted small\">{}</span></div><div class=\"card-b\"><div class=\"diff\">{}</div></div></div>",
+                    old.version,
+                    old.version + 1,
+                    esc(&when(old.at)),
+                    diff_html(&old.text, new)
+                );
+            }
+        }
+        _ => body.push_str("<p class=\"muted\">One text so far: nothing to compare. Each change to the plan's text keeps the one it replaced here.</p>"),
+    }
+    body.push_str("</section>");
+
+    let _ = write!(
         body,
-        "<footer>Written by ekko {} from the board. It reloads by itself when the board changes; <code>ekko artifact {}</code> writes it again.</footer>",
+        "<footer>Written by ekko {} from the board. It reloads by itself when the board changes; <code>ekko artifact {}</code> writes it again.</footer></div></main>",
         env!("CARGO_PKG_VERSION"),
         item.id
     );
 
     let version = format!("{:016x}", fnv(body.as_bytes()));
-    let script = format!(
+    let poll = format!(
         "(function () {{\n  var version = \"{version}\";\n  window.ekkoArtifact = function (seen) {{ if (seen !== version) location.reload(); }};\n  setInterval(function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }}, {POLL_MS});\n}})();",
         js_string(uid)
     );
     let html = format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{} \u{b7} artifact {}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n<main>\n{body}</main>\n<script>{script}</script>\n</body>\n</html>\n",
-        esc(title.trim()),
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{} \u{b7} artifact {}</title>\n<script>{THEME}</script>\n<style>{STYLE}</style>\n</head>\n<body>\n<div class=\"app\">\n{body}\n</div>\n<script>{SCRIPT}</script>\n<script>{poll}</script>\n</body>\n</html>\n",
+        esc(title),
         item.id
     );
     (html, version)
+}
+
+/// A step as the page shows it: its title and the rest of its text, and its
+/// task while the board holds it.
+struct Shown<'a> {
+    step: &'a Step,
+    title: &'a str,
+    rest: &'a str,
+    task: Option<u32>,
+    /// Its task's state as the views word it, or why it has no task.
+    state: String,
+    /// The class the page styles that state with.
+    class: &'static str,
+}
+
+fn shown<'a>(artifact: &'a Artifact, all: &ItemMap) -> Vec<Shown<'a>> {
+    let index = crate::ekko::uid_index(all);
+    artifact
+        .steps
+        .iter()
+        .map(|step| {
+            let (title, rest) = step.text.split_once('\n').unwrap_or((step.text.as_str(), ""));
+            let (task, state, class) = match step.task.as_deref() {
+                None => (None, "to approve".to_string(), "proposed"),
+                Some(uid) => match index.get(uid).and_then(|id| all.get(id)) {
+                    Some(task) => {
+                        let word = State::of(task).map_or("a note", State::word);
+                        (Some(task.id), word.to_string(), state_class(word))
+                    }
+                    None => (None, "not on this board".to_string(), "gone"),
+                },
+            };
+            Shown { step, title: title.trim(), rest: rest.trim(), task, state, class }
+        })
+        .collect()
+}
+
+/// What a step says past its title, and when it is done.
+fn step_details(body: &mut String, step: &Shown) {
+    if !step.rest.is_empty() {
+        let _ = write!(body, "<div class=\"step-text\">{}</div>", esc(step.rest));
+    }
+    if let Some(done_when) = &step.step.done_when {
+        let _ = write!(body, "<div class=\"done-when\"><b>Done when</b> {}</div>", esc(done_when));
+    }
+}
+
+/// The progress card: the steps done of the tasks the approvals made, and a
+/// segment per step in its state's colour.
+fn progress_card(body: &mut String, steps: &[Shown], tasks: usize, done: usize) {
+    body.push_str("<div class=\"card\"><div class=\"card-h\"><h3>Progress</h3><span class=\"muted small\">tasks on the board</span></div><div class=\"card-b\">");
+    if tasks > 0 {
+        let _ = write!(body, "<div class=\"big\">{done}<span> / {tasks} done</span></div>");
+    } else {
+        let _ = write!(body, "<div class=\"big\">{}<span> to approve</span></div>", plural(steps.len(), "step"));
+    }
+    body.push_str("<div class=\"segments\">");
+    for step in steps {
+        let _ = write!(body, "<span class=\"{}\" title=\"{}: {}\"></span>", step.class, esc(&step.step.key), esc(&step.state));
+    }
+    body.push_str("</div><div class=\"legend\">");
+    for (class, word) in [("done", "done"), ("progress", "in progress"), ("open", "pending"), ("proposed", "to approve"), ("cancelled", "cancelled"), ("gone", "not on this board")] {
+        let count = steps.iter().filter(|step| step.class == class).count();
+        if count > 0 {
+            let _ = write!(body, "<span><span class=\"dot {class}\"></span>{count} {word}</span>");
+        }
+    }
+    body.push_str("</div></div></div>");
+}
+
+/// A note's kind as a badge: an open question stands out.
+fn note_badge(note: &Item) -> String {
+    match (&note.question, note.mark()) {
+        (Some(question), _) => match &question.answer {
+            None => "<span class=\"badge warn\">open question</span>".to_string(),
+            Some(answer) => format!("<span class=\"badge ok\">\u{2713} {}</span>", esc(crate::menu::picked(&answer.text))),
+        },
+        (None, Some(mark)) => format!("<span class=\"badge plain\">{}</span>", esc(mark)),
+        (None, None) => "<span class=\"badge outline\">note</span>".to_string(),
+    }
+}
+
+/// The plan's text split at its `## ` headings, outside code fences: each
+/// heading with the Markdown under it, and what comes before the first under
+/// an empty heading.
+fn sections(plan: &str) -> Vec<(String, String)> {
+    let mut sections = vec![(String::new(), String::new())];
+    let mut fenced = false;
+    for line in plan.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+        }
+        match line.strip_prefix("## ") {
+            Some(heading) if !fenced => sections.push((heading.trim().to_string(), String::new())),
+            _ => {
+                if let Some((_, text)) = sections.last_mut() {
+                    text.push_str(line);
+                    text.push('\n');
+                }
+            }
+        }
+    }
+    sections.retain(|(heading, text)| !heading.is_empty() || !text.trim().is_empty());
+    sections
+}
+
+/// The width and height of a step on the map, and the room between them, in
+/// pixels.
+const NODE: (usize, usize) = (200, 92);
+const NODE_GAP: (usize, usize) = (64, 28);
+
+/// Where each step sits on the map: its column, one past the latest of the
+/// steps it waits on, and its row in that column.
+fn layout(steps: &[Shown]) -> Vec<(usize, usize)> {
+    let mut placed: Vec<(usize, usize)> = Vec::with_capacity(steps.len());
+    let mut rows: Vec<usize> = Vec::new();
+    for (at, step) in steps.iter().enumerate() {
+        let column = step
+            .step
+            .after
+            .iter()
+            .filter_map(|key| steps[..at].iter().position(|earlier| &earlier.step.key == key))
+            .map(|earlier| placed[earlier].0 + 1)
+            .max()
+            .unwrap_or(0);
+        if rows.len() <= column {
+            rows.resize(column + 1, 0);
+        }
+        placed.push((column, rows[column]));
+        rows[column] += 1;
+    }
+    placed
+}
+
+/// The map: a box per step, placed by `layout` with each column centred on
+/// the tallest, and a curve from each step to every step that waits on it.
+fn map(steps: &[Shown]) -> String {
+    let (width, height) = NODE;
+    let (gap_x, gap_y) = NODE_GAP;
+    let placed = layout(steps);
+    let columns = placed.iter().map(|(column, _)| column + 1).max().unwrap_or(0);
+    let mut rows = vec![0; columns];
+    for (column, _) in &placed {
+        rows[*column] += 1;
+    }
+    let tallest = rows.iter().copied().max().unwrap_or(0);
+    let at = |step: usize| {
+        let (column, row) = placed[step];
+        let offset = (tallest - rows[column]) * (height + gap_y) / 2;
+        (column * (width + gap_x), offset + row * (height + gap_y))
+    };
+    let (full_width, full_height) = (columns * (width + gap_x) - gap_x, tallest * (height + gap_y) - gap_y);
+    let mut out = format!(
+        "<div class=\"map\" style=\"width:{full_width}px;height:{full_height}px\"><svg viewBox=\"0 0 {full_width} {full_height}\" width=\"{full_width}\" height=\"{full_height}\" aria-hidden=\"true\"><defs><marker id=\"arrow\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"7\" markerHeight=\"7\" orient=\"auto-start-reverse\"><path class=\"arrowhead\" d=\"M0 0 L10 5 L0 10 z\"/></marker></defs>"
+    );
+    for (later, step) in steps.iter().enumerate() {
+        for key in &step.step.after {
+            let Some(earlier) = steps[..later].iter().position(|earlier| &earlier.step.key == key) else { continue };
+            let ((x1, y1), (x2, y2)) = (at(earlier), at(later));
+            let (from_x, from_y, to_x, to_y) = (x1 + width, y1 + height / 2, x2.saturating_sub(2), y2 + height / 2);
+            let middle = (from_x + to_x) / 2;
+            let _ = write!(out, "<path class=\"edge\" d=\"M{from_x} {from_y} C {middle} {from_y}, {middle} {to_y}, {to_x} {to_y}\" marker-end=\"url(#arrow)\"/>");
+        }
+    }
+    out.push_str("</svg>");
+    for (index, step) in steps.iter().enumerate() {
+        let (x, y) = at(index);
+        let task = step.task.map(|id| format!("task {id}")).unwrap_or_default();
+        let _ = write!(
+            out,
+            "<button class=\"node {}\" data-step=\"{}\" style=\"left:{x}px;top:{y}px\"><span class=\"k\">{}</span><span class=\"t\">{}</span><span class=\"s\"><span><span class=\"dot {}\"></span>{}</span><span>{task}</span></span></button>",
+            step.class,
+            esc(&step.step.key),
+            esc(&step.step.key),
+            esc(step.title),
+            step.class,
+            esc(&step.state)
+        );
+    }
+    out.push_str("</div>");
+    out
+}
+
+/// The lines of `old` and `new`, each marked kept (' '), taken out ('-') or
+/// put in ('+'), by their longest common subsequence.
+fn diff<'a>(old: &'a str, new: &'a str) -> Vec<(char, &'a str)> {
+    let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    let (n, m) = (old.len(), new.len());
+    let mut common = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            common[i][j] = if old[i] == new[j] { common[i + 1][j + 1] + 1 } else { common[i + 1][j].max(common[i][j + 1]) };
+        }
+    }
+    let (mut i, mut j, mut lines) = (0, 0, Vec::with_capacity(n.max(m)));
+    while i < n && j < m {
+        if old[i] == new[j] {
+            lines.push((' ', old[i]));
+            i += 1;
+            j += 1;
+        } else if common[i + 1][j] >= common[i][j + 1] {
+            lines.push(('-', old[i]));
+            i += 1;
+        } else {
+            lines.push(('+', new[j]));
+            j += 1;
+        }
+    }
+    lines.extend(old[i..].iter().map(|line| ('-', *line)));
+    lines.extend(new[j..].iter().map(|line| ('+', *line)));
+    lines
+}
+
+/// Lines kept around a change, on each side; the others fold into a count.
+const DIFF_CONTEXT: usize = 2;
+
+/// `diff` as the page shows it: the changed lines, with `DIFF_CONTEXT` kept
+/// lines around each run of them.
+fn diff_html(old: &str, new: &str) -> String {
+    let lines = diff(old, new);
+    let changed: Vec<usize> = lines.iter().enumerate().filter(|(_, (mark, _))| *mark != ' ').map(|(at, _)| at).collect();
+    if changed.is_empty() {
+        return "<div class=\"hunk\">The text is the same: only the steps changed.</div>".to_string();
+    }
+    let near = |at: usize| changed.iter().any(|change| change.abs_diff(at) <= DIFF_CONTEXT);
+    let mut out = String::new();
+    let mut folded = 0;
+    for (at, (mark, line)) in lines.iter().enumerate() {
+        if *mark == ' ' && !near(at) {
+            folded += 1;
+            continue;
+        }
+        if folded > 0 {
+            let _ = write!(out, "<div class=\"hunk\">\u{2026} {}</div>", plural(folded, "line kept"));
+            folded = 0;
+        }
+        let class = match mark {
+            '+' => "add",
+            '-' => "del",
+            _ => "ctx",
+        };
+        let _ = write!(out, "<div class=\"{class}\">{mark} {}</div>", esc(line));
+    }
+    if folded > 0 {
+        let _ = write!(out, "<div class=\"hunk\">\u{2026} {}</div>", plural(folded, "line kept"));
+    }
+    out
+}
+
+/// `count` of `word`, in the plural past one: "1 step", "3 steps".
+fn plural(count: usize, word: &str) -> String {
+    match (count, word.split_once(' ')) {
+        (1, _) => format!("1 {word}"),
+        (_, Some((noun, rest))) => format!("{count} {noun}s {rest}"),
+        (_, None) => format!("{count} {word}s"),
+    }
+}
+
+/// A moment on the board, as the page shows it, in local time.
+fn when(millis: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(millis).map(|at| at.with_timezone(&chrono::Local).format("%b %d, %H:%M").to_string()).unwrap_or_default()
 }
 
 /// The page of the artifact `uid` under the board's directory `dir`.
@@ -599,39 +1021,201 @@ fn fnv(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
-const STYLE: &str = "
-:root { color-scheme: light dark; --fg: #1f2328; --muted: #656d76; --line: #d0d7de; --bg: #ffffff; --soft: #f6f8fa; --accent: #0969da; --warn: #fff8c5; --done: #1a7f37; }
-@media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --muted: #8d96a0; --line: #30363d; --bg: #0d1117; --soft: #161b22; --accent: #4493f8; --warn: #3b2e00; --done: #3fb950; } }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, 'Segoe UI', sans-serif; }
-main { max-width: 52rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
-h1 { font-size: 1.9rem; line-height: 1.25; margin: 0.2rem 0 0.4rem; }
-h2 { font-size: 1.3rem; border-bottom: 1px solid var(--line); padding-bottom: 0.3rem; margin-top: 2.2rem; }
-.where, .standing, footer, .note-head, .after, .key { color: var(--muted); }
-.where { font-size: 0.85rem; margin: 0; }
-.standing { margin: 0; }
-.standing.open { color: var(--accent); }
-.banner { background: var(--warn); border: 1px solid var(--line); border-radius: 6px; padding: 0.6rem 0.9rem; }
-code, pre { font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace; font-size: 0.9em; background: var(--soft); border-radius: 4px; }
-code { padding: 0.1em 0.3em; }
-pre { padding: 0.8rem; overflow-x: auto; }
-pre code { padding: 0; background: none; }
-table { border-collapse: collapse; }
-th, td { border: 1px solid var(--line); padding: 0.3rem 0.6rem; }
+/// Sets the page's theme before it draws: the one the user picked last, or
+/// the system's.
+const THEME: &str = r##"(function () { var theme = null; try { theme = localStorage.getItem("ekko-theme"); } catch (e) {} document.documentElement.dataset.theme = theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); })();"##;
+
+/// The page's tabs, its theme toggle, the map's steps and the copy button.
+/// The open tab is the address's fragment, which a reload keeps.
+const SCRIPT: &str = r##"(function () {
+  var root = document.documentElement, toggle = document.getElementById("theme");
+  function label() { toggle.textContent = root.dataset.theme === "dark" ? "Light" : "Dark"; }
+  label();
+  toggle.addEventListener("click", function () {
+    root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+    label();
+    try { localStorage.setItem("ekko-theme", root.dataset.theme); } catch (e) {}
+  });
+  var tabs = Array.prototype.map.call(document.querySelectorAll(".tabs [data-tab]"), function (tab) { return tab.dataset.tab; });
+  function open(tab) {
+    if (tabs.indexOf(tab) < 0) tab = tabs[0];
+    document.querySelectorAll("[data-panel]").forEach(function (panel) { panel.hidden = panel.dataset.panel !== tab; });
+    document.querySelectorAll("[data-tab]").forEach(function (link) { link.classList.toggle("on", link.dataset.tab === tab); });
+    if (location.hash !== "#" + tab) { try { history.replaceState(null, "", "#" + tab); } catch (e) { location.hash = tab; } }
+  }
+  document.querySelectorAll("[data-tab]").forEach(function (link) {
+    link.addEventListener("click", function (event) { event.preventDefault(); open(link.dataset.tab); });
+  });
+  open(location.hash.slice(1));
+  document.querySelectorAll(".node").forEach(function (node) {
+    node.addEventListener("click", function () {
+      document.querySelectorAll(".node").forEach(function (other) { other.classList.toggle("sel", other === node); });
+      document.querySelectorAll(".detail").forEach(function (detail) { detail.hidden = detail.id !== "detail-" + node.dataset.step; });
+      document.querySelectorAll(".hint").forEach(function (hint) { hint.hidden = true; });
+    });
+  });
+  document.querySelectorAll("[data-copy]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var label = button.textContent;
+      var copied = navigator.clipboard ? navigator.clipboard.writeText(button.dataset.copy) : Promise.reject();
+      copied.then(function () { button.textContent = "Copied"; }, function () { button.textContent = "Copy failed"; }).then(function () {
+        setTimeout(function () { button.textContent = label; }, 1200);
+      });
+    });
+  });
+})();"##;
+
+/// The look: shadcn/ui's neutral theme, written by hand (decision 1089).
+const STYLE: &str = r##"
+:root {
+  color-scheme: light;
+  --bg: #ffffff; --fg: #09090b; --card: #ffffff; --muted: #f4f4f5; --muted-fg: #71717a; --border: #e4e4e7;
+  --primary: #18181b; --primary-fg: #fafafa; --ring: #a1a1aa; --side: #fafafa;
+  --ok: #15803d; --ok-bg: #dcfce7; --warn: #a16207; --warn-bg: #fef9c3; --accent: #2563eb; --accent-bg: #dbeafe;
+  --add: #dcfce7; --add-fg: #166534; --del: #fee2e2; --del-fg: #991b1b;
+  --radius: 10px;
+  --sans: "Inter", "Geist", "Segoe UI", "Helvetica Neue", "Liberation Sans", Arial, "DejaVu Sans", sans-serif;
+  --mono: "Geist Mono", "JetBrains Mono", "JetBrainsMono Nerd Font", ui-monospace, "SFMono-Regular", Menlo, "DejaVu Sans Mono", monospace;
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #09090b; --fg: #fafafa; --card: #0c0c0f; --muted: #27272a; --muted-fg: #a1a1aa; --border: #27272a;
+  --primary: #fafafa; --primary-fg: #18181b; --ring: #52525b; --side: #0c0c0f;
+  --ok: #4ade80; --ok-bg: #14532d66; --warn: #facc15; --warn-bg: #713f1266; --accent: #93c5fd; --accent-bg: #1e3a8a66;
+  --add: #14532d55; --add-fg: #86efac; --del: #7f1d1d55; --del-fg: #fca5a5;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.55 var(--sans); }
+button { font: inherit; color: inherit; }
 a { color: var(--accent); }
-.steps { padding-left: 1.6rem; }
-.step { margin: 0.5rem 0; }
-.status { display: inline-block; font-size: 0.8rem; border: 1px solid var(--line); border-radius: 999px; padding: 0 0.55rem; background: var(--soft); }
-.step.done .status { color: var(--done); border-color: var(--done); }
-.step.progress .status { color: var(--accent); border-color: var(--accent); }
-.step.cancelled { text-decoration: line-through; color: var(--muted); }
-.key { font-family: ui-monospace, monospace; font-size: 0.85rem; }
-.done-when, .step-text { color: var(--muted); font-size: 0.92rem; white-space: pre-wrap; }
-.note { border: 1px solid var(--line); border-radius: 6px; padding: 0.4rem 0.9rem; margin: 0.8rem 0; }
-.note-head { font-size: 0.85rem; margin: 0.2rem 0; }
+code { font: 0.86em var(--mono); background: var(--muted); border-radius: 5px; padding: 0.1em 0.35em; }
+pre { background: var(--muted); border-radius: 8px; padding: 0.8rem 0.9rem; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+[hidden] { display: none !important; }
+.muted { color: var(--muted-fg); }
+.small { font-size: 0.8rem; }
+
+.app { display: grid; grid-template-columns: 15rem minmax(0, 1fr); min-height: 100vh; }
+.side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 0.9rem; padding: 0.9rem 0.7rem; background: var(--side); border-right: 1px solid var(--border); overflow-y: auto; }
+.brand { display: flex; gap: 0.6rem; align-items: center; padding: 0.2rem 0.4rem; }
+.brand b { display: block; font-size: 0.92rem; }
+.brand small { color: var(--muted-fg); font-size: 0.78rem; }
+.logo { width: 2rem; height: 2rem; flex: none; border-radius: 8px; display: grid; place-items: center; background: var(--primary); color: var(--primary-fg); font-weight: 700; }
+.nav { display: flex; flex-direction: column; gap: 0.1rem; }
+.group { padding: 0.7rem 0.55rem 0.3rem; font-size: 0.72rem; font-weight: 600; color: var(--muted-fg); }
+.nav a { display: flex; align-items: center; gap: 0.5rem; padding: 0.38rem 0.55rem; border-radius: 7px; color: var(--fg); text-decoration: none; }
+.nav a:hover { background: var(--muted); }
+.nav a.on { background: var(--muted); font-weight: 600; }
+.nav .count { margin-left: auto; font-size: 0.75rem; font-weight: 400; color: var(--muted-fg); }
+.none { padding: 0.38rem 0.55rem; color: var(--muted-fg); }
+.side-foot { margin-top: auto; padding: 0 0.5rem; font-size: 0.75rem; color: var(--muted-fg); }
+.live { display: inline-block; width: 0.5rem; height: 0.5rem; margin-right: 0.4rem; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+
+main { min-width: 0; }
+.topbar { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1.6rem; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 90%, transparent); backdrop-filter: blur(8px); }
+.crumb { color: var(--muted-fg); }
+.spacer { flex: 1; }
+.btn { display: inline-flex; align-items: center; height: 2rem; padding: 0 0.8rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); font-size: 0.85rem; font-weight: 500; white-space: nowrap; cursor: pointer; }
+.btn:hover { background: var(--muted); }
+.btn.ghost { border-color: transparent; }
+
+.content { max-width: 84rem; padding: 1.6rem 1.6rem 4rem; }
+h1 { margin: 0 0 0.7rem; font-size: 1.6rem; line-height: 1.25; letter-spacing: -0.02em; font-weight: 650; }
+.badges { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+.badge { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.12rem 0.55rem; border: 1px solid transparent; border-radius: 999px; font-size: 0.75rem; font-weight: 600; white-space: nowrap; background: var(--muted); }
+.badge.ok, .badge.done { background: var(--ok-bg); color: var(--ok); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.progress { background: var(--accent-bg); color: var(--accent); }
+.badge.outline, .badge.open { background: none; border-color: var(--border); color: var(--muted-fg); }
+.badge.proposed { background: none; border: 1px dashed var(--ring); color: var(--muted-fg); }
+.badge.cancelled, .badge.gone { background: none; border-color: var(--border); color: var(--muted-fg); text-decoration: line-through; }
+.banner { margin: 1rem 0 0; padding: 0.7rem 0.9rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--muted); }
+.banner.warn { background: var(--warn-bg); border-color: transparent; }
+.tabs { display: inline-flex; flex-wrap: wrap; gap: 0.2rem; margin: 1.2rem 0; padding: 0.25rem; border-radius: 9px; background: var(--muted); }
+.tabs button { padding: 0.3rem 0.85rem; border: 0; border-radius: 7px; background: none; color: var(--muted-fg); font-weight: 500; cursor: pointer; }
+.tabs button.on { background: var(--bg); color: var(--fg); box-shadow: 0 1px 2px rgb(0 0 0 / 0.08); }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; gap: 1.2rem; align-items: start; }
+.stack { display: flex; flex-direction: column; gap: 1.2rem; min-width: 0; }
+.card { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: 0 1px 2px rgb(0 0 0 / 0.04); }
+.card + .card { margin-top: 0; }
+[data-panel] > .card + .card { margin-top: 1.2rem; }
+.card-h { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; padding: 0.95rem 1.1rem 0; }
+.card-h h3 { margin: 0; font-size: 0.95rem; font-weight: 600; }
+.card-b { padding: 0.6rem 1.1rem 1rem; }
+.prose p { margin: 0.3rem 0 0.6rem; }
+.prose ul, .prose ol { margin: 0.3rem 0; padding-left: 1.2rem; }
+.prose li { margin: 0.3rem 0; }
+.prose table { border-collapse: collapse; }
+.prose th, .prose td { padding: 0.3rem 0.6rem; border: 1px solid var(--border); }
+.doc { max-width: 48rem; font-size: 0.98rem; line-height: 1.7; }
+.doc h2 { margin: 1.8rem 0 0.5rem; padding-bottom: 0.3rem; border-bottom: 1px solid var(--border); font-size: 1.2rem; }
+.doc h2:first-child { margin-top: 0.4rem; }
+
+.big { font-size: 2rem; font-weight: 700; letter-spacing: -0.03em; }
+.big span { font-size: 1rem; font-weight: 500; color: var(--muted-fg); }
+.segments { display: flex; gap: 3px; margin: 0.5rem 0 0.5rem; }
+.segments span { flex: 1; height: 8px; border-radius: 3px; background: var(--muted); }
+.segments .done { background: var(--ok); }
+.segments .progress { background: var(--accent); }
+.segments .open { background: var(--ring); opacity: 0.45; }
+.segments .proposed { background: none; border: 1px dashed var(--ring); }
+.segments .cancelled, .segments .gone { opacity: 0.3; }
+.legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.78rem; color: var(--muted-fg); }
+.dot { display: inline-block; width: 0.62rem; height: 0.62rem; margin-right: 0.35rem; border: 1.5px solid var(--ring); border-radius: 50%; vertical-align: -0.06rem; flex: none; }
+.dot.done { background: var(--ok); border-color: var(--ok); }
+.dot.progress { background: var(--accent); border-color: var(--accent); }
+.dot.proposed { border-style: dashed; }
+.dot.cancelled, .dot.gone { background: var(--muted); }
+.mini { display: flex; align-items: center; gap: 0.55rem; padding: 0.42rem 0; border-top: 1px solid var(--border); font-size: 0.85rem; }
+.mini:first-child { border-top: 0; }
+.mini .k { width: 4.8rem; flex: none; font: 0.75rem var(--mono); color: var(--muted-fg); overflow: hidden; text-overflow: ellipsis; }
+.mini .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini.wrap .t { white-space: normal; }
+.mini .id { font-size: 0.75rem; color: var(--muted-fg); }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+th { padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--border); text-align: left; font-weight: 500; color: var(--muted-fg); }
+td { padding: 0.65rem 0.8rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td:first-child code { white-space: nowrap; }
+.step-title { font-weight: 500; }
+.step-text, .done-when { margin-top: 0.25rem; font-size: 0.84rem; color: var(--muted-fg); white-space: pre-wrap; }
+.done-when b { color: var(--fg); font-weight: 600; }
+
+.map-wrap { overflow-x: auto; padding: 0.4rem 0.2rem 0.8rem; }
+.map { position: relative; }
+.map svg { position: absolute; inset: 0; overflow: visible; }
+.edge { fill: none; stroke: var(--ring); stroke-width: 1.6; }
+.arrowhead { fill: var(--ring); }
+.node { position: absolute; display: flex; flex-direction: column; justify-content: flex-start; align-items: stretch; width: 200px; height: 92px; padding: 0.55rem 0.7rem; border: 1px solid var(--border); border-radius: 12px; background: var(--card); text-align: left; cursor: pointer; }
+.node:hover { border-color: var(--ring); }
+.node.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.node.done { border-color: color-mix(in srgb, var(--ok) 50%, var(--border)); }
+.node.progress { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+.node.proposed { border-style: dashed; }
+.node .k { display: block; font: 0.72rem var(--mono); color: var(--accent); }
+.node .t { display: -webkit-box; margin-top: 0.15rem; overflow: hidden; font-size: 0.82rem; line-height: 1.3; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.node.cancelled .t, .node.gone .t { text-decoration: line-through; color: var(--muted-fg); }
+.node .s { position: absolute; right: 0.7rem; bottom: 0.45rem; left: 0.7rem; display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--muted-fg); }
+.hint { margin-top: 1rem; }
+.detail { margin-top: 1rem; max-width: 48rem; }
+
 .note-text { white-space: pre-wrap; }
-.answer { margin-top: 0.4rem; font-weight: 600; }
-footer { margin-top: 3rem; font-size: 0.85rem; }
-";
+details summary { cursor: pointer; color: var(--muted-fg); }
+details .note-text { margin-top: 0.5rem; }
+.diff { overflow: hidden; border: 1px solid var(--border); border-radius: 8px; font: 0.82rem/1.6 var(--mono); }
+.diff div { padding: 0.1rem 0.8rem; white-space: pre-wrap; word-break: break-word; }
+.diff .ctx { color: var(--muted-fg); }
+.diff .add { background: var(--add); color: var(--add-fg); }
+.diff .del { background: var(--del); color: var(--del-fg); }
+.diff .hunk { background: var(--muted); color: var(--muted-fg); font-style: italic; }
+footer { margin-top: 2.5rem; font-size: 0.8rem; color: var(--muted-fg); }
+
+@media (max-width: 1200px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 860px) { .app { grid-template-columns: 1fr; } .side { display: none; } .content { padding: 1rem; } }
+@media print { .side, .topbar, .tabs { display: none; } .app { display: block; } [data-panel] { display: block !important; margin-bottom: 1.5rem; } }
+"##;
 
 #[cfg(test)]
 mod tests {
@@ -797,6 +1381,75 @@ mod tests {
         let mut changed = item.clone();
         changed.description = changed.description.replace("bold", "bolder");
         assert_ne!(page(&changed, &all, Some(Path::new("/projects/site"))).1, version, "a change shows in the version");
+    }
+
+    #[test]
+    fn the_map_puts_each_step_one_column_past_the_latest_it_waits_on() {
+        let made = steps(
+            &[],
+            &[spec("a", Some("A"), &[]), spec("b", Some("B"), &["a"]), spec("c", Some("C"), &["a"]), spec("d", Some("D"), &["c", "b"]), spec("e", Some("E"), &[]), spec("f", Some("F"), &["a", "d"])],
+        )
+        .unwrap();
+        let item = artifact_item(1, &plan("Ship"), made);
+        let all: ItemMap = BTreeMap::from([(1, item.clone())]);
+        let shown = shown(item.artifact.as_deref().unwrap(), &all);
+        assert_eq!(layout(&shown), [(0, 0), (1, 0), (1, 1), (2, 0), (0, 1), (3, 0)]);
+        let drawn = map(&shown);
+        assert_eq!(drawn.matches("<path class=\"edge\"").count(), 6, "one curve per step waited on: {drawn}");
+        assert_eq!(drawn.matches("<button class=\"node proposed\"").count(), 6, "{drawn}");
+        let (width, height) = NODE;
+        let (gap_x, gap_y) = NODE_GAP;
+        let size = format!("width:{}px;height:{}px", 4 * width + 3 * gap_x, 2 * height + gap_y);
+        assert!(drawn.contains(&size), "four columns, two rows: {drawn}");
+        assert!(drawn.contains(&format!("left:{}px;top:{}px", width + gap_x, 0)) && drawn.contains(&format!("left:{}px;top:{}px", 2 * (width + gap_x), (height + gap_y) / 2)), "a column shorter than the tallest is centred on it: {drawn}");
+    }
+
+    #[test]
+    fn a_plan_is_cut_at_its_headings_but_inside_code() {
+        let cut = sections("Before.\n## Goal\nThe goal.\n```\n## not a heading\n```\n## Design\nThe design.\n");
+        assert_eq!(
+            cut,
+            [
+                (String::new(), "Before.\n".to_string()),
+                ("Goal".to_string(), "The goal.\n```\n## not a heading\n```\n".to_string()),
+                ("Design".to_string(), "The design.\n".to_string()),
+            ]
+        );
+        assert_eq!(sections("## Goal\nText.\n").len(), 1, "nothing before the first heading, no section for it");
+    }
+
+    #[test]
+    fn a_diff_shows_what_changed_with_the_lines_around_it() {
+        assert_eq!(diff("a\nb\nc", "a\nx\nc"), [(' ', "a"), ('-', "b"), ('+', "x"), (' ', "c")]);
+        assert_eq!(diff("a", "a\nb"), [(' ', "a"), ('+', "b")]);
+        assert_eq!(diff("a\nb", "b"), [('-', "a"), (' ', "b")]);
+        let shown = diff_html("1\n2\n3\n4\n5\n6\n7\n8", "1\n2\n3\n4\nfive\n6\n7\n8");
+        assert!(shown.starts_with("<div class=\"hunk\">\u{2026} 2 lines kept</div><div class=\"ctx\">  3</div>"), "{shown}");
+        assert!(shown.contains("<div class=\"del\">- 5</div><div class=\"add\">+ five</div>"), "{shown}");
+        assert!(shown.ends_with("<div class=\"ctx\">  7</div><div class=\"hunk\">\u{2026} 1 line kept</div>"), "{shown}");
+        assert!(diff_html("same", "same").contains("The text is the same"));
+        assert!(diff_html("<b>", "<i>").contains("<div class=\"add\">+ &lt;i&gt;</div>"), "escaped");
+    }
+
+    #[test]
+    fn the_page_holds_its_tabs_its_notes_and_how_its_text_changed() {
+        let made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"])]).unwrap();
+        let mut item = artifact_item(1, &plan("Ship"), made);
+        item.description = item.description.replace("## Design\nText.", "## Design\nThe new design.");
+        let plan_now = item.artifact.as_mut().unwrap();
+        plan_now.version = 3;
+        plan_now.earlier.push(Earlier { version: 2, at: 0, text: plan("Ship"), unknown: BTreeMap::new() });
+        let mut note = Item::new_note(2, "Keep the page light\nIt reloads often.".to_string(), vec!["My Board".to_string()]);
+        note.attached_to = item.uid.clone();
+        let all: ItemMap = BTreeMap::from([(1, item.clone()), (2, note)]);
+        let (html, _) = page(&item, &all, None);
+        for tab in ["overview", "plan", "steps", "map", "notes", "history"] {
+            assert!(html.contains(&format!("<section data-panel=\"{tab}\"")) && html.contains(&format!("<button data-tab=\"{tab}\">")), "{tab}: {html}");
+        }
+        assert!(html.contains("<h3>Keep the page light</h3>") && html.contains("It reloads often."), "the note attached: {html}");
+        assert!(html.contains("Version 2 \u{2192} 3") && html.contains("<div class=\"del\">- Text.</div><div class=\"add\">+ The new design.</div>"), "{html}");
+        assert!(html.contains("<path class=\"edge\""), "b waits on a: {html}");
+        assert!(!html.contains("What is known</h3>"), "the research is the plan tab's, not a card: {html}");
     }
 
     #[test]
