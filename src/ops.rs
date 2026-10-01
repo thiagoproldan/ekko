@@ -430,7 +430,15 @@ fn addressable(names: &[String]) -> Result<(), EkkoError> {
 /// `["coding", "@reviews"]` to `["@coding", "@reviews"]`, the default board
 /// by either of its names, and the default board when there are none.
 fn boards(names: &[String]) -> Vec<String> {
-    let named: Vec<String> = names
+    let named = named(names);
+    if named.is_empty() { vec!["My Board".to_string()] } else { remove_duplicates(named) }
+}
+
+/// The boards `names` name, as they are stored, and none for none: what
+/// add_boards and remove_boards change, which an empty list must not turn
+/// into the default board (task 1011).
+fn named(names: &[String]) -> Vec<String> {
+    names
         .iter()
         .map(|name| name.trim())
         .filter(|name| !name.is_empty())
@@ -438,8 +446,7 @@ fn boards(names: &[String]) -> Vec<String> {
             "myboard" | "My Board" => "My Board".to_string(),
             bare => format!("@{bare}"),
         })
-        .collect();
-    if named.is_empty() { vec!["My Board".to_string()] } else { remove_duplicates(named) }
+        .collect()
 }
 
 /// How a refusal names the items it involves.
@@ -1174,10 +1181,10 @@ impl<'a> Draft<'a> {
         }
         addressable(&spec.add_boards)?;
         if changes_boards {
-            let removed = boards(&spec.remove_boards);
+            let removed = named(&spec.remove_boards);
             let mut kept: Vec<String> = self.data[&id].boards.iter().filter(|name| !removed.contains(name)).cloned().collect();
-            for name in boards(&spec.add_boards) {
-                if !spec.add_boards.iter().all(|given| given.trim().is_empty()) && !kept.contains(&name) {
+            for name in named(&spec.add_boards) {
+                if !kept.contains(&name) {
                     kept.push(name);
                 }
             }
@@ -2090,6 +2097,33 @@ mod tests {
         assert!(matches!(stale, Err(EkkoError::Stale { id: 1, .. })));
         let stale = batch(&ekko, &[json!({"op": "link", "item": 1, "add_blocked_by": [2], "if_updated_at": read})]);
         assert!(matches!(stale, Err(EkkoError::Stale { id: 1, .. })));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// add_boards and remove_boards change only the boards they name, each
+    /// way an update can give them: the item keeps every other board, the
+    /// default one too, and only taking off the last leaves it on the
+    /// default (task 1011).
+    #[test]
+    fn adding_or_removing_boards_keeps_every_board_not_named() {
+        let (ekko, dir) = board("boards-kept");
+        let cases = [
+            (json!({"add_boards": ["b"]}), vec!["My Board", "@a", "@b"]),
+            (json!({"add_boards": ["a"]}), vec!["My Board", "@a"]),
+            (json!({"remove_boards": ["a"]}), vec!["My Board"]),
+            (json!({"remove_boards": ["myboard"]}), vec!["@a"]),
+            (json!({"remove_boards": [" "]}), vec!["My Board", "@a"]),
+            (json!({"add_boards": ["b"], "remove_boards": ["a"]}), vec!["My Board", "@b"]),
+            (json!({"remove_boards": ["My Board", "a"]}), vec!["My Board"]),
+        ];
+        for (id, (change, expected)) in (1..).zip(cases) {
+            batch(&ekko, &[json!({"op": "create", "text": format!("item {id}"), "boards": ["My Board", "@a"]})]).unwrap();
+            let mut update = json!({"op": "update", "item": id});
+            update.as_object_mut().unwrap().extend(change.as_object().unwrap().clone());
+            batch(&ekko, &[update]).unwrap();
+            assert_eq!(ekko.storage.get().unwrap()[&id].boards, expected, "{change}");
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
