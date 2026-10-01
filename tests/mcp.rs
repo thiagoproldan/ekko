@@ -443,8 +443,8 @@ fn typed_notes_are_written_listed_and_searched_over_stdio() {
     );
 
     let prime = text(&replies["5"]);
-    assert!(prime.contains("Gotchas and procedures (1)\n   3. [procedure] Release: bump, tag, push"), "{prime}");
-    assert!(prime.contains("Decisions (1): search with the decision filter"), "{prime}");
+    let listed = "Decisions, gotchas and procedures (2): the most cited, then the newest\n   3. [procedure] Release: bump, tag, push\n   2. [decision] ship on demand\n";
+    assert!(prime.contains(listed), "{prime}");
     assert!(!prime.contains("ship weekly"), "{prime}");
     let found = text(&replies["6"]);
     assert!(found.contains("1. [decision, superseded by 2] ship weekly"), "{found}");

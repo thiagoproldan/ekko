@@ -88,13 +88,26 @@ const WITH_HEADING: &str = "With someone, not to take up";
 const WITH_REST: &str = "search with a with:NAME filter";
 /// Tasks with someone `next` names before it counts the rest.
 const WITH_NAMED: usize = 20;
-/// Gotchas and procedures a prime lists, newest first, each by its first
-/// line: the traps and the steps a session should have in mind before it
-/// starts. Decisions are only counted -- there are more of them, and search
-/// finds the one that matters when it matters.
+/// Decisions, gotchas and procedures a prime lists, each by its first line:
+/// the `KNOWLEDGE_CITED` that other items cite most, then the newest gotchas
+/// and procedures. Measured on the sessions of 2026-09-15 to 10-01 (task
+/// 1021), this recalled 46% of the lasting notes they went on to fetch,
+/// against 24% for the newest five alone; it was the user's pick (question
+/// 1024). A ranking by updatedAt let a change of boards push the newest
+/// lessons out (task 1020), so neither half reads it.
 const KNOWLEDGE_SHOWN: usize = 5;
-/// Where a prime says the gotchas and procedures it did not list are.
-const KNOWLEDGE_REST: &str = "search with the gotcha or procedure filter";
+const KNOWLEDGE_CITED: usize = 3;
+/// Where a prime says the lasting notes it did not list are.
+const KNOWLEDGE_REST: &str = "search with the decision, gotcha or procedure filter";
+/// The words that cite an item by its number, as notes and prompts write
+/// them, in English and Portuguese, each plural before its singular.
+const CITING: [&str; 24] = [
+    "tasks", "task", "notes", "note", "decisions", "decision", "gotchas", "gotcha", "procedures", "procedure",
+    "questions", "question", "handoffs", "handoff", "tarefas", "tarefa", "notas", "nota", "procedimentos",
+    "procedimento", "perguntas", "pergunta", "decisões", "decisão",
+];
+/// What may stand between two numbers a citing word names.
+const CITED_GAPS: [&str; 7] = [", and ", ", e ", ", ", " and ", " e ", " or ", " ou "];
 /// The longest a "+N more" line gets, reserved for each section a cut leaves
 /// short: the indent, a count of up to six digits, and the longest place to
 /// look, "search with the blocked filter".
@@ -729,6 +742,108 @@ fn updated(item: &Item) -> i64 {
     item.updated_at.unwrap_or(item.timestamp)
 }
 
+/// The lasting notes a prime lists, out of `lasting`: the `KNOWLEDGE_CITED`
+/// that the most items of `citing` cite, by their text or answer, then the
+/// newest gotchas and procedures by creation, then the newest of the rest,
+/// up to `KNOWLEDGE_SHOWN`. Creation, not updatedAt: a write that only moves
+/// a note to another board must not bring it to the top (task 1020). A
+/// citation of a superseded note counts for the one at the end of its line,
+/// so a procedure rewritten keeps the place its citations gave it; and a
+/// line citing itself counts nothing.
+fn lasting_shown<'a>(
+    lasting: &[&'a Item],
+    citing: impl Iterator<Item = &'a Item>,
+    superseded_by: &HashMap<u32, Vec<u32>>,
+) -> Vec<&'a Item> {
+    let mut cited: HashMap<u32, usize> = HashMap::new();
+    for item in citing {
+        let mut ids = cited_ids(&item.description);
+        if let Some(answer) = item.question.as_ref().and_then(|question| question.answer.as_ref()) {
+            ids.extend(cited_ids(&answer.text));
+        }
+        let own = head(item.id, superseded_by);
+        let mut ids: Vec<u32> = ids.into_iter().map(|id| head(id, superseded_by)).filter(|id| *id != own).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            *cited.entry(id).or_default() += 1;
+        }
+    }
+    let newest = |note: &&Item| (std::cmp::Reverse(note.timestamp), std::cmp::Reverse(note.id));
+    let mut most_cited: Vec<&Item> = lasting.iter().copied().filter(|note| cited.contains_key(&note.id)).collect();
+    most_cited.sort_by_key(|note| (std::cmp::Reverse(cited[&note.id]), newest(note)));
+    let mut by_creation: Vec<&Item> = lasting.to_vec();
+    by_creation.sort_by_key(newest);
+    let mut shown: Vec<&Item> = most_cited.into_iter().take(KNOWLEDGE_CITED).collect();
+    let gotchas_and_procedures =
+        by_creation.iter().filter(|note| matches!(note.knowledge, Some(Knowledge::Gotcha | Knowledge::Procedure)));
+    for note in gotchas_and_procedures.chain(by_creation.iter()) {
+        if shown.len() == KNOWLEDGE_SHOWN {
+            break;
+        }
+        if !shown.iter().any(|kept| kept.id == note.id) {
+            shown.push(*note);
+        }
+    }
+    shown
+}
+
+/// The note at the end of `id`'s line of supersession -- the newest that
+/// supersedes it, and the newest that supersedes that -- or `id`, when
+/// nothing supersedes it.
+fn head(mut id: u32, superseded_by: &HashMap<u32, Vec<u32>>) -> u32 {
+    for _ in 0..=superseded_by.len() {
+        match superseded_by.get(&id).and_then(|newer| newer.last()) {
+            Some(&newer) => id = newer,
+            None => break,
+        }
+    }
+    id
+}
+
+/// The ids `text` cites: a citing word, then a number or a list of them --
+/// "procedure 234", "notes 990, 992 and 994", "tarefas 5 e 6". A number of
+/// more than five digits, or running into a letter, is none.
+fn cited_ids(text: &str) -> Vec<u32> {
+    let bytes = text.as_bytes();
+    let part_of_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80;
+    let mut ids = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let starts = at == 0 || !part_of_word(bytes[at - 1]);
+        let word = CITING
+            .iter()
+            .filter(|_| starts)
+            .find(|word| bytes.get(at..at + word.len()).is_some_and(|start| start.eq_ignore_ascii_case(word.as_bytes())));
+        let Some(word) = word else {
+            at += 1;
+            continue;
+        };
+        let mut next = at + word.len();
+        let spaces = bytes[next..].iter().take_while(|byte| byte.is_ascii_whitespace()).count();
+        if spaces == 0 {
+            at = next;
+            continue;
+        }
+        next += spaces;
+        loop {
+            let digits = bytes[next..].iter().take_while(|byte| byte.is_ascii_digit()).count();
+            if digits == 0 || digits > 5 || bytes.get(next + digits).is_some_and(|byte| part_of_word(*byte)) {
+                break;
+            }
+            ids.extend(text[next..next + digits].parse::<u32>());
+            next += digits;
+            let rest = &text[next..];
+            match CITED_GAPS.iter().find(|gap| rest.starts_with(**gap) && rest[gap.len()..].starts_with(|c: char| c.is_ascii_digit())) {
+                Some(gap) => next += gap.len(),
+                None => break,
+            }
+        }
+        at = next;
+    }
+    ids
+}
+
 fn state_word(item: &Item) -> &'static str {
     word_or_note(State::of(item))
 }
@@ -843,13 +958,14 @@ pub struct Prime {
     /// first: other sessions stopping on the same board.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub other_handoffs: Vec<OtherHandoff>,
-    /// The newest gotchas and procedures in force; `knowledge_total` counts
-    /// them all.
+    /// The decisions, gotchas and procedures in force a prime lists: the
+    /// most cited, then the newest gotchas and procedures. `knowledge_total`
+    /// counts them all.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub knowledge: Vec<NoteRef>,
     #[serde(skip_serializing_if = "is_zero")]
     pub knowledge_total: usize,
-    /// Decisions in force, counted: search with the decision filter reads them.
+    /// The decisions in force, of `knowledge_total`.
     #[serde(skip_serializing_if = "is_zero")]
     pub decisions: usize,
     /// The questions no one has answered yet, oldest first: what the user
@@ -1101,20 +1217,23 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         }
     }
 
-    // What stays true, beside the work: gotchas and procedures listed, loose
-    // or attached to any task, done ones included; decisions counted. A
-    // superseded note is history, and no section of a prime shows it.
+    // What stays true, beside the work: decisions, gotchas and procedures,
+    // loose or attached to any task, done ones included. A superseded note
+    // is history, and no section of a prime shows it.
     let in_force =
         |note: &&Item| visible(note) && !note.is_task && !reader.graph.links.superseded_by.contains_key(&note.id);
-    let mut lasting: Vec<&Item> = all
+    let lasting: Vec<&Item> = all
         .values()
         .filter(in_force)
-        .filter(|note| matches!(note.knowledge, Some(Knowledge::Gotcha | Knowledge::Procedure)))
+        .filter(|note| matches!(note.knowledge, Some(Knowledge::Decision | Knowledge::Gotcha | Knowledge::Procedure)))
         .collect();
-    lasting.sort_by_key(|note| (std::cmp::Reverse(updated(note)), std::cmp::Reverse(note.id)));
     let knowledge_total = lasting.len();
-    let knowledge: Vec<NoteRef> = lasting.into_iter().take(KNOWLEDGE_SHOWN).map(|note| reader.note_ref(note)).collect();
-    let decisions = all.values().filter(in_force).filter(|note| note.knowledge == Some(Knowledge::Decision)).count();
+    let knowledge: Vec<NoteRef> =
+        lasting_shown(&lasting, all.values().filter(|item| visible(item)), &reader.graph.links.superseded_by)
+            .into_iter()
+            .map(|note| reader.note_ref(note))
+            .collect();
+    let decisions = lasting.iter().filter(|note| note.knowledge == Some(Knowledge::Decision)).count();
     for entry in listed([&mut doing, &mut ready, &mut blocked, &mut waiting, &mut with_someone]) {
         entry.notes.retain(|note| note.superseded_by.is_empty() && !knowledge.iter().any(|shown| shown.id == note.id));
     }
@@ -2547,12 +2666,8 @@ impl Prime {
 
         let attention = self.attention();
         let close = "\nAn item in full, with its dependencies and notes: context <id>.\n";
-        // Only a board with typed notes pays for them: without any, these two
-        // cost nothing and the prime is what it was before they existed.
-        let decisions = match self.decisions {
-            0 => String::new(),
-            n => format!("\nDecisions ({n}): search with the decision filter\n"),
-        };
+        // Only a board with typed notes pays for them: without any, this costs
+        // nothing and the prime is what it was before they existed.
         let knowledge_more = if self.knowledge.is_empty() {
             0
         } else {
@@ -2569,8 +2684,7 @@ impl Prime {
             + 4 * MORE_LINE
             + waiting_more
             + with_more
-            + knowledge_more
-            + decisions.chars().count();
+            + knowledge_more;
         let mut room = Room(budget.saturating_sub(fixed));
         if let Some(handoff) = &self.handoff {
             out.push_str(&handoff.text());
@@ -2672,7 +2786,7 @@ impl Prime {
                 reserved: false,
             },
             Section {
-                heading: format!("\nGotchas and procedures ({})", self.knowledge_total),
+                heading: format!("\nDecisions, gotchas and procedures ({}): the most cited, then the newest", self.knowledge_total),
                 blocks: self.knowledge.iter().map(|note| (knowledge_line(note), Vec::new())).collect(),
                 total: self.knowledge_total,
                 rest: Some(KNOWLEDGE_REST),
@@ -2684,7 +2798,6 @@ impl Prime {
         for (section, shown) in sections.iter().zip(&shown) {
             section.write(&mut out, shown);
         }
-        out.push_str(&decisions);
 
         out.push_str(&attention);
         out.push_str(close);
@@ -3895,12 +4008,12 @@ mod tests {
         draft.commit(false).unwrap();
     }
 
-    /// Gotchas and procedures in force are listed once, by first line and
-    /// newest first; decisions in force are counted; a superseded note shows
-    /// nowhere, and a typed note is not repeated among the loose notes or
-    /// under its task.
+    /// Decisions, gotchas and procedures in force are listed once, by first
+    /// line: with none cited, the newest gotchas and procedures, then the
+    /// newest decisions. A superseded note shows nowhere, and a listed note
+    /// is not repeated among the loose notes or under its task.
     #[test]
-    fn prime_lists_gotchas_and_procedures_counts_decisions_and_hides_the_superseded() {
+    fn prime_lists_lasting_notes_once_and_hides_the_superseded() {
         let (ekko, dir) = board("knowledge-prime");
         let note = |kind: &str, text: &str| serde_json::json!({"op": "create", "kind": kind, "text": text});
         write(
@@ -3920,22 +4033,185 @@ mod tests {
         ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
 
         let text = prime(&ekko, "default board").unwrap().text();
-        let listed = "\nGotchas and procedures (3)\n   7. [gotcha] the trap, restated\n   3. [procedure] Release: bump, tag, push\n   2. [gotcha] Tab clears isComplete\n";
+        let listed = "\nDecisions, gotchas and procedures (5): the most cited, then the newest\n   7. [gotcha] the trap, restated\n   3. [procedure] Release: bump, tag, push\n   2. [gotcha] Tab clears isComplete\n   9. [decision] crossterm, not ratatui\n   5. [decision] ship on demand\n";
         assert!(text.contains(listed), "{text}");
-        assert!(text.contains("\nDecisions (2): search with the decision filter\n"), "{text}");
-        assert!(text.contains("       9. [decision] crossterm, not ratatui"), "a decision still explains its task: {text}");
-        for gone in ["second line", "the old trap", "ship weekly", "ship on demand"] {
+        for gone in ["second line", "the old trap", "ship weekly", "\nDecisions ("] {
             assert!(!text.contains(gone), "{gone}: {text}");
         }
-        assert_eq!(line_ids(&text).iter().filter(|id| **id == 2).count(), 1, "listed once: {text}");
+        for once in [2, 9] {
+            assert_eq!(line_ids(&text).iter().filter(|id| **id == once).count(), 1, "{once} listed once: {text}");
+        }
         assert!(text.contains("\nRecent notes, not attached to a task\n   8. a plain note\n\n"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The lasting notes the most other items cite come first, decisions
+    /// among them, ranked by how many items cite them and then by the newest;
+    /// then the newest gotchas and procedures. An item citing a note twice
+    /// counts once, a note citing itself counts nothing, and a trashed item's
+    /// citations count nothing.
+    #[test]
+    fn prime_lists_the_most_cited_lasting_notes_then_the_newest() {
+        let (ekko, dir) = board("knowledge-cited");
+        let note = |kind: &str, text: &str| serde_json::json!({"op": "create", "kind": kind, "text": text});
+        write(
+            &ekko,
+            &[
+                note("procedure", "release steps"),
+                note("decision", "keep the storage in JSON"),
+                note("gotcha", "a stale binary"),
+                note("gotcha", "the lock trap"),
+                note("procedure", "deploy steps, procedure 5"),
+                note("gotcha", "the newest trap"),
+                note("procedure", "the newest procedure"),
+                note("decision", "the newest decision"),
+                note("note", "see procedure 1 and decision 2"),
+                serde_json::json!({"op": "create", "text": "follow procedure 1, then gotcha 3"}),
+                note("note", "procedimento 1 e decis\u{e3}o 2"),
+                note("note", "gotcha 4, gotcha 4 and gotcha 4 again"),
+                note("note", "gotcha 3, notes 3 and 3"),
+            ],
+        );
+        ekko.set_trashed(&words(&["13"]), true).unwrap();
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        let listed = "\nDecisions, gotchas and procedures (8): the most cited, then the newest\n   1. [procedure] release steps\n   2. [decision] keep the storage in JSON\n   4. [gotcha] the lock trap\n   7. [procedure] the newest procedure\n   6. [gotcha] the newest trap\n";
+        assert!(text.contains(listed), "{text}");
+        assert!(text.contains(&format!("      +3 more: {KNOWLEDGE_REST}\n")), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A citation of a superseded note counts for the note in force at the
+    /// end of its line, and an item in that line citing another in it counts
+    /// nothing: procedure 1, rewritten as 3 and then 4, passes the citations
+    /// of 6 and 7 to 4, which ties with gotcha 5 and so comes after it, the
+    /// newer; 3's own "procedure 1" would have put 4 first.
+    #[test]
+    fn a_note_that_supersedes_another_takes_its_citations() {
+        let (ekko, dir) = board("knowledge-cited-line");
+        let note = |kind: &str, text: &str| serde_json::json!({"op": "create", "kind": kind, "text": text});
+        let rewrite = |text: &str, older: u32| serde_json::json!({"op": "create", "kind": "procedure", "text": text, "supersedes": older});
+        write(
+            &ekko,
+            &[
+                note("procedure", "release steps, with their history"),
+                note("gotcha", "a trap"),
+                rewrite("release steps, procedure 1 rewritten", 1),
+                rewrite("release steps, shorter still", 3),
+                note("gotcha", "a newer trap"),
+                note("note", "see procedure 1"),
+                note("note", "procedure 1 again, and gotcha 5"),
+                note("note", "gotcha 5 and gotcha 2"),
+                note("gotcha", "newest a"),
+                note("gotcha", "newest b"),
+                note("gotcha", "newest c"),
+            ],
+        );
+
+        let text = prime(&ekko, "default board").unwrap().text();
+        let listed = "\nDecisions, gotchas and procedures (6): the most cited, then the newest\n   5. [gotcha] a newer trap\n   4. [procedure] release steps, shorter still\n   2. [gotcha] a trap\n  11. [gotcha] newest c\n  10. [gotcha] newest b\n";
+        assert!(text.contains(listed), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Only creation and what cites them rank the lasting notes a prime
+    /// lists: no other write to one moves it among them (task 1020), where a
+    /// ranking by updatedAt let a change of boards push the newest out. The
+    /// writes are every operation a batch takes, and every field of update,
+    /// as serde's refusal of an unknown one names them.
+    #[test]
+    fn no_write_but_a_citation_moves_a_lasting_note_in_the_prime() {
+        let (ekko, dir) = board("knowledge-writes");
+        let mut ops = vec![serde_json::json!({"op": "create", "text": "a task"})];
+        for k in 2..=8 {
+            let kind = if k % 2 == 0 { "gotcha" } else { "procedure" };
+            ops.push(serde_json::json!({"op": "create", "kind": kind, "text": format!("lesson {k}")}));
+        }
+        write(&ekko, &ops);
+        let shown = |ekko: &Ekko| prime(ekko, "default board").unwrap().knowledge.iter().map(|note| note.id).collect::<Vec<_>>();
+        assert_eq!(shown(&ekko), vec![8, 7, 6, 5, 4]);
+
+        // "unknown field `x`, expected one of `a`, `b`": the names in quotes
+        // after the first.
+        let named = |refusal: String| refusal.split('`').skip(3).step_by(2).map(str::to_string).collect::<Vec<_>>();
+        let fields = named(serde_json::from_value::<crate::ops::Update>(serde_json::json!({"none": 0})).unwrap_err().to_string());
+        let kinds = named(serde_json::from_value::<crate::ops::Op>(serde_json::json!({"op": "none"})).unwrap_err().to_string());
+        assert!(fields.len() > 5 && kinds.len() > 3, "{fields:?} {kinds:?}");
+        let mut writes = Vec::new();
+        for kind in &kinds {
+            match kind.as_str() {
+                "create" => {
+                    writes.push(serde_json::json!({"op": "create", "text": "another task"}));
+                    writes.push(serde_json::json!({"op": "create", "kind": "note", "text": "a plain note"}));
+                }
+                "set_state" => {
+                    writes.push(serde_json::json!({"op": "set_state", "items": [2], "state": "starred"}));
+                    writes.push(serde_json::json!({"op": "set_state", "items": [2], "state": "unstarred"}));
+                }
+                "edit" => writes.push(serde_json::json!({"op": "edit", "item": 2, "append": "and a line more"})),
+                "link" => writes.push(serde_json::json!({"op": "link", "item": 2, "attached_to": 1})),
+                "update" => {
+                    for field in &fields {
+                        let value = match field.as_str() {
+                            // A note takes no priority, nor a date or a name
+                            // but null, which clears them.
+                            "item" | "if_updated_at" | "priority" => continue,
+                            "due" | "with" | "phase" => serde_json::Value::Null,
+                            "boards" => serde_json::json!(["work"]),
+                            "add_boards" => serde_json::json!(["home"]),
+                            "remove_boards" => serde_json::json!(["work"]),
+                            "starred" => serde_json::json!(true),
+                            "kind" => serde_json::json!("procedure"),
+                            other => panic!("update takes {other}, which this test does not write"),
+                        };
+                        let mut op = serde_json::json!({"op": "update", "item": 2});
+                        op[field.as_str()] = value;
+                        writes.push(op);
+                    }
+                }
+                other => panic!("a batch takes {other}, which this test does not write"),
+            }
+        }
+        for op in writes {
+            write(&ekko, std::slice::from_ref(&op));
+            assert_eq!(shown(&ekko), vec![8, 7, 6, 5, 4], "after {op}");
+        }
+
+        write(&ekko, &[serde_json::json!({"op": "edit", "item": 1, "append": "\nsee gotcha 2"})]);
+        assert_eq!(shown(&ekko), vec![2, 8, 7, 6, 5], "a citation moves it");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An item cites another by a citing word and its number, in English or
+    /// Portuguese, alone or in a list; a number running into a letter or
+    /// past five digits, a word inside another, or a number with no word,
+    /// cites nothing.
+    #[test]
+    fn cited_ids_reads_a_citing_word_and_its_numbers() {
+        for (text, ids) in [
+            ("procedure 234, steps", vec![234]),
+            ("Notes 990, 992 and 994 say so", vec![990, 992, 994]),
+            ("tarefas 5 e 6; decis\u{e3}o 7", vec![5, 6, 7]),
+            ("decis\u{f5}es 8, e 9", vec![8, 9]),
+            ("task 1 or 2, then 3", vec![1, 2]),
+            ("tasks 1, 2,3", vec![1, 2]),
+            ("gotcha\n12", vec![12]),
+            ("the 3rd task 4th", vec![]),
+            ("subtask 5 and my_task 6", vec![]),
+            ("task 123456", vec![]),
+            ("task five, 6", vec![]),
+            ("version 0.31.0", vec![]),
+        ] {
+            assert_eq!(cited_ids(text), ids, "{text}");
+        }
+    }
+
     /// On a board the work already fills, typed notes still fit the prime's
-    /// budget: the section keeps its first lines and says where the rest are,
-    /// and the decisions line is always there.
+    /// budget: the section keeps its first lines and says where the rest are.
     #[test]
     fn typed_notes_fit_a_prime_the_work_already_fills() {
         let (ekko, dir) = board("knowledge-budget");
@@ -3961,9 +4237,8 @@ mod tests {
         let text = prime(&ekko, "default board").unwrap().text();
         assert!(text.chars().count() <= PRIME_BUDGET, "{} characters", text.chars().count());
         assert!(text.contains("more: next lists them"), "the work filled it: {text}");
-        assert!(text.contains("\nGotchas and procedures (12)\n"), "{text}");
-        assert!(text.contains(&format!("      +7 more: {KNOWLEDGE_REST}\n")), "{text}");
-        assert!(text.contains("\nDecisions (20): search with the decision filter\n"), "{text}");
+        assert!(text.contains("\nDecisions, gotchas and procedures (32): the most cited, then the newest\n"), "{text}");
+        assert!(text.contains(&format!("      +27 more: {KNOWLEDGE_REST}\n")), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3993,7 +4268,7 @@ mod tests {
         let text = prime(&ekko, "default board").unwrap().text();
         assert!(text.chars().count() <= PRIME_BUDGET, "{} characters", text.chars().count());
         assert!(text.contains("more: context <id> reads one"), "the work in progress filled it: {text}");
-        assert!(text.contains("\nGotchas and procedures (2)\n"), "{text}");
+        assert!(text.contains("\nDecisions, gotchas and procedures (2): the most cited, then the newest\n"), "{text}");
         assert!(text.contains("restart before writing after an upgrade"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
@@ -4034,7 +4309,8 @@ mod tests {
         ekko.set_trashed(&words(&["2"]), true).unwrap();
         let older = context(&ekko, "1").unwrap().text();
         assert!(!older.contains("Superseded by"), "{older}");
-        assert!(prime(&ekko, "default board").unwrap().text().contains("Decisions (1)"));
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.contains("procedures (1): the most cited, then the newest\n   1. [decision] ship weekly\n"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
