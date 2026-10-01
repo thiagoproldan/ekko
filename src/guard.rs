@@ -1131,4 +1131,47 @@ mod tests {
             "session": [1047920, 10288721, "016877cc"], "reasons": ["a gotcha", "ctx's work-loss guard"]
         }));
     }
+
+    /// Candidate cues run through `hits` over a corpus of past calls, as a
+    /// replay counts what each would have refused (task 1021, step 4): the
+    /// file `EKKO_CUES` names holds [{"id", "command", "words", "folder"}],
+    /// the file `EKKO_CUE_CORPUS` names a {"id", "command", "cwd"} per line,
+    /// and each call a cue hits goes to the file `EKKO_CUE_OUT` names. Run by
+    /// hand over the transcripts' commands, which no public repository may
+    /// hold: `cargo test --release -- --ignored replays_cues`.
+    #[test]
+    #[ignore]
+    fn replays_cues() {
+        let (Ok(cues), Ok(corpus), Ok(out)) =
+            (std::env::var("EKKO_CUES"), std::env::var("EKKO_CUE_CORPUS"), std::env::var("EKKO_CUE_OUT"))
+        else {
+            return;
+        };
+        let cues: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(cues).unwrap()).unwrap();
+        let indexed: Vec<Indexed> = cues
+            .iter()
+            .map(|cue| Indexed {
+                board: PathBuf::from("replay"),
+                id: u32::try_from(cue["id"].as_u64().unwrap()).unwrap(),
+                text: String::new(),
+                cue: serde_json::from_value(cue.clone()).unwrap(),
+                guards: cue["folder"].as_str().map(PathBuf::from),
+            })
+            .collect();
+        let mut lines = String::new();
+        for line in std::fs::read_to_string(corpus).unwrap().lines() {
+            let call: Value = serde_json::from_str(line).unwrap();
+            let command = call["command"].as_str().unwrap();
+            if !indexed.iter().any(|cue| command.contains(cue.cue.command.as_str())) {
+                continue;
+            }
+            let cwd = call["cwd"].as_str().filter(|cwd| !cwd.is_empty()).unwrap_or("/");
+            let found: Vec<u32> = hits(&indexed, command, Path::new(cwd)).iter().map(|cue| cue.id).collect();
+            if !found.is_empty() {
+                lines.push_str(&json!({"id": call["id"], "cues": found}).to_string());
+                lines.push('\n');
+            }
+        }
+        std::fs::write(out, lines).unwrap();
+    }
 }
