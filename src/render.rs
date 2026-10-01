@@ -1308,7 +1308,7 @@ impl<'a> Renderer<'a> {
             replaced => format!("{} ({replaced} replaced)", count.current),
         };
         let tasks = written.tasks;
-        let held = format!(
+        let mut held = format!(
             "decisions {}, gotchas {}, procedures {}; {} tasks, each on a page ({} done, {} cancelled, {} open); {} other notes",
             kind(written.decisions),
             kind(written.gotchas),
@@ -1319,9 +1319,12 @@ impl<'a> Renderer<'a> {
             tasks.open,
             written.loose,
         );
+        if written.private > 0 {
+            held.push_str(&format!("; {} items on @private, or on a task there, left out", written.private));
+        }
         self.emit(" ", None, &self.painter.grey(&held), "");
         let files = format!(
-            "{} files written, {} already up to date, {} pages of tasks no longer on the board removed",
+            "{} files written, {} already up to date, {} pages of tasks no longer on the board, or on @private, removed",
             written.written, written.unchanged, written.removed
         );
         self.emit(" ", None, &self.painter.grey(&files), "");

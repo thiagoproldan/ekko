@@ -114,6 +114,7 @@ fn success_value(outcome: &Outcome) -> Value {
             "procedures": written.procedures,
             "tasks": written.tasks,
             "loose": written.loose,
+            "private": written.private,
         }),
         Outcome::Phases(names) => json!({"ok": true, "command": command, "phases": names}),
         Outcome::Stashed { ids, away } | Outcome::Trashed { ids, away } => {

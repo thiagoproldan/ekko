@@ -750,6 +750,18 @@ fn docs_are_written_from_the_board_and_only_over_their_own_files() {
     assert_eq!(after["removed"].as_u64(), Some(1), "{after}");
     assert!(!docs.join("tasks").join("2.md").exists());
 
+    // On the board @private, a task leaves the docs with its notes, and
+    // where another item names it, only its id stays, with no link.
+    assert!(ekko(&app, &["--move", "@3", "myboard", "private"]).status.success());
+    let private = reply(&ekko(&app, &["--json", "docs"]));
+    assert_eq!((private["private"].as_u64(), private["removed"].as_u64()), (Some(3), Some(1)), "{private}");
+    assert!(!docs.join("tasks").join("3.md").exists());
+    assert!(read("tasks/1.md").contains("Blocks 3 (in progress)."), "{}", read("tasks/1.md"));
+    for page in ["index.md", "decisions.md", "gotchas.md", "procedures.md", "history.md", "notes.md", "tasks/1.md"] {
+        assert!(!read(page).contains("Write the docs") && !read(page).contains("3.md"), "the private task shows in {page}");
+    }
+    assert!(read("index.md").contains("The items on the board @private, and the notes on a task there, are left out."));
+
     fs::write(docs.join("notes.md"), "# My own notes\n").unwrap();
     assert!(ekko(&app, &["--task", "One more"]).status.success());
     let refused = ekko(&app, &["--json", "docs"]);

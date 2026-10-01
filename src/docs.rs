@@ -8,6 +8,10 @@
 //!
 //! Every file begins with a mark, and only a file that has it is ever
 //! overwritten or removed: a project's docs/ may hold pages written by hand.
+//!
+//! An item on the board `@private` is left out, and so is every note on a
+//! task there: they stay on the board, in the prime and in search, and only
+//! the docs, which a commit can make public, do without them (task 1004).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -28,6 +32,10 @@ const MARK: &str = "<!-- Written by ekko docs";
 /// cut at a word under it, and the note's whole text follows.
 const TITLE: usize = 120;
 
+/// The board that keeps an item out of the docs, the way `draft: true` keeps
+/// a page out of a site Quartz builds (note 1006), in any case.
+const PRIVATE: &str = "@private";
+
 /// What a run wrote, for the reply.
 #[derive(Debug, Clone, Serialize)]
 pub struct Written {
@@ -36,7 +44,8 @@ pub struct Written {
     /// alone, so a board that did not move rewrites nothing.
     pub written: usize,
     pub unchanged: usize,
-    /// Task pages an earlier run wrote for tasks no longer on the board.
+    /// Task pages an earlier run wrote for tasks no longer on the board, or
+    /// on `@private` now.
     pub removed: usize,
     pub decisions: Count,
     pub gotchas: Count,
@@ -44,6 +53,8 @@ pub struct Written {
     pub tasks: Tasks,
     /// Notes on no task, on the page of other notes.
     pub loose: usize,
+    /// Items left out: those on `@private`, and the notes on a task there.
+    pub private: usize,
 }
 
 /// The notes of one kind: those in force, and those a later one replaced.
@@ -94,8 +105,15 @@ pub fn write(
         procedures: procedure_count,
         tasks,
         loose,
+        private: items.len() - board.homes.len(),
     };
-    let as_of = items.values().map(|item| item.updated_at.unwrap_or(item.timestamp)).max().map(day).unwrap_or_default();
+    let as_of = items
+        .values()
+        .filter(|item| board.homes.contains_key(&item.id))
+        .map(|item| item.updated_at.unwrap_or(item.timestamp))
+        .max()
+        .map(day)
+        .unwrap_or_default();
     let mut pages = vec![
         (Page::Index, index(project, &source, memory, &written, &as_of)),
         (Page::Decisions, decisions),
@@ -104,7 +122,12 @@ pub fn write(
         (Page::History, board.history(&tasks)),
         (Page::Notes, notes),
     ];
-    pages.extend(items.values().filter(|item| item.is_task).map(|item| (Page::Task(item.id), board.task(item.id))));
+    pages.extend(
+        items
+            .values()
+            .filter(|item| item.is_task && board.homes.contains_key(&item.id))
+            .map(|item| (Page::Task(item.id), board.task(item.id))),
+    );
 
     let head = format!("{MARK} from {source}: change the board and run it again, since edits here are overwritten. -->\n\n");
     let files: Vec<(PathBuf, String)> =
@@ -205,7 +228,8 @@ impl Page {
 struct Board<'a> {
     items: &'a ItemMap,
     /// A task on its page; a note at its anchor on the page of its kind, on
-    /// its task's, or on the page of other notes.
+    /// its task's, or on the page of other notes. An item left out as private
+    /// has none, so nothing lists it or links to it.
     homes: HashMap<u32, Page>,
     /// The task each note explains, and each task's notes, oldest first.
     task_of: HashMap<u32, u32>,
@@ -233,13 +257,16 @@ impl<'a> Board<'a> {
             blocks: HashMap::new(),
             commits,
         };
+        let private = |item: &Item| item.boards.iter().any(|name| name.eq_ignore_ascii_case(PRIVATE));
         for (&id, item) in items {
             for blocker in item.blocked_by.iter().flatten().filter_map(|uid| resolve(uid.as_str())) {
                 board.blocked_by.entry(id).or_default().push(blocker);
                 board.blocks.entry(blocker).or_default().push(id);
             }
             if item.is_task {
-                board.homes.insert(id, Page::Task(id));
+                if !private(item) {
+                    board.homes.insert(id, Page::Task(id));
+                }
                 continue;
             }
             let task = item
@@ -247,13 +274,18 @@ impl<'a> Board<'a> {
                 .as_deref()
                 .and_then(resolve)
                 .filter(|task| items.get(task).is_some_and(|task| task.is_task));
-            if let Some(task) = task {
-                board.task_of.insert(id, task);
-                board.notes_of.entry(task).or_default().push(id);
-            }
+            // A note a private one replaced is replaced all the same: the
+            // docs say so, with no link to it.
             if let Some(old) = item.supersedes.as_deref().and_then(resolve) {
                 board.replaces.insert(id, old);
                 board.replaced_by.insert(old, id);
+            }
+            if private(item) || task.is_some_and(|task| private(&items[&task])) {
+                continue;
+            }
+            if let Some(task) = task {
+                board.task_of.insert(id, task);
+                board.notes_of.entry(task).or_default().push(id);
             }
             let home = item.knowledge.and_then(Page::of_kind).or(task.map(Page::Task)).unwrap_or(Page::Notes);
             board.homes.insert(id, home);
@@ -263,7 +295,7 @@ impl<'a> Board<'a> {
 
     fn tally(&self) -> Tasks {
         let mut tasks = Tasks::default();
-        for item in self.items.values().filter(|item| item.is_task) {
+        for item in self.items.values().filter(|item| item.is_task && self.homes.contains_key(&item.id)) {
             match State::of(item) {
                 Some(State::Done) => tasks.done += 1,
                 Some(State::Cancelled) => tasks.cancelled += 1,
@@ -323,11 +355,21 @@ impl<'a> Board<'a> {
     /// Every task, newest first: the open ones, then the rest by the month
     /// each was created in, each line linking to the task's page.
     fn history(&self, tasks: &Tasks) -> String {
+        let every = match self.items.values().any(|item| item.is_task && !self.homes.contains_key(&item.id)) {
+            true => format!("Every task on the board but those on {PRIVATE}"),
+            false => "Every task on the board".to_string(),
+        };
         let mut out = format!(
-            "# History\n\nEvery task on the board, newest first: {} done, {} cancelled, {} open. Each has a page of its own, with its notes, handoffs, answers and commits.\n\n",
+            "# History\n\n{every}, newest first: {} done, {} cancelled, {} open. Each has a page of its own, with its notes, handoffs, answers and commits.\n\n",
             tasks.done, tasks.cancelled, tasks.open
         );
-        let ids: Vec<u32> = self.items.values().rev().filter(|item| item.is_task).map(|item| item.id).collect();
+        let ids: Vec<u32> = self
+            .items
+            .values()
+            .rev()
+            .filter(|item| item.is_task && self.homes.contains_key(&item.id))
+            .map(|item| item.id)
+            .collect();
         let open: Vec<u32> = ids.iter().copied().filter(|id| !closed(&self.items[id])).collect();
         if !open.is_empty() {
             out.push_str("## Open\n\n");
@@ -387,10 +429,8 @@ impl<'a> Board<'a> {
         }
         for (word, ids) in [("Blocked by", self.blocked_by.get(&id)), ("Blocks", self.blocks.get(&id))] {
             let Some(ids) = ids else { continue };
-            let links: Vec<String> = ids
-                .iter()
-                .map(|other| format!("[{other}]({}) ({})", on.link(Page::Task(*other), None), state(&self.items[other])))
-                .collect();
+            let links: Vec<String> =
+                ids.iter().map(|other| format!("{} ({})", self.cited(*other, on), state(&self.items[other]))).collect();
             let _ = write!(out, "{word} {}.\n\n", links.join(", "));
         }
         if let Some(commits) = self.commits.get(&id).filter(|commits| !commits.is_empty()) {
@@ -454,15 +494,27 @@ impl<'a> Board<'a> {
     fn about(&self, id: u32, on: Page) -> Vec<String> {
         let mut about = vec![self.label(id), day(self.items[&id].timestamp)];
         if let Some(&task) = self.task_of.get(&id).filter(|_| !matches!(on, Page::Task(_))) {
-            about.push(format!("on task [{task}]({})", on.link(Page::Task(task), None)));
+            about.push(format!("on task {}", self.cited(task, on)));
         }
         if let Some(&old) = self.replaces.get(&id) {
-            about.push(format!("replaces [{old}]({})", on.link(self.homes[&old], Some(old))));
+            about.push(format!("replaces {}", self.cited(old, on)));
         }
         if let Some(&new) = self.replaced_by.get(&id) {
-            about.push(format!("replaced by [{new}]({})", on.link(self.homes[&new], Some(new))));
+            about.push(format!("replaced by {}", self.cited(new, on)));
         }
         about
+    }
+
+    /// An item's id, from the page `on`: a link to where the item is
+    /// written, or the bare number for one the docs leave out.
+    fn cited(&self, id: u32, on: Page) -> String {
+        match self.homes.get(&id) {
+            Some(&page) => {
+                let anchor = (!self.items[&id].is_task).then_some(id);
+                format!("[{id}]({})", on.link(page, anchor))
+            }
+            None => id.to_string(),
+        }
     }
 
     /// What a note is, in a word for a reader. A note without a kind is
@@ -808,7 +860,7 @@ fn index(project: Option<&str>, source: &str, memory: Option<&str>, written: &Wr
          - [Procedures](procedures.md): steps that work. {}\n\
          - [History](history.md): every task, newest first, each on a page of its own. {} done, {} cancelled, {} open.\n\
          - [Other notes](notes.md): notes on no task. {}.\n\n\
-         *Written by ekko docs from {source}, as of {as_of}.*\n",
+         *Written by ekko docs from {source}, as of {as_of}.",
         kind(written.decisions),
         kind(written.gotchas),
         kind(written.procedures),
@@ -817,6 +869,10 @@ fn index(project: Option<&str>, source: &str, memory: Option<&str>, written: &Wr
         tasks.open,
         written.loose,
     );
+    if written.private > 0 {
+        let _ = write!(out, " The items on the board {PRIVATE}, and the notes on a task there, are left out.");
+    }
+    out.push_str("*\n");
     out
 }
 
@@ -932,5 +988,48 @@ mod tests {
         let task = board.task(1);
         assert!(task.contains("- Decision [3](../decisions.md#3): Use the new way"), "{task}");
         assert!(task.find("4. Stopped at the parser") < task.find("5. Stopped at the tests"), "oldest first: {task}");
+    }
+
+    #[test]
+    fn an_item_on_private_and_the_notes_on_a_task_there_are_left_out_and_nothing_links_to_them() {
+        let private = |mut item: serde_json::Value| {
+            item["boards"] = serde_json::json!(["My Board", "@Private"]);
+            item
+        };
+        let mut shipped = task(1, "Ship it");
+        shipped["blockedBy"] = serde_json::json!([uid(2)]);
+        let items = board_of(serde_json::json!([
+            shipped,
+            private(task(2, "Set up the client's host")),
+            note(3, "Its name is acme-1", serde_json::json!({"attachedTo": uid(2)})),
+            note(4, "Use the old way", serde_json::json!({"knowledge": "decision", "attachedTo": uid(1)})),
+            private(note(5, "Use sudo on acme-1", serde_json::json!({"knowledge": "decision", "supersedes": uid(4)}))),
+            note(6, "After task 2 and notes 3 and 5, task 1 shipped", serde_json::json!({"attachedTo": uid(1)})),
+        ]));
+        let commits = HashMap::new();
+        let board = Board::new(&items, &commits);
+        let mut kept: Vec<u32> = board.homes.keys().copied().collect();
+        kept.sort_unstable();
+        assert_eq!(kept, [1, 4, 6]);
+        let (decisions, count) = board.kind(Page::Decisions, "Decisions", "What was settled, and why:");
+        assert_eq!((count.current, count.replaced), (0, 1), "the decision a private one replaced is replaced still");
+        assert!(decisions.contains("4. Use the old way") && decisions.contains("replaced by 5*"), "{decisions}");
+        let task = board.task(1);
+        assert!(task.contains("Blocked by 2 (done)."), "{task}");
+        assert!(task.contains("After task 2 and notes 3 and 5, task [1](1.md) shipped"), "{task}");
+        let history = board.history(&board.tally());
+        assert!(history.contains("but those on @private, newest first: 1 done"), "{history}");
+
+        let folder = crate::paths::test_dir("ekko-docs-private");
+        let written = write(&items, &commits, &folder, Some("site"), None).unwrap();
+        assert_eq!((written.private, written.tasks.done, written.loose), (3, 1, 0));
+        assert!(!folder.join("tasks").join("2.md").exists());
+        let mut files = vec![folder.join("tasks").join("1.md")];
+        files.extend(["index.md", "decisions.md", "gotchas.md", "procedures.md", "history.md", "notes.md"].map(|name| folder.join(name)));
+        for file in files {
+            let text = fs::read_to_string(&file).unwrap();
+            assert!(!text.contains("acme") && !text.contains("client") && !text.contains("2.md"), "{}: {text}", file.display());
+        }
+        let _ = fs::remove_dir_all(&folder);
     }
 }

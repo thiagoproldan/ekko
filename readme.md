@@ -876,6 +876,8 @@ docs/
 
 It is meant for the end of a project, when the board is done, and runs on any board. Each item a note cites -- `task 983`, `notes 990 and 992` -- becomes a link to where that item is written. A note's text, plain on the board, is escaped so that markdown shows it as written, and a block it fences with ``` stays as it is. The stash and the trash stay out.
 
+An item on the board `@private` stays out of the docs too, and so does every note on a task there, the way a page marked `draft: true` stays out of a site Quartz builds. Unlike the stash, the board keeps it everywhere else: `ekko --move @12 myboard private` puts item 12 on `@private` and keeps it on My Board (`--move` replaces an item's boards, so name each one it keeps), and the item stays in the prime and in search. Only the docs do without it. Where another item names it, its id stays, with no link.
+
 Code writes all of it, with no model: no tokens, and a fraction of a second (0.35 s for Ekko's own board, 215 files, on a debug build). A board that did not move rewrites nothing, and the page of a task that left the board goes. Every file starts with a line saying `ekko docs` wrote it, and only a file with that line is ever overwritten or removed: a file in the way that it did not write stops the run before anything is written, with `NOT_GENERATED`. The default board belongs to no folder, so there the folder must be named. Writing publishes nothing: in a repository the pages are files like any other, and the diff shows what a commit would make public.
 
 ### Stable ids
