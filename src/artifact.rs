@@ -974,16 +974,56 @@ fn replace(path: &Path, content: &[u8]) -> std::io::Result<()> {
 
 /// The plan's Markdown as HTML. Raw HTML in it is shown as text, not run:
 /// the page is the board's, and a script a plan carried would run there.
+/// For the same reason a link keeps its address only when `linkable`, and
+/// is its words alone otherwise. An image is a link to its source, never
+/// loaded, since the page fetches nothing (task 1097).
 fn markdown(text: &str) -> String {
-    use pulldown_cmark::{html, Event, Options, Parser};
+    use pulldown_cmark::{html, Event, LinkType, Options, Parser, Tag, TagEnd};
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let events = Parser::new_ext(text, options).map(|event| match event {
-        Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
-        other => other,
-    });
+    let mut events = Vec::new();
+    // Each link and image open here, innermost last: whether it kept its
+    // tag, and a kept image's source, which names it when it has no words.
+    let mut open = Vec::new();
+    for event in Parser::new_ext(text, options) {
+        match event {
+            Event::Html(raw) | Event::InlineHtml(raw) => events.push(Event::Text(raw)),
+            // One inside a kept link would nest a link in a link.
+            Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
+                let keep = !open.iter().any(|(kept, _)| *kept) && (link_type == LinkType::Email || linkable(&dest_url));
+                open.push((keep, None));
+                if keep {
+                    events.push(Event::Start(Tag::Link { link_type, dest_url, title, id }));
+                }
+            }
+            Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
+                let keep = !open.iter().any(|(kept, _)| *kept) && linkable(&dest_url);
+                open.push((keep, keep.then(|| dest_url.clone())));
+                if keep {
+                    events.push(Event::Start(Tag::Link { link_type, dest_url, title, id }));
+                }
+            }
+            Event::End(TagEnd::Link | TagEnd::Image) => {
+                let Some((true, source)) = open.pop() else { continue };
+                let bare = matches!(events.last(), Some(Event::Start(Tag::Link { .. })));
+                if let Some(source) = source.filter(|_| bare) {
+                    events.push(Event::Text(source));
+                }
+                events.push(Event::End(TagEnd::Link));
+            }
+            other => events.push(other),
+        }
+    }
     let mut out = String::new();
-    html::push_html(&mut out, events);
+    html::push_html(&mut out, events.into_iter());
     out
+}
+
+/// Whether a link to `url` keeps its address on the page: one to the web,
+/// to mail, or to a place on the page itself. Any other -- javascript:,
+/// data:, a file -- would run or load something from the page.
+fn linkable(url: &str) -> bool {
+    let url = url.to_ascii_lowercase();
+    ["http://", "https://", "mailto:", "#"].iter().any(|start| url.starts_with(start))
 }
 
 fn esc(text: &str) -> String {
@@ -1381,6 +1421,42 @@ mod tests {
         let mut changed = item.clone();
         changed.description = changed.description.replace("bold", "bolder");
         assert_ne!(page(&changed, &all, Some(Path::new("/projects/site"))).1, version, "a change shows in the version");
+    }
+
+    #[test]
+    fn a_plan_links_to_the_web_mail_or_the_page_and_loads_no_image() {
+        let html = markdown(concat!(
+            "[run](javascript:alert(1)) [shout](JaVaScRiPt:alert(2)) [coded](javascript&#58;alert(3)) <javascript:alert(4)>\n\n",
+            "[data](data:text/html,x) [file](file:///etc/passwd) [relative](notes.md) [spaced](< https://example.com/s>)\n\n",
+            "[web](https://example.com/a) [plain](http://example.com/b) [upper](HTTPS://example.com/c) [mail](mailto:a@example.com) <b@example.com> [here](#plan)\n\n",
+            "![a chart](https://example.com/chart.png) ![](https://example.com/bare.png) ![local](chart.png)\n\n",
+            "[![inner](https://example.com/in.png)](https://example.com/out) ![see [x](https://example.com/y)](https://example.com/z)\n",
+        ));
+        let hrefs: Vec<&str> = html.split("href=\"").skip(1).map(|rest| &rest[..rest.find('"').unwrap_or(rest.len())]).collect();
+        assert_eq!(
+            hrefs,
+            [
+                "https://example.com/a",
+                "http://example.com/b",
+                "HTTPS://example.com/c",
+                "mailto:a@example.com",
+                "mailto:b@example.com",
+                "#plan",
+                "https://example.com/chart.png",
+                "https://example.com/bare.png",
+                "https://example.com/out",
+                "https://example.com/z",
+            ],
+            "{html}"
+        );
+        assert!(!html.contains("<img"), "no image is loaded: {html}");
+        for words in ["run", "shout", "coded", "javascript:alert(4)", "data", "file", "relative", "spaced", "local"] {
+            assert!(html.contains(words), "a link refused keeps its words, {words}: {html}");
+        }
+        assert!(html.contains(">a chart</a>") && html.contains(">https://example.com/bare.png</a>"), "an image is a link named by its words, or by its source: {html}");
+        assert!(html.contains("<a href=\"https://example.com/out\">inner</a>"), "an image inside a link is its words: {html}");
+        assert!(html.contains("<a href=\"https://example.com/z\">see x</a>"), "a link inside an image is its words: {html}");
+        assert_eq!(html.matches("<a ").count(), html.matches("</a>").count(), "every link opened is closed, and no other: {html}");
     }
 
     #[test]
