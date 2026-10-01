@@ -27,3 +27,6 @@ snap
 # UI reference screenshots -- third-party, kept locally
 /imgs_base_ui
 __pycache__/
+
+# Obsidian keeps its own state in a vault it opens, such as docs/
+.obsidian/
