@@ -1,0 +1,221 @@
+<!-- Written by ekko docs from the board of ekko: change the board and run it again, since edits here are overwritten. -->
+
+# History
+
+Every task on the board but those on @private, newest first: 186 done, 14 cancelled, 4 open. Each has a page of its own, with its notes, handoffs, answers and commits.
+
+## Open
+
+- [1031](tasks/1031.md) Evaluate a naming of their own for notes, apart from the tasks' numbers · pending
+- [1021](tasks/1021.md) Re-validate how ekko's reads find what sessions need, as the board grows · in progress · 1 commit
+- [1019](tasks/1019.md) ekko artifact: planning, Claude's Artifact joined with plan mode · pending
+- [1004](tasks/1004.md) Publish ekko's own docs/ once the board's private notes are kept out of them · in progress · 1 commit
+
+## 2026-10
+
+- [1028](tasks/1028.md) Release ekko v0.32.0: the prime's most cited lasting notes (1020) · done · 1 commit
+- [1020](tasks/1020.md) The prime's gotcha and procedure slots follow updatedAt, which any write moves · done · 1 commit
+- [1015](tasks/1015.md) Release v0.31.0 · done · 1 commit
+- [1011](tasks/1011.md) add_boards takes an item off My Board when no remove_boards is given · done · 1 commit
+- [1003](tasks/1003.md) Release v0.30.0 · done · 1 commit
+
+## 2026-09
+
+- [983](tasks/983.md) Claude Code: text only at the end of a run, no running commentary · done · 1 commit
+- [982](tasks/982.md) Release v0.29.0 · done · 1 commit
+- [979](tasks/979.md) ask: questions explain themselves, recommend an option, say why · done · 1 commit
+- [975](tasks/975.md) ctx: a session alone is asked for a handoff that auto-reset then cannot type · done
+- [967](tasks/967.md) ctx: auto-reset typed /clear into a draft the user was writing · done
+- [961](tasks/961.md) ctx: no handoff ask while the user is there; only a session alone is asked · done
+- [944](tasks/944.md) Decide which features stay: audit of measured use, 2026-09-29 · done
+- [941](tasks/941.md) Re-count the cold returns two weeks after ctx 0.9.0 turned the guard off · done
+- [929](tasks/929.md) Decide ctx's cold-return guard after 540: off, raise to 400k, or keep · done · 1 commit
+- [915](tasks/915.md) ekko docs: the project's documentation as .md files, from the board · done · 1 commit
+- [914](tasks/914.md) Release v0.28.0 · done · 1 commit
+- [909](tasks/909.md) move_to over MCP too: the user wants moving items in the CLI and the MCP server · done · 1 commit
+- [897](tasks/897.md) move entre projetos: não há como levar itens do quadro padrão para um projeto · done · 2 commits
+- [895](tasks/895.md) Release v0.27.0 · done · 1 commit
+- [891](tasks/891.md) ctx work-loss guard: a commit whose patch is on another branch is not lost · done
+- [890](tasks/890.md) Clean up the repo's branches, leaving main · done
+- [885](tasks/885.md) ekko memory: a fast, clean, cheap recall of what the project is as a whole · done · 1 commit
+- [884](tasks/884.md) Find a useful way to use caching in ekko: faster queries, or other gains · done · 1 commit
+- [880](tasks/880.md) Observe ctx 0.8.0's 5-hour cap live, the first time the window passes 85% · done
+- [878](tasks/878.md) Release v0.26.1 · done · 1 commit
+- [868](tasks/868.md) Release v0.26.0 · done · 1 commit
+- [862](tasks/862.md) ekko: a conversation continued in a background session loses its holds · done · 1 commit
+- [859](tasks/859.md) ekko: an MCP write parses the board it just wrote · done · 1 commit
+- [853](tasks/853.md) Release ekko v0.25.1: the fixes of 829, 827 and 839 · done · 1 commit
+- [845](tasks/845.md) ekko: an enum variant this version does not know makes the board unreadable · done · 1 commit
+- [844](tasks/844.md) ekko: one command parses storage.json three times · done · 1 commit
+- [841](tasks/841.md) Cue for cargo fmt --all in winwayland, once the repo is back on this machine · cancelled
+- [839](tasks/839.md) Two guards refusing one Bash call: the model reads only one of the reasons · done · 1 commit
+- [829](tasks/829.md) ekko: a question keeps no unknown field, so an older ekko drops its new ones · done · 1 commit
+- [827](tasks/827.md) ekko: the guard ignores EKKO_DIR; a cue on that board never refuses · done · 1 commit
+- [809](tasks/809.md) ctx: cold-return prices a point at 175k units; measured 63-77k since · done
+- [808](tasks/808.md) ctx: tell the model where the 5-hour window stands, and stop new work at 85% · done
+- [805](tasks/805.md) ekko: a gotcha with a command cue refuses the calls it names · done · 2 commits
+- [804](tasks/804.md) ctx: refuse bringing secret material into the context · done
+- [803](tasks/803.md) ctx: refuse a git or rm command that would destroy work with no other copy · done
+- [802](tasks/802.md) Declare bypassPermissions in the Nix wrapper's --settings, for both profiles · done
+- [789](tasks/789.md) Compaction as the safety net where ctx cannot type the reset · done
+- [770](tasks/770.md) Bypass always on, with the guards coming from ekko and ctx · done
+- [757](tasks/757.md) Re-run evals/claude-code/transcripts.py over a full week of the handoff era · done
+- [747](tasks/747.md) Auto mode for the reset: a session running alone hands off and goes on by itself · done
+- [735](tasks/735.md) Release v0.24.0 · done · 1 commit
+- [730](tasks/730.md) The ask rule for another board misses EKKO_PROJECT=x ekko: test a rule that asks · done
+- [725](tasks/725.md) Release v0.23.0 · done · 1 commit
+- [711](tasks/711.md) Release v0.22.2 · done · 1 commit
+- [666](tasks/666.md) Remove the merged worktrees ekko-wait and ekko-copies, and branch ci-commit · done
+- [658](tasks/658.md) Confirm each Claude Code session runs ekko 0.22.1 · done
+- [657](tasks/657.md) Release v0.22.1 · done · 1 commit
+- [650](tasks/650.md) Release v0.22.0 · done · 1 commit
+- [640](tasks/640.md) History keeps no daily versions: it counts days back from now · done · 1 commit
+- [638](tasks/638.md) Say in the priority field's schema that 3 is the most urgent · done · 1 commit
+- [629](tasks/629.md) Confirm each Claude Code session runs ekko 0.21.0 and gets the wake hook · done
+- [628](tasks/628.md) Release v0.21.0 · done · 1 commit
+- [623](tasks/623.md) Flaky test: commits_name_their_tasks_and_context_lists_them · done · 1 commit
+- [606](tasks/606.md) Confirm each Claude Code session runs ekko 0.20.1 after the restart · done
+- [604](tasks/604.md) Release v0.20.1 · done · 1 commit
+- [595](tasks/595.md) Release v0.20.0 · done · 1 commit
+- [593](tasks/593.md) Menu: don't take a key pressed as the question window opens as an answer · done · 1 commit
+- [586](tasks/586.md) Move the old auto memory's feedback rules into a global CLAUDE.md · done
+- [575](tasks/575.md) Revive \~/NixOS's auto-commit (gotcha [572](gotchas.md#572)), at the user's word. Now: `systemctl --user start nixos-autocommit.service`… · done
+- [540](tasks/540.md) Re-count the cold returns two weeks after 525's guard goes live · done · 1 commit
+- [526](tasks/526.md) Effort paired test: measure max against high on the same kinds of task -- cost, turns and quality -- before changing… · done · 1 commit
+- [525](tasks/525.md) Cold-return guard: when a prompt arrives after 60+ minutes idle on a context of \~200k or more, stop it once and offer… · done
+- [514](tasks/514.md) The prime's 'Where the last session stopped' fell back to a stale handoff: once 469, which held the newest handoff… · done · 1 commit
+- [512](tasks/512.md) Release v0.19.0 at the user's word (procedure 234). Local main holds 618ef1e (469: the replaced-binary note under the… · done
+- [507](tasks/507.md) Playground, on a branch named playground: measure attention-style retrieval for ekko before building it -- the user's… · cancelled
+- [503](tasks/503.md) Protect each project's board from its own folder · done · 1 commit
+- [496](tasks/496.md) Decide: ekko as the user's own tool or as a product for others · done
+- [495](tasks/495.md) Run ekko under another MCP client and list what works only in Claude Code · cancelled
+- [493](tasks/493.md) Remove branch ask-menu (794f14b, superseded by aff9197 on main) and its worktree wt-menu under 7ed2ad71's scratchpad… · done
+- [487](tasks/487.md) Release v0.18.0 over v0.17.0, on the user's word (asked through AskUserQuestion, 2026-09-24, session 874cd2ed)… · done
+- [475](tasks/475.md) Release v0.17.0 over v0.16.0, on the user's word (answer to 474): 26294ec, ask puts the question to the user in a… · done
+- [469](tasks/469.md) The replaced-binary note (274) never fires under the Nix-built plugin. The flake has pinned the plugin's command to its… · done
+- [431](tasks/431.md) Measure what each part of every session's floor weighs · done
+- [426](tasks/426.md) Build in ekko the answer to 419: when a handoff replaces a task's earlier one, the earlier note keeps a record of it (a… · done
+- [424](tasks/424.md) Build in ctx the answer to 418: (1) the status line shows how old the handoff is once one was asked for or written, as… · done
+- [422](tasks/422.md) Should we measure what each skill and MCP server adds to every session's floor, and unload what does not earn its… · done
+- [421](tasks/421.md) Should what has to outlive a handoff go into a typed note (decision, gotcha, procedure) instead of handoff prose, and… · done
+- [420](tasks/420.md) Should a handoff name by id the notes the next session must read, instead of sending it to the whole task? A question… · done
+- [419](tasks/419.md) Should ekko's context print a replaced handoff clipped and marked as history? A question to decide with the user… · done
+- [418](tasks/418.md) Should ctx's status line show how old the handoff is once an ask has passed? A question to decide with the user, first… · done
+- [416](tasks/416.md) Validate the automatic handoff after its first live run (ctx 0.1.0 asked session 06637eec at 330k on 2026-09-23): what… · done
+- [398](tasks/398.md) Completing a task says nothing of the notes attached to it that still propose something, and they leave the prime with… · done
+- [397](tasks/397.md) search never returns a stashed item, and no filter includes one. 82 items are stashed on this board, 45 of them notes.… · done
+- [396](tasks/396.md) Link commits to items with an 'Ekko: &lt;id>' commit trailer, so the board knows where each task landed, rebases included.… · done · 1 commit
+- [395](tasks/395.md) Questions for the user still go around ask: the rule is text, and ask is deferred. Procedure [382](procedures.md#382) item 5 says a question… · done
+- [394](tasks/394.md) A batch's text that holds $N is kept as written, with nothing said: the reply could name it. SEEN 2026-09-22, session… · done
+- [393](tasks/393.md) Flaky test directories: tests that run in parallel in one process can be handed the same temp directory, and the first… · done
+- [391](tasks/391.md) A release script: procedure 234 run as one deterministic command, not six steps an agent reasons through. Session… · done
+- [389](tasks/389.md) Waiting on another session: tell it when what it waits on is free · done · 1 commit
+- [388](tasks/388.md) Release v0.15.0: the audit of 2026-09-22 (task [312](tasks/312.md)), landed as bf33478 over v0.14.2. 2937a60 --calendar removed (321… · done
+- [387](tasks/387.md) Release v0.14.2: f521ce3 (the task list shows a sequence the whole way: done steps carry their place, and the steps… · done
+- [386](tasks/386.md) Demo sequence, step C: ship (to be cancelled after the demo) · cancelled
+- [385](tasks/385.md) Demo sequence, step B: build (to be cancelled after the demo) · cancelled
+- [384](tasks/384.md) Demo sequence, step A: plan (to be cancelled after the demo) · cancelled
+- [383](tasks/383.md) Release v0.14.1: a1a844b (only this session's own work is in progress on its task list; ended sessions' work marked… · done
+- [380](tasks/380.md) A resumed session is not shown the answer to its own question: on resume, the SessionStart hook replies with 'what… · done
+- [376](tasks/376.md) Release v0.14.0: task 354's steps 3 and 4 -- the CLI meets the hold, the prime names the notes of work held elsewhere… · done
+- [370](tasks/370.md) Each session's own view of the board, and who did what: every Claude Code session in one project shows the same board… · done
+- [369](tasks/369.md) Cap a description at 20,000 characters, over twice the longest on this board (9,125), since context prints it whole… · done
+- [368](tasks/368.md) Refuse board names that are empty or hold a space: the MCP accepts them and the CLI cannot address them (note [336](tasks/312.md#336)… · done
+- [367](tasks/367.md) set_state undone on a cancelled task says it changed nothing and that unstarted revives it, instead of a bare ok (note… · done
+- [366](tasks/366.md) changes with a cursor ahead of the board says so, instead of blaming the journal: since 269 it is counters.json that… · done
+- [365](tasks/365.md) An empty append is refused instead of writing a revision that changes nothing (note [336](tasks/312.md#336)) · done
+- [364](tasks/364.md) priority -1 answers INVALID_PRIORITY, as 0 and 4 do, instead of INVALID_INPUT with serde's 'expected u8' (note [336](tasks/312.md#336)) · done
+- [359](tasks/359.md) Scratch for task 354's step 2: a second Claude Code session sets this in progress and holds it, this session is refused… · cancelled
+- [355](tasks/355.md) Push the CI half of 278 once gh has the workflow scope · done · 1 commit
+- [352](tasks/352.md) Two sessions on one repo: agree how work lands on main, so no session waits on another's working tree · done
+- [337](tasks/337.md) Decide whether and how ekko becomes Claude Code's long-term memory, from the memory-types proposal of a Claude Desktop… · done
+- [331](tasks/331.md) context lists a blocker that is in the trash as [pending], while it holds nothing up (the task it blocked can be… · done
+- [330](tasks/330.md) link lets a note be blocked (blocked_by on a note), while a note as the blocker is refused: the note is then counted as… · done
+- [329](tasks/329.md) phases drops a phase that still holds items: they fall out of the roadmap ('a 0/0 · 20 at the root' with a task in b)… · done
+- [322](tasks/322.md) context prints an item twice when it is requested beside the task it is attached to: context [265, 311] prints handoff… · done
+- [321](tasks/321.md) Remove --calendar: it draws the current month with nothing from the board on it, and no one used it (shell history and… · done
+- [312](tasks/312.md) Audit of 2026-09-22, the critical phase: make writes, reads and MCP calls faster, spend fewer tokens, move work the… · done
+- [284](tasks/284.md) Urgency counts blocking twice: ekko inherits priority and latest finish and still adds 8 for any open dependent, which… · done
+- [283](tasks/283.md) prime(if_rev) and next(if_rev) answer 'unchanged' across midnight while the order and the overdue list moved · done
+- [282](tasks/282.md) create with attached_to and no kind should make a note: a task can never be attached, and the refusal costs a call · done
+- [281](tasks/281.md) --phase with --task or --note writes twice: the item sits at the project root for a moment, and the revision moves by… · done
+- [280](tasks/280.md) Temp-file cleanup can delete a live writer's file: remove only the temp files whose writer is dead · done
+- [279](tasks/279.md) Lock waiters poll every 50 ms and starve under contention: wait in the kernel's queue, a blocking flock on a thread… · done
+- [278](tasks/278.md) Eval hygiene: copy_real drops counters.json, retrieval's ground truth ignores waiting, semantics.py always exits 0, and… · done · 1 commit
+- [277](tasks/277.md) Board history: keep recent versions of storage.json as hard links, since .ekko is out of git and every write replaces… · done
+- [276](tasks/276.md) The lock-timeout message tells the user to delete the lock file, which under flock lets a second writer in · done
+- [275](tasks/275.md) Keep what Claude Code sends ahead of the conversation stable: a test pins a hash of the server instructions and the… · done
+- [274](tasks/274.md) A server older than the board should refuse to write and say to restart Claude Code: a version fence in counters.json · done
+- [273](tasks/273.md) search misses inflected words: 'handoffs' finds 7 items where 'handoff' finds 51. Add light stemming, query side… · done
+- [272](tasks/272.md) Two sessions' structured writes overwrite each other: link blocked_by, update boards and edit text replace whole… · done
+- [271](tasks/271.md) changes has no limit: changes(0) on 5,000 items is 429 KB (\~165k tokens), and a week of this board is 27 KB (\~10k… · done
+- [270](tasks/270.md) prime can pass the 10,000 characters Claude Code keeps: Needs attention lists every overdue, broken, inverted and… · done
+- [269](tasks/269.md) A lost or older counters.json sends the revision back and hides every later write from cursors already held: heal it… · done
+- [268](tasks/268.md) --clear and --restore can lose an item: write the destination before the source, so a failure leaves a duplicate, never… · done
+- [267](tasks/267.md) Tell the user when to hand off, and hold the turn for the handoff: built in ctx (github.com/thiagoproldan/ctx), the… · done
+- [265](tasks/265.md) Decide which findings of the improvement review of 2026-09-21 (session 620867ca, answered in chat) become tasks: the… · done
+- [264](tasks/264.md) Owners for tasks, the user's idea on 2026-09-21: a task someone is working on names who holds it, identified so that a… · done
+- [263](tasks/263.md) A cursor never runs ahead of the board it came with. save_against writes counters.json (the revision) before… · done
+- [262](tasks/262.md) When several sessions hand off, the prime shows every handoff under an hour old on open work, each with its task and… · done
+- [261](tasks/261.md) Marking a task in progress that is already in progress says so: the reply says it was already in progress, since when… · done
+- [260](tasks/260.md) Require a short title on every task · done · 1 commit
+- [259](tasks/259.md) Paired test of note [163](decisions.md#163), what task [180](tasks/180.md) (note [258](tasks/180.md#258)) could not read off transcripts: the same tasks under (A) the status… · done · 2 commits
+- [257](tasks/257.md) context lists a waiting task under 'Roots, free to start': Graph::upstream (src/agent.rs) takes as a root any open… · done
+- [249](tasks/249.md) Release v0.11.0 by procedure 234 -- the waiting state, the description from stdin, the prime's newer loose notes, --ui… · done
+- [248](tasks/248.md) One task total: counted by item::tally alone, not summed again by hand in Ekko::compute_stats, Prime::text_within and… · done
+- [247](tasks/247.md) One state vocabulary: every state's word from one State::word with a strict inverse, so a new state cannot be… · done
+- [246](tasks/246.md) Keep the fields this version does not know when it rewrites an item -- today any older ekko that writes drops… · done
+- [241](tasks/241.md) Viability and rigor review, 2026-09-21, session bb04549e, asked by the user after 121, 88 and 235. VERDICT: viable. The… · cancelled
+- [239](tasks/239.md) Remove --ui entirely: src/tui is 35% of the code for a view the user barely uses and that did not come out as they… · done
+- [235](tasks/235.md) The prime's recent notes show only loose notes newer than the handoff it shows -- older ones are history the handoff… · done
+- [219](tasks/219.md) teste de mencao · cancelled
+- [207](tasks/207.md) A prime that runs out of room drops the gotchas and procedures section whole, with no '+N more' line, so a full board… · done
+- [202](tasks/202.md) Draw the board in Claude Code's own task list, the ✔ ◼ ◻ widget under the spinner, from the ekko plugin: hooks write… · done
+- [197](tasks/197.md) Show the board in Claude Code's status line: ekko --statusline prints the work in progress and the next ready tasks in… · cancelled
+- [183](tasks/183.md) Rigor plan 2.5, rank fusion (RRF over search position, urgency and recency) for 'what matters for X now' -- dropped… · cancelled
+- [182](tasks/182.md) Rigor plan 4.4, an optional effort estimate (a duration, or optimistic/likely/pessimistic summed by the PERT mean) so… · cancelled
+- [180](tasks/180.md) Measure what handoffs actually save after a week of real use, not before 2026-09-28: note [163](decisions.md#163)'s paired test and note… · done
+- [178](tasks/178.md) Show the handoff mark in the board view and in --ui -- prime and context already say which note is a task's handoff… · done
+- [176](tasks/176.md) Rigor plan 4.5, structuredContent: find out what the model actually receives when a tool answers with structuredContent… · cancelled
+- [174](tasks/174.md) Rigor plan 4.1, board items mentionable with @ as MCP resources (item://93, prime://, board://icebox): run the… · done
+- [172](tasks/172.md) Typed knowledge notes: a note can say it is a decision, a gotcha or a procedure, and a decision can name the earlier… · done
+- [160](tasks/160.md) Context handoff: before /clear, the agent writes a compact state note on the task it is working (where it stopped… · done
+- [153](tasks/153.md) The cycle check walks every path instead of every item: adding one dependency to a chain of 26 diamonds, 80 tasks… · done
+- [150](tasks/150.md) paused is a state --set accepts and --list rejects: --list paused answers UNKNOWN_LIST_TERM · done
+- [148](tasks/148.md) Phase order and dependency order are never checked against each other: a task in an earlier phase can be blocked by one… · done
+- [146](tasks/146.md) The blocked-by rule only holds at the moment of completion: reopening a blocker leaves its completed dependents done… · done
+- [144](tasks/144.md) Two definitions of a task total: the board counter and --projects count cancelled tasks, the percentage and the roadmap… · done
+- [142](tasks/142.md) State is four independent flags, not one of five states: cancelled then --check is done and cancelled at once, and the… · done
+- [140](tasks/140.md) Fix the crossed vocabulary before the new direction: --path became --roadmap, --anchor became --attached-to, and… · done
+
+## 2026-08
+
+- [131](tasks/131.md) Ideia que a gente descartou · cancelled
+- [125](tasks/125.md) Authorship, the axis with:NAME deliberately did not cover: who WROTE an item, as opposed to who it is with · done · 1 commit
+- [124](tasks/124.md) Editing resends the whole description -- fixing one word in a 900-character note costs the note again · done
+- [123](tasks/123.md) No batch: closing a task and writing the note explaining it are two calls, not atomic, and interrupted between them the… · done
+- [122](tasks/122.md) No way to read one item: seeing item 91 costs 83KB of whole board, or --find with a substring you must already know · done
+- [121](tasks/121.md) Long text goes through argv, so apostrophes get dropped to avoid shell quoting -- read a description from stdin instead · done
+- [116](tasks/116.md) A board name silently shadows a --list attribute of the same name, and makes it unreachable: with a board @due, neither… · done
+- [114](tasks/114.md) The UI reloads in silence after a write, so a mistyped key changes real data with no trace on screen · done
+- [113](tasks/113.md) The UI lets a navigation key destroy a terminal state: Tab on a done task clears isComplete and marks it in progress… · done
+- [102](tasks/102.md) Anchor a note to an item by uid, so the reason renders under the work it explains instead of as a sibling · done
+- [101](tasks/101.md) Let mutations accept a uid where they accept an id -- the skill tells agents to carry uid across turns and no command… · done
+- [100](tasks/100.md) Clear a dependency: --blocked-by has no way to unset, and the empty-uids branch in set_blocked_by is unreachable dead… · done
+- [88](tasks/88.md) A waiting state, for a task that cannot proceed because of something outside the board -- --list ready reports those as… · done
+- [87](tasks/87.md) Actors as an attribute via with:NAME -- absence is the board owner, so you never mark your own; the agent is just a name · done
+- [81](tasks/81.md) cli.rs promises --projects lists projects "with their item counts" and display_projects prints only names -- the… · done
+- [80](tasks/80.md) No way to delete a project: --create has no inverse, so removal is rm -rf on the directory -- no archive, no restore… · done
+- [72](tasks/72.md) Path node glyphs render uncoloured: display_path paints the phase NAME but appends the dot outside the painted span, so… · done
+- [71](tasks/71.md) The timeline view never draws the blocked-by marker: display_item_by_date does not call get_blocked, while… · done
+- [41](tasks/41.md) Fold long note descriptions in the rendered views, with a hidden-line count · done
+- [38](tasks/38.md) CI warns on every run: actions/checkout@v4 targets Node 20, which GitHub deprecated and now forces onto Node 24 · done
+- [37](tasks/37.md) Two safety branches still local: backup-pre-reroot and pre-v0.4.1. Delete once the rewritten history is trusted · done
+- [36](tasks/36.md) Note 16 is stale: it says MSRV is 1.88, true when written and false since the home dependency was dropped (it is 1.87) · done
+- [35](tasks/35.md) Skill lives loose in \~/.claude/skills; decide whether it should be version-controlled · done
+- [34](tasks/34.md) ekko is on no PATH the shell reads. Flake package now exists, so this is down to choosing how to install it… · done
+- [30](tasks/30.md) Add a real paused state: third symbol, repoint the unstarted alias, warn when more than one task is in progress. Design… · done
+- [25](tasks/25.md) Piping into head panics with a broken pipe instead of exiting quietly · done
+- [23](tasks/23.md) Cheap incremental read: --since, to sync without pulling the whole board · done
+- [22](tasks/22.md) Stable uid in --json, so ids being recycled cannot mislead a caller · done
+- [21](tasks/21.md) Idempotent state setting so a retried command cannot undo itself · done
