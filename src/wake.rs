@@ -154,7 +154,7 @@ pub fn untold(ekko: &Ekko, me: &Actor, told: &Told, since: u64, holding: bool) -
         if let Some(answer) = answer {
             let theirs = !answer.by.as_ref().is_some_and(|by| me.is(by));
             if answer.rev > since && theirs && told.has(&format!("open-{uid}")) && told.mark(&format!("answer-{uid}")) {
-                let by = answer.by.as_ref().map_or_else(|| "the user".to_string(), &name);
+                let by = answer.by.as_ref().map_or_else(|| "the user".to_string(), name);
                 lines.push(format!(
                     "Question {}, which this session asked, was answered, recorded by {by}: {}. It asked: {}",
                     note.id,
