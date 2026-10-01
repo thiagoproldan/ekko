@@ -27,3 +27,6 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 # The plan on an artifact's page, from Markdown (task 1019): the HTML
 # renderer alone, without the command-line tool's getopts.
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# The head of each request `ekko serve` answers (task 1102): hyper's parser,
+# with no dependencies, for 25 kB of a stripped build (decision 1128).
+httparse = "1"

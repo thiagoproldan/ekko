@@ -1168,7 +1168,7 @@ impl Server {
             }
             "artifact" => {
                 let spec: ops::ArtifactSpec = parse(args)?;
-                artifact(&ekko, &spec)
+                artifact(&ekko, &spec, &self.home, &location)
             }
             "batch" => {
                 let ops = args.remove("ops").ok_or_else(|| invalid("batch needs ops"))?;
@@ -1333,9 +1333,16 @@ fn write(
 /// waited on by this session for the same, writes nothing and says so.
 /// The MCP tool `artifact` (task 1019): writes an artifact and its page, or
 /// reads it as context does, with where its page is.
-fn artifact(ekko: &Ekko, spec: &ops::ArtifactSpec) -> Result<String, ToolError> {
-    let page = |item: &crate::item::Item, data: &crate::storage::ItemMap| {
-        crate::artifact::write(ekko.storage.dir(), item, data, ekko.folder.as_deref())
+fn artifact(ekko: &Ekko, spec: &ops::ArtifactSpec, home: &Path, location: &directory::Location) -> Result<String, ToolError> {
+    // The file is written either way, and every write keeps it current; the
+    // page given is the server's where one serves it (task 1102), with why
+    // not otherwise.
+    let page = |item: &crate::item::Item, data: &crate::storage::ItemMap| -> std::io::Result<(String, Option<String>)> {
+        let path = crate::artifact::write(ekko.storage.dir(), item, data, ekko.folder.as_deref())?;
+        Ok(match crate::serve::page_address(home, location, item.uid.as_deref().unwrap_or_default()) {
+            Ok(address) => (address, None),
+            Err(why) => (path.display().to_string(), Some(why)),
+        })
     };
     if let (Some(target), true) = (&spec.artifact, spec.reads()) {
         let all = ekko.storage.get_shared().map_err(EkkoError::from)?;
@@ -1346,7 +1353,8 @@ fn artifact(ekko: &Ekko, spec: &ops::ArtifactSpec) -> Result<String, ToolError> 
         }
         let mut text = read[0].text();
         match page(item, &all) {
-            Ok(path) => text.push_str(&format!("Its page: {}\n", path.display())),
+            Ok((page, None)) => text.push_str(&format!("Its page: {page}\n")),
+            Ok((page, Some(why))) => text.push_str(&format!("Its page: {page}, the file, which no server serves: {why}\n")),
             Err(error) => text.push_str(&format!("Its page could not be written: {error}\n")),
         }
         return Ok(text);
@@ -1361,7 +1369,12 @@ fn artifact(ekko: &Ekko, spec: &ops::ArtifactSpec) -> Result<String, ToolError> 
         reply["standing"] = json!(standing.words());
     }
     match page(item, &committed.data) {
-        Ok(path) => reply["page"] = json!(path.display().to_string()),
+        Ok((page, unserved)) => {
+            reply["page"] = json!(page);
+            if let Some(why) = unserved {
+                reply["unserved"] = json!(why);
+            }
+        }
         Err(error) => reply["pageError"] = json!(error.to_string()),
     }
     name_readiness(&mut reply, &committed);
@@ -1973,7 +1986,7 @@ fn tool_definitions(linked: &[String]) -> Value {
         },
         {
             "name": "artifact",
-            "description": "The plan for one goal, which lives across sessions -- not Claude Code's Artifact tool, which publishes to claude.ai. An artifact is a task whose text is the plan: its title, then ## Goal, ## What is known, ## Design and ## Risks and open questions, each on a line of its own, with steps in order. Without artifact it creates one from text and steps; with artifact and steps it writes those over the plan's steps; with artifact alone it reads it. Its text changes with edit, each change a new version. Decisions and questions about it attach to it. The user reads it on a page ekko keeps current, whose path the reply gives; ask with approve puts the plan to them, and their answer in ekko's menu makes tasks of the steps not approved yet, which block the artifact.",
+            "description": "The plan for one goal, which lives across sessions -- not Claude Code's Artifact tool, which publishes to claude.ai. An artifact is a task whose text is the plan: its title, then ## Goal, ## What is known, ## Design and ## Risks and open questions, each on a line of its own, with steps in order. Without artifact it creates one from text and steps; with artifact and steps it writes those over the plan's steps; with artifact alone it reads it. Its text changes with edit, each change a new version. Decisions and questions about it attach to it. The user reads it on a page ekko keeps current, whose address the reply gives; ask with approve puts the plan to them, and their answer in ekko's menu makes tasks of the steps not approved yet, which block the artifact.",
             "inputSchema": object(json!({
                 "artifact": item,
                 "text": {"type": "string", "description": "To create one: the plan."},

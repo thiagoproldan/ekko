@@ -51,6 +51,20 @@ pub struct ArtifactCli {
     pub json: bool,
 }
 
+/// `ekko serve [--idle <seconds>] [--stop]` (task 1102): the local server of
+/// artifact pages, in the foreground, which `ekko artifact` and the artifact
+/// tool start on their own when none runs. A command word, as `artifact` is.
+#[derive(Parser, Debug)]
+#[command(name = "ekko serve", disable_help_flag = true, disable_version_flag = true)]
+pub struct ServeCli {
+    /// Stop after this many seconds without a request; an hour otherwise.
+    #[arg(long, value_name = "SECONDS")]
+    pub idle: Option<u64>,
+    /// Stop the server that runs, and start none.
+    #[arg(long, conflicts_with = "idle")]
+    pub stop: bool,
+}
+
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 #[command(group(clap::ArgGroup::new("hooked").args(["prime", "memory", "tasklist", "wake", "guard"])))]

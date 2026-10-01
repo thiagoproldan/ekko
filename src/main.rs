@@ -21,6 +21,7 @@ mod ops;
 mod project;
 mod paths;
 mod render;
+mod serve;
 mod shell;
 mod storage;
 mod tasklist;
@@ -40,6 +41,7 @@ const HELP: &str = r#"
     $ ekko init [<folder>] [--name <name>]
     $ ekko docs [<folder>] [--project <name>]
     $ ekko artifact <id> [--project <name>] [--no-open]
+    $ ekko serve [--idle <seconds>] [--stop]
 
     Options
         none              Display board view
@@ -183,6 +185,10 @@ fn main() -> ExitCode {
     }
     if args.get(leading_json).map(String::as_str) == Some("artifact") {
         return run_artifact(&args[leading_json + 1..], leading_json > 0);
+    }
+    // And `serve` (task 1102).
+    if args.get(leading_json).map(String::as_str) == Some("serve") {
+        return run_serve(&args[leading_json + 1..]);
     }
 
     let cli = match cli::Cli::try_parse_from(std::iter::once("ekko".to_string()).chain(args)) {
@@ -457,21 +463,63 @@ fn run_artifact(args: &[String], json_first: bool) -> ExitCode {
         if item.artifact.is_none() {
             return Err(EkkoError::InvalidInput(format!("{id} is not an artifact: a session writes one with ekko's artifact tool")));
         }
-        artifact::write(&location.dir, item, &all, root.as_deref()).map_err(|error| EkkoError::InvalidInput(format!("its page could not be written: {error}")))
+        let path = artifact::write(&location.dir, item, &all, root.as_deref())
+            .map_err(|error| EkkoError::InvalidInput(format!("its page could not be written: {error}")))?;
+        Ok((path, item.uid.clone().unwrap_or_default()))
     });
-    let path = match written {
-        Ok(path) => path,
+    let (path, uid) = match written {
+        Ok(written) => written,
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
-    let opened = !cli.no_open && artifact::open(&path).is_ok();
+    // The server's page where one can serve it, the file otherwise (task 1102).
+    let served = serve::page_address(&home_dir, &location, &uid);
+    let page = served.clone().unwrap_or_else(|_| path.display().to_string());
+    let opened = !cli.no_open && artifact::open(&page).is_ok();
     if json_mode {
-        println!("{}", serde_json::json!({"page": path.display().to_string(), "opened": opened}));
-    } else if opened {
-        println!("{} (opened in the browser)", path.display());
+        let mut out = serde_json::json!({"page": page, "opened": opened});
+        if let Err(why) = &served {
+            out["unserved"] = serde_json::json!(why);
+        }
+        println!("{out}");
+        return ExitCode::SUCCESS;
+    }
+    if let Err(why) = &served {
+        eprintln!("ekko: the page is its file, served by no server: {why}");
+    }
+    if opened {
+        println!("{page} (opened in the browser)");
     } else {
-        println!("{}", path.display());
+        println!("{page}");
     }
     ExitCode::SUCCESS
+}
+
+/// `ekko serve`: the local server of artifact pages, in the foreground, or
+/// with `--stop`, the end of the one that runs (task 1102).
+fn run_serve(args: &[String]) -> ExitCode {
+    let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cli = match cli::ServeCli::try_parse_from(std::iter::once("ekko serve".to_string()).chain(args.iter().cloned())) {
+        Ok(cli) => cli,
+        Err(e) => {
+            eprint!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let done = if cli.stop {
+        serve::stop_running(&home_dir).map(|port| match port {
+            Some(port) => println!("Stopped the server on 127.0.0.1:{port}"),
+            None => println!("No server runs"),
+        })
+    } else {
+        serve::run(&home_dir, cli.idle.map_or(serve::IDLE, std::time::Duration::from_secs))
+    };
+    match done {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("ekko serve: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// All of stdin, for a guard: a Bash command can run past what

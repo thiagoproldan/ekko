@@ -919,7 +919,7 @@ pub fn write(dir: &Path, item: &Item, all: &ItemMap, folder: Option<&Path>) -> s
     let pages = dir.join(PAGES);
     std::fs::create_dir_all(&pages)?;
     let (html, version) = page(item, all, folder);
-    let script = format!("ekkoArtifact(\"{version}\");\n");
+    let script = script(&version);
     let path = page_path(dir, uid);
     let script_path = pages.join(format!("{uid}.js"));
     if path.exists() && std::fs::read_to_string(&script_path).is_ok_and(|kept| kept == script) {
@@ -951,12 +951,19 @@ pub fn refresh(dir: &Path, all: &ItemMap, folder: Option<&Path>) {
     }
 }
 
-/// Opens `path` in the default browser, as `cargo doc --open` does, without
-/// waiting for it.
-pub fn open(path: &Path) -> std::io::Result<()> {
+/// The script beside a page that holds its `version`, which the page loads
+/// every `POLL_MS` and reloads on when it changed: from the file next to a
+/// written page, or from `ekko serve` (task 1102).
+pub fn script(version: &str) -> String {
+    format!("ekkoArtifact(\"{version}\");\n")
+}
+
+/// Opens `page`, a file or an address, in the default browser, as `cargo doc
+/// --open` does, without waiting for it.
+pub fn open(page: impl AsRef<std::ffi::OsStr>) -> std::io::Result<()> {
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     std::process::Command::new(opener)
-        .arg(path)
+        .arg(page)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

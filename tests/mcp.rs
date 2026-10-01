@@ -49,6 +49,8 @@ fn served(home: &PathBuf, folder: Option<&Path>, lines: &[String]) -> Vec<Value>
     let mut child = command
         .arg("--mcp")
         .env("HOME", home)
+        // A server the artifact tool starts keeps its files under this home.
+        .env_remove("XDG_STATE_HOME")
         .env("EKKO_TERMINAL", "none")
         .env_remove("EKKO_PROJECT")
         .stdin(Stdio::piped())
@@ -1282,9 +1284,10 @@ fn a_session_reaches_the_board_the_user_linked_and_no_other() {
 }
 
 /// The artifact tool (task 1019): deferred, it writes an artifact from a plan
-/// with its page, whose path the reply gives; search's artifact filter finds
+/// with its page, whose address the reply gives, on the server it started
+/// (task 1102), the file written all the same; search's artifact filter finds
 /// it; given the artifact alone, it reads it as context does. `ekko artifact`
-/// writes the same page from a terminal, and refuses what is not one.
+/// gives the same page from a terminal, and refuses what is not one.
 #[test]
 fn an_artifact_is_written_with_its_page_and_read_back() {
     let home = temp_home();
@@ -1308,7 +1311,10 @@ fn an_artifact_is_written_with_its_page_and_read_back() {
     let written: Value = serde_json::from_str(text(&replies["3"])).unwrap();
     assert_eq!(written["standing"], "draft, 1 step", "{written}");
     let page = written["page"].as_str().unwrap().to_string();
-    assert!(fs::read_to_string(&page).unwrap().contains("<h1>Ship the page</h1>"));
+    let uid = written["items"][0]["uid"].as_str().unwrap();
+    assert!(page.starts_with("http://127.0.0.1:") && page.ends_with(&format!("/default/{uid}.html")), "{written}");
+    let file = home.join(".ekko").join("artifacts").join(format!("{uid}.html"));
+    assert!(fs::read_to_string(file).unwrap().contains("<h1>Ship the page</h1>"));
     let read = text(&replies["4"]);
     assert!(read.contains("artifact, a task pending") && read.contains("plan version 1: draft, 1 step"), "{read}");
     assert!(read.contains(&format!("Its page: {page}")), "{read}");
@@ -1322,6 +1328,7 @@ fn an_artifact_is_written_with_its_page_and_read_back() {
             .env("EKKO_DIR", &home)
             .env("HOME", &home)
             .env_remove("EKKO_PROJECT")
+            .env_remove("XDG_STATE_HOME")
             .current_dir(&home)
             .output()
             .unwrap()
