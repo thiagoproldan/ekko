@@ -1299,6 +1299,34 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// Where the docs went, what they hold, and what changed on disk.
+    pub fn success_docs(&mut self, written: &crate::docs::Written) {
+        let folder = self.painter.grey(&written.folder.display().to_string());
+        self.success("\n", "Wrote the docs:", &folder);
+        let kind = |count: crate::docs::Count| match count.replaced {
+            0 => count.current.to_string(),
+            replaced => format!("{} ({replaced} replaced)", count.current),
+        };
+        let tasks = written.tasks;
+        let held = format!(
+            "decisions {}, gotchas {}, procedures {}; {} tasks, each on a page ({} done, {} cancelled, {} open); {} other notes",
+            kind(written.decisions),
+            kind(written.gotchas),
+            kind(written.procedures),
+            tasks.done + tasks.cancelled + tasks.open,
+            tasks.done,
+            tasks.cancelled,
+            tasks.open,
+            written.loose,
+        );
+        self.emit(" ", None, &self.painter.grey(&held), "");
+        let files = format!(
+            "{} files written, {} already up to date, {} pages of tasks no longer on the board removed",
+            written.written, written.unchanged, written.removed
+        );
+        self.emit(" ", None, &self.painter.grey(&files), "");
+    }
+
     pub fn success_edit(&mut self, id: u32) {
         let suffix = self.painter.grey(&id.to_string());
         self.success("\n", "Updated description of item:", &suffix);

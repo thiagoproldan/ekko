@@ -41,6 +41,7 @@ Added by Ekko, each of them invisible until you use it:
 - **A cancelled state**, struck through and kept, because deleting loses why the work was dropped
 - **Projects**: a board per folder or repository, made with `ekko init` and found from inside it the way git finds a repository
 - **Phases and `--roadmap`**: a project's roadmap, read backwards as history and forwards as a plan
+- **Docs from the board**: `ekko docs` writes the project's documentation as markdown -- its decisions, gotchas and procedures, its history, and a page per task -- by code, with no model, in a fraction of a second
 - **Dependencies**: `--blocked-by`, so a task cannot be completed while what blocks it is open, and `--list ready` for what can actually be started
 - **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
 - **Stable `uid`s**, accepted anywhere a display id is, because display ids get recycled and `--restore` hands out new ones
@@ -103,6 +104,7 @@ $ ekko --help
   Usage
     $ ekko [<options> ...]
     $ ekko init [<folder>] [--name <name>]
+    $ ekko docs [<folder>] [--project <name>]
 
     Options
         none              Display board view
@@ -856,6 +858,25 @@ Ekko: 469
 Several share a line, as `Ekko: 125, 396`, and a uid does as well as an id. `--context` then lists the commits naming the item, read from the git history of the project's folder each time it is asked: those on the branch checked out first, newest first, then those only on another branch, marked `(not on main)`. Nothing is stored, so a rebase, a cherry-pick or a squash that keeps the message keeps the link, where a note citing a SHA goes stale at the first rebase. A line naming anything but ids and uids, such as prose that starts with the word, is no trailer. Outside a git repository, or without git, there is simply no list.
 
 An agent is told the line as it takes a task up: `set_state` putting a task in progress, on a project in a git repository, answers with a notice giving the trailer its commits end with. Nothing is installed in the repository, and a commit without the line is still a commit.
+
+### Docs from the board
+
+`ekko docs` writes a project's documentation from its board, as markdown, into the project's `docs/`, or into the folder you name with `ekko docs <folder>`:
+
+```
+docs/
+  index.md        the project's memory page, then a map of the rest
+  decisions.md    the decisions in force, newest first, and the replaced ones at the end
+  gotchas.md      the gotchas, the same way
+  procedures.md   the procedures, the same way
+  history.md      every task, newest first: the open ones, then the rest by month
+  notes.md        notes on no task, and the questions asked about the project
+  tasks/<id>.md   a task with its commits, what it waited on and held up, and its notes, handoffs and answers
+```
+
+It is meant for the end of a project, when the board is done, and runs on any board. Each item a note cites -- `task 983`, `notes 990 and 992` -- becomes a link to where that item is written. A note's text, plain on the board, is escaped so that markdown shows it as written, and a block it fences with ``` stays as it is. The stash and the trash stay out.
+
+Code writes all of it, with no model: no tokens, and a fraction of a second (0.35 s for Ekko's own board, 215 files, on a debug build). A board that did not move rewrites nothing, and the page of a task that left the board goes. Every file starts with a line saying `ekko docs` wrote it, and only a file with that line is ever overwritten or removed: a file in the way that it did not write stops the run before anything is written, with `NOT_GENERATED`. The default board belongs to no folder, so there the folder must be named. Writing publishes nothing: in a repository the pages are files like any other, and the diff shows what a commit would make public.
 
 ### Stable ids
 

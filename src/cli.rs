@@ -19,6 +19,20 @@ pub struct InitCli {
     pub json: bool,
 }
 
+/// `ekko docs [<folder>] [--project <name>]` (task 915): the board's
+/// documentation, written as markdown. A command word, as `init` is.
+#[derive(Parser, Debug)]
+#[command(name = "ekko docs", disable_help_flag = true, disable_version_flag = true)]
+pub struct DocsCli {
+    /// Where the pages go -- the project's docs/ when absent.
+    pub folder: Option<String>,
+    /// A project's board other than the one found from the folder.
+    #[arg(long, value_name = "NAME")]
+    pub project: Option<String>,
+    #[arg(long, short = 'j')]
+    pub json: bool,
+}
+
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 #[command(group(clap::ArgGroup::new("hooked").args(["prime", "memory", "tasklist", "wake", "guard"])))]

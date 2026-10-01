@@ -14,7 +14,7 @@
 //! know which of those two output modes is active at all.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config;
 use crate::directory::DirectoryError;
@@ -85,6 +85,10 @@ pub enum EkkoError {
     Directory(DirectoryError),
     Config(config::ConfigError),
     Clipboard(String),
+    /// `ekko docs` found files in its way that it did not write (task 915).
+    NotGenerated(Vec<String>),
+    /// `ekko docs` could not write or remove a file.
+    DocsWrite(String),
 }
 
 impl EkkoError {
@@ -129,6 +133,8 @@ impl EkkoError {
             EkkoError::Directory(_) => "DIRECTORY_ERROR",
             EkkoError::Config(_) => "CONFIG_ERROR",
             EkkoError::Clipboard(_) => "CLIPBOARD_ERROR",
+            EkkoError::NotGenerated(_) => "NOT_GENERATED",
+            EkkoError::DocsWrite(_) => "DOCS_WRITE",
         }
     }
 
@@ -176,6 +182,7 @@ impl EkkoError {
             EkkoError::Directory(e) => out.generic_error(&e.to_string()),
             EkkoError::Config(e) => out.generic_error(&e.to_string()),
             EkkoError::Clipboard(message) => out.generic_error(message),
+            EkkoError::NotGenerated(_) | EkkoError::DocsWrite(_) => out.generic_error(&self.to_string()),
         }
     }
 }
@@ -342,6 +349,13 @@ impl std::fmt::Display for EkkoError {
             EkkoError::Directory(e) => write!(f, "{e}"),
             EkkoError::Config(e) => write!(f, "{e}"),
             EkkoError::Clipboard(message) => write!(f, "{message}"),
+            EkkoError::NotGenerated(files) => write!(
+                f,
+                "{} not written by ekko docs, which overwrites only its own files, so nothing was written. Move {} away, or name another folder: ekko docs <folder>",
+                files.join(", "),
+                if files.len() == 1 { "it" } else { "them" }
+            ),
+            EkkoError::DocsWrite(message) => write!(f, "{message}"),
         }
     }
 }
@@ -390,6 +404,17 @@ impl From<DirectoryError> for EkkoError {
 impl From<config::ConfigError> for EkkoError {
     fn from(error: config::ConfigError) -> Self {
         EkkoError::Config(error)
+    }
+}
+
+impl From<crate::docs::Error> for EkkoError {
+    fn from(error: crate::docs::Error) -> Self {
+        match error {
+            crate::docs::Error::Foreign(paths) => {
+                EkkoError::NotGenerated(paths.iter().map(|path| path.display().to_string()).collect())
+            }
+            crate::docs::Error::Io(path, error) => EkkoError::DocsWrite(format!("Could not write {}: {error}", path.display())),
+        }
     }
 }
 
@@ -463,6 +488,8 @@ pub enum Outcome {
     /// board, and each item's id here and there.
     MovedTo { project: Option<String>, items: Vec<crate::move_to::Carried> },
     Init(Box<crate::project::Initialized>),
+    /// `ekko docs`: what it wrote, and where.
+    Docs(Box<crate::docs::Written>),
     Phases(Vec<String>),
     Blocked { item: Item, blockers: Vec<u32> },
     Attached { item: Item, target: Option<u32> },
@@ -513,6 +540,7 @@ impl Outcome {
             Outcome::Linked { linked, .. } => if *linked { "link-project" } else { "unlink-project" },
             Outcome::MovedTo { .. } => "move-to",
             Outcome::Init(_) => "init",
+            Outcome::Docs(_) => "docs",
             Outcome::Phases(_) => "phases",
             Outcome::Blocked { .. } => "blocked",
             Outcome::Attached { .. } => "attached",
@@ -583,6 +611,7 @@ impl Outcome {
             Outcome::Timeline(groups) | Outcome::Archive(groups) => out.display_by_date(groups),
             Outcome::Projects(projects) => out.display_projects(projects),
             Outcome::Init(init) => out.success_init(init),
+            Outcome::Docs(written) => out.success_docs(written),
             Outcome::Destroyed { name, tasks, notes, trash } => {
                 out.success_destroy(name, *tasks, *notes, trash)
             }
@@ -2340,6 +2369,21 @@ impl Ekko {
     /// Nothing here is stored beyond the sequence itself -- the counts and
     /// the cursor are read off the items every time, so the view cannot
     /// drift from the board it describes.
+    /// `ekko docs` (task 915): the board's documentation, written as markdown
+    /// into `folder`. `board_dir` holds the project's page, which opens the
+    /// index, and the commits naming each task are read from the project's
+    /// folder, as context reads them.
+    pub fn write_docs(&self, folder: &Path, board_dir: &Path, project: Option<&str>) -> Result<Outcome, EkkoError> {
+        let data = self.visible()?;
+        let tasks: Vec<(u32, Option<&str>)> =
+            data.values().filter(|item| item.is_task).map(|item| (item.id, item.uid.as_deref())).collect();
+        let since = data.values().filter(|item| item.is_task).map(|item| item.timestamp).min().unwrap_or(0);
+        let commits = self.folder.as_deref().map(|folder| crate::commits::naming(folder, since, &tasks)).unwrap_or_default();
+        let memory = std::fs::read_to_string(crate::memory::path(board_dir)).ok();
+        let written = crate::docs::write(&data, &commits, folder, project, memory.as_deref())?;
+        Ok(Outcome::Docs(Box::new(written)))
+    }
+
     pub fn display_roadmap(&self) -> Result<Outcome, EkkoError> {
         let data = self.visible()?;
         let phases = self.storage.get_phases()?;

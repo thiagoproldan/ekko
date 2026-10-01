@@ -4,6 +4,7 @@ mod commits;
 mod config;
 mod dialog;
 mod directory;
+mod docs;
 mod ekko;
 mod guard;
 mod holder;
@@ -36,6 +37,7 @@ const HELP: &str = r#"
   Usage
     $ ekko [<options> ...]
     $ ekko init [<folder>] [--name <name>]
+    $ ekko docs [<folder>] [--project <name>]
 
     Options
         none              Display board view
@@ -172,6 +174,10 @@ fn main() -> ExitCode {
     let leading_json = args.iter().take_while(|a| *a == "--json" || *a == "-j").count();
     if args.get(leading_json).map(String::as_str) == Some("init") {
         return run_init(&args[leading_json + 1..], leading_json > 0);
+    }
+    // `docs` too (task 915).
+    if args.get(leading_json).map(String::as_str) == Some("docs") {
+        return run_docs(&args[leading_json + 1..], leading_json > 0);
     }
 
     let cli = match cli::Cli::try_parse_from(std::iter::once("ekko".to_string()).chain(args)) {
@@ -367,6 +373,54 @@ fn run_init(args: &[String], json_first: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(err) => finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
+    }
+}
+
+/// `ekko docs [<folder>]`: the board's documentation, written as markdown
+/// into the folder given, or else the project's docs/. The default board
+/// belongs to no folder, so it needs one named.
+fn run_docs(args: &[String], json_first: bool) -> ExitCode {
+    let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let docs = match cli::DocsCli::try_parse_from(std::iter::once("ekko docs".to_string()).chain(args.iter().cloned())) {
+        Ok(docs) => docs,
+        Err(e) => {
+            eprint!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let json_mode = json_first || docs.json;
+    let ekko_dir_env = std::env::var("EKKO_DIR").ok();
+    let project_env = std::env::var("EKKO_PROJECT").ok();
+    let project_name = docs.project.as_deref().or(project_env.as_deref());
+    let location = match directory::locate(&home_dir, &cwd, None, ekko_dir_env.as_deref(), project_name) {
+        Ok(location) => location,
+        Err(err) => return finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
+    };
+    let root = location.project.as_ref().and_then(|project| project.root.clone());
+    let folder = match (&docs.folder, &root) {
+        (Some(folder), _) => cwd.join(folder),
+        (None, Some(root)) => root.join("docs"),
+        (None, None) => {
+            let err = EkkoError::InvalidInput(
+                "The default board belongs to no project's folder, so its docs have nowhere to go: name the folder, as ekko docs <folder>"
+                    .to_string(),
+            );
+            return finish_with_error(&err, json_mode, &home_dir);
+        }
+    };
+    let project = location.project.as_ref().map(|project| project.name.as_str());
+    let written = Ekko::at(&location).and_then(|ekko| ekko.in_folder(root.clone()).write_docs(&folder, &location.dir, project));
+    match written {
+        Ok(outcome) => {
+            if json_mode {
+                json_output::print_success(&outcome);
+            } else {
+                with_renderer(&home_dir, |r| outcome.render(r));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => finish_with_error(&err, json_mode, &home_dir),
     }
 }
 

@@ -625,3 +625,141 @@ fn move_to_takes_items_to_another_board_and_the_old_id_says_where() {
 
     fs::remove_dir_all(&home).ok();
 }
+
+/// `ekko docs` writes a project's docs from its board (task 915): a page per
+/// kind of note with the replaced ones at the end, the history, and a page
+/// per task with its commits, its blockers and its notes, under the
+/// project's own page. A board that did not move rewrites nothing, the page
+/// of a task that left the board goes, the stash stays out, and a file ekko
+/// docs did not write is never overwritten.
+#[test]
+fn docs_are_written_from_the_board_and_only_over_their_own_files() {
+    let home = temp_ekko_dir();
+    let app = home.join("app");
+    let elsewhere = home.join("elsewhere");
+    for dir in [&app, &elsewhere] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&app)
+            .args(["-c", "user.name=ekko", "-c", "user.email=ekko@example.com", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+            .args(args)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let ekko = |cwd: &PathBuf, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &home)
+            .env("TZ", "UTC")
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .output()
+            .expect("failed to run ekko")
+    };
+    let reply = |output: &process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stdout)))
+    };
+    let docs = app.join("docs");
+    let read = |page: &str| fs::read_to_string(docs.join(page)).unwrap_or_else(|e| panic!("{page}: {e}"));
+
+    git(&["init", "-q"]);
+    assert!(ekko(&app, &["init"]).status.success());
+    // 2026-09-20 12:00 UTC, a minute apart; the answer a day later.
+    let at = |n: i64| 1_789_905_600_000_i64 + n * 60_000;
+    let uid = |n: u32| format!("18d00000000000{n:02}-1");
+    let item = |id: u32, text: &str, task: bool, extra: serde_json::Value| {
+        let mut item = serde_json::json!({
+            "_id": id, "_date": "Sun Sep 20 2026", "_timestamp": at(i64::from(id)), "description": text,
+            "isStarred": false, "boards": ["My Board"], "_isTask": task, "uid": uid(id),
+        });
+        if task {
+            item.as_object_mut().unwrap().extend(serde_json::json!({"isComplete": false, "inProgress": false, "priority": 1}).as_object().unwrap().clone());
+        }
+        item.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        (id.to_string(), item)
+    };
+    let board: serde_json::Map<String, serde_json::Value> = [
+        item(1, "Ship the parser", true, serde_json::json!({"isComplete": true})),
+        item(2, "Try a generated parser", true, serde_json::json!({"cancelled": true})),
+        item(3, "Write the docs", true, serde_json::json!({"inProgress": true, "blockedBy": [uid(1)]})),
+        item(4, "Hand-write the parser\nThe generated one was slower: note 6.", false, serde_json::json!({"knowledge": "decision", "supersedes": uid(5), "attachedTo": uid(1)})),
+        item(5, "Generate the parser", false, serde_json::json!({"knowledge": "decision"})),
+        item(6, "Measured: 3x faster than the one task 2 tried, as `<parser>` and <parser>.", false, serde_json::json!({"attachedTo": uid(1)})),
+        item(7, "Which folder do the docs go to?\nOptions:\n- docs/\n- .ekko/docs", false, serde_json::json!({
+            "attachedTo": uid(3), "question": {"rev": 1, "answer": {"text": "docs/", "at": at(24 * 60), "rev": 2}},
+        })),
+        item(8, "Run the tests before the release", false, serde_json::json!({"knowledge": "gotcha"})),
+        item(9, "Write the docs\n1) ekko docs\n2) review the diff", false, serde_json::json!({"knowledge": "procedure", "attachedTo": uid(3)})),
+        item(10, "A thought about the whole app", false, serde_json::json!({})),
+        item(11, "a stashed thought", false, serde_json::json!({"stashed": at(30)})),
+    ]
+    .into_iter()
+    .collect();
+    fs::create_dir_all(app.join(".ekko").join("storage")).unwrap();
+    fs::write(app.join(".ekko").join("storage").join("storage.json"), serde_json::Value::Object(board).to_string()).unwrap();
+    fs::write(app.join(".ekko").join("memory.md"), "# app\n\nWhat the app is, kept by the user.\n").unwrap();
+    git(&["commit", "-q", "--allow-empty", "-m", "feat: the parser\n\nEkko: 1"]);
+    let sha = git(&["rev-parse", "--short", "HEAD"]);
+
+    let first = ekko(&app, &["--json", "docs"]);
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stdout));
+    let first = reply(&first);
+    assert_eq!(first["folder"], docs.display().to_string());
+    assert_eq!(first["decisions"], serde_json::json!({"current": 1, "replaced": 1}));
+    assert_eq!(first["tasks"], serde_json::json!({"done": 1, "cancelled": 1, "open": 1}));
+    assert_eq!((first["written"].as_u64(), first["loose"].as_u64()), (Some(9), Some(1)), "{first}");
+
+    let index = read("index.md");
+    assert!(index.starts_with("<!-- Written by ekko docs from the board of app"), "{index}");
+    assert!(index.contains("# app\n\nWhat the app is, kept by the user.\n\n## Documentation"), "{index}");
+    assert!(index.contains("- [Decisions](decisions.md): what was settled, and why. 1 in force, 1 replaced."), "{index}");
+    let decisions = read("decisions.md");
+    let (current, replaced) = decisions.split_once("## Replaced").expect("the replaced decision has its section");
+    assert!(current.contains("## <a id=\"4\"></a>4. Hand-write the parser") && !current.contains("<a id=\"5\">"), "{decisions}");
+    assert!(current.contains("The generated one was slower: note [6](tasks/1.md#6)."), "{decisions}");
+    assert!(replaced.contains("### <a id=\"5\"></a>5. Generate the parser") && replaced.contains("replaced by [4](#4)"), "{decisions}");
+    let shipped = read("tasks/1.md");
+    assert!(shipped.contains(&format!("- `{sha}` ")) && shipped.contains("feat: the parser"), "{shipped}");
+    assert!(shipped.contains("- Decision [4](../decisions.md#4): Hand-write the parser"), "{shipped}");
+    assert!(shipped.contains("than the one task [2](2.md) tried, as `<parser>` and &lt;parser>."), "{shipped}");
+    let open = read("tasks/3.md");
+    assert!(open.contains("Blocked by [1](1.md) (done)."), "{open}");
+    assert!(open.contains("**Answer**, 2026-09-21: docs/"), "{open}");
+    assert!(open.contains("- Procedure [9](../procedures.md#9): Write the docs"), "{open}");
+    assert!(read("history.md").contains("## Open\n\n- [3](tasks/3.md) Write the docs · in progress\n"), "{}", read("history.md"));
+    assert!(read("notes.md").contains("10. A thought about the whole app"), "{}", read("notes.md"));
+    for page in ["index.md", "decisions.md", "gotchas.md", "procedures.md", "history.md", "notes.md", "tasks/1.md", "tasks/2.md", "tasks/3.md"] {
+        assert!(!read(page).contains("a stashed thought"), "the stash shows in {page}");
+    }
+
+    let again = reply(&ekko(&app, &["--json", "docs"]));
+    assert_eq!((again["written"].as_u64(), again["unchanged"].as_u64()), (Some(0), Some(9)), "{again}");
+
+    assert!(ekko(&app, &["--delete", "2"]).status.success());
+    let after = reply(&ekko(&app, &["--json", "docs"]));
+    assert_eq!(after["removed"].as_u64(), Some(1), "{after}");
+    assert!(!docs.join("tasks").join("2.md").exists());
+
+    fs::write(docs.join("notes.md"), "# My own notes\n").unwrap();
+    assert!(ekko(&app, &["--task", "One more"]).status.success());
+    let refused = ekko(&app, &["--json", "docs"]);
+    assert!(!refused.status.success());
+    assert_eq!(reply(&refused)["code"], "NOT_GENERATED", "{}", reply(&refused));
+    assert_eq!(fs::read_to_string(docs.join("notes.md")).unwrap(), "# My own notes\n");
+    assert!(!read("history.md").contains("One more"), "a refused run wrote something");
+
+    let nowhere = reply(&ekko(&elsewhere, &["--json", "docs"]));
+    assert_eq!(nowhere["code"], "INVALID_INPUT", "{nowhere}");
+
+    fs::remove_dir_all(&home).ok();
+}

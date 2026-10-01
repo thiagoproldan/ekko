@@ -102,6 +102,19 @@ fn success_value(outcome: &Outcome) -> Value {
             })),
             "excluded": init.excluded,
         }),
+        Outcome::Docs(written) => json!({
+            "ok": true,
+            "command": command,
+            "folder": written.folder.display().to_string(),
+            "written": written.written,
+            "unchanged": written.unchanged,
+            "removed": written.removed,
+            "decisions": written.decisions,
+            "gotchas": written.gotchas,
+            "procedures": written.procedures,
+            "tasks": written.tasks,
+            "loose": written.loose,
+        }),
         Outcome::Phases(names) => json!({"ok": true, "command": command, "phases": names}),
         Outcome::Stashed { ids, away } | Outcome::Trashed { ids, away } => {
             json!({"ok": true, "command": command, "ids": ids, "away": away})
