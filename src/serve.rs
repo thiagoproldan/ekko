@@ -96,12 +96,32 @@ pub fn read(home: &Path) -> Option<Runtime> {
 /// Replaces `serve.json` by rename, readable by the user alone, as Jupyter
 /// writes its own runtime file.
 fn save(home: &Path, runtime: &Runtime) -> io::Result<()> {
-    let dir = dir(home);
-    let temp = dir.join(format!(".{RUNTIME}.{}.tmp", std::process::id()));
+    private(&dir(home).join(RUNTIME), &serde_json::to_vec_pretty(runtime)?)
+}
+
+/// Replaces `path` with `content` by rename, readable by the user alone.
+fn private(path: &Path, content: &[u8]) -> io::Result<()> {
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let temp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
     let _ = fs::remove_file(&temp);
     let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
-    file.write_all(&serde_json::to_vec_pretty(runtime)?)?;
-    fs::rename(&temp, dir.join(RUNTIME))
+    file.write_all(content)?;
+    fs::rename(&temp, path)
+}
+
+/// The file `ekko artifact` opens in place of the page's `address`: it sends
+/// the browser on to the page with the token, which so stays off the
+/// browser's command line, where other users read it, as Jupyter's redirect
+/// file keeps its own (decision 1132).
+pub fn redirect_file(home: &Path, address: &str) -> Result<PathBuf, String> {
+    let runtime = read(home).ok_or("no server runs")?;
+    let target = format!("{address}?token={}", runtime.token);
+    let html = format!(
+        "<!doctype html>\n<meta charset=\"utf-8\">\n<meta http-equiv=\"refresh\" content=\"0;url={target}\">\n<title>ekko</title>\n<a href=\"{target}\">{address}</a>\n"
+    );
+    let path = dir(home).join("serve-open.html");
+    private(&path, html.as_bytes()).map_err(|error| format!("{} cannot be written: {error}", path.display()))?;
+    Ok(path)
 }
 
 // ---- the client: `ekko artifact` and the artifact tool ----------------
@@ -281,7 +301,12 @@ pub fn run(home: &Path, idle: Duration) -> Result<(), String> {
     }
     let listener = bind(read(home).map(|runtime| runtime.port))?;
     let port = listener.local_addr().map_err(|error| format!("the port is not known: {error}"))?.port();
-    let token = token().map_err(|error| format!("no token from /dev/urandom: {error}"))?;
+    // The last server's token, so a tab that opened its page still writes
+    // after a replacement.
+    let token = match read(home).map(|runtime| runtime.token).filter(|token| token.len() == 64) {
+        Some(token) => token,
+        None => token().map_err(|error| format!("no token from /dev/urandom: {error}"))?,
+    };
     let runtime = Runtime { pid: std::process::id(), port, version: VERSION.to_string(), token };
     save(home, &runtime).map_err(|error| format!("{} cannot be written: {error}", dir.join(RUNTIME).display()))?;
     log(home, &format!("started: version {VERSION}, 127.0.0.1:{port}, pid {}, stops after {} s idle", runtime.pid, idle.as_secs()));
@@ -362,13 +387,16 @@ fn handle(shared: &Shared, mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(TIMEOUT));
     let _ = stream.set_write_timeout(Some(TIMEOUT));
     let answer = match read_request(&mut stream) {
-        Ok(request) => match refused(shared.runtime.port, &stream, &request) {
-            Some(why) => {
+        Ok(request) => {
+            let answer = match caller(shared.runtime.port, &stream, &request) {
+                Ok(socket) => route(shared, &request, socket),
+                Err(why) => Answer::refuse(why, false),
+            };
+            if let Some(why) = &answer.refusal {
                 log(&shared.home, &format!("refused {} {}: {why}", request.method, request.path));
-                Answer::text(403, &why)
             }
-            None => route(shared, &request),
-        },
+            answer
+        }
         Err(Some(answer)) => answer,
         Err(None) => return,
     };
@@ -425,13 +453,28 @@ fn read_request(stream: &mut impl Read) -> Result<Request, Option<Answer>> {
     }
 }
 
-/// Why a request is refused, if it is: a Host other than this server's own,
-/// or a socket another user owns.
-fn refused(port: u16, stream: &TcpStream, request: &Request) -> Option<String> {
+/// The socket at the other end of `stream`, which this user owns: its inode,
+/// or none where there is no /proc/net/tcp to read it from, in which case
+/// another user's processes are served too. Why not, for a Host other than
+/// this server's own, or another user's socket.
+fn caller(port: u16, stream: &TcpStream, request: &Request) -> Result<Option<u64>, String> {
     if !local_host(request.header("host"), port) {
-        return Some(format!("Host {:?} is not 127.0.0.1:{port} or localhost:{port}", request.header("host").unwrap_or_default()));
+        return Err(format!("Host {:?} is not 127.0.0.1:{port} or localhost:{port}", request.header("host").unwrap_or_default()));
     }
-    foreign(stream)
+    if !cfg!(target_os = "linux") {
+        return Ok(None);
+    }
+    let (Ok(SocketAddr::V4(local)), Ok(SocketAddr::V4(peer))) = (stream.local_addr(), stream.peer_addr()) else {
+        return Err("not a connection to 127.0.0.1".to_string());
+    };
+    let table = fs::read_to_string("/proc/net/tcp").unwrap_or_default();
+    // SAFETY: geteuid only reads this process's credentials.
+    let mine = unsafe { libc::geteuid() };
+    match socket(&table, peer, local) {
+        Some((uid, inode)) if uid == mine => Ok(Some(inode)),
+        Some((uid, _)) => Err(format!("the connecting socket is uid {uid}'s, not this user's")),
+        None => Err(format!("the connecting socket, {peer}, is not in /proc/net/tcp")),
+    }
 }
 
 /// Whether `host` names this server: 127.0.0.1 or localhost, at its port. A
@@ -440,35 +483,79 @@ fn local_host(host: Option<&str>, port: u16) -> bool {
     host.is_some_and(|host| host == format!("127.0.0.1:{port}") || host.eq_ignore_ascii_case(&format!("localhost:{port}")))
 }
 
-/// Why the socket at the other end of `stream` is refused, if it is: owned by
-/// another user, or not found. Only Linux has /proc/net/tcp to tell; elsewhere
-/// another user's processes are served too.
-fn foreign(stream: &TcpStream) -> Option<String> {
-    if !cfg!(target_os = "linux") {
-        return None;
-    }
-    let (Ok(SocketAddr::V4(local)), Ok(SocketAddr::V4(peer))) = (stream.local_addr(), stream.peer_addr()) else {
-        return Some("not a connection to 127.0.0.1".to_string());
-    };
-    let table = fs::read_to_string("/proc/net/tcp").unwrap_or_default();
-    // SAFETY: geteuid only reads this process's credentials.
-    let mine = unsafe { libc::geteuid() };
-    match owner(&table, peer, local) {
-        Some(uid) if uid == mine => None,
-        Some(uid) => Some(format!("the connecting socket is uid {uid}'s, not this user's")),
-        None => Some(format!("the connecting socket, {peer}, is not in /proc/net/tcp")),
-    }
-}
-
-/// The uid owning the socket at `from` connected to `to`, in a table laid out
-/// as /proc/net/tcp is: each address in hex, the IPv4 one as the kernel holds
-/// it, in network order, and the uid in the eighth field.
-fn owner(table: &str, from: SocketAddrV4, to: SocketAddrV4) -> Option<u32> {
+/// The socket at `from` connected to `to`, in a table laid out as
+/// /proc/net/tcp is: the uid owning it, in the eighth field, and its inode,
+/// in the tenth. Each address is in hex, the IPv4 one as the kernel holds it,
+/// in network order.
+fn socket(table: &str, from: SocketAddrV4, to: SocketAddrV4) -> Option<(u32, u64)> {
     table.lines().skip(1).find_map(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
         let ends = (address(fields.get(1)?)?, address(fields.get(2)?)?);
-        (ends == (from, to)).then(|| fields.get(7)?.parse().ok())?
+        (ends == (from, to)).then(|| Some((fields.get(7)?.parse().ok()?, fields.get(9)?.parse().ok()?)))?
     })
+}
+
+/// The processes holding socket `inode`: each one with a descriptor linked to
+/// socket:[inode], which a process that handed it down to a child shares.
+fn holders(inode: u64) -> Vec<u32> {
+    let link = format!("socket:[{inode}]");
+    let Ok(entries) = fs::read_dir("/proc") else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            let descriptors = fs::read_dir(format!("/proc/{pid}/fd")).into_iter().flatten().flatten();
+            descriptors.into_iter().any(|fd| fs::read_link(fd.path()).is_ok_and(|target| target.as_os_str() == link.as_str()))
+        })
+        .collect()
+}
+
+/// The person behind a write, as the processes holding its socket, each
+/// with its name; why not, when a Claude Code process is among the ancestors
+/// of one of them, judged as `ekko --answer` judges a command (decision 1132).
+fn session(socket: Option<u64>) -> Result<String, String> {
+    let Some(inode) = socket else {
+        return Err("only Linux tells the user from a session, by /proc; elsewhere a write is ekko's menu's".to_string());
+    };
+    let holders = holders(inode);
+    if holders.is_empty() {
+        return Err("no process holds the connecting socket".to_string());
+    }
+    match holders.iter().find_map(|pid| crate::holder::claude_among(*pid).map(|claude| (*pid, claude))) {
+        Some((pid, claude)) => Err(format!("process {pid} runs under Claude Code, process {claude}: a session writes with ekko's MCP tools")),
+        None => Ok(holders
+            .iter()
+            .map(|pid| format!("process {pid} ({})", fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default().trim()))
+            .collect::<Vec<_>>()
+            .join(", ")),
+    }
+}
+
+/// The person behind a write, as `session` names them; why the write is
+/// refused, when it comes from another page than the server's own, from a
+/// browser that has not opened the page with the token, or from a Claude
+/// Code session (decision 1132).
+fn writer(shared: &Shared, request: &Request, socket: Option<u64>) -> Result<String, String> {
+    let port = shared.runtime.port;
+    let origin = request.header("origin").unwrap_or_default();
+    if origin != format!("http://127.0.0.1:{port}") && !origin.eq_ignore_ascii_case(&format!("http://localhost:{port}")) {
+        return Err(format!("a write comes from the page itself, and this one's Origin is {origin:?}"));
+    }
+    if !cookie(request, &cookie_name(port)).is_some_and(|token| same(token, &shared.runtime.token)) {
+        return Err("this browser has not opened the page through ekko artifact, which hands it the token".to_string());
+    }
+    session(socket)
+}
+
+/// The cookie a browser that opened a page with the token holds: one per
+/// port, since cookies are not kept apart by port.
+fn cookie_name(port: u16) -> String {
+    format!("ekko_{port}")
+}
+
+/// The value of the cookie `name` a request carries.
+fn cookie<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+    request.header("cookie")?.split(';').filter_map(|pair| pair.trim().split_once('=')).find(|(key, _)| *key == name).map(|(_, value)| value)
 }
 
 /// An address as /proc/net/tcp writes it, `0100007F:A1B2` for 127.0.0.1:41394.
@@ -478,18 +565,54 @@ fn address(text: &str) -> Option<SocketAddrV4> {
     Some(SocketAddrV4::new(Ipv4Addr::from(ip.to_ne_bytes()), u16::from_str_radix(port, 16).ok()?))
 }
 
-/// What the server answers a request it accepted.
-fn route(shared: &Shared, request: &Request) -> Answer {
-    let path = request.path.split('?').next().unwrap_or_default();
+/// What the server answers a request from this user's `socket`.
+fn route(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
+    let (path, query) = request.path.split_once('?').unwrap_or((request.path.as_str(), ""));
     match (request.method.as_str(), path) {
         ("GET", "/status") => Answer::new(200, "application/json", serde_json::json!({"ekko": VERSION, "pid": shared.runtime.pid}).to_string()),
         ("POST", "/stop") => match request.header(TOKEN) {
             Some(token) if same(token, &shared.runtime.token) => Answer { stops: true, ..Answer::text(200, "stopping") },
-            _ => Answer::text(403, &format!("stopping takes the token serve.json holds, in {TOKEN}")),
+            _ => Answer::refuse(format!("stopping takes the token serve.json holds, in {TOKEN}"), false),
         },
-        ("GET", path) => page(&shared.home, path).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
-        _ => Answer::text(405, "the server answers GET, and POST /stop"),
+        // Writes nothing: says whom the server takes the caller for, which
+        // the page shows, and a test asks.
+        ("POST", "/api/who") => match writer(shared, request, socket) {
+            Ok(person) => {
+                log(&shared.home, &format!("POST /api/who: the user, {person}"));
+                Answer::new(200, "application/json", serde_json::json!({"person": true}).to_string())
+            }
+            Err(why) => Answer::refuse(why, true),
+        },
+        ("GET", path) => match query.split('&').find_map(|pair| pair.strip_prefix("token=")) {
+            Some(token) if path.starts_with("/default/") || path.starts_with("/project/") => opened(shared, path, token),
+            _ => page(&shared.home, path).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
+        },
+        _ => Answer::text(405, "the server answers GET, and POST to /stop and /api/who"),
     }
+}
+
+/// A page opened through the redirect file: the token traded for the cookie
+/// a write needs, and the browser sent on to the address without it, which
+/// keeps the token out of its history. A token not this server's gets no
+/// cookie, and the page then reads only.
+fn opened(shared: &Shared, path: &str, token: &str) -> Answer {
+    let answer = Answer::text(303, "the page").with("Location", path.to_string());
+    if !same(token, &shared.runtime.token) {
+        return answer;
+    }
+    answer.with("Set-Cookie", format!("{}={token}; HttpOnly; SameSite=Strict; Path=/", cookie_name(shared.runtime.port)))
+}
+
+/// A page as the server sends it, under a Content-Security-Policy that runs
+/// only its own scripts, each given this answer's nonce, and fetches from
+/// nowhere but the server (decision 1132). A plan's text cannot carry a
+/// script tag of its own: its raw HTML is escaped.
+fn secured(html: &str) -> Answer {
+    let nonce = token().unwrap_or_default();
+    let policy = format!(
+        "default-src 'none'; script-src 'self' 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    );
+    Answer::new(200, "text/html; charset=utf-8", html.replace("<script>", &format!("<script nonce=\"{nonce}\">"))).with("Content-Security-Policy", policy)
 }
 
 /// Whether two tokens are the same, in a time that does not tell how much
@@ -524,7 +647,7 @@ fn page(home: &Path, path: &str) -> Option<Answer> {
     let item = index.get(uid).and_then(|id| all.get(id)).filter(|item| item.artifact.is_some() && item.trashed.is_none())?;
     let (html, version) = crate::artifact::page(item, &all, folder.as_deref());
     match kind {
-        "html" => Some(Answer::new(200, "text/html; charset=utf-8", html)),
+        "html" => Some(secured(&html)),
         "js" => Some(Answer::new(200, "text/javascript; charset=utf-8", crate::artifact::script(&version))),
         _ => None,
     }
@@ -562,22 +685,42 @@ struct Answer {
     code: u16,
     kind: &'static str,
     body: Vec<u8>,
+    /// The headers past those every answer has.
+    headers: Vec<(&'static str, String)>,
+    /// Why it refuses, which the log keeps.
+    refusal: Option<String>,
     /// Whether the server stops once it is sent.
     stops: bool,
 }
 
 impl Answer {
     fn new(code: u16, kind: &'static str, body: impl Into<Vec<u8>>) -> Answer {
-        Answer { code, kind, body: body.into(), stops: false }
+        Answer { code, kind, body: body.into(), headers: Vec::new(), refusal: None, stops: false }
     }
 
     fn text(code: u16, text: &str) -> Answer {
         Answer::new(code, "text/plain; charset=utf-8", format!("{text}\n"))
     }
 
+    /// A 403 saying `why`: in JSON to the page's own API, which shows it.
+    fn refuse(why: String, json: bool) -> Answer {
+        let mut answer = match json {
+            true => Answer::new(403, "application/json", serde_json::json!({"person": false, "why": why}).to_string()),
+            false => Answer::text(403, &why),
+        };
+        answer.refusal = Some(why);
+        answer
+    }
+
+    fn with(mut self, name: &'static str, value: String) -> Answer {
+        self.headers.push((name, value));
+        self
+    }
+
     fn bytes(&self) -> Vec<u8> {
         let reason = match self.code {
             200 => "OK",
+            303 => "See Other",
             400 => "Bad Request",
             403 => "Forbidden",
             404 => "Not Found",
@@ -585,13 +728,16 @@ impl Answer {
             431 => "Request Header Fields Too Large",
             _ => "Service Unavailable",
         };
-        let mut bytes = format!(
-            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
+        let mut head = format!(
+            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n",
             self.code,
             self.kind,
             self.body.len()
-        )
-        .into_bytes();
+        );
+        for (name, value) in &self.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        let mut bytes = format!("{head}\r\n").into_bytes();
         bytes.extend_from_slice(&self.body);
         bytes
     }
@@ -609,6 +755,17 @@ mod tests {
         format!("{at:4}: {} {} 01 00000000:00000000 00:00000000 00000000 {uid:5}        0 {} 1 0000000000000000 20 4 30 10 -1", hex(local), hex(remote), 1000 + at)
     }
 
+    /// A server on port 9 of no home, whose token is `secret`.
+    fn shared() -> Shared {
+        Shared {
+            home: std::env::temp_dir().join("ekko-serve-nowhere"),
+            runtime: Runtime { pid: 7, port: 9, version: VERSION.to_string(), token: "secret".to_string() },
+            began: Instant::now(),
+            last: AtomicU64::new(0),
+            open: AtomicUsize::new(0),
+        }
+    }
+
     #[test]
     fn the_owner_of_a_connection_is_read_off_proc_net_tcp() {
         let server = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41394);
@@ -623,22 +780,80 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(address("0100007F:A1B2").filter(|_| cfg!(target_endian = "little")), cfg!(target_endian = "little").then_some(server));
-        assert_eq!(owner(&table, browser, server), Some(1001), "the connecting socket is the browser's: {table}");
-        assert_eq!(owner(&table, server, browser), Some(1000), "the accepted one is the server's own");
-        assert_eq!(owner(&table, other, server), Some(1002), "the address counts, not the port alone");
-        assert_eq!(owner(&table, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 50001), server), None);
-        assert_eq!(owner(&table, browser, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41395)), None);
+        assert_eq!(socket(&table, browser, server), Some((1001, 1002)), "the connecting socket is the browser's, and its inode: {table}");
+        assert_eq!(socket(&table, server, browser), Some((1000, 1001)), "the accepted one is the server's own");
+        assert_eq!(socket(&table, other, server), Some((1002, 1003)), "the address counts, not the port alone");
+        assert_eq!(socket(&table, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 50001), server), None);
+        assert_eq!(socket(&table, browser, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 41395)), None);
     }
 
     /// A connection this user makes is this user's, read off the machine's
     /// own /proc/net/tcp.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_connection_from_this_user_is_served() {
+    fn a_connection_from_this_user_is_served_and_held_by_its_process() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (accepted, _) = listener.accept().unwrap();
-        assert_eq!(foreign(&accepted), None);
+        let request = |host: &str| Request { method: "GET".to_string(), path: "/".to_string(), headers: vec![("Host".to_string(), host.to_string())] };
+        let inode = caller(port, &accepted, &request(&format!("127.0.0.1:{port}"))).unwrap().expect("Linux reads the socket");
+        assert_eq!(holders(inode), vec![std::process::id()], "the connecting socket is this process's");
+        assert!(caller(port, &accepted, &request("evil.example")).is_err());
+        // This process is a session when Claude Code runs the tests, and the
+        // person on CI: the judgment follows its ancestors either way.
+        assert_eq!(session(Some(inode)).is_err(), crate::holder::claude_among(std::process::id()).is_some());
+        // A socket its process closed once the request was sent, as bash's
+        // `printf ... > /dev/tcp/...` does, is nobody's, and nobody writes.
+        drop(client);
+        assert_eq!(holders(inode), Vec::<u32>::new());
+        assert!(session(Some(inode)).unwrap_err().contains("no process holds"));
+    }
+
+    #[test]
+    fn a_write_needs_the_page_own_origin_and_the_cookie_the_token_bought() {
+        let shared = shared();
+        let write = |origin: Option<&str>, cookie: Option<&str>| {
+            let mut headers = vec![("Host".to_string(), "127.0.0.1:9".to_string())];
+            headers.extend(origin.map(|origin| ("Origin".to_string(), origin.to_string())));
+            headers.extend(cookie.map(|cookie| ("Cookie".to_string(), cookie.to_string())));
+            writer(&shared, &Request { method: "POST".to_string(), path: "/api/who".to_string(), headers }, None).unwrap_err()
+        };
+        let mine = "a=1; ekko_9=secret; b=2";
+        let foreign = ["null", "http://127.0.0.1:8", "http://127.0.0.1:90", "http://localhost:8", "http://localhost:90", "http://evil.example", "https://127.0.0.1:9"];
+        for origin in std::iter::once(None).chain(foreign.map(Some)) {
+            assert!(write(origin, Some(mine)).contains("Origin"), "{origin:?}");
+        }
+        for cookie in [None, Some("ekko_9=secrex"), Some("ekko_8=secret"), Some("xekko_9=secret")] {
+            assert!(write(Some("http://127.0.0.1:9"), cookie).contains("ekko artifact"), "{cookie:?}");
+        }
+        assert!(write(Some("http://localhost:9"), Some(mine)).contains("only Linux"), "past the Origin and the cookie, the person check");
+
+        let opened = opened(&shared, "/default/u.html", "secret");
+        assert_eq!(opened.code, 303);
+        let headers: Vec<(&str, &str)> = opened.headers.iter().map(|(name, value)| (*name, value.as_str())).collect();
+        assert_eq!(headers, [("Location", "/default/u.html"), ("Set-Cookie", "ekko_9=secret; HttpOnly; SameSite=Strict; Path=/")]);
+        let wrong = opened_headers(&super::opened(&shared, "/default/u.html", "secrex"));
+        assert_eq!(wrong, ["Location"], "a token not the server's buys no cookie");
+    }
+
+    fn opened_headers(answer: &Answer) -> Vec<&'static str> {
+        answer.headers.iter().map(|(name, _)| *name).collect()
+    }
+
+    #[test]
+    fn a_served_page_runs_only_its_own_scripts() {
+        let answer = secured("<html><script>a()</script><p>&lt;script&gt;</p><script>b()</script></html>");
+        let policy = &answer.headers.iter().find(|(name, _)| *name == "Content-Security-Policy").unwrap().1;
+        let nonce = policy.split("'nonce-").nth(1).and_then(|rest| rest.split('\'').next()).unwrap();
+        assert_eq!(nonce.len(), 64, "{policy}");
+        let html = String::from_utf8(answer.body).unwrap();
+        assert_eq!(html.matches(&format!("<script nonce=\"{nonce}\">")).count(), 2, "{html}");
+        assert!(!html.contains("<script>") && html.contains("&lt;script&gt;"), "{html}");
+        for part in ["default-src 'none'", "script-src 'self' 'nonce-", "connect-src 'self'", "base-uri 'none'", "frame-ancestors 'none'"] {
+            assert!(policy.contains(part), "{part}: {policy}");
+        }
+        assert_ne!(secured("<script>").headers, answer.headers, "a nonce per answer");
     }
 
     #[test]
@@ -679,30 +894,24 @@ mod tests {
 
     #[test]
     fn the_server_tells_its_version_and_stops_only_with_its_token() {
-        let shared = Shared {
-            home: std::env::temp_dir().join("ekko-serve-nowhere"),
-            runtime: Runtime { pid: 7, port: 9, version: VERSION.to_string(), token: "secret".to_string() },
-            began: Instant::now(),
-            last: AtomicU64::new(0),
-            open: AtomicUsize::new(0),
-        };
+        let shared = shared();
         let request = |method: &str, path: &str, token: Option<&str>| Request {
             method: method.to_string(),
             path: path.to_string(),
             headers: token.map(|token| vec![(TOKEN.to_ascii_lowercase(), token.to_string())]).unwrap_or_default(),
         };
-        let status = route(&shared, &request("GET", "/status", None));
+        let status = route(&shared, &request("GET", "/status", None), None);
         assert_eq!(status.code, 200);
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&status.body).unwrap(), serde_json::json!({"ekko": VERSION, "pid": 7}));
-        let stopping = route(&shared, &request("POST", "/stop", Some("secret")));
+        let stopping = route(&shared, &request("POST", "/stop", Some("secret")), None);
         assert_eq!((stopping.code, stopping.stops), (200, true));
         for token in [None, Some("secrex"), Some("secret2"), Some("")] {
-            let refused = route(&shared, &request("POST", "/stop", token));
+            let refused = route(&shared, &request("POST", "/stop", token), None);
             assert_eq!((refused.code, refused.stops), (403, false), "{token:?}");
         }
-        assert_eq!(route(&shared, &request("GET", "/stop", Some("secret"))).code, 404);
-        assert_eq!(route(&shared, &request("GET", "/default/nothing.html", None)).code, 404);
-        assert_eq!(route(&shared, &request("GET", "/elsewhere/x/y.html", None)).code, 404);
-        assert_eq!(route(&shared, &request("DELETE", "/status", None)).code, 405);
+        assert_eq!(route(&shared, &request("GET", "/stop", Some("secret")), None).code, 404);
+        assert_eq!(route(&shared, &request("GET", "/default/nothing.html", None), None).code, 404);
+        assert_eq!(route(&shared, &request("GET", "/elsewhere/x/y.html", None), None).code, 404);
+        assert_eq!(route(&shared, &request("DELETE", "/status", None), None).code, 405);
     }
 }

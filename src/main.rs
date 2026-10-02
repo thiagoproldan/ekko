@@ -474,7 +474,10 @@ fn run_artifact(args: &[String], json_first: bool) -> ExitCode {
     // The server's page where one can serve it, the file otherwise (task 1102).
     let served = serve::page_address(&home_dir, &location, &uid);
     let page = served.clone().unwrap_or_else(|_| path.display().to_string());
-    let opened = !cli.no_open && artifact::open(&page).is_ok();
+    // The browser goes through the redirect file, which hands it the token
+    // a write from the page needs (task 1103).
+    let opening = served.as_ref().ok().and_then(|address| serve::redirect_file(&home_dir, address).ok());
+    let opened = !cli.no_open && artifact::open(opening.as_deref().map_or(page.as_ref(), std::path::Path::as_os_str)).is_ok();
     if json_mode {
         let mut out = serde_json::json!({"page": page, "opened": opened});
         if let Err(why) = &served {

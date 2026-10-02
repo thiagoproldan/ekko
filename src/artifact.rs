@@ -407,7 +407,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     for question in &open_questions {
         let _ = write!(body, "<a href=\"#notes\" data-tab=\"notes\">Question {}<span class=\"count\">open</span></a>", question.id);
     }
-    let _ = write!(body, "</nav><div class=\"side-foot\"><span class=\"live\"></span>Follows the board \u{b7} ekko {}</div></aside>", env!("CARGO_PKG_VERSION"));
+    let _ = write!(body, "</nav><div class=\"side-foot\"><span class=\"live\"></span>Follows the board \u{b7} ekko {}<span id=\"who\"></span></div></aside>", env!("CARGO_PKG_VERSION"));
 
     // The head of the page: where it stands, and what asks for the user.
     let _ = write!(
@@ -632,7 +632,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
 
     let version = format!("{:016x}", fnv(body.as_bytes()));
     let poll = format!(
-        "(function () {{\n  var version = \"{version}\";\n  window.ekkoArtifact = function (seen) {{ if (seen !== version) location.reload(); }};\n  setInterval(function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }}, {POLL_MS});\n}})();",
+        "(function () {{\n  var version = \"{version}\";\n  window.ekkoArtifact = function (seen) {{ if (seen !== version) location.reload(); }};\n  setInterval(function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }}, {POLL_MS});\n  if (location.protocol === \"http:\") fetch(\"/api/who\", {{ method: \"POST\" }}).then(function (answer) {{ return answer.json(); }}).then(function (who) {{\n    var text = who.person ? \" \\u00b7 writes as you\" : \" \\u00b7 reads only: \" + who.why;\n    document.getElementById(\"who\").textContent = text;\n  }}, function () {{}});\n}})();",
         js_string(uid)
     );
     let html = format!(
@@ -961,14 +961,25 @@ pub fn script(version: &str) -> String {
 /// Opens `page`, a file or an address, in the default browser, as `cargo doc
 /// --open` does, without waiting for it.
 pub fn open(page: impl AsRef<std::ffi::OsStr>) -> std::io::Result<()> {
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    std::process::Command::new(opener)
+    open_with(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }, page.as_ref())
+}
+
+/// Runs `opener page` in the background of a shell that exits at once, so
+/// the opener, and a browser it has to start, lose their parent and leave
+/// the process tree of whoever ran ekko: a browser started from a session's
+/// command is then the user's (task 1103). An opener the shell does not find
+/// is an error, as it is to a spawn.
+fn open_with(opener: &str, page: &std::ffi::OsStr) -> std::io::Result<()> {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg("command -v \"$0\" >/dev/null || exit 127; \"$0\" \"$1\" >/dev/null 2>&1 &")
+        .arg(opener)
         .arg(page)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
+        .status()
+        .and_then(|status| if status.success() { Ok(()) } else { Err(std::io::Error::other(format!("{opener} does not run: sh exited with {status}"))) })
 }
 
 /// Replaces `path` with `content` by rename from a file beside it.
@@ -1786,6 +1797,45 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), page, "a write that changes nothing it shows leaves it");
             std::fs::remove_dir_all(&home).ok();
         }
+    }
+
+    /// The opener runs outside the tree of the process that opened the page,
+    /// which a session's command is in, and gets the page as one argument; an
+    /// opener not found is an error (task 1103). It writes what it got, then
+    /// its ancestors, once the shell that ran it had time to exit.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_opener_runs_outside_the_tree_of_the_process_that_opened_the_page() {
+        let dir = crate::paths::test_dir("ekko-artifact-opener");
+        std::fs::create_dir_all(&dir).unwrap();
+        let opener = dir.join("opener");
+        let seen = dir.join("seen");
+        let script = r#"#!/bin/sh
+sleep 0.5
+{
+  printf '%s\n' "$1"
+  pid=$$
+  while [ "$pid" -gt 1 ]; do
+    pid=$(sed 's/.*) //' "/proc/$pid/stat" | cut -d' ' -f2)
+    printf '%s\n' "$pid"
+  done
+} > 'SEEN.part'
+mv 'SEEN.part' 'SEEN'
+"#;
+        std::fs::write(&opener, script.replace("SEEN", &seen.display().to_string())).unwrap();
+        std::fs::set_permissions(&opener, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let page = "/a page's \"name\" & $HOME.html";
+        open_with(&opener.display().to_string(), page.as_ref()).unwrap();
+        let began = std::time::Instant::now();
+        while !seen.exists() && began.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let seen = std::fs::read_to_string(&seen).unwrap();
+        let (given, ancestors) = seen.split_once('\n').unwrap();
+        assert_eq!(given, page);
+        assert!(!ancestors.lines().any(|pid| pid == std::process::id().to_string()), "the opener is in this process's tree: {ancestors}");
+        assert!(open_with("ekko-no-such-opener", page.as_ref()).is_err(), "an opener not found");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

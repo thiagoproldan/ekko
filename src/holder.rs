@@ -494,7 +494,13 @@ fn tty(pid: u32) -> Option<String> {
 /// The nearest ancestor that is Claude Code, by its process name: `claude`,
 /// or `.claude-unwrapped` behind a nix wrapper.
 fn claude_ancestor() -> Option<u32> {
-    let mut pid = std::os::unix::process::parent_id();
+    claude_among(std::os::unix::process::parent_id())
+}
+
+/// `pid`, or the nearest of its ancestors, that is Claude Code, as
+/// `claude_ancestor` tells one: how `ekko serve` judges the process behind a
+/// request (task 1103).
+pub(crate) fn claude_among(mut pid: u32) -> Option<u32> {
     for _ in 0..16 {
         let name = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
         if name.trim().trim_start_matches('.').starts_with("claude") {

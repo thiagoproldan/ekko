@@ -154,6 +154,7 @@ fn ekko_artifact_opens_the_page_from_a_server_it_started_and_a_second_call_reuse
     assert_eq!(address, format!("http://127.0.0.1:{port}/default/{uid}.html"), "the last port, taken again: {stderr}");
     let started = runtime(&home);
     assert_ne!(started["pid"], first["pid"]);
+    assert_eq!(started["token"], first["token"], "the token outlives its server, so a tab open across the replacement still writes");
     assert!(alive(started["pid"].as_u64().unwrap()));
     let mode = fs::metadata(state(&home).join("serve.json")).map(|meta| std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777).unwrap();
     assert_eq!(mode, 0o600, "the token is the user's alone");
@@ -227,6 +228,8 @@ fn a_server_of_another_version_is_stopped_and_replaced_on_its_port() {
     assert_eq!(code, 200);
     assert_eq!(serde_json::from_str::<Value>(&status).unwrap()["ekko"], VERSION);
     assert_eq!(runtime(&home)["version"], VERSION);
+    let token = runtime(&home)["token"].as_str().unwrap().to_string();
+    assert!(token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()), "a token ekko did not draw is not kept: {token}");
 }
 
 /// A server with no request for its idle time stops, and says so in its log.
@@ -298,4 +301,90 @@ fn a_board_the_server_cannot_name_keeps_its_file_page() {
     let page = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert!(page.starts_with(&copy.join(".ekko").join("artifacts").display().to_string()) && page.ends_with(".html"), "{page}");
     assert!(String::from_utf8_lossy(&out.stderr).contains("this board is neither"), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// One request, written whole, to 127.0.0.1:`port`, from this process: the
+/// whole answer.
+fn exchange(port: u16, request: &str) -> String {
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    answer
+}
+
+/// The same request sent by bash through /dev/tcp: by a copy of bash named
+/// claude, which is a Claude Code process as ekko tells one, or else by a
+/// subshell its bash left behind, which so passed to init or a subreaper
+/// before it connected, out of every session's process tree, this test's
+/// included when Claude Code runs it. Its whole answer.
+fn from_bash(home: &Path, port: u16, request: &str, as_claude: bool) -> String {
+    let out = home.join(if as_claude { "answer-claude" } else { "answer-person" });
+    let script = format!("exec 3<>/dev/tcp/127.0.0.1/{port}; printf '%s' \"$REQUEST\" >&3; cat <&3 > \"$OUT.part\"; mv \"$OUT.part\" \"$OUT\"");
+    let mut command = if as_claude {
+        let bash = String::from_utf8(Command::new("sh").args(["-c", "command -v bash"]).output().unwrap().stdout).unwrap();
+        let claude = home.join("claude");
+        fs::copy(bash.trim(), &claude).unwrap();
+        let mut command = Command::new(claude);
+        command.arg("-c").arg(script);
+        command
+    } else {
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(format!("(sleep 0.5; {script}) > /dev/null 2>&1 &"));
+        command
+    };
+    assert!(command.env("REQUEST", request).env("OUT", &out).status().unwrap().success());
+    assert!(until(10, || out.exists()), "bash never got its answer");
+    fs::read_to_string(out).unwrap()
+}
+
+/// A write is the user's only from the page opened through the redirect
+/// file, and from a process outside every Claude Code session (task 1103):
+/// the file hands the browser the token, which it trades for the cookie;
+/// the same write under Claude Code, from another Origin, with another Host
+/// or without the cookie is refused; and the page runs only its own scripts.
+#[test]
+fn a_write_is_the_users_only_from_the_page_opened_with_the_token() {
+    let home = Home::new();
+    let written = artifact(&home);
+    let (port, path) = split(written["page"].as_str().unwrap());
+    let (address, stderr, ok) = opened(&home, "1");
+    assert!(ok, "{stderr}");
+    let token = runtime(&home)["token"].as_str().unwrap().to_string();
+    let redirect = state(&home).join("serve-open.html");
+    assert!(fs::read_to_string(&redirect).unwrap().contains(&format!("url={address}?token={token}")));
+    let mode = fs::metadata(&redirect).map(|meta| std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777).unwrap();
+    assert_eq!(mode, 0o600);
+
+    let host = format!("127.0.0.1:{port}");
+    let traded = exchange(port, &format!("GET {path}?token={token} HTTP/1.1\r\nHost: {host}\r\n\r\n"));
+    assert!(traded.starts_with("HTTP/1.1 303 "), "{traded}");
+    assert!(traded.contains(&format!("\r\nLocation: {path}\r\n")), "{traded}");
+    let cookie = format!("ekko_{port}={token}");
+    assert!(traded.contains(&format!("\r\nSet-Cookie: {cookie}; HttpOnly; SameSite=Strict; Path=/\r\n")), "{traded}");
+    let page = exchange(port, &format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n"));
+    let policy = page.lines().find_map(|line| line.strip_prefix("Content-Security-Policy: ")).unwrap_or_else(|| panic!("no CSP: {page}"));
+    let nonce = policy.split("'nonce-").nth(1).and_then(|rest| rest.split('\'').next()).unwrap();
+    assert!(page.contains(&format!("<script nonce=\"{nonce}\">")) && !page.contains("<script>"), "every script of the page carries the nonce");
+    assert!(page.contains("fetch(\"/api/who\""), "the page asks whom it writes as");
+
+    let who = |origin: &str, host: &str, cookie: &str| format!("POST /api/who HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nCookie: {cookie}\r\nContent-Length: 0\r\n\r\n");
+    let origin = format!("http://127.0.0.1:{port}");
+    let person = from_bash(&home, port, &who(&origin, &host, &cookie), false);
+    assert!(person.starts_with("HTTP/1.1 200 ") && person.ends_with("{\"person\":true}"), "{person}");
+    let session = from_bash(&home, port, &who(&origin, &host, &cookie), true);
+    assert!(session.starts_with("HTTP/1.1 403 ") && session.contains("runs under Claude Code"), "{session}");
+    for (request, refusal) in [
+        (who("http://127.0.0.1:1", &host, &cookie), "Origin"),
+        (who("null", &host, &cookie), "Origin"),
+        (who(&origin, "evil.example", &cookie), "Host"),
+        (who(&origin, &host, "other=1"), "ekko artifact"),
+        (who(&origin, &host, &format!("ekko_{port}=not-the-token")), "ekko artifact"),
+    ] {
+        let answer = exchange(port, &request);
+        assert!(answer.starts_with("HTTP/1.1 403 ") && answer.contains(refusal), "{request}: {answer}");
+    }
+    let log = fs::read_to_string(state(&home).join("serve.log")).unwrap();
+    assert!(log.contains("refused POST /api/who: process ") && log.contains("runs under Claude Code"), "{log}");
 }
