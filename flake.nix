@@ -42,7 +42,8 @@
           meta = with pkgs.lib; {
             inherit (cargoToml.package) description;
             homepage = cargoToml.package.repository;
-            license = licenses.mit;
+            # The artifact page's fonts, in assets/fonts, are the OFL's.
+            license = [ licenses.mit licenses.ofl ];
             mainProgram = "ekko";
             # storage.rs reads /proc/<pid>/stat with no cfg fallback.
             platforms = platforms.linux;

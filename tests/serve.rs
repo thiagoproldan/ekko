@@ -80,6 +80,18 @@ fn get(port: u16, path: &str, host: &str) -> (u16, String) {
     (head.split(' ').nth(1).unwrap().parse().unwrap(), body.to_string())
 }
 
+/// One request to 127.0.0.1:`port`, naming `host`: the head and the body,
+/// as bytes.
+fn fetch(port: u16, path: &str, host: &str) -> (String, Vec<u8>) {
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    let end = answer.windows(4).position(|window| window == b"\r\n\r\n").unwrap();
+    (String::from_utf8_lossy(&answer[..end]).into_owned(), answer[end + 4..].to_vec())
+}
+
 /// The port and path of an address the server gives.
 fn split(address: &str) -> (u16, String) {
     let rest = address.strip_prefix("http://127.0.0.1:").unwrap_or_else(|| panic!("not the server's address: {address}"));
@@ -168,6 +180,15 @@ fn ekko_artifact_opens_the_page_from_a_server_it_started_and_a_second_call_reuse
     let file = home.join(".ekko").join("artifacts");
     assert_eq!(script, fs::read_to_string(file.join(format!("{uid}.js"))).unwrap(), "the version the file page has");
     assert!(fs::read_to_string(file.join(format!("{uid}.html"))).unwrap().contains("<h1>Ship the page</h1>"));
+    // The fonts the page names come from the server, the very ones written
+    // beside the file page (task 1152).
+    let fonts: Vec<&str> = page.split("url(\"fonts/").skip(1).filter_map(|rest| rest.split('"').next()).collect();
+    assert_eq!(fonts.len(), 3, "{page}");
+    for font in fonts {
+        let (head, body) = fetch(port, &format!("/default/fonts/{font}"), &format!("127.0.0.1:{port}"));
+        assert!(head.starts_with("HTTP/1.1 200 ") && head.contains("Content-Type: font/woff2"), "{font}: {head}");
+        assert_eq!(body, fs::read(file.join("fonts").join(font)).unwrap(), "{font}");
+    }
 
     let (again, stderr, ok) = opened(&home, "1");
     assert!(ok, "{stderr}");

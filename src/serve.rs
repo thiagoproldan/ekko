@@ -585,7 +585,7 @@ fn route(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
         },
         ("GET", path) => match query.split('&').find_map(|pair| pair.strip_prefix("token=")) {
             Some(token) if path.starts_with("/default/") || path.starts_with("/project/") => opened(shared, path, token),
-            _ => page(&shared.home, path).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
+            _ => font(path).or_else(|| page(&shared.home, path)).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
         },
         _ => Answer::text(405, "the server answers GET, and POST to /stop and /api/who"),
     }
@@ -605,12 +605,13 @@ fn opened(shared: &Shared, path: &str, token: &str) -> Answer {
 
 /// A page as the server sends it, under a Content-Security-Policy that runs
 /// only its own scripts, each given this answer's nonce, and fetches from
-/// nowhere but the server (decision 1132). A plan's text cannot carry a
-/// script tag of its own: its raw HTML is escaped.
+/// nowhere but the server (decision 1132), its fonts included (task 1152).
+/// A plan's text cannot carry a script tag of its own: its raw HTML is
+/// escaped.
 fn secured(html: &str) -> Answer {
     let nonce = token().unwrap_or_default();
     let policy = format!(
-        "default-src 'none'; script-src 'self' 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+        "default-src 'none'; script-src 'self' 'nonce-{nonce}'; style-src 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
     );
     Answer::new(200, "text/html; charset=utf-8", html.replace("<script>", &format!("<script nonce=\"{nonce}\">"))).with("Content-Security-Policy", policy)
 }
@@ -653,6 +654,24 @@ fn page(home: &Path, path: &str) -> Option<Answer> {
     }
 }
 
+/// A font of the pages, or their licence, which a page's style names beside
+/// it: `fonts/<file>` under the path of a board, any board, since a font is
+/// no board's. A font's name holds its hash, so a browser may keep it for
+/// good, and a page reloaded on a new version draws at once.
+fn font(path: &str) -> Option<Answer> {
+    let (board, file) = path.rsplit_once(&format!("/{}/", crate::artifact::FONTS_DIR))?;
+    let named = board.strip_prefix("/project/").is_some_and(|name| !name.is_empty() && !name.contains('/'));
+    if board != "/default" && !named {
+        return None;
+    }
+    let (license, text) = crate::artifact::FONT_LICENSE;
+    if file == license {
+        return Some(Answer::new(200, "text/plain; charset=utf-8", text));
+    }
+    let (_, bytes) = crate::artifact::font_files().iter().find(|(name, _)| name == file)?;
+    Some(Answer { cache: "max-age=31536000, immutable", ..Answer::new(200, "font/woff2", *bytes) })
+}
+
 /// `text` as one segment of a path: every byte escaped but the unreserved
 /// ones, so a project's name can hold anything a name can.
 fn encode(text: &str) -> String {
@@ -691,11 +710,13 @@ struct Answer {
     refusal: Option<String>,
     /// Whether the server stops once it is sent.
     stops: bool,
+    /// How long a browser may keep it: nothing but a font, by default.
+    cache: &'static str,
 }
 
 impl Answer {
     fn new(code: u16, kind: &'static str, body: impl Into<Vec<u8>>) -> Answer {
-        Answer { code, kind, body: body.into(), headers: Vec::new(), refusal: None, stops: false }
+        Answer { code, kind, body: body.into(), headers: Vec::new(), refusal: None, stops: false, cache: "no-store" }
     }
 
     fn text(code: u16, text: &str) -> Answer {
@@ -729,10 +750,11 @@ impl Answer {
             _ => "Service Unavailable",
         };
         let mut head = format!(
-            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n",
+            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n",
             self.code,
             self.kind,
-            self.body.len()
+            self.body.len(),
+            self.cache
         );
         for (name, value) in &self.headers {
             head.push_str(&format!("{name}: {value}\r\n"));
@@ -850,7 +872,7 @@ mod tests {
         let html = String::from_utf8(answer.body).unwrap();
         assert_eq!(html.matches(&format!("<script nonce=\"{nonce}\">")).count(), 2, "{html}");
         assert!(!html.contains("<script>") && html.contains("&lt;script&gt;"), "{html}");
-        for part in ["default-src 'none'", "script-src 'self' 'nonce-", "connect-src 'self'", "base-uri 'none'", "frame-ancestors 'none'"] {
+        for part in ["default-src 'none'", "script-src 'self' 'nonce-", "font-src 'self';", "connect-src 'self'", "base-uri 'none'", "frame-ancestors 'none'"] {
             assert!(policy.contains(part), "{part}: {policy}");
         }
         assert_ne!(secured("<script>").headers, answer.headers, "a nonce per answer");
@@ -913,5 +935,29 @@ mod tests {
         assert_eq!(route(&shared, &request("GET", "/default/nothing.html", None), None).code, 404);
         assert_eq!(route(&shared, &request("GET", "/elsewhere/x/y.html", None), None).code, 404);
         assert_eq!(route(&shared, &request("DELETE", "/status", None), None).code, 405);
+    }
+
+    /// The fonts a page names beside it, under any board's path, kept by
+    /// the browser for good; their licence beside them; nothing else there.
+    #[test]
+    fn the_fonts_of_the_pages_are_served_beside_them_and_kept() {
+        let shared = shared();
+        let get = |path: &str| route(&shared, &Request { method: "GET".to_string(), path: path.to_string(), headers: Vec::new() }, None);
+        let (name, bytes) = &crate::artifact::font_files()[1];
+        for board in ["/default", "/project/site", "/project/a%20b"] {
+            let font = get(&format!("{board}/fonts/{name}"));
+            assert_eq!((font.code, font.kind, font.cache), (200, "font/woff2", "max-age=31536000, immutable"), "{board}");
+            assert_eq!(&font.body, bytes);
+            assert!(String::from_utf8_lossy(&font.bytes()).contains("\r\nCache-Control: max-age=31536000, immutable\r\n"));
+        }
+        let license = get("/default/fonts/OFL.txt");
+        assert_eq!((license.code, license.kind), (200, "text/plain; charset=utf-8"));
+        assert!(String::from_utf8_lossy(&license.body).contains("SIL OPEN FONT LICENSE"));
+        for path in [format!("/default/fonts/{}", name.replace(".woff2", "0.woff2")), format!("/elsewhere/fonts/{name}"), format!("/project/fonts/{name}"), format!("/project/a/b/fonts/{name}"), format!("/fonts/{name}")] {
+            assert_eq!(get(&path).code, 404, "{path}");
+        }
+        let page = get("/default/nothing.html");
+        assert_eq!((page.code, page.cache), (404, "no-store"), "anything but a font is kept by none");
+        assert!(String::from_utf8_lossy(&page.bytes()).contains("\r\nCache-Control: no-store\r\n"));
     }
 }

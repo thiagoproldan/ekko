@@ -9,12 +9,13 @@
 //! earlier texts. A task rather than a note, so the decisions and questions
 //! about the plan attach to it, and the tasks its approval makes block it.
 //!
-//! The page is one HTML file, its style and script inline and nothing
-//! fetched, beside a script holding its version, under the board's
-//! `artifacts/`. Every write that changes what a page shows rewrites it, the
-//! page first, and the page reloads when the version in the script changes:
-//! a classic script loads beside a `file://` page where `fetch` is refused,
-//! as rustdoc loads its search index (measured in Firefox 157, task 1059).
+//! The page is one HTML file, its style and script inline, beside a script
+//! holding its version and the fonts it draws with, under the board's
+//! `artifacts/`; nothing comes from the network. Every write that changes
+//! what a page shows rewrites it, the page first, and the page reloads when
+//! the version in the script changes: a classic script loads beside a
+//! `file://` page where `fetch` is refused, as rustdoc loads its search
+//! index (measured in Firefox 157, task 1059).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -359,10 +360,14 @@ pub fn approval_asked<'a>(item: &Item, all: &'a ItemMap) -> Option<&'a Item> {
 }
 
 /// The page of artifact `item` on the board `all`, whose project folder is
-/// `folder`, and the version it carries. Its look is the one the user picked
-/// from three mockups (task 1085, decision 1089): a sidebar and tabs, the
-/// plan's sections as cards beside its progress, its steps as a table and as
-/// the graph their `after` draws, its notes, and its earlier texts compared.
+/// `folder`, and the version it carries. Its look is mockup D, which the
+/// user approved (task 1092, decision 1151): the plan read as an article,
+/// Medium's in the light theme and AKQA's case study in the dark (note
+/// 1148), with where it stands in a column beside it; the Goal's first
+/// sentence as a statement, each other section opened by its heading in
+/// capitals, then the steps, the map their `after` draws, the notes and how
+/// the text changed; Medium's section bars at the right edge, and AKQA's
+/// bar at the bottom, which finds a section, step or note (note 1149).
 pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, String) {
     let artifact = item.artifact.as_deref();
     let standing = Standing::of(item, all);
@@ -371,276 +376,266 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     let board = folder.and_then(Path::file_name).map_or_else(|| "the default board".to_string(), |name| format!("project {}", name.to_string_lossy()));
     let uid = item.uid.as_deref().unwrap_or_default();
     let steps = artifact.map(|artifact| shown(artifact, all)).unwrap_or_default();
-    let sections = sections(plan);
     let mut notes: Vec<&Item> =
         all.values().filter(|note| !note.is_task && note.trashed.is_none() && !uid.is_empty() && note.attached_to.as_deref() == Some(uid)).collect();
     notes.sort_by_key(|note| std::cmp::Reverse((note.timestamp, note.id)));
-    let open_questions: Vec<&Item> = notes.iter().copied().filter(|note| note.question.as_ref().is_some_and(|question| question.answer.is_none())).collect();
     let tasks = steps.iter().filter(|step| step.task.is_some() && step.class != "cancelled").count();
     let done = steps.iter().filter(|step| step.class == "done").count();
     let version = artifact.map_or(0, |artifact| artifact.version);
-    let tabs = [
-        ("overview", "Overview", String::new()),
-        ("plan", "Plan", sections.iter().filter(|(heading, _)| !heading.is_empty()).count().to_string()),
-        ("steps", "Steps", if tasks > 0 { format!("{done}/{tasks}") } else { steps.len().to_string() }),
-        ("map", "Map", String::new()),
-        ("notes", "Notes", notes.len().to_string()),
-        ("history", "History", format!("v{version}")),
-    ];
+    let command = format!("ekko artifact {}", item.id);
+    let phase = standing.as_ref().map(phase);
+    let by = written_by(item);
+    // The page's parts, by id and name, as the section bars and the bar list them.
+    let mut parts: Vec<(String, String)> = Vec::new();
 
     let mut body = String::new();
-    // The sidebar: what the page is of, its tabs, and what waits on the user.
     let _ = write!(
         body,
-        "<aside class=\"side\"><div class=\"brand\"><span class=\"logo\">e</span><div><b>ekko</b><small>{} \u{b7} artifact {}</small></div></div><nav class=\"nav\"><div class=\"group\">Artifact {}</div>",
+        "<header class=\"top\"><span class=\"wordmark\">ekko</span><span class=\"where\">{} \u{b7} artifact {}<span id=\"who\"></span></span><span class=\"spacer\"></span><button class=\"link\" id=\"theme\" type=\"button\">Dark</button><button class=\"solid\" type=\"button\" data-copy=\"{command}\">Copy command</button></header>",
         esc(&board),
-        item.id,
         item.id
     );
-    for (tab, name, count) in &tabs {
-        let _ = write!(body, "<a href=\"#{tab}\" data-tab=\"{tab}\">{name}<span class=\"count\">{}</span></a>", esc(count));
-    }
-    body.push_str("<div class=\"group\">Waiting on you</div>");
-    if open_questions.is_empty() {
-        body.push_str("<span class=\"none\">Nothing</span>");
-    }
-    for question in &open_questions {
-        let _ = write!(body, "<a href=\"#notes\" data-tab=\"notes\">Question {}<span class=\"count\">open</span></a>", question.id);
-    }
-    let _ = write!(body, "</nav><div class=\"side-foot\"><span class=\"live\"></span>Follows the board \u{b7} ekko {}<span id=\"who\"></span></div></aside>", env!("CARGO_PKG_VERSION"));
 
-    // The head of the page: where it stands, and what asks for the user.
+    // Where it stands, in Medium's author column beside the text.
+    let _ = write!(body, "<main class=\"page\"><aside class=\"standing\"><div class=\"standing-inner\"><div class=\"mark\">{}</div><p class=\"name\">Artifact {}</p><p class=\"about\">", item.id, item.id);
+    if let Some(standing) = &standing {
+        let _ = write!(body, "{}.", esc(&capitalized(&standing.words())));
+    }
+    if let Some(by) = &by {
+        let _ = write!(body, " Written by {}.", esc(by));
+    }
+    body.push_str("</p>");
+    if !steps.is_empty() {
+        body.push_str("<div class=\"segments\">");
+        for (at, step) in steps.iter().enumerate() {
+            let _ = write!(body, "<span class=\"{}\" title=\"{:02} {}: {}\"></span>", step.class, at + 1, esc(&step.step.key), esc(&step.state));
+        }
+        body.push_str("</div>");
+    }
+    let _ = write!(body, "<button class=\"copy\" type=\"button\" data-copy=\"{command}\">Copy command</button></div></aside>");
+
+    // The head of the text: tags, title, byline and actions, then what waits
+    // on the user and what the user should know first.
+    body.push_str("<article class=\"prose\"><ul class=\"tags\"><li>Artifact</li>");
+    if let Some(phase) = phase {
+        let _ = write!(body, "<li>{phase}</li>");
+    }
+    let progress = if tasks > 0 { format!("{done} of {tasks} done") } else { plural(steps.len(), "step") };
+    let _ = write!(body, "<li>{progress}</li>");
+    if let Some(priority) = item.priority.filter(|priority| *priority > 1) {
+        let _ = write!(body, "<li>Priority {priority}</li>");
+    }
+    if !notes.is_empty() {
+        let _ = write!(body, "<li>{}</li>", plural(notes.len(), "note"));
+    }
+    let _ = write!(body, "<li>Version {version}</li></ul><h1>{}</h1><div class=\"byline\">", esc(title));
+    if let Some(by) = &by {
+        let _ = write!(body, "<span class=\"who\">Written by {}</span>", esc(by));
+    }
+    if let Some(phase) = phase {
+        let _ = write!(body, "<span class=\"state\">{phase}</span>");
+    }
     let _ = write!(
         body,
-        "<main><div class=\"topbar\"><span class=\"crumb\">ekko \u{b7} {} \u{b7} artifact {}</span><span class=\"spacer\"></span><button class=\"btn\" data-copy=\"ekko artifact {}\">Copy command</button><button class=\"btn ghost\" id=\"theme\">Dark</button></div><div class=\"content\">",
-        esc(&board),
-        item.id,
-        item.id
+        "<span>{} min read</span><span>\u{b7}</span><span>Updated {}</span></div><div class=\"actions\"><span>{}</span><span>{}</span><span>v{version}</span><span class=\"spacer\"></span><button type=\"button\" data-copy=\"{command}\" title=\"Copy command\" aria-label=\"Copy command\">{COPY}</button></div>",
+        reading_minutes(plan),
+        esc(&when(item.updated_at.unwrap_or(item.timestamp))),
+        plural(steps.len(), "step"),
+        plural(notes.len(), "note")
     );
-    let _ = write!(body, "<h1>{}</h1><div class=\"badges\">", esc(title));
-    if let (Some(artifact), Some(standing)) = (artifact, &standing) {
-        let tone = if !standing.open() {
-            "outline"
-        } else if standing.waiting.is_some() || standing.changed {
-            "warn"
-        } else if standing.tasks > 0 {
-            "ok"
-        } else {
-            "plain"
-        };
-        let _ = write!(body, "<span class=\"badge {tone}\">{}</span>", esc(&standing.words()));
-        let approved = match artifact.approved_version {
-            Some(approved) if approved == artifact.version => " \u{b7} approved".to_string(),
-            Some(approved) => format!(" \u{b7} version {approved} approved"),
-            None => String::new(),
-        };
-        let _ = write!(body, "<span class=\"badge plain\">version {}{approved}</span>", artifact.version);
-        let _ = write!(body, "<span class=\"badge outline\">{}</span>", plural(artifact.steps.len(), "step"));
+    let approval = standing.as_ref().and_then(|standing| standing.waiting);
+    if let Some(question) = approval {
+        let answer = format!("It asks you to approve this plan: answer it in ekko's menu, or with <code>ekko --answer {question}</code> in a terminal.");
+        callout(&mut body, &format!("Waiting on you: question {question}"), &answer);
     }
-    if let Some(priority) = item.priority.filter(|priority| *priority > 1) {
-        let _ = write!(body, "<span class=\"badge outline\">priority {priority}</span>");
+    for question in notes.iter().filter(|note| note.question.as_ref().is_some_and(|question| question.answer.is_none()) && Some(note.id) != approval) {
+        let answer = format!("{}: answer it in ekko's menu, or with <code>ekko --answer {}</code> in a terminal.", esc(crate::ekko::title(&question.description)), question.id);
+        callout(&mut body, &format!("Waiting on you: question {}", question.id), &answer);
     }
-    let _ = write!(body, "<span class=\"muted small\">updated {}</span></div>", esc(&when(item.updated_at.unwrap_or(item.timestamp))));
-    if let (Some(artifact), Some(standing)) = (artifact, &standing) {
-        if let Some(question) = standing.waiting {
-            let _ = write!(
-                body,
-                "<p class=\"banner warn\">Waiting on you: question {question} asks you to approve this plan. Answer it in ekko's menu, or with <code>ekko --answer {question}</code> in a terminal.</p>"
-            );
-        }
-        if standing.changed {
-            let _ = write!(
-                body,
-                "<p class=\"banner\">The plan changed after version {} was approved: History shows how.</p>",
-                artifact.approved_version.unwrap_or_default()
-            );
-        }
+    if let (Some(artifact), Some(true)) = (artifact, standing.as_ref().map(|standing| standing.changed)) {
+        let changed = format!("The plan changed after version {} was approved: History shows how.", artifact.approved_version.unwrap_or_default());
+        callout(&mut body, "Changed since it was approved", &changed);
     }
     if item.trashed.is_some() || item.stashed.is_some() {
         let away = if item.trashed.is_some() { "in the trash" } else { "stashed" };
-        let _ = write!(body, "<p class=\"banner\">This artifact is {away}.</p>");
+        callout(&mut body, &capitalized(away), &format!("This artifact is {away}."));
     }
-    body.push_str("<div class=\"tabs\" role=\"tablist\">");
-    for (tab, name, _) in &tabs {
-        let _ = write!(body, "<button data-tab=\"{tab}\">{name}</button>");
-    }
-    body.push_str("</div>");
 
-    // Overview: the plan's sections but the research, beside its progress.
-    body.push_str("<section data-panel=\"overview\" class=\"grid\"><div class=\"stack\">");
-    let mut cards = sections.iter().filter(|(heading, _)| heading != "What is known").peekable();
-    if cards.peek().is_none() {
-        body.push_str("<div class=\"card\"><div class=\"card-b muted\">The plan has no text yet.</div></div>");
+    // The plan: the Goal's first sentence as its statement, each other
+    // section opened by its heading, what comes before the first as it is.
+    let mut ids = Vec::new();
+    let cut = sections(plan);
+    if cut.is_empty() {
+        body.push_str("<p>The plan has no text yet.</p>");
     }
-    for (heading, text) in cards {
-        let heading = if heading.is_empty() { "Plan" } else { heading.as_str() };
-        let _ = write!(body, "<div class=\"card\"><div class=\"card-h\"><h3>{}</h3></div><div class=\"card-b prose\">{}</div></div>", esc(heading), markdown(text));
+    let mut goal_shown = false;
+    for (heading, text) in &cut {
+        if heading.is_empty() {
+            let _ = write!(body, "<section class=\"lead\">{}</section>", markdown(text));
+            continue;
+        }
+        let id = unique(&mut ids, &format!("plan-{}", slug(heading)));
+        if heading == "Goal" && !goal_shown {
+            goal_shown = true;
+            let _ = write!(body, "<section class=\"goal\" id=\"{id}\" data-part=\"Goal\">{}</section>", goal(text));
+        } else {
+            let _ = write!(body, "<section class=\"part\" id=\"{id}\" data-part=\"{}\"><h2 class=\"opener\">{}</h2>{}</section>", esc(heading), esc(heading), markdown(text));
+        }
+        parts.push((id, heading.clone()));
     }
-    body.push_str("</div><div class=\"stack\">");
-    progress_card(&mut body, &steps, tasks, done);
-    if !steps.is_empty() {
-        body.push_str("<div class=\"card\"><div class=\"card-h\"><h3>Steps</h3><a href=\"#steps\" data-tab=\"steps\" class=\"small\">all</a></div><div class=\"card-b\">");
-        for step in &steps {
-            let task = step.task.map(|id| id.to_string()).unwrap_or_default();
-            let _ = write!(
-                body,
-                "<div class=\"mini\"><span class=\"dot {}\" title=\"{}\"></span><span class=\"k\">{}</span><span class=\"t\">{}</span><span class=\"id\">{task}</span></div>",
-                step.class,
-                esc(&step.state),
-                esc(&step.step.key),
-                esc(step.title)
-            );
-        }
-        body.push_str("</div></div>");
-    }
-    if !notes.is_empty() {
-        body.push_str("<div class=\"card\"><div class=\"card-h\"><h3>Questions and decisions</h3><a href=\"#notes\" data-tab=\"notes\" class=\"small\">all notes</a></div><div class=\"card-b\">");
-        let listed: Vec<&&Item> = notes.iter().filter(|note| note.question.is_some() || note.mark() == Some("decision")).take(6).collect();
-        if listed.is_empty() {
-            body.push_str("<p class=\"muted\">None yet.</p>");
-        }
-        for note in listed {
-            let _ = write!(body, "<div class=\"mini wrap\"><span class=\"t\">{}</span>{}</div>", esc(crate::ekko::title(&note.description)), note_badge(note));
-        }
-        body.push_str("</div></div>");
-    }
-    if let Some(artifact) = artifact {
-        body.push_str("<div class=\"card\"><div class=\"card-h\"><h3>Versions</h3>");
-        if !artifact.earlier.is_empty() {
-            body.push_str("<a href=\"#history\" data-tab=\"history\" class=\"small\">compare</a>");
-        }
-        let current = if artifact.approved_version == Some(artifact.version) { "current \u{b7} approved" } else { "current" };
-        let _ = write!(body, "</div><div class=\"card-b\"><div class=\"mini\"><span class=\"badge ok\">v{}</span><span class=\"t\">{current}</span></div>", artifact.version);
-        for earlier in artifact.earlier.iter().rev() {
-            let approved = if artifact.approved_version == Some(earlier.version) { " \u{b7} approved" } else { "" };
-            let _ = write!(
-                body,
-                "<div class=\"mini\"><span class=\"badge outline\">v{}</span><span class=\"t\">replaced {}{approved}</span></div>",
-                earlier.version,
-                esc(&when(earlier.at))
-            );
-        }
-        body.push_str("</div></div>");
-    }
-    body.push_str("</div></section>");
 
-    // Plan: the whole text, to read.
-    let _ = write!(body, "<section data-panel=\"plan\" hidden><article class=\"prose doc\">{}</article></section>", markdown(plan));
-
-    // Steps: each with its task, what it waits on, and when it is done.
-    body.push_str("<section data-panel=\"steps\" hidden>");
+    // Steps: AKQA's numbered items, each with its task, opening in place to
+    // the rest of its text and when it is done.
+    parts.push(("steps".to_string(), "Steps".to_string()));
+    body.push_str("<section class=\"part\" id=\"steps\" data-part=\"Steps\"><h2 class=\"opener\">Steps</h2>");
     if steps.is_empty() {
-        body.push_str("<p class=\"muted\">No steps yet: the artifact tool writes them.</p>");
+        body.push_str("<p>No steps yet: the artifact tool writes them.</p>");
     } else {
-        body.push_str("<div class=\"card\"><table><thead><tr><th>Key</th><th>Step</th><th>After</th><th>Task</th><th>State</th></tr></thead><tbody>");
-        for step in &steps {
-            let _ = write!(body, "<tr id=\"step-{}\"><td><code>{}</code></td><td><div class=\"step-title\">{}</div>", esc(&step.step.key), esc(&step.step.key), esc(step.title));
-            step_details(&mut body, step);
-            let after = if step.step.after.is_empty() { "\u{2014}".to_string() } else { step.step.after.join(", ") };
-            let task = step.task.map_or_else(|| "\u{2014}".to_string(), |id| id.to_string());
-            let _ = write!(body, "</td><td class=\"muted\">{}</td><td>{task}</td><td><span class=\"badge {}\">{}</span></td></tr>", esc(&after), step.class, esc(&step.state));
-        }
-        body.push_str("</tbody></table></div>");
-    }
-    body.push_str("</section>");
-
-    // Map: the steps as the graph their `after` draws.
-    body.push_str("<section data-panel=\"map\" hidden>");
-    if steps.is_empty() {
-        body.push_str("<p class=\"muted\">No steps yet: the artifact tool writes them.</p>");
-    } else {
-        let _ = write!(body, "<div class=\"map-wrap\">{}</div>", map(&steps));
-        body.push_str("<div class=\"legend\"><span><span class=\"dot proposed\"></span>to approve</span><span><span class=\"dot open\"></span>pending</span><span><span class=\"dot progress\"></span>in progress</span><span><span class=\"dot done\"></span>done</span><span>an arrow: what a step waits on</span></div>");
-        body.push_str("<p class=\"muted hint\">Pick a step to see it.</p>");
-        for step in &steps {
-            let task = step.task.map(|id| format!(" \u{b7} task {id}")).unwrap_or_default();
-            let after = if step.step.after.is_empty() { String::new() } else { format!(" \u{b7} after {}", step.step.after.join(", ")) };
-            let _ = write!(
-                body,
-                "<div class=\"card detail\" id=\"detail-{}\" hidden><div class=\"card-h\"><h3>{}</h3><span class=\"badge {}\">{}</span></div><div class=\"card-b\"><p class=\"muted small\"><code>{}</code>{}{}</p>",
-                esc(&step.step.key),
+        body.push_str("<ol class=\"steps\">");
+        for (at, step) in steps.iter().enumerate() {
+            let mut meta = esc(&step.state);
+            if let Some(id) = step.task {
+                let _ = write!(meta, " \u{b7} task {id}");
+            }
+            if !step.step.after.is_empty() {
+                let _ = write!(meta, " \u{b7} after {}", esc(&step.step.after.join(", ")));
+            }
+            let head = format!(
+                "<span class=\"num\">{:02}</span><span class=\"title\">{}</span><span class=\"meta\"><span class=\"dot {}\"></span>{meta}</span>",
+                at + 1,
                 esc(step.title),
-                step.class,
-                esc(&step.state),
-                esc(&step.step.key),
-                task,
-                esc(&after)
+                step.class
             );
-            step_details(&mut body, step);
-            body.push_str("</div></div>");
+            let _ = write!(body, "<li class=\"step {}\" id=\"step-{}\" data-state=\"{}\">", step.class, esc(&step.step.key), esc(&step.state));
+            if step.rest.is_empty() && step.step.done_when.is_none() {
+                let _ = write!(body, "<div class=\"step-head\">{head}</div></li>");
+                continue;
+            }
+            let _ = write!(body, "<button class=\"step-head\" type=\"button\" aria-expanded=\"false\">{head}</button><div class=\"more\">");
+            if !step.rest.is_empty() {
+                let _ = write!(body, "<p>{}</p>", esc(step.rest));
+            }
+            if let Some(done_when) = &step.step.done_when {
+                let _ = write!(body, "<p class=\"when\"><b>Done when</b> {}</p>", esc(done_when));
+            }
+            body.push_str("</div></li>");
         }
+        body.push_str("</ol>");
     }
     body.push_str("</section>");
 
-    // Notes: the questions, decisions and notes attached, newest first.
-    body.push_str("<section data-panel=\"notes\" hidden>");
-    if notes.is_empty() {
-        body.push_str("<p class=\"muted\">No note is attached to this artifact.</p>");
-    }
-    for note in &notes {
-        let (head, rest) = note.description.trim().split_once('\n').unwrap_or((note.description.trim(), ""));
+    // Map: the steps as the graph their `after` draws, on a strip wider
+    // than the column, with arrows while it is wider than the window.
+    if !steps.is_empty() {
+        parts.push(("map".to_string(), "Map".to_string()));
         let _ = write!(
             body,
-            "<article class=\"card note\"><div class=\"card-h\"><h3>{}</h3>{}</div><div class=\"card-b\"><p class=\"muted small\">{} \u{b7} {}</p>",
-            esc(head.trim()),
-            note_badge(note),
-            note.id,
-            esc(&when(note.timestamp))
+            "<section class=\"part\" id=\"map\" data-part=\"Map\"><h2 class=\"opener\">Map</h2><p>What each step waits on, from the first on the left. A step leads to its place in the list.</p><div class=\"bleed\"><div class=\"strip\">{}</div><div class=\"arrows\" hidden><button type=\"button\" data-by=\"-480\" aria-label=\"Back\">\u{2039}</button><button type=\"button\" data-by=\"480\" aria-label=\"On\">\u{203a}</button></div></div></section>",
+            map(&steps)
         );
-        if !rest.trim().is_empty() {
-            if note.question.is_some() {
-                let _ = write!(body, "<details><summary>What it explained and offered</summary><div class=\"note-text\">{}</div></details>", esc(rest.trim()));
-            } else {
-                let _ = write!(body, "<div class=\"note-text\">{}</div>", esc(rest.trim()));
-            }
-        }
-        body.push_str("</div></article>");
     }
-    body.push_str("</section>");
 
-    // History: each earlier text against the one that replaced it.
-    body.push_str("<section data-panel=\"history\" hidden>");
-    match artifact {
-        Some(artifact) if !artifact.earlier.is_empty() => {
-            if let Some(approved) = artifact.approved_version {
-                let _ = write!(body, "<p class=\"muted\">Version {approved} is the one you approved.</p>");
+    // Notes: the questions, decisions and notes attached, newest first.
+    if !notes.is_empty() {
+        parts.push(("notes".to_string(), "Notes".to_string()));
+        body.push_str("<section class=\"part\" id=\"notes\" data-part=\"Notes\"><h2 class=\"opener\">Notes</h2>");
+        for note in &notes {
+            let (head, rest) = note_text(&note.description);
+            let kind = note_kind(note);
+            let open = if note.question.as_ref().is_some_and(|question| question.answer.is_none()) { " open" } else { "" };
+            let _ = write!(
+                body,
+                "<div class=\"note{open}\" id=\"note-{}\" data-kind=\"{kind}\"><div class=\"kind\">{kind} {} \u{b7} {}</div><h3>{}</h3>",
+                note.id,
+                note.id,
+                esc(&when(note.timestamp)),
+                esc(head)
+            );
+            if let Some(answer) = note.question.as_ref().and_then(|question| question.answer.as_ref()) {
+                let _ = write!(body, "<span class=\"answer\">\u{2713} {}</span>", esc(crate::menu::picked(&answer.text)));
             }
-            let mut earlier: Vec<&Earlier> = artifact.earlier.iter().collect();
-            earlier.sort_by_key(|earlier| earlier.version);
-            for (at, old) in earlier.iter().enumerate().rev() {
-                let new = earlier.get(at + 1).map_or(item.description.as_str(), |next| next.text.as_str());
-                let _ = write!(
-                    body,
-                    "<div class=\"card\"><div class=\"card-h\"><h3>Version {} \u{2192} {}</h3><span class=\"muted small\">{}</span></div><div class=\"card-b\"><div class=\"diff\">{}</div></div></div>",
-                    old.version,
-                    old.version + 1,
-                    esc(&when(old.at)),
-                    diff_html(&old.text, new)
-                );
+            match (rest.as_str(), note.question.is_some()) {
+                ("", _) => {}
+                (rest, true) => {
+                    let _ = write!(body, "<details><summary>What it explained and offered</summary><p class=\"text\">{}</p></details>", esc(rest));
+                }
+                (rest, false) => {
+                    let _ = write!(body, "<p class=\"text\">{}</p>", esc(rest));
+                }
             }
+            body.push_str("</div>");
         }
-        _ => body.push_str("<p class=\"muted\">One text so far: nothing to compare. Each change to the plan's text keeps the one it replaced here.</p>"),
+        body.push_str("</section>");
     }
-    body.push_str("</section>");
 
+    // History: the version against the one approved, and each earlier text
+    // against the one that replaced it.
+    parts.push(("history".to_string(), "History".to_string()));
+    body.push_str("<section class=\"part\" id=\"history\" data-part=\"History\"><h2 class=\"opener\">History</h2>");
+    if let Some(artifact) = artifact {
+        let approved = match artifact.approved_version {
+            Some(approved) if approved == version => format!("Version {version} is the current one, and the one you approved."),
+            Some(approved) => format!("Version {version} is the current one; version {approved} is the one you approved."),
+            None => format!("Version {version} is the current one; none is approved yet."),
+        };
+        let _ = write!(body, "<p class=\"history\">{approved}</p>");
+        let mut earlier: Vec<&Earlier> = artifact.earlier.iter().collect();
+        earlier.sort_by_key(|earlier| earlier.version);
+        if earlier.is_empty() {
+            body.push_str("<p class=\"history\">One text so far: nothing to compare. Each change to the plan's text keeps the one it replaced here.</p>");
+        }
+        for (at, old) in earlier.iter().enumerate().rev() {
+            let new = earlier.get(at + 1).map_or(item.description.as_str(), |next| next.text.as_str());
+            let _ = write!(
+                body,
+                "<div class=\"version\" id=\"version-{}\"><div class=\"kind\">Replaced {}</div><h3>Version {} \u{2192} {}</h3><div class=\"diff\">{}</div></div>",
+                old.version,
+                esc(&when(old.at)),
+                old.version,
+                old.version + 1,
+                diff_html(&old.text, new)
+            );
+        }
+    }
     let _ = write!(
         body,
-        "<footer>Written by ekko {} from the board. It reloads by itself when the board changes; <code>ekko artifact {}</code> writes it again.</footer></div></main>",
+        "</section><footer class=\"foot\">Written by ekko {} from the board. It reloads by itself when the board changes, and <code>{command}</code> writes it again. Set in Inter and in Ekko Serif, Adobe's Source Serif 4 cut for this page, under the <a href=\"{FONTS_DIR}/{}\">SIL Open Font License</a>.</footer></article></main>",
         env!("CARGO_PKG_VERSION"),
-        item.id
+        FONT_LICENSE.0
     );
 
-    let version = format!("{:016x}", fnv(body.as_bytes()));
-    let poll = format!(
-        "(function () {{\n  var version = \"{version}\";\n  window.ekkoArtifact = function (seen) {{ if (seen !== version) location.reload(); }};\n  setInterval(function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }}, {POLL_MS});\n  if (location.protocol === \"http:\") fetch(\"/api/who\", {{ method: \"POST\" }}).then(function (answer) {{ return answer.json(); }}).then(function (who) {{\n    var text = who.person ? \" \\u00b7 writes as you\" : \" \\u00b7 reads only: \" + who.why;\n    document.getElementById(\"who\").textContent = text;\n  }}, function () {{}});\n}})();",
-        js_string(uid)
-    );
-    let html = format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{} \u{b7} artifact {}</title>\n<script>{THEME}</script>\n<style>{STYLE}</style>\n</head>\n<body>\n<div class=\"app\">\n{body}\n</div>\n<script>{SCRIPT}</script>\n<script>{poll}</script>\n</body>\n</html>\n",
+    // Medium's section bars, and AKQA's bar.
+    body.push_str("<nav class=\"toc\" aria-label=\"Sections\"><button class=\"toc-bars\" type=\"button\" aria-label=\"Sections\">");
+    body.push_str(&"<span></span>".repeat(parts.len()));
+    body.push_str("</button><div class=\"toc-card\"><ol>");
+    for (id, name) in &parts {
+        let _ = write!(body, "<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{}</span></a></li>", esc(name));
+    }
+    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-inner\"><div class=\"bar-fold list-fold\"><div class=\"bar-list\" role=\"listbox\"></div><div class=\"bar-rule\"></div></div><div class=\"bar-line\"><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
+    let (plan_parts, ours): (Vec<_>, Vec<_>) = parts.iter().partition(|(id, _)| id.starts_with("plan-"));
+    if let Some((id, _)) = plan_parts.first() {
+        let _ = write!(body, "<a href=\"#{id}\">Plan</a>");
+    }
+    for (id, name) in ours {
+        let _ = write!(body, "<a href=\"#{id}\">{name}</a>");
+    }
+    body.push_str("</nav></div></div></div>");
+
+    // The page before its version and after it: the version is the hash of
+    // the two, so a change to anything the page holds, its style and script
+    // as a new ekko writes them too, is a version of its own.
+    let faces = font_faces();
+    let before = format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{} \u{b7} artifact {}</title>\n<script>{THEME}</script>\n<style>\n{faces}{STYLE}</style>\n</head>\n<body>\n{body}\n<script>{SCRIPT}</script>\n<script>(function () {{\n  var version = \"",
         esc(title),
         item.id
     );
-    (html, version)
+    let after = format!(
+        "\";\n  window.ekkoArtifact = function (seen) {{ if (seen === version) return; if (window.ekkoKeep) ekkoKeep(); location.reload(); }};\n  setInterval(function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }}, {POLL_MS});\n  if (location.protocol === \"http:\") fetch(\"/api/who\", {{ method: \"POST\" }}).then(function (answer) {{ return answer.json(); }}).then(function (who) {{\n    var text = who.person ? \" \\u00b7 writes as you\" : \" \\u00b7 reads only: \" + who.why;\n    document.getElementById(\"who\").textContent = text;\n  }}, function () {{}});\n}})();</script>\n</body>\n</html>\n",
+        js_string(uid)
+    );
+    let version = format!("{:016x}", fnv_from(fnv(before.as_bytes()), after.as_bytes()));
+    (format!("{before}{version}{after}"), version)
 }
 
 /// A step as the page shows it: its title and the rest of its text, and its
@@ -678,50 +673,101 @@ fn shown<'a>(artifact: &'a Artifact, all: &ItemMap) -> Vec<Shown<'a>> {
         .collect()
 }
 
-/// What a step says past its title, and when it is done.
-fn step_details(body: &mut String, step: &Shown) {
-    if !step.rest.is_empty() {
-        let _ = write!(body, "<div class=\"step-text\">{}</div>", esc(step.rest));
-    }
-    if let Some(done_when) = &step.step.done_when {
-        let _ = write!(body, "<div class=\"done-when\"><b>Done when</b> {}</div>", esc(done_when));
+/// Who wrote `item`, as the page says it: the user, or a session named by
+/// its process; `None` for one written before authors were recorded
+/// (0.19.0).
+fn written_by(item: &Item) -> Option<String> {
+    let by = item.created_by.as_ref()?;
+    Some(if by.pid.is_none() { "the user".to_string() } else { format!("a session, {}", by.label()) })
+}
+
+/// Where an artifact stands, in the word its tag and its byline give.
+fn phase(standing: &Standing) -> &'static str {
+    match standing.state {
+        State::Done => "Done",
+        State::Cancelled => "Cancelled",
+        _ if standing.waiting.is_some() => "Waiting on you",
+        _ if standing.tasks == 0 => "Draft",
+        _ => "Approved",
     }
 }
 
-/// The progress card: the steps done of the tasks the approvals made, and a
-/// segment per step in its state's colour.
-fn progress_card(body: &mut String, steps: &[Shown], tasks: usize, done: usize) {
-    body.push_str("<div class=\"card\"><div class=\"card-h\"><h3>Progress</h3><span class=\"muted small\">tasks on the board</span></div><div class=\"card-b\">");
-    if tasks > 0 {
-        let _ = write!(body, "<div class=\"big\">{done}<span> / {tasks} done</span></div>");
-    } else {
-        let _ = write!(body, "<div class=\"big\">{}<span> to approve</span></div>", plural(steps.len(), "step"));
+/// `text` with its first letter a capital.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+/// The words a minute Medium's reading time counts (265).
+const READING_PACE: usize = 265;
+
+/// How many minutes the plan takes to read, at `READING_PACE`, rounded, and
+/// at least one.
+fn reading_minutes(plan: &str) -> usize {
+    ((plan.split_whitespace().count() + READING_PACE / 2) / READING_PACE).max(1)
+}
+
+/// A box above the plan for what the user should know first: `head`, and
+/// `text`, which is HTML.
+fn callout(body: &mut String, head: &str, text: &str) {
+    let _ = write!(body, "<div class=\"callout\"><b>{}</b>{text}</div>", esc(head));
+}
+
+/// A note's kind, as the page heads it: an open question stands apart.
+fn note_kind(note: &Item) -> String {
+    match (&note.question, note.mark()) {
+        (Some(question), _) if question.answer.is_none() => "Open question".to_string(),
+        (Some(_), _) => "Question".to_string(),
+        (None, Some(mark)) => capitalized(mark),
+        (None, None) => "Note".to_string(),
     }
-    body.push_str("<div class=\"segments\">");
-    for step in steps {
-        let _ = write!(body, "<span class=\"{}\" title=\"{}: {}\"></span>", step.class, esc(&step.step.key), esc(&step.state));
-    }
-    body.push_str("</div><div class=\"legend\">");
-    for (class, word) in [("done", "done"), ("progress", "in progress"), ("open", "pending"), ("proposed", "to approve"), ("cancelled", "cancelled"), ("gone", "not on this board")] {
-        let count = steps.iter().filter(|step| step.class == class).count();
-        if count > 0 {
-            let _ = write!(body, "<span><span class=\"dot {class}\"></span>{count} {word}</span>");
+}
+
+/// A note's text as the page sets it: its first sentence as its title, and
+/// the rest -- on the board, often the rest of a long first line -- then
+/// the lines after it.
+fn note_text(text: &str) -> (&str, String) {
+    let text = text.trim();
+    let (first, after) = text.split_once('\n').unwrap_or((text, ""));
+    let first = first.trim();
+    let (head, more) = match sentence_end(first, true) {
+        Some(end) => (&first[..end], first[end..].trim_start()),
+        None => (first, ""),
+    };
+    let rest: Vec<&str> = [more, after.trim()].into_iter().filter(|part| !part.is_empty()).collect();
+    (head, rest.join("\n"))
+}
+
+/// `text` as the end of an id: its letters and digits in lower case, each
+/// run of anything else one dash between them.
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
         }
     }
-    body.push_str("</div></div></div>");
+    let out = out.trim_end_matches('-');
+    if out.is_empty() { "section".to_string() } else { out.to_string() }
 }
 
-/// A note's kind as a badge: an open question stands out.
-fn note_badge(note: &Item) -> String {
-    match (&note.question, note.mark()) {
-        (Some(question), _) => match &question.answer {
-            None => "<span class=\"badge warn\">open question</span>".to_string(),
-            Some(answer) => format!("<span class=\"badge ok\">\u{2713} {}</span>", esc(crate::menu::picked(&answer.text))),
-        },
-        (None, Some(mark)) => format!("<span class=\"badge plain\">{}</span>", esc(mark)),
-        (None, None) => "<span class=\"badge outline\">note</span>".to_string(),
+/// `id`, or past it the first of `id-2`, `id-3`... not among `taken`, which
+/// it joins.
+fn unique(taken: &mut Vec<String>, id: &str) -> String {
+    let mut made = id.to_string();
+    let mut count = 1;
+    while taken.contains(&made) {
+        count += 1;
+        made = format!("{id}-{count}");
     }
+    taken.push(made.clone());
+    made
 }
+
+/// The copy button's icon: two sheets, drawn in the text's colour.
+const COPY: &str = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" aria-hidden=\"true\"><rect x=\"7\" y=\"7\" width=\"9.5\" height=\"9.5\" rx=\"1.5\"/><path d=\"M13 7V5a1.5 1.5 0 0 0-1.5-1.5h-6A1.5 1.5 0 0 0 4 5v6.5A1.5 1.5 0 0 0 5.5 13H7\"/></svg>";
 
 /// The plan's text split at its `## ` headings, outside code fences: each
 /// heading with the Markdown under it, and what comes before the first under
@@ -913,11 +959,13 @@ pub fn page_path(dir: &Path, uid: &str) -> PathBuf {
 /// Writes the page of artifact `item` and the script holding its version,
 /// unless both already hold this version: the page first, then the script,
 /// each by rename, so a page that reloads on the new version reads the new
-/// page (task 1059). The page's path.
+/// page (task 1059). The fonts go beside them first, where they are not
+/// yet. The page's path.
 pub fn write(dir: &Path, item: &Item, all: &ItemMap, folder: Option<&Path>) -> std::io::Result<PathBuf> {
     let uid = item.uid.as_deref().ok_or_else(|| std::io::Error::other("an artifact without a uid has no page"))?;
     let pages = dir.join(PAGES);
     std::fs::create_dir_all(&pages)?;
+    write_fonts(&pages)?;
     let (html, version) = page(item, all, folder);
     let script = script(&version);
     let path = page_path(dir, uid);
@@ -928,6 +976,62 @@ pub fn write(dir: &Path, item: &Item, all: &ItemMap, folder: Option<&Path>) -> s
     replace(&path, html.as_bytes())?;
     replace(&script_path, script.as_bytes())?;
     Ok(path)
+}
+
+/// The fonts a page draws with, cut by scripts/fonts.sh from Inter and
+/// Source Serif 4 (task 1152): the family the page's style names, the
+/// style, the file's name before its hash, and the bytes.
+const FONTS: [(&str, &str, &str, &[u8]); 3] = [
+    ("Inter", "normal", "inter", include_bytes!("../assets/fonts/inter.woff2")),
+    ("Ekko Serif", "normal", "ekko-serif", include_bytes!("../assets/fonts/ekko-serif.woff2")),
+    ("Ekko Serif", "italic", "ekko-serif-italic", include_bytes!("../assets/fonts/ekko-serif-italic.woff2")),
+];
+
+/// The folder of the fonts, beside the pages and under the address of each.
+pub const FONTS_DIR: &str = "fonts";
+
+/// The fonts' licence, which goes where they go, under this name.
+pub const FONT_LICENSE: (&str, &str) = ("OFL.txt", include_str!("../assets/fonts/OFL.txt"));
+
+/// The file each font is beside the pages, and under the server's address
+/// of each: its name and its bytes' hash, so a font cut again is a file of
+/// its own, which a browser may keep for good.
+pub fn font_files() -> &'static [(String, &'static [u8])] {
+    static FILES: std::sync::OnceLock<Vec<(String, &'static [u8])>> = std::sync::OnceLock::new();
+    FILES.get_or_init(|| FONTS.iter().map(|(_, _, name, bytes)| (format!("{name}-{:08x}.woff2", fnv(bytes) >> 32), *bytes)).collect())
+}
+
+/// The page's rules for its fonts, which load from the files beside it:
+/// from the disk beside a file page, as rustdoc's do (Firefox allows a
+/// page opened from a file a font in its folder or below, measured in
+/// Firefox 157), and from the server beside a served one. A font loads only
+/// once something on the page is set in it.
+fn font_faces() -> String {
+    let mut out = String::new();
+    for ((family, style, _, _), (file, _)) in FONTS.iter().zip(font_files()) {
+        let _ = writeln!(
+            out,
+            "@font-face {{ font-family: \"{family}\"; src: url(\"{FONTS_DIR}/{file}\") format(\"woff2\"); font-weight: 400 700; font-style: {style}; font-display: block; }}"
+        );
+    }
+    out
+}
+
+/// Writes the fonts and their licence into `fonts` under the folder of the
+/// pages, each that is not there whole yet.
+fn write_fonts(pages: &Path) -> std::io::Result<()> {
+    let fonts = pages.join(FONTS_DIR);
+    let (license, text) = FONT_LICENSE;
+    let files = font_files().iter().map(|(name, bytes)| (name.as_str(), *bytes)).chain([(license, text.as_bytes())]);
+    for (name, bytes) in files {
+        let path = fonts.join(name);
+        if std::fs::metadata(&path).is_ok_and(|meta| meta.len() == bytes.len() as u64) {
+            continue;
+        }
+        std::fs::create_dir_all(&fonts)?;
+        replace(&path, bytes)?;
+    }
+    Ok(())
 }
 
 /// Rewrites every page under the board's directory `dir` whose artifact is
@@ -990,19 +1094,20 @@ fn replace(path: &Path, content: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&temp, path)
 }
 
-/// The plan's Markdown as HTML. Raw HTML in it is shown as text, not run:
-/// the page is the board's, and a script a plan carried would run there.
-/// For the same reason a link keeps its address only when `linkable`, and
-/// is its words alone otherwise. An image is a link to its source, never
-/// loaded, since the page fetches nothing (task 1097).
-fn markdown(text: &str) -> String {
-    use pulldown_cmark::{html, Event, LinkType, Options, Parser, Tag, TagEnd};
+/// The plan's Markdown as the events the page renders, each run of text
+/// one event. Raw HTML in it is text, not run: the page is the board's, and
+/// a script a plan carried would run there. For the same reason a link
+/// keeps its address only when `linkable`, and is its words alone
+/// otherwise. An image is a link to its source, never loaded, since the
+/// page loads nothing a plan names (task 1097).
+fn events(text: &str) -> Vec<pulldown_cmark::Event<'_>> {
+    use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, TextMergeStream};
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut events = Vec::new();
     // Each link and image open here, innermost last: whether it kept its
     // tag, and a kept image's source, which names it when it has no words.
     let mut open = Vec::new();
-    for event in Parser::new_ext(text, options) {
+    for event in TextMergeStream::new(Parser::new_ext(text, options)) {
         match event {
             Event::Html(raw) | Event::InlineHtml(raw) => events.push(Event::Text(raw)),
             // One inside a kept link would nest a link in a link.
@@ -1031,9 +1136,116 @@ fn markdown(text: &str) -> String {
             other => events.push(other),
         }
     }
+    events
+}
+
+/// The plan's Markdown as HTML, by the rules of `events`.
+fn markdown(text: &str) -> String {
     let mut out = String::new();
-    html::push_html(&mut out, events.into_iter());
+    pulldown_cmark::html::push_html(&mut out, events(text).into_iter());
     out
+}
+
+/// The Goal as the page opens it: its first sentence as the statement, in
+/// large serif, then the rest as it is written.
+fn goal(text: &str) -> String {
+    let mut out = String::new();
+    match first_sentence(events(text)) {
+        Ok((sentence, rest)) => {
+            out.push_str("<p class=\"statement\">");
+            pulldown_cmark::html::push_html(&mut out, sentence.into_iter());
+            out.push_str("</p>\n");
+            pulldown_cmark::html::push_html(&mut out, rest.into_iter());
+        }
+        Err(events) => pulldown_cmark::html::push_html(&mut out, events.into_iter()),
+    }
+    out
+}
+
+/// A text's events cut in two: a sentence's, and those after it.
+type Split<'a> = (Vec<pulldown_cmark::Event<'a>>, Vec<pulldown_cmark::Event<'a>>);
+
+/// The first sentence of `events`, when they open with a paragraph: its
+/// inline events, and the events after it, where what is left of the
+/// paragraph stays a paragraph. A sentence ends as `sentence_end` says, in
+/// text outside any emphasis, link or code, so a cut never splits one; a
+/// paragraph where none does is one sentence. The events unchanged when
+/// they open with anything else.
+fn first_sentence(mut events: Vec<pulldown_cmark::Event<'_>>) -> Result<Split<'_>, Vec<pulldown_cmark::Event<'_>>> {
+    use pulldown_cmark::{CowStr, Event, Tag, TagEnd};
+    if !matches!(events.first(), Some(Event::Start(Tag::Paragraph))) {
+        return Err(events);
+    }
+    // Where it ends: in the text at an index, at a byte, or at the
+    // paragraph's own end, which is the event at an index.
+    let mut depth = 0usize;
+    let mut cut = None;
+    for (at, event) in events.iter().enumerate().skip(1) {
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(TagEnd::Paragraph) if depth == 0 => {
+                cut = Some((at, None));
+                break;
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Text(text) if depth == 0 => {
+                let line_ends = matches!(events.get(at + 1), Some(Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph)));
+                if let Some(end) = sentence_end(text, line_ends) {
+                    cut = Some((at, Some(end)));
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some((at, end)) = cut else { return Err(events) };
+    let mut rest = events.split_off(at + 1);
+    let last = events.pop();
+    events.remove(0);
+    let mut sentence = events;
+    let (Some(end), Some(Event::Text(text))) = (end, last) else { return Ok((sentence, rest)) };
+    let (head, tail) = text.split_at(end);
+    sentence.push(Event::Text(CowStr::from(head.to_string())));
+    let tail = tail.trim_start();
+    if tail.is_empty() {
+        while matches!(rest.first(), Some(Event::SoftBreak | Event::HardBreak)) {
+            rest.remove(0);
+        }
+        if matches!(rest.first(), Some(Event::End(TagEnd::Paragraph))) {
+            rest.remove(0);
+            return Ok((sentence, rest));
+        }
+    }
+    let mut after = vec![Event::Start(Tag::Paragraph)];
+    if !tail.is_empty() {
+        after.push(Event::Text(CowStr::from(tail.to_string())));
+    }
+    after.extend(rest);
+    Ok((sentence, after))
+}
+
+/// Where the first sentence in `text` ends: past a full stop, question or
+/// exclamation mark and any closing quote or bracket after it, where a
+/// space follows, or the text ends and `line_ends` there. Not after an
+/// abbreviation that seldom ends one.
+fn sentence_end(text: &str, line_ends: bool) -> Option<usize> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    for (index, &(at, mark)) in chars.iter().enumerate() {
+        if !matches!(mark, '.' | '?' | '!') {
+            continue;
+        }
+        let mut next = index + 1;
+        while chars.get(next).is_some_and(|(_, close)| matches!(close, '"' | '\'' | ')' | ']' | '\u{201d}' | '\u{2019}')) {
+            next += 1;
+        }
+        let ends = chars.get(next).map_or(line_ends, |(_, after)| after.is_whitespace());
+        let word = text[..at + mark.len_utf8()].rsplit(char::is_whitespace).next().unwrap_or_default();
+        let word = word.trim_start_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        if ends && !["e.g.", "i.e.", "cf.", "vs."].contains(&word.as_str()) {
+            return Some(chars.get(next).map_or(text.len(), |(at, _)| *at));
+        }
+    }
+    None
 }
 
 /// Whether a link to `url` keeps its address on the page: one to the web,
@@ -1074,205 +1286,542 @@ fn state_class(state: &str) -> &'static str {
 }
 
 /// FNV-1a, 64 bits: the page's version, which only has to change when the
-/// page does.
+/// page does, and the fonts' names.
 fn fnv(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3))
+    fnv_from(FNV_OFFSET, bytes)
+}
+
+/// Where FNV-1a starts.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a over `bytes`, on from `hash`: over several runs of bytes, as over
+/// them joined.
+fn fnv_from(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// Sets the page's theme before it draws: the one the user picked last, or
 /// the system's.
 const THEME: &str = r##"(function () { var theme = null; try { theme = localStorage.getItem("ekko-theme"); } catch (e) {} document.documentElement.dataset.theme = theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); })();"##;
 
-/// The page's tabs, its theme toggle, the map's steps and the copy button.
-/// The open tab is the address's fragment, which a reload keeps.
+/// What the page does: its theme toggle and copy buttons, the steps that
+/// open in place, the map's arrows, Medium's section bars, AKQA's command
+/// bar, and the place a reader keeps across the reload a new version makes.
 const SCRIPT: &str = r##"(function () {
-  var root = document.documentElement, toggle = document.getElementById("theme");
-  function label() { toggle.textContent = root.dataset.theme === "dark" ? "Light" : "Dark"; }
-  label();
+  "use strict";
+  var root = document.documentElement;
+  function smooth() { return matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"; }
+
+  // The theme: the one picked last, or the system's.
+  var toggle = document.getElementById("theme");
+  function showTheme() { toggle.textContent = root.dataset.theme === "dark" ? "Light" : "Dark"; }
   toggle.addEventListener("click", function () {
     root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
-    label();
     try { localStorage.setItem("ekko-theme", root.dataset.theme); } catch (e) {}
+    showTheme();
   });
-  var tabs = Array.prototype.map.call(document.querySelectorAll(".tabs [data-tab]"), function (tab) { return tab.dataset.tab; });
-  function open(tab) {
-    if (tabs.indexOf(tab) < 0) tab = tabs[0];
-    document.querySelectorAll("[data-panel]").forEach(function (panel) { panel.hidden = panel.dataset.panel !== tab; });
-    document.querySelectorAll("[data-tab]").forEach(function (link) { link.classList.toggle("on", link.dataset.tab === tab); });
-    if (location.hash !== "#" + tab) { try { history.replaceState(null, "", "#" + tab); } catch (e) { location.hash = tab; } }
-  }
-  document.querySelectorAll("[data-tab]").forEach(function (link) {
-    link.addEventListener("click", function (event) { event.preventDefault(); open(link.dataset.tab); });
-  });
-  open(location.hash.slice(1));
-  document.querySelectorAll(".node").forEach(function (node) {
-    node.addEventListener("click", function () {
-      document.querySelectorAll(".node").forEach(function (other) { other.classList.toggle("sel", other === node); });
-      document.querySelectorAll(".detail").forEach(function (detail) { detail.hidden = detail.id !== "detail-" + node.dataset.step; });
-      document.querySelectorAll(".hint").forEach(function (hint) { hint.hidden = true; });
-    });
-  });
+  showTheme();
+
   document.querySelectorAll("[data-copy]").forEach(function (button) {
+    var label = button.innerHTML;
     button.addEventListener("click", function () {
-      var label = button.textContent;
       var copied = navigator.clipboard ? navigator.clipboard.writeText(button.dataset.copy) : Promise.reject();
       copied.then(function () { button.textContent = "Copied"; }, function () { button.textContent = "Copy failed"; }).then(function () {
-        setTimeout(function () { button.textContent = label; }, 1200);
+        setTimeout(function () { button.innerHTML = label; }, 1200);
       });
     });
   });
+
+  // Steps open in place; a step on the map leads to its place in the list.
+  function setOpen(step, open) {
+    step.classList.toggle("open", open);
+    var head = step.querySelector("button.step-head");
+    if (head) head.setAttribute("aria-expanded", String(open));
+  }
+  function openStep(key) {
+    var step = document.getElementById("step-" + key);
+    if (!step) return;
+    setOpen(step, true);
+    step.scrollIntoView({ behavior: smooth(), block: "center" });
+  }
+  document.querySelectorAll("button.step-head").forEach(function (head) {
+    head.addEventListener("click", function () { setOpen(head.parentElement, !head.parentElement.classList.contains("open")); });
+  });
+  document.querySelectorAll(".map .node").forEach(function (node) {
+    node.addEventListener("click", function () { openStep(node.dataset.step); });
+  });
+
+  // The map's arrows, while the map is wider than the window.
+  var strip = document.querySelector(".strip"), arrows = document.querySelector(".arrows");
+  if (strip && arrows) {
+    arrows.querySelectorAll("button").forEach(function (button) {
+      button.addEventListener("click", function () { strip.scrollBy({ left: Number(button.dataset.by), behavior: smooth() }); });
+    });
+    var fit = function () { arrows.hidden = strip.scrollWidth <= strip.clientWidth; };
+    addEventListener("resize", fit);
+    fit();
+  }
+
+  // Medium's section bars: the part being read, and a card naming them all.
+  var parts = Array.prototype.slice.call(document.querySelectorAll("[data-part]"));
+  var bars = Array.prototype.slice.call(document.querySelectorAll(".toc-bars span"));
+  var rows = Array.prototype.slice.call(document.querySelectorAll(".toc a"));
+  function jump(id) {
+    var target = document.getElementById(id);
+    if (target) target.scrollIntoView({ behavior: smooth(), block: "start" });
+  }
+  rows.forEach(function (row) {
+    row.addEventListener("click", function (event) { event.preventDefault(); jump(row.getAttribute("href").slice(1)); });
+  });
+  var current = -1;
+  function follow() {
+    var at = 0;
+    parts.forEach(function (part, i) { if (part.getBoundingClientRect().top < innerHeight * 0.4) at = i; });
+    if (at === current) return;
+    current = at;
+    bars.forEach(function (bar, i) { bar.classList.toggle("on", i === at); });
+    rows.forEach(function (row, i) { row.classList.toggle("on", i === at); });
+  }
+  var following = false;
+  addEventListener("scroll", function () {
+    if (following) return;
+    following = true;
+    requestAnimationFrame(function () { following = false; follow(); });
+  }, { passive: true });
+  follow();
+
+  // AKQA's bar: a pill a click unfolds into a panel, which finds a part, a
+  // step or a note of the page.
+  var bar = document.getElementById("bar");
+  var input = bar.querySelector("input"), hint = bar.querySelector(".bar-hint"), list = bar.querySelector(".bar-list");
+  var listFold = bar.querySelector(".list-fold"), navFold = bar.querySelector(".nav-fold"), menu = bar.querySelector(".bar-menu");
+  var items = parts.map(function (part) {
+    return { kind: "Section", badge: "\u00a7", label: part.dataset.part, target: part.id, search: ("section " + part.dataset.part).toLowerCase() };
+  });
+  document.querySelectorAll(".step").forEach(function (step) {
+    var key = step.id.slice(5), title = step.querySelector(".title").textContent;
+    items.push({ kind: "Step \u00b7 " + step.dataset.state, badge: step.querySelector(".num").textContent, label: title, step: key,
+      search: ("step steps " + key + " " + title + " " + step.querySelector(".meta").textContent).toLowerCase() });
+  });
+  document.querySelectorAll(".note").forEach(function (note) {
+    var kind = note.dataset.kind, title = note.querySelector("h3").textContent, answer = note.querySelector(".answer");
+    items.push({ kind: kind + " " + note.id.slice(5), badge: kind.charAt(0), label: title, target: note.id,
+      search: ("note notes " + kind + " " + kind + "s " + title + " " + (answer ? answer.textContent : "")).toLowerCase() });
+  });
+  function find(text) {
+    var words = text.toLowerCase().split(/\s+/).filter(Boolean);
+    return items.filter(function (item) { return words.every(function (word) { return item.search.indexOf(word) >= 0; }); });
+  }
+  // The suggestions the pill cycles through, each with what it looks for:
+  // one that would find nothing on this page is not offered.
+  var hints = [["Steps in progress", "in progress"], ["Open questions", "open question"], ["Jump to a step", ""], ["Show the map", "map"], ["What the design says", "design"]]
+    .filter(function (hint) { return hint[1] ? find(hint[1]).length > 0 : items.some(function (item) { return item.step; }); });
+  if (!hints.length) hints = [["Jump to a section", ""]];
+  var shown = 0, selected = 0, matches = [];
+
+  // A suggestion comes in word by word, each from a blur, and leaves the same
+  // way. Each word but the last ends in a no-break space, which the end of
+  // its inline block keeps where it drops a space.
+  function showHint() {
+    var words = hints[shown][0].split(" ");
+    hint.textContent = "";
+    words.forEach(function (word, i) {
+      var span = document.createElement("span");
+      span.textContent = word + (i < words.length - 1 ? "\u00a0" : "");
+      hint.appendChild(span);
+      setTimeout(function () { span.classList.add("in"); }, 60 * i + 20);
+    });
+    setTimeout(function () {
+      Array.prototype.forEach.call(hint.children, function (span, i) { setTimeout(function () { span.classList.remove("in"); }, 40 * i); });
+      setTimeout(function () { shown = (shown + 1) % hints.length; showHint(); }, 700);
+    }, 2600);
+  }
+  function hintVisible() { hint.style.visibility = input.value || bar.classList.contains("open") ? "hidden" : "visible"; }
+
+  function render() {
+    matches = find(input.value).slice(0, 40);
+    selected = Math.min(selected, Math.max(matches.length - 1, 0));
+    list.textContent = "";
+    matches.forEach(function (item, i) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "item" + (i === selected ? " sel" : "");
+      button.setAttribute("role", "option");
+      button.innerHTML = '<span class="badge"></span><span class="what"><span class="kind"></span><span class="label"></span></span>';
+      button.querySelector(".badge").textContent = item.badge;
+      button.querySelector(".kind").textContent = item.kind;
+      button.querySelector(".label").textContent = item.label;
+      button.addEventListener("click", function () { go(item); });
+      list.appendChild(button);
+    });
+    size();
+  }
+
+  // The heights the spring moves to: the folds' content, or nothing folded.
+  function size() {
+    var open = bar.classList.contains("open");
+    var listHeight = open && !bar.dataset.navOnly && matches.length ? listFold.scrollHeight : 0;
+    var navHeight = open ? navFold.firstElementChild.offsetHeight : 0;
+    listFold.style.height = listHeight + "px";
+    navFold.style.height = navHeight + "px";
+    bar.style.height = 56 + listHeight + navHeight + "px";
+  }
+
+  function open(navOnly) {
+    if (navOnly) bar.dataset.navOnly = "1"; else delete bar.dataset.navOnly;
+    bar.classList.add("open");
+    var hinted = !navOnly && !input.value;
+    if (hinted) input.value = hints[shown][1];
+    hintVisible();
+    render();
+    input.focus();
+    // The hint's words, picked, so the first key typed takes their place.
+    if (hinted) input.select();
+  }
+  function close() {
+    bar.classList.remove("open");
+    delete bar.dataset.navOnly;
+    hintVisible();
+    size();
+    input.blur();
+  }
+  function go(item) {
+    close();
+    if (item.step) openStep(item.step); else jump(item.target);
+  }
+
+  bar.querySelector(".bar-line").addEventListener("click", function (event) {
+    if (event.target.closest(".bar-menu")) return;
+    if (!bar.classList.contains("open")) open(false);
+  });
+  menu.addEventListener("click", function (event) {
+    event.stopPropagation();
+    if (bar.classList.contains("open")) close(); else open(true);
+  });
+  input.addEventListener("input", function () {
+    delete bar.dataset.navOnly;
+    selected = 0;
+    render();
+  });
+  input.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") { close(); return; }
+    if (!bar.classList.contains("open")) { if (event.key !== "Tab") open(false); return; }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      selected = (selected + (event.key === "ArrowDown" ? 1 : -1) + matches.length) % Math.max(matches.length, 1);
+      render();
+      var sel = list.querySelector(".sel");
+      if (sel) sel.scrollIntoView({ block: "nearest" });
+    }
+    if (event.key === "Enter" && matches[selected]) go(matches[selected]);
+  });
+  bar.querySelectorAll(".bar-nav a").forEach(function (a) {
+    a.addEventListener("click", function (event) {
+      event.preventDefault();
+      go({ target: a.getAttribute("href").slice(1) });
+    });
+  });
+  document.addEventListener("pointerdown", function (event) {
+    if (bar.classList.contains("open") && !bar.contains(event.target)) close();
+  });
+  addEventListener("keydown", function (event) {
+    if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+    var active = document.activeElement;
+    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
+    event.preventDefault();
+    open(false);
+  });
+  showHint();
+  hintVisible();
+  size();
+
+  // Where the reader was, kept across the reload a new version of the page
+  // makes: the last part, step or note begun above the window's top and how
+  // far above, the steps open, and the bar's text while it is open.
+  var keptAt = "ekko-kept " + location.pathname;
+  function anchor() {
+    var found = null;
+    document.querySelectorAll("main [id]").forEach(function (element) { if (element.getBoundingClientRect().top <= 1) found = element; });
+    return found;
+  }
+  window.ekkoKeep = function () {
+    var at = anchor();
+    var kept = { y: scrollY, id: at ? at.id : "", offset: at ? at.getBoundingClientRect().top : 0,
+      open: Array.prototype.map.call(document.querySelectorAll(".step.open"), function (step) { return step.id; }) };
+    if (bar.classList.contains("open")) kept.bar = input.value;
+    try { sessionStorage.setItem(keptAt, JSON.stringify(kept)); history.scrollRestoration = "manual"; } catch (e) {}
+  };
+  var kept = null;
+  try { kept = JSON.parse(sessionStorage.getItem(keptAt)); sessionStorage.removeItem(keptAt); } catch (e) {}
+  if (kept) {
+    (kept.open || []).forEach(function (id) { var step = document.getElementById(id); if (step) setOpen(step, true); });
+    var back = function () {
+      var at = kept.id && document.getElementById(kept.id);
+      scrollTo(0, at ? scrollY + at.getBoundingClientRect().top - kept.offset : kept.y);
+      try { history.scrollRestoration = "auto"; } catch (e) {}
+      if (typeof kept.bar === "string") { input.value = kept.bar; open(false); }
+    };
+    var settled = function () { document.fonts.ready.then(back); };
+    if (document.readyState === "complete") settled(); else addEventListener("load", settled);
+  }
 })();"##;
 
-/// The look: shadcn/ui's neutral theme, written by hand (decision 1089).
+/// The look of mockup D (decision 1151): Medium's article in the light
+/// theme and AKQA's case study in the dark, both measured in note 1148; the
+/// command bar is AKQA's and the section bars Medium's, measured in note
+/// 1149. Sizes are the references' own, in px. The fonts come before it,
+/// from `font_faces`.
 const STYLE: &str = r##"
 :root {
+  --serif: "Ekko Serif", Georgia, Cambria, "Times New Roman", Times, serif;
+  --sans: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  --column: 680px;
+  /* Medium's article. */
+  --page: #fff;
+  --bg: #fff;
+  --fg: #242424;
+  --fg-strong: #000;
+  --fg-2: #6b6b6b;
+  --rule: #f2f2f2;
+  --chip: #f2f2f2;
+  --node: #fff;
+  --node-line: #e6e6e6;
+  --accent: #1a8917;
+  --card: #fff;
+  --card-shadow: 0 0 4px rgba(36, 36, 36, 0.05), 0 2px 8px rgba(36, 36, 36, 0.15);
+  --bars-bg: rgba(255, 255, 255, 0.38);
+  --add: #e6ffec;
+  --del: #ffebe9;
+  /* AKQA's bar, the same over either theme. */
+  --bar-bg: rgba(0, 0, 0, 0.42);
+  --bar-fg: #fff;
+  --bar-hint: #d9d9d9;
+  --bar-muted: #bbb;
+  --bar-chip: rgba(255, 255, 255, 0.04);
+  --bar-chip-on: rgba(255, 255, 255, 0.16);
+  --bar-line: rgba(255, 255, 255, 0.16);
+  /* AKQA's spring, sampled from its bar opening (note 1149): past the
+     target by 14% at a third of the way, settled by 0.9 s. */
+  --spring: linear(0, 0.086 3.9%, 0.168 5.8%, 0.3 8.3%, 0.604 13.8%, 0.754 16.7%, 0.893 19.9%, 0.989 22.6%, 1.061 25.4%, 1.114 28.8%, 1.132 31.1%, 1.139 33.9%, 1.136 36.3%, 1.111 41.2%, 1.089 44%, 1.068 46.6%, 1.046 49.4%, 1.029 52.1%, 1.014 54.7%, 0.996 58.6%, 0.989 61.2%, 0.982 63.6%, 0.982 67.3%, 0.986 76.8%, 0.989 80.8%, 0.996 86%, 1 90.9%, 1);
   color-scheme: light;
-  --bg: #ffffff; --fg: #09090b; --card: #ffffff; --muted: #f4f4f5; --muted-fg: #71717a; --border: #e4e4e7;
-  --primary: #18181b; --primary-fg: #fafafa; --ring: #a1a1aa; --side: #fafafa;
-  --ok: #15803d; --ok-bg: #dcfce7; --warn: #a16207; --warn-bg: #fef9c3; --accent: #2563eb; --accent-bg: #dbeafe;
-  --add: #dcfce7; --add-fg: #166534; --del: #fee2e2; --del-fg: #991b1b;
-  --radius: 10px;
-  --sans: "Inter", "Geist", "Segoe UI", "Helvetica Neue", "Liberation Sans", Arial, "DejaVu Sans", sans-serif;
-  --mono: "Geist Mono", "JetBrains Mono", "JetBrainsMono Nerd Font", ui-monospace, "SFMono-Regular", Menlo, "DejaVu Sans Mono", monospace;
 }
-html[data-theme="dark"] {
+
+/* AKQA's case study. */
+:root[data-theme="dark"] {
+  --page: #000;
+  --bg: #191919;
+  --fg: #d9d9d9;
+  --fg-strong: #fff;
+  --fg-2: #bbb;
+  --rule: rgba(255, 255, 255, 0.32);
+  --chip: #262626;
+  --node: #262626;
+  --node-line: rgba(255, 255, 255, 0.16);
+  --accent: #fff;
+  --card: #262626;
+  --card-shadow: 0 8px 40px rgba(0, 0, 0, 0.25);
+  --bars-bg: rgba(0, 0, 0, 0.38);
+  --add: rgba(46, 160, 67, 0.18);
+  --del: rgba(248, 81, 73, 0.18);
   color-scheme: dark;
-  --bg: #09090b; --fg: #fafafa; --card: #0c0c0f; --muted: #27272a; --muted-fg: #a1a1aa; --border: #27272a;
-  --primary: #fafafa; --primary-fg: #18181b; --ring: #52525b; --side: #0c0c0f;
-  --ok: #4ade80; --ok-bg: #14532d66; --warn: #facc15; --warn-bg: #713f1266; --accent: #93c5fd; --accent-bg: #1e3a8a66;
-  --add: #14532d55; --add-fg: #86efac; --del: #7f1d1d55; --del-fg: #fca5a5;
 }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.55 var(--sans); }
+
+html { background: var(--page); }
+body { margin: 0; overflow-x: clip; background: var(--bg); color: var(--fg); font: 400 16px/24px var(--sans); -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+a { color: inherit; }
 button { font: inherit; color: inherit; }
-a { color: var(--accent); }
-code { font: 0.86em var(--mono); background: var(--muted); border-radius: 5px; padding: 0.1em 0.35em; }
-pre { background: var(--muted); border-radius: 8px; padding: 0.8rem 0.9rem; overflow-x: auto; }
-pre code { background: none; padding: 0; }
 [hidden] { display: none !important; }
-.muted { color: var(--muted-fg); }
-.small { font-size: 0.8rem; }
 
-.app { display: grid; grid-template-columns: 15rem minmax(0, 1fr); min-height: 100vh; }
-.side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 0.9rem; padding: 0.9rem 0.7rem; background: var(--side); border-right: 1px solid var(--border); overflow-y: auto; }
-.brand { display: flex; gap: 0.6rem; align-items: center; padding: 0.2rem 0.4rem; }
-.brand b { display: block; font-size: 0.92rem; }
-.brand small { color: var(--muted-fg); font-size: 0.78rem; }
-.logo { width: 2rem; height: 2rem; flex: none; border-radius: 8px; display: grid; place-items: center; background: var(--primary); color: var(--primary-fg); font-weight: 700; }
-.nav { display: flex; flex-direction: column; gap: 0.1rem; }
-.group { padding: 0.7rem 0.55rem 0.3rem; font-size: 0.72rem; font-weight: 600; color: var(--muted-fg); }
-.nav a { display: flex; align-items: center; gap: 0.5rem; padding: 0.38rem 0.55rem; border-radius: 7px; color: var(--fg); text-decoration: none; }
-.nav a:hover { background: var(--muted); }
-.nav a.on { background: var(--muted); font-weight: 600; }
-.nav .count { margin-left: auto; font-size: 0.75rem; font-weight: 400; color: var(--muted-fg); }
-.none { padding: 0.38rem 0.55rem; color: var(--muted-fg); }
-.side-foot { margin-top: auto; padding: 0 0.5rem; font-size: 0.75rem; color: var(--muted-fg); }
-.live { display: inline-block; width: 0.5rem; height: 0.5rem; margin-right: 0.4rem; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+/* ---- the top bar: Medium's, 56px and a rule ---------------------------- */
+.top { display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 24px; border-bottom: 1px solid var(--rule); }
+.wordmark { font: 700 28px/1 var(--serif); letter-spacing: -0.04em; color: var(--fg-strong); }
+.where { font: 400 14px/20px var(--sans); color: var(--fg-2); }
+.top .spacer { flex: 1; }
+.top .link { padding: 0; border: 0; background: none; font: 400 14px/20px var(--sans); color: var(--fg-2); cursor: pointer; }
+.top .link:hover { color: var(--fg); }
+.top .solid { padding: 8px 16px; border: 0; border-radius: 999px; background: var(--fg); color: var(--bg); font: 400 14px/20px var(--sans); cursor: pointer; }
 
-main { min-width: 0; }
-.topbar { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1.6rem; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 90%, transparent); backdrop-filter: blur(8px); }
-.crumb { color: var(--muted-fg); }
-.spacer { flex: 1; }
-.btn { display: inline-flex; align-items: center; height: 2rem; padding: 0 0.8rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); font-size: 0.85rem; font-weight: 500; white-space: nowrap; cursor: pointer; }
-.btn:hover { background: var(--muted); }
-.btn.ghost { border-color: transparent; }
+/* ---- the page: Medium's column, where it stands beside it -------------- */
+.page { position: relative; max-width: var(--column); margin: 0 auto; padding: 32px 24px 240px; box-sizing: content-box; }
+.standing { position: absolute; top: 32px; bottom: 0; left: -232px; width: 160px; }
+.standing-inner { position: sticky; top: 32px; }
+.standing .mark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--chip); font: 600 13px/1 var(--sans); color: var(--fg); }
+.standing .name { margin: 16px 0 0; font: 500 16px/20px var(--sans); color: var(--fg-strong); }
+.standing .about { margin: 12px 0 0; font: 400 14px/20px var(--sans); color: var(--fg-2); }
+.segments { display: flex; flex-wrap: wrap; gap: 4px; margin: 16px 0 0; }
+.segments span { width: 8px; height: 2px; border-radius: 1px; background: var(--fg); opacity: 0.15; }
+.segments .done { opacity: 1; }
+.segments .progress { opacity: 1; background: var(--accent); }
+.standing .copy { display: inline-block; margin: 16px 0 0; padding: 0; border: 0; background: none; font: 400 14px/20px var(--sans); color: var(--fg); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 
-.content { max-width: 84rem; padding: 1.6rem 1.6rem 4rem; }
-h1 { margin: 0 0 0.7rem; font-size: 1.6rem; line-height: 1.25; letter-spacing: -0.02em; font-weight: 650; }
-.badges { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
-.badge { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.12rem 0.55rem; border: 1px solid transparent; border-radius: 999px; font-size: 0.75rem; font-weight: 600; white-space: nowrap; background: var(--muted); }
-.badge.ok, .badge.done { background: var(--ok-bg); color: var(--ok); }
-.badge.warn { background: var(--warn-bg); color: var(--warn); }
-.badge.progress { background: var(--accent-bg); color: var(--accent); }
-.badge.outline, .badge.open { background: none; border-color: var(--border); color: var(--muted-fg); }
-.badge.proposed { background: none; border: 1px dashed var(--ring); color: var(--muted-fg); }
-.badge.cancelled, .badge.gone { background: none; border-color: var(--border); color: var(--muted-fg); text-decoration: line-through; }
-.banner { margin: 1rem 0 0; padding: 0.7rem 0.9rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--muted); }
-.banner.warn { background: var(--warn-bg); border-color: transparent; }
-.tabs { display: inline-flex; flex-wrap: wrap; gap: 0.2rem; margin: 1.2rem 0; padding: 0.25rem; border-radius: 9px; background: var(--muted); }
-.tabs button { padding: 0.3rem 0.85rem; border: 0; border-radius: 7px; background: none; color: var(--muted-fg); font-weight: 500; cursor: pointer; }
-.tabs button.on { background: var(--bg); color: var(--fg); box-shadow: 0 1px 2px rgb(0 0 0 / 0.08); }
+.prose .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.prose .tags li { margin: 0; padding: 4px 12px; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--rule); font: 400 13px/20px var(--sans); letter-spacing: normal; color: var(--fg); }
+h1 { margin: 24px 0 0; font: 700 42px/52px var(--sans); letter-spacing: -0.011em; color: var(--fg); }
+.byline { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 32px 0 0; font: 400 14px/20px var(--sans); color: var(--fg-2); }
+.byline .who { color: var(--fg); }
+.byline .state { padding: 7px 15px; border: 1px solid var(--fg); border-radius: 999px; color: var(--fg); }
+.actions { display: flex; align-items: center; gap: 24px; margin: 32px 0 0; padding: 10px 8px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font: 400 13px/20px var(--sans); color: var(--fg-2); }
+.actions .spacer { flex: 1; }
+.actions button { display: grid; place-items: center; padding: 4px; border: 0; background: none; color: var(--fg-2); cursor: pointer; }
+.actions button:hover { color: var(--fg); }
 
-.grid { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; gap: 1.2rem; align-items: start; }
-.stack { display: flex; flex-direction: column; gap: 1.2rem; min-width: 0; }
-.card { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: 0 1px 2px rgb(0 0 0 / 0.04); }
-.card + .card { margin-top: 0; }
-[data-panel] > .card + .card { margin-top: 1.2rem; }
-.card-h { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; padding: 0.95rem 1.1rem 0; }
-.card-h h3 { margin: 0; font-size: 0.95rem; font-weight: 600; }
-.card-b { padding: 0.6rem 1.1rem 1rem; }
-.prose p { margin: 0.3rem 0 0.6rem; }
-.prose ul, .prose ol { margin: 0.3rem 0; padding-left: 1.2rem; }
-.prose li { margin: 0.3rem 0; }
-.prose table { border-collapse: collapse; }
-.prose th, .prose td { padding: 0.3rem 0.6rem; border: 1px solid var(--border); }
-.doc { max-width: 48rem; font-size: 0.98rem; line-height: 1.7; }
-.doc h2 { margin: 1.8rem 0 0.5rem; padding-bottom: 0.3rem; border-bottom: 1px solid var(--border); font-size: 1.2rem; }
-.doc h2:first-child { margin-top: 0.4rem; }
+.callout { margin: 40px 0 0; padding: 20px 24px; border-radius: 8px; background: var(--chip); font: 400 16px/24px var(--sans); color: var(--fg); }
+.callout + .callout { margin-top: 16px; }
+.callout b { display: block; margin: 0 0 4px; font-weight: 600; color: var(--fg-strong); }
 
-.big { font-size: 2rem; font-weight: 700; letter-spacing: -0.03em; }
-.big span { font-size: 1rem; font-weight: 500; color: var(--muted-fg); }
-.segments { display: flex; gap: 3px; margin: 0.5rem 0 0.5rem; }
-.segments span { flex: 1; height: 8px; border-radius: 3px; background: var(--muted); }
-.segments .done { background: var(--ok); }
-.segments .progress { background: var(--accent); }
-.segments .open { background: var(--ring); opacity: 0.45; }
-.segments .proposed { background: none; border: 1px dashed var(--ring); }
-.segments .cancelled, .segments .gone { opacity: 0.3; }
-.legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.78rem; color: var(--muted-fg); }
-.dot { display: inline-block; width: 0.62rem; height: 0.62rem; margin-right: 0.35rem; border: 1.5px solid var(--ring); border-radius: 50%; vertical-align: -0.06rem; flex: none; }
-.dot.done { background: var(--ok); border-color: var(--ok); }
-.dot.progress { background: var(--accent); border-color: var(--accent); }
-.dot.proposed { border-style: dashed; }
-.dot.cancelled, .dot.gone { background: var(--muted); }
-.mini { display: flex; align-items: center; gap: 0.55rem; padding: 0.42rem 0; border-top: 1px solid var(--border); font-size: 0.85rem; }
-.mini:first-child { border-top: 0; }
-.mini .k { width: 4.8rem; flex: none; font: 0.75rem var(--mono); color: var(--muted-fg); overflow: hidden; text-overflow: ellipsis; }
-.mini .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mini.wrap .t { white-space: normal; }
-.mini .id { font-size: 0.75rem; color: var(--muted-fg); }
+/* ---- the plan: AKQA's openers and statement, Medium's text ------------- */
+.prose .statement { margin: 56px 0 0; font: 400 32px/40px var(--serif); letter-spacing: -0.01em; color: var(--fg-strong); }
+.goal, .part { scroll-margin-top: 24px; }
+section.part::before { content: ""; display: block; height: 1px; margin: 120px calc(50% - 50vw + 24px); background: var(--rule); }
+.opener { margin: 0 0 56px; font: 400 88px/0.873 var(--sans); letter-spacing: -0.027em; text-transform: uppercase; overflow-wrap: anywhere; color: var(--fg-strong); }
+.prose p, .prose li { font: 400 20px/32px var(--serif); letter-spacing: -0.003em; color: var(--fg); }
+.prose p { margin: 2.14em 0 -0.46em; }
+.prose .opener + p, .prose .statement + p { margin-top: 0.94em; }
+.prose ul, .prose ol { margin: 1.4em 0 -0.46em; padding-left: 30px; }
+.prose li { margin: 1.14em 0 -0.46em; padding-left: 0.3em; }
+.prose li p { margin: 0; }
+.prose code { padding: 2px 4px; border-radius: 3px; background: var(--chip); font: 400 0.75em/1 var(--mono); }
+.prose .callout code { background: var(--bg); }
+.prose strong { font-weight: 700; }
+.prose a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.prose section :is(h1, h2):not(.opener) { margin: 1.6em 0 -0.3em; font: 700 28px/34px var(--sans); letter-spacing: -0.016em; color: var(--fg-strong); }
+.prose h3 { margin: 1.72em 0 -0.28em; font: 600 24px/30px var(--sans); letter-spacing: -0.016em; color: var(--fg-strong); }
+.prose :is(h4, h5, h6) { margin: 1.6em 0 -0.3em; font: 600 20px/26px var(--sans); color: var(--fg-strong); }
+.prose pre { margin: 2em 0 -0.46em; padding: 16px 20px; overflow-x: auto; border-radius: 4px; background: var(--chip); font: 400 14px/22px var(--mono); }
+.prose pre code { padding: 0; background: none; font: inherit; }
+.prose blockquote { margin: 2em 0 -0.46em; padding-left: 20px; border-left: 3px solid var(--fg); }
+.prose blockquote p { margin-top: 0; font-style: italic; }
+.prose table { width: 100%; margin: 2em 0 -0.46em; border-collapse: collapse; font: 400 15px/22px var(--sans); }
+.prose th, .prose td { padding: 8px 10px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+.prose th { font-weight: 600; color: var(--fg-strong); }
+.prose hr { height: 1px; margin: 2.5em 0 -0.46em; border: 0; background: var(--rule); }
 
-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
-th { padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--border); text-align: left; font-weight: 500; color: var(--muted-fg); }
-td { padding: 0.65rem 0.8rem; border-bottom: 1px solid var(--border); vertical-align: top; }
-tr:last-child td { border-bottom: 0; }
-td:first-child code { white-space: nowrap; }
-.step-title { font-weight: 500; }
-.step-text, .done-when { margin-top: 0.25rem; font-size: 0.84rem; color: var(--muted-fg); white-space: pre-wrap; }
-.done-when b { color: var(--fg); font-weight: 600; }
+/* ---- steps: AKQA's numbered items -------------------------------------- */
+.prose .steps { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
+.prose .step { margin: 0; padding: 0; border-bottom: 1px solid var(--rule); scroll-margin: 96px 0; }
+.step-head { display: grid; grid-template-columns: 40px 1fr; gap: 4px 8px; box-sizing: border-box; width: 100%; padding: 24px 0; border: 0; background: none; text-align: left; }
+button.step-head { cursor: pointer; }
+.step .num { font: 400 20px/24px var(--sans); color: var(--fg-2); }
+.step .title { font: 400 20px/24px var(--serif); color: var(--fg-strong); }
+.step .meta { grid-column: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; font: 400 14px/21px var(--sans); color: var(--fg-2); }
+.step.cancelled .title, .step.gone .title { color: var(--fg-2); text-decoration: line-through; }
+.dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--fg-2); }
+.dot.done { background: var(--fg); box-shadow: none; }
+.dot.progress { background: var(--accent); box-shadow: none; }
+.dot.proposed { box-shadow: none; outline: 1.5px dashed var(--fg-2); outline-offset: -1.5px; }
+.dot.cancelled, .dot.gone { background: var(--chip); }
+.step .more { display: none; padding: 0 0 24px 48px; }
+.step.open .more { display: block; }
+.prose .step .more p { margin: 0 0 12px; font: 400 16px/24px var(--sans); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
+.prose .step .more .when { color: var(--fg-2); }
+.step .more .when b { font-weight: 600; color: var(--fg); }
 
-.map-wrap { overflow-x: auto; padding: 0.4rem 0.2rem 0.8rem; }
+/* ---- the map: AKQA's strip, wider than the column ---------------------- */
+.bleed { position: relative; margin: 0 calc(50% - 50vw); }
+.strip { overflow-x: auto; padding: 8px 24px 24px; scrollbar-width: none; }
+.strip::-webkit-scrollbar { display: none; }
 .map { position: relative; }
 .map svg { position: absolute; inset: 0; overflow: visible; }
-.edge { fill: none; stroke: var(--ring); stroke-width: 1.6; }
-.arrowhead { fill: var(--ring); }
-.node { position: absolute; display: flex; flex-direction: column; justify-content: flex-start; align-items: stretch; width: 200px; height: 92px; padding: 0.55rem 0.7rem; border: 1px solid var(--border); border-radius: 12px; background: var(--card); text-align: left; cursor: pointer; }
-.node:hover { border-color: var(--ring); }
-.node.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
-.node.done { border-color: color-mix(in srgb, var(--ok) 50%, var(--border)); }
-.node.progress { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
-.node.proposed { border-style: dashed; }
-.node .k { display: block; font: 0.72rem var(--mono); color: var(--accent); }
-.node .t { display: -webkit-box; margin-top: 0.15rem; overflow: hidden; font-size: 0.82rem; line-height: 1.3; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.node.cancelled .t, .node.gone .t { text-decoration: line-through; color: var(--muted-fg); }
-.node .s { position: absolute; right: 0.7rem; bottom: 0.45rem; left: 0.7rem; display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--muted-fg); }
-.hint { margin-top: 1rem; }
-.detail { margin-top: 1rem; max-width: 48rem; }
+.map .edge { fill: none; stroke: var(--fg-2); stroke-opacity: 0.5; stroke-width: 1.2; }
+.map .arrowhead { fill: var(--fg-2); fill-opacity: 0.5; }
+.map .node { position: absolute; box-sizing: border-box; display: flex; flex-direction: column; width: 200px; height: 92px; padding: 12px 14px; border: 0; border-radius: 8px; background: var(--node); box-shadow: inset 0 0 0 1px var(--node-line); text-align: left; cursor: pointer; }
+.map .node:hover { box-shadow: inset 0 0 0 1px var(--fg-2); }
+.map .node.proposed { box-shadow: none; outline: 1px dashed var(--fg-2); outline-offset: -1px; }
+.map .k { font: 400 11px/16px var(--mono); color: var(--fg-2); }
+.map .t { display: -webkit-box; margin-top: 2px; overflow: hidden; font: 400 13px/18px var(--sans); color: var(--fg-strong); -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.map .node.cancelled .t, .map .node.gone .t { color: var(--fg-2); text-decoration: line-through; }
+.map .s { position: absolute; right: 14px; bottom: 10px; left: 14px; display: flex; justify-content: space-between; font: 400 11px/16px var(--sans); color: var(--fg-2); }
+.map .s .dot { width: 6px; height: 6px; margin-right: 6px; vertical-align: 1px; }
+.arrows { display: flex; justify-content: flex-end; gap: 8px; max-width: var(--column); margin: 8px auto 0; padding: 0 24px; }
+.arrows button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 50%; background: var(--chip); color: var(--fg); cursor: pointer; }
 
-.note-text { white-space: pre-wrap; }
-details summary { cursor: pointer; color: var(--muted-fg); }
-details .note-text { margin-top: 0.5rem; }
-.diff { overflow: hidden; border: 1px solid var(--border); border-radius: 8px; font: 0.82rem/1.6 var(--mono); }
-.diff div { padding: 0.1rem 0.8rem; white-space: pre-wrap; word-break: break-word; }
-.diff .ctx { color: var(--muted-fg); }
-.diff .add { background: var(--add); color: var(--add-fg); }
-.diff .del { background: var(--del); color: var(--del-fg); }
-.diff .hunk { background: var(--muted); color: var(--muted-fg); font-style: italic; }
-footer { margin-top: 2.5rem; font-size: 0.8rem; color: var(--muted-fg); }
+/* ---- notes and history ------------------------------------------------- */
+.note, .version { padding: 24px 0; border-top: 1px solid var(--rule); scroll-margin-top: 24px; }
+.note:last-child, .version:last-child { border-bottom: 1px solid var(--rule); }
+.note .kind, .version .kind { font: 400 13px/20px var(--sans); color: var(--fg-2); }
+.note.open .kind { color: var(--accent); }
+.prose .note h3, .prose .version h3 { margin: 4px 0 0; font: 600 20px/24px var(--sans); letter-spacing: -0.01em; color: var(--fg-strong); }
+.note .answer { display: inline-block; margin: 12px 0 0; padding: 4px 12px; border-radius: 999px; background: var(--chip); font: 400 13px/20px var(--sans); color: var(--fg); }
+.prose .note .text { margin: 12px 0 0; font: 400 18px/28px var(--serif); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
+.note details { margin: 12px 0 0; }
+.note summary { font: 400 14px/20px var(--sans); color: var(--fg-2); cursor: pointer; }
+.prose .history { font: 400 20px/32px var(--serif); color: var(--fg-2); }
+.diff { margin: 12px 0 0; overflow: hidden; border-radius: 4px; background: var(--chip); font: 400 13px/20px var(--mono); }
+.diff div { padding: 1px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff .ctx, .diff .hunk { color: var(--fg-2); }
+.diff .hunk { font-style: italic; }
+.diff .add { background: var(--add); }
+.diff .del { background: var(--del); }
+.foot { margin: 120px 0 0; font: 400 13px/20px var(--sans); color: var(--fg-2); }
 
-@media (max-width: 1200px) { .grid { grid-template-columns: minmax(0, 1fr); } }
-@media (max-width: 860px) { .app { grid-template-columns: 1fr; } .side { display: none; } .content { padding: 1rem; } }
-@media print { .side, .topbar, .tabs { display: none; } .app { display: block; } [data-panel] { display: block !important; margin-bottom: 1.5rem; } }
+/* ---- Medium's section bars, at the right edge -------------------------- */
+.toc { position: fixed; top: 50%; right: 16px; z-index: 20; transform: translateY(-50%); }
+.toc-bars { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 24px; padding: 12px 0; border: 0; border-radius: 999px; background: var(--bars-bg); cursor: pointer; transition: opacity 0.18s, visibility 0.18s; }
+.toc-bars span { width: 16px; height: 2px; border-radius: 1px; background: var(--fg); opacity: 0.15; transition: opacity 0.15s, background-color 0.15s; }
+.toc-bars span.on { opacity: 1; }
+.toc-card { position: absolute; top: 50%; right: 0; box-sizing: border-box; width: 300px; padding: 12px 40px 12px 16px; border-radius: 8px; background: var(--card); box-shadow: var(--card-shadow); opacity: 0; visibility: hidden; transform: translateY(-50%); transition: opacity 0.18s, visibility 0.18s; }
+.toc:hover .toc-card, .toc:focus-within .toc-card { opacity: 1; visibility: visible; }
+.toc:hover .toc-bars, .toc:focus-within .toc-bars { opacity: 0; visibility: hidden; }
+.toc ol { margin: 0; padding: 0; list-style: none; }
+.toc li { padding: 2px 0; }
+.toc a { display: flex; align-items: center; gap: 8px; font: 400 14px/20px var(--sans); color: var(--fg-2); text-decoration: none; white-space: nowrap; }
+.toc a .t { overflow: hidden; text-overflow: ellipsis; }
+.toc a .d { flex: none; width: 4px; height: 4px; border-radius: 50%; }
+.toc a:hover { color: var(--fg); }
+.toc a.on { color: var(--accent); }
+.toc a.on .d { background: var(--accent); }
+
+/* ---- AKQA's bar: a pill at the bottom, a panel once clicked ------------ */
+.bar { position: fixed; bottom: 60px; left: 50%; z-index: 30; box-sizing: border-box; width: 320px; height: 56px; overflow: hidden; border-radius: 100px; background: var(--bar-bg); box-shadow: 0 8px 40px rgba(0, 0, 0, 0.05); color: var(--bar-fg); -webkit-backdrop-filter: blur(25px); backdrop-filter: blur(25px); transform: translateX(-50%); transition: width 0.9s var(--spring), height 0.9s var(--spring), border-radius 0.9s var(--spring); }
+.bar.open { width: 600px; border-radius: 20px; }
+.bar-inner { position: absolute; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; }
+/* What the panel adds, folded to nothing in the pill, unfolded by the same spring. */
+.bar-fold { height: 0; overflow: hidden; opacity: 0; transition: height 0.9s var(--spring), opacity 0.55s; }
+.bar.open .bar-fold { opacity: 1; }
+.bar-list { max-height: 327px; overflow-y: auto; padding: 8px; scrollbar-width: thin; }
+.bar-list:empty { display: none; }
+.bar-list .item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; border: 0; border-radius: 8px; background: none; color: var(--bar-fg); text-align: left; cursor: pointer; }
+.bar-list .item:hover, .bar-list .item.sel { background: var(--bar-chip-on); }
+.bar-list .badge { display: grid; flex: none; place-items: center; width: 24px; height: 24px; border-radius: 4px; background: #000; font: 500 10px/1 var(--sans); color: #fff; }
+.bar-list .what { display: flex; flex-direction: column; min-width: 0; }
+.bar-list .kind { font: 400 11px/14px var(--sans); color: var(--bar-muted); }
+.bar-list .label { overflow: hidden; font: 400 13px/18px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+.bar-rule { height: 1px; background: var(--bar-line); }
+.bar-line { position: relative; display: flex; align-items: center; min-height: 56px; padding: 0 40px 0 16px; box-sizing: border-box; font: 400 14px/20px var(--sans); }
+.bar-hint { position: absolute; top: 50%; left: 16px; right: 40px; overflow: hidden; color: var(--bar-hint); white-space: nowrap; pointer-events: none; transform: translateY(-50%); }
+.bar-hint span { display: inline-block; opacity: 0; filter: blur(4px); transition: opacity 0.5s, filter 0.5s; }
+.bar-hint span.in { opacity: 1; filter: blur(0); }
+.bar input { position: relative; z-index: 1; width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; font: inherit; color: var(--bar-fg); caret-color: var(--bar-fg); }
+.bar-menu { position: absolute; top: 50%; right: 16px; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; background: none; color: var(--bar-fg); cursor: pointer; transform: translateY(-50%); }
+.bar-menu span { position: absolute; width: 16px; height: 1px; border-radius: 1px; background: currentColor; transition: transform 0.3s; }
+.bar-menu span:first-child { transform: translateY(-3px); }
+.bar-menu span:last-child { transform: translateY(3px); }
+.bar.open .bar-menu span:first-child { transform: rotate(45deg); }
+.bar.open .bar-menu span:last-child { transform: rotate(-45deg); }
+.bar-nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 16px; }
+.bar-nav a { padding: 6px 14px; border-radius: 999px; background: var(--bar-chip); font: 400 13px/19.5px var(--sans); letter-spacing: -0.025em; color: var(--bar-muted); text-decoration: none; transition: background-color 0.3s, color 0.3s; }
+.bar-nav a:hover, .bar-nav a.on { background: var(--bar-chip-on); color: var(--bar-fg); }
+
+/* The column at the left needs 232px beside the text, and the window
+   1176px for that; a narrower one puts it above the text. */
+@media (max-width: 1175px) {
+  .standing { position: static; width: auto; margin: 0 0 32px; }
+  .standing-inner { position: static; }
+}
+@media (max-width: 720px) {
+  .opener { font-size: 56px; }
+  h1 { font-size: 32px; line-height: 40px; }
+  .bar.open { width: calc(100vw - 32px); }
+  .toc { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bar, .bar-fold, .bar-hint span, .toc-card, .toc-bars, .toc-bars span { transition: none; }
+}
+@media print {
+  .top .link, .top .solid, .standing .copy, .actions button, .toc, .bar, .arrows { display: none; }
+  .step .more { display: block; }
+}
 "##;
 
 #[cfg(test)]
@@ -1427,12 +1976,12 @@ mod tests {
         let item = artifact_item(1, &text, made);
         let all: ItemMap = BTreeMap::from([(1, item.clone())]);
         let (html, version) = page(&item, &all, Some(Path::new("/projects/site")));
-        assert!(html.contains("<h1>Ship &lt;it&gt;</h1>"), "{html}");
-        assert!(html.contains("ekko \u{b7} project site \u{b7} artifact 1"), "{html}");
-        assert!(html.contains("<strong>bold</strong>"), "{html}");
+        assert!(html.contains("<h1>Ship &lt;it&gt;</h1>") && html.contains("<title>Ship &lt;it&gt; \u{b7} artifact 1</title>"), "{html}");
+        assert!(html.contains("<span class=\"where\">project site \u{b7} artifact 1<span id=\"who\"></span></span>"), "{html}");
+        assert!(html.contains("<p class=\"statement\">A <strong>bold</strong> goal.</p>"), "{html}");
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;") && !html.contains("<script>alert"), "raw HTML in a plan is shown, not run: {html}");
-        assert!(html.contains("First &lt;step&gt;") && html.contains("to approve"), "{html}");
-        assert!(html.contains("draft, 1 step"), "{html}");
+        assert!(html.contains("<span class=\"title\">First &lt;step&gt;</span>") && html.contains("data-state=\"to approve\""), "{html}");
+        assert!(html.contains("<p class=\"about\">Draft, 1 step.</p>") && html.contains("<ul class=\"tags\"><li>Artifact</li><li>Draft</li><li>1 step</li><li>Version 1</li></ul>"), "{html}");
         assert_eq!(version.len(), 16);
         let (again, same) = page(&item, &all, Some(Path::new("/projects/site")));
         assert_eq!((again, same), (html.clone(), version.clone()), "the same board writes the same page");
@@ -1526,24 +2075,175 @@ mod tests {
     }
 
     #[test]
-    fn the_page_holds_its_tabs_its_notes_and_how_its_text_changed() {
+    fn the_page_holds_its_parts_in_order_its_notes_and_how_its_text_changed() {
         let made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"])]).unwrap();
         let mut item = artifact_item(1, &plan("Ship"), made);
         item.description = item.description.replace("## Design\nText.", "## Design\nThe new design.");
         let plan_now = item.artifact.as_mut().unwrap();
         plan_now.version = 3;
         plan_now.earlier.push(Earlier { version: 2, at: 0, text: plan("Ship"), unknown: BTreeMap::new() });
-        let mut note = Item::new_note(2, "Keep the page light\nIt reloads often.".to_string(), vec!["My Board".to_string()]);
+        let mut note = Item::new_note(2, "Keep the page light. It reloads often.\nAnd it reads well.".to_string(), vec!["My Board".to_string()]);
         note.attached_to = item.uid.clone();
         let all: ItemMap = BTreeMap::from([(1, item.clone()), (2, note)]);
         let (html, _) = page(&item, &all, None);
-        for tab in ["overview", "plan", "steps", "map", "notes", "history"] {
-            assert!(html.contains(&format!("<section data-panel=\"{tab}\"")) && html.contains(&format!("<button data-tab=\"{tab}\">")), "{tab}: {html}");
+        let parts = [
+            ("plan-goal", "Goal"),
+            ("plan-what-is-known", "What is known"),
+            ("plan-design", "Design"),
+            ("plan-risks-and-open-questions", "Risks and open questions"),
+            ("steps", "Steps"),
+            ("map", "Map"),
+            ("notes", "Notes"),
+            ("history", "History"),
+        ];
+        let mut from = 0;
+        for (id, name) in parts {
+            from += html[from..].find(&format!("id=\"{id}\" data-part=\"{name}\"")).unwrap_or_else(|| panic!("{id}, in this order: {html}"));
         }
-        assert!(html.contains("<h3>Keep the page light</h3>") && html.contains("It reloads often."), "the note attached: {html}");
+        let rows: String = parts.iter().map(|(id, name)| format!("<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{name}</span></a></li>")).collect();
+        assert!(html.contains(&format!("<div class=\"toc-card\"><ol>{rows}</ol></div>")), "the section bars name each part, in the same order: {html}");
+        assert!(html.contains(&format!("aria-label=\"Sections\">{}</button>", "<span></span>".repeat(parts.len()))), "a bar per part: {html}");
+        let nav = "<a href=\"#plan-goal\">Plan</a><a href=\"#steps\">Steps</a><a href=\"#map\">Map</a><a href=\"#notes\">Notes</a><a href=\"#history\">History</a>";
+        assert!(html.contains(&format!("aria-label=\"Parts\">{nav}</nav>")), "the bar's menu: {html}");
+        assert!(html.contains("<h2 class=\"opener\">What is known</h2>") && !html.contains("<h2 class=\"opener\">Goal</h2>"), "the Goal opens with its statement: {html}");
+        assert!(html.contains("<h3>Keep the page light.</h3>") && html.contains("<p class=\"text\">It reloads often.\nAnd it reads well.</p>"), "a note's first sentence is its title: {html}");
+        assert!(html.contains("<div class=\"note\" id=\"note-2\" data-kind=\"Note\"><div class=\"kind\">Note 2 \u{b7} "), "{html}");
+        assert_eq!((reading_minutes("word"), reading_minutes(&"word ".repeat(397)), reading_minutes(&"word ".repeat(398))), (1, 1, 2), "Medium's 265 words a minute, rounded");
         assert!(html.contains("Version 2 \u{2192} 3") && html.contains("<div class=\"del\">- Text.</div><div class=\"add\">+ The new design.</div>"), "{html}");
+        assert!(html.contains("<p class=\"history\">Version 3 is the current one; none is approved yet.</p>"), "{html}");
         assert!(html.contains("<path class=\"edge\""), "b waits on a: {html}");
-        assert!(!html.contains("What is known</h3>"), "the research is the plan tab's, not a card: {html}");
+
+        let bare = artifact_item(1, &plan("Ship"), Vec::new());
+        let (html, _) = page(&bare, &BTreeMap::from([(1, bare.clone())]), None);
+        assert!(html.contains("id=\"steps\" data-part=\"Steps\"><h2 class=\"opener\">Steps</h2><p>No steps yet: the artifact tool writes them.</p>"), "{html}");
+        assert!(!html.contains("data-part=\"Map\"") && !html.contains("data-part=\"Notes\""), "no map without steps, no notes without one: {html}");
+        assert!(!html.contains("href=\"#map\"") && !html.contains("href=\"#notes\""), "nor do the bars name them: {html}");
+    }
+
+    #[test]
+    fn the_goal_opens_with_its_first_sentence() {
+        for (text, statement, rest) in [
+            ("Ship the page. Then measure it.", "Ship the page.", "<p>Then measure it.</p>\n"),
+            ("Ship the page.\nThen measure it.", "Ship the page.", "<p>Then measure it.</p>\n"),
+            ("Ship the page.\n\nThen measure it.", "Ship the page.", "<p>Then measure it.</p>\n"),
+            ("Ship the page", "Ship the page", ""),
+            ("Is it shipped? Yes.", "Is it shipped?", "<p>Yes.</p>\n"),
+            ("Ship it (\"today.\") Then rest.", "Ship it (\"today.\")", "<p>Then rest.</p>\n"),
+            ("Ship it, e.g. today. Then rest.", "Ship it, e.g. today.", "<p>Then rest.</p>\n"),
+            ("Version 1.5 ships.", "Version 1.5 ships.", ""),
+            ("Ship **the page. Now** and rest. Later.", "Ship <strong>the page. Now</strong> and rest.", "<p>Later.</p>\n"),
+            ("Ship [the page. Now](https://example.com) here! Then.", "Ship <a href=\"https://example.com\">the page. Now</a> here!", "<p>Then.</p>\n"),
+            ("Ship `a. b` now. Then.", "Ship <code>a. b</code> now.", "<p>Then.</p>\n"),
+            ("<b>Raw</b> first. Then.", "&lt;b&gt;Raw&lt;/b&gt; first.", "<p>Then.</p>\n"),
+            ("Ship it. And *this* too.\nMore.", "Ship it.", "<p>And <em>this</em> too.\nMore.</p>\n"),
+        ] {
+            assert_eq!(goal(text), format!("<p class=\"statement\">{statement}</p>\n{rest}"), "{text}");
+        }
+        assert_eq!(goal("- A list first.\n"), "<ul>\n<li>A list first.</li>\n</ul>\n", "no statement unless it opens with a paragraph");
+        assert_eq!(goal("### A heading. First\n\nThen.\n"), "<h3>A heading. First</h3>\n<p>Then.</p>\n");
+        assert_eq!(goal(""), "");
+    }
+
+    #[test]
+    fn a_heading_gives_its_section_an_id_of_its_own() {
+        assert_eq!(slug("Risks and open questions"), "risks-and-open-questions");
+        assert_eq!(slug("  Ça va? Été!  "), "a-va-t");
+        assert_eq!(slug("!!!"), "section");
+        let mut taken = Vec::new();
+        assert_eq!([unique(&mut taken, "plan-x"), unique(&mut taken, "plan-x"), unique(&mut taken, "plan-x")], ["plan-x", "plan-x-2", "plan-x-3"]);
+        let text = plan("Ship").replace("## Design\nText.", "## Design\nText.\n## Steps\nTheirs.\n## Steps\nAgain.\n## Goal\nOnce more.");
+        let item = artifact_item(1, &text, Vec::new());
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+        for id in ["plan-steps", "plan-steps-2", "steps"] {
+            assert_eq!(html.matches(&format!(" id=\"{id}\" data-part=\"Steps\"")).count(), 1, "{id}: {html}");
+        }
+        assert!(html.contains("<section class=\"part\" id=\"plan-goal-2\" data-part=\"Goal\"><h2 class=\"opener\">Goal</h2><p>Once more.</p>"), "only the first Goal opens the plan: {html}");
+    }
+
+    #[test]
+    fn a_step_opens_in_place_when_it_has_more_to_show() {
+        let mut made = steps(&[], &[spec("a", Some("First\nWhy it comes first."), &[]), spec("b", Some("Second"), &["a"])]).unwrap();
+        made[1].done_when = Some("It ships.".to_string());
+        let mut done = Item::new_task(2, "First".into(), vec![], 1);
+        State::Done.write(&mut done);
+        made[0].task = done.uid.clone();
+        let item = artifact_item(1, &plan("Ship"), made);
+        let all: ItemMap = BTreeMap::from([(1, item.clone()), (2, done)]);
+        let (html, _) = page(&item, &all, None);
+        assert!(
+            html.contains("<li class=\"step done\" id=\"step-a\" data-state=\"done\"><button class=\"step-head\" type=\"button\" aria-expanded=\"false\"><span class=\"num\">01</span><span class=\"title\">First</span><span class=\"meta\"><span class=\"dot done\"></span>done \u{b7} task 2</span></button><div class=\"more\"><p>Why it comes first.</p></div></li>"),
+            "{html}"
+        );
+        assert!(html.contains("<span class=\"num\">02</span><span class=\"title\">Second</span><span class=\"meta\"><span class=\"dot proposed\"></span>to approve \u{b7} after a</span></button><div class=\"more\"><p class=\"when\"><b>Done when</b> It ships.</p></div>"), "{html}");
+        let bare = artifact_item(1, &plan("Ship"), steps(&[], &[spec("c", Some("Third"), &[])]).unwrap());
+        let (html, _) = page(&bare, &BTreeMap::from([(1, bare.clone())]), None);
+        assert!(html.contains("<li class=\"step proposed\" id=\"step-c\" data-state=\"to approve\"><div class=\"step-head\">"), "nothing more to show, nothing to open: {html}");
+        assert!(!html.contains("<div class=\"more\">"), "{html}");
+    }
+
+    #[test]
+    fn a_callout_says_what_waits_on_the_user_and_nothing_else_has_one() {
+        let made = steps(&[], &[spec("a", Some("First"), &[])]).unwrap();
+        let item = artifact_item(1, &plan("Ship"), made);
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+        assert!(!html.contains("class=\"callout\""), "a draft nobody is asked about: {html}");
+
+        let mut asked = Item::new_note(2, "Which comes first?\nThe page or the server.".to_string(), vec!["My Board".to_string()]);
+        asked.attached_to = item.uid.clone();
+        asked.question = Some(serde_json::from_value(serde_json::json!({"rev": 1})).unwrap());
+        let mut answered = Item::new_note(3, "Which comes last?".to_string(), vec!["My Board".to_string()]);
+        answered.attached_to = item.uid.clone();
+        answered.question = Some(serde_json::from_value(serde_json::json!({"rev": 1, "answer": {"text": "The docs", "at": 0, "rev": 2}})).unwrap());
+        let all: ItemMap = BTreeMap::from([(1, item.clone()), (2, asked), (3, answered)]);
+        let (html, _) = page(&item, &all, None);
+        assert_eq!(html.matches("class=\"callout\"").count(), 1, "the open question only: {html}");
+        assert!(html.contains("<div class=\"callout\"><b>Waiting on you: question 2</b>Which comes first?: answer it in ekko's menu, or with <code>ekko --answer 2</code> in a terminal.</div>"), "{html}");
+        assert!(html.contains("<div class=\"note open\" id=\"note-2\" data-kind=\"Open question\">") && html.contains("<span class=\"answer\">\u{2713} The docs</span>"), "{html}");
+
+        let mut changed = item.clone();
+        let plan_now = changed.artifact.as_mut().unwrap();
+        (plan_now.version, plan_now.approved_version) = (2, Some(1));
+        changed.trashed = Some(1);
+        let (html, _) = page(&changed, &BTreeMap::from([(1, changed.clone())]), None);
+        assert!(html.contains("<b>Changed since it was approved</b>The plan changed after version 1 was approved: History shows how."), "{html}");
+        assert!(html.contains("<b>In the trash</b>This artifact is in the trash."), "{html}");
+    }
+
+    #[test]
+    fn the_page_draws_with_the_fonts_written_beside_it() {
+        let names: Vec<&str> = font_files().iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names.len(), 3);
+        for (name, stem) in names.iter().zip(["inter-", "ekko-serif-", "ekko-serif-italic-"]) {
+            let hash = name.strip_prefix(stem).and_then(|rest| rest.strip_suffix(".woff2")).unwrap_or_else(|| panic!("{name}"));
+            assert!(hash.len() == 8 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()), "named by its hash: {name}");
+        }
+        let faces = font_faces();
+        for (name, rule) in names.iter().zip(["\"Inter\"; src: url(\"fonts/", "\"Ekko Serif\"; src: url(\"fonts/", "\"Ekko Serif\"; src: url(\"fonts/"]) {
+            assert!(faces.contains(&format!("{rule}{name}\") format(\"woff2\")")), "{name}: {faces}");
+        }
+        assert!(faces.contains("font-style: italic") && faces.matches("font-weight: 400 700").count() == 3, "{faces}");
+        let item = artifact_item(1, &plan("Ship"), Vec::new());
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+        assert!(html.contains(&format!("<style>\n{faces}")), "the page's style opens with them: {html}");
+
+        let dir = crate::paths::test_dir("ekko-artifact-fonts");
+        let fonts = dir.join(PAGES).join(FONTS_DIR);
+        write(&dir, &item, &BTreeMap::from([(1, item.clone())]), None).unwrap();
+        for (name, bytes) in font_files() {
+            assert_eq!(std::fs::read(fonts.join(name)).unwrap(), *bytes, "{name}");
+        }
+        assert_eq!(std::fs::read_to_string(fonts.join(FONT_LICENSE.0)).unwrap(), FONT_LICENSE.1);
+        assert!(FONT_LICENSE.1.contains("SIL OPEN FONT LICENSE Version 1.1") && FONT_LICENSE.1.contains("Reserved Font Name"));
+        // A font gone or cut short is written again by the next write, even
+        // of a page that did not change; one whole is left as it is.
+        std::fs::remove_file(fonts.join(names[0])).unwrap();
+        std::fs::write(fonts.join(names[1]), b"short").unwrap();
+        let kept = std::fs::metadata(fonts.join(names[2])).unwrap().modified().unwrap();
+        write(&dir, &item, &BTreeMap::from([(1, item.clone())]), None).unwrap();
+        assert_eq!(std::fs::read(fonts.join(names[0])).unwrap(), font_files()[0].1);
+        assert_eq!(std::fs::read(fonts.join(names[1])).unwrap(), font_files()[1].1);
+        assert_eq!(std::fs::metadata(fonts.join(names[2])).unwrap().modified().unwrap(), kept);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1566,9 +2266,24 @@ mod tests {
         refresh(&dir, &all, None);
         assert!(std::fs::read_to_string(&path).unwrap().contains("<h1>Ship today</h1>"));
         assert_ne!(std::fs::read_to_string(dir.join(PAGES).join(format!("{uid}.js"))).unwrap(), script);
-        let left: Vec<String> = std::fs::read_dir(dir.join(PAGES)).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
-        assert_eq!(left.len(), 2, "no temp file is left: {left:?}");
+        let listed = |dir: PathBuf| -> Vec<String> { std::fs::read_dir(dir).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect() };
+        let mut left = listed(dir.join(PAGES));
+        left.sort();
+        assert_eq!(left, [format!("{uid}.html"), format!("{uid}.js"), FONTS_DIR.to_string()], "no temp file is left");
+        assert_eq!(listed(dir.join(PAGES).join(FONTS_DIR)).len(), 4, "nor among the fonts");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_version_is_the_hash_of_the_whole_page_but_itself() {
+        // Every byte of the page, the theme, style and scripts an ekko
+        // writes as much as the plan, so a new ekko's page reloads too.
+        let item = artifact_item(1, &plan("Ship"), steps(&[], &[spec("a", Some("First"), &[])]).unwrap());
+        let (html, version) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+        assert_eq!(html.matches(&version).count(), 1, "{version}: {html}");
+        let (before, after) = html.split_once(&version).unwrap();
+        assert!(before.ends_with("var version = \"") && before.contains(THEME) && before.contains(STYLE) && before.contains(SCRIPT));
+        assert_eq!(version, format!("{:016x}", fnv(format!("{before}{after}").as_bytes())));
     }
 
     /// The approval end to end on a board (task 1019): asked by a session,
@@ -1651,7 +2366,20 @@ mod tests {
             assert!(text.contains("- field: The field\n- tool: The tool (after field)\n- page: The page (after field)"), "{text}");
             assert!(ask(&as_session, &home, target).unwrap_err().to_string().contains("asks to approve artifact"), "one question at a time");
             assert!(answer(&as_session, first, "Aprovar").is_err(), "a session's answer makes nothing");
+            let callouts = || {
+                let data = board();
+                let (html, _) = page(&data[&target], &data, None);
+                html.split("<div class=\"callout\">").skip(1).map(|rest| rest.split("</div>").next().unwrap_or_default().to_string()).collect::<Vec<_>>()
+            };
+            let waiting = format!("<b>Waiting on you: question {first}</b>It asks you to approve this plan: answer it in ekko's menu, or with <code>ekko --answer {first}</code> in a terminal.");
+            assert_eq!(callouts(), [waiting], "the approval asked, once, though the question is attached to the artifact too");
+            let shown = || {
+                let data = board();
+                page(&data[&target], &data, None).0
+            };
+            assert!(shown().contains("<li>Artifact</li><li>Waiting on you</li>") && shown().contains("<span class=\"who\">Written by a session, "), "{}", shown());
             answer(&as_user, first, "Ainda não").unwrap();
+            assert_eq!(callouts(), Vec::<String>::new(), "answered, it waits no more");
             assert_eq!(made(), 0, "the second answer");
             let second = ask(&as_session, &home, target).unwrap();
             answer(&as_user, second, APPROVE).unwrap();
@@ -1682,6 +2410,7 @@ mod tests {
             assert_eq!(blockers, [&field, &tool, &page].map(|task| task.uid.clone().unwrap()), "the tasks block the artifact");
             assert!(field.id < tool.id && tool.id < page.id, "made in the plan's order");
             assert_eq!(Standing::of(&data[&target], &data).unwrap().words(), "approved, 0 of 3 done");
+            assert!(shown().contains("<li>Artifact</li><li>Approved</li><li>0 of 3 done</li>"), "{}", shown());
 
             let context = crate::agent::context(&as_user, &target.to_string()).unwrap().text();
             assert!(context.contains("artifact, a task pending"), "{context}");
@@ -1789,10 +2518,10 @@ mod tests {
             let target = artifact(&as_user, json!({"text": plan("Ship"), "steps": steps})).unwrap();
             let data = as_user.storage.get().unwrap();
             let path = write(&dir, &data[&target], &data, None).unwrap();
-            assert!(std::fs::read_to_string(&path).unwrap().contains("draft, 1 step"));
+            assert!(std::fs::read_to_string(&path).unwrap().contains("Draft, 1 step."));
             apply(&as_user, json!({"op": "edit", "item": target, "append": "\nAnd a line more."})).unwrap();
             let page = std::fs::read_to_string(&path).unwrap();
-            assert!(page.contains("And a line more.") && page.contains("version 2"), "an edit through any path rewrites it: {page}");
+            assert!(page.contains("And a line more.") && page.contains("<li>Version 2</li>"), "an edit through any path rewrites it: {page}");
             apply(&as_user, json!({"op": "create", "text": "Unrelated"})).unwrap();
             assert_eq!(std::fs::read_to_string(&path).unwrap(), page, "a write that changes nothing it shows leaves it");
             std::fs::remove_dir_all(&home).ok();
