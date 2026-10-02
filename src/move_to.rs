@@ -38,7 +38,7 @@ use serde::Serialize;
 use crate::directory::{self, DirectoryError, Location};
 use crate::ekko::{Ekko, EkkoError, Outcome};
 use crate::holder::Holder;
-use crate::item::{Answer, Approving, Artifact, CueOn, Item, Over, Proposal, Question, Step, Wait};
+use crate::item::{Answer, Approving, Artifact, Comment, CueOn, Item, Over, Proposal, Question, Step, Wait};
 use crate::storage::{ItemMap, Moved};
 
 /// An item `--move-to` took: its id on the board it left and on the one it
@@ -304,6 +304,7 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
         wait,
         cue,
         artifact,
+        comment,
         id: _,
         date: _,
         timestamp: _,
@@ -358,6 +359,10 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
     if let Some(CueOn { question, cue: _, at: _ }) = cue {
         found.push(("has its cue from", question));
     }
+    if let Some(comment) = comment.as_deref() {
+        let Comment { reply_to, version: _, quote: _, replacement: _, step: _, sent: _, resolved: _, unknown: _ } = comment;
+        found.extend(reply_to.as_deref().map(|uid| ("answers", uid)));
+    }
     found
 }
 
@@ -404,6 +409,7 @@ fn arriving(item: &Item, id: u32) -> Item {
         wait,
         cue,
         artifact,
+        comment,
     } = item;
     let question = question.as_deref().map(|question| {
         let Question { rev: _, answer, asked_by, cue, allow, link, applies, approve, unknown } = question;
@@ -430,6 +436,19 @@ fn arriving(item: &Item, id: u32) -> Item {
             version: *version,
             earlier: earlier.clone(),
             approved_version: *approved_version,
+            unknown: unknown.clone(),
+        })
+    });
+    let comment = comment.as_deref().map(|comment| {
+        let Comment { version, quote, replacement, step, reply_to, sent, resolved, unknown } = comment;
+        Box::new(Comment {
+            version: *version,
+            quote: quote.clone(),
+            replacement: replacement.clone(),
+            step: step.clone(),
+            reply_to: reply_to.clone(),
+            sent: *sent,
+            resolved: *resolved,
             unknown: unknown.clone(),
         })
     });
@@ -480,6 +499,7 @@ fn arriving(item: &Item, id: u32) -> Item {
         wait,
         cue,
         artifact,
+        comment,
     }
 }
 

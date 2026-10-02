@@ -606,6 +606,48 @@ impl<'a> Draft<'a> {
         Ok(ids)
     }
 
+    /// A comment on the artifact `on` (task 1105): a note attached to it,
+    /// holding `comment`, made on the version the plan is at, and on words
+    /// that version holds. Its text says what the comment says, or what it
+    /// suggests when it says nothing else.
+    pub fn comment(&mut self, on: &Ref, text: &str, comment: crate::item::Comment) -> Result<u32, EkkoError> {
+        let id = self.resolve(on)?;
+        let item = &self.data[&id];
+        let Some(artifact) = item.artifact.as_deref().filter(|_| item.trashed.is_none()) else {
+            return Err(invalid(format!("{id} is not an artifact")));
+        };
+        if comment.version != artifact.version {
+            return Err(invalid(format!("the plan is at version {} now, and the comment was made on version {}", artifact.version, comment.version)));
+        }
+        if let Some(quote) = comment.quote.as_ref().filter(|quote| quote.exact.is_empty() || !item.description.contains(&quote.exact)) {
+            return Err(invalid(format!("version {} of the plan does not hold {:?}", artifact.version, quote.exact)));
+        }
+        if let Some(step) = comment.step.as_ref().filter(|step| !artifact.steps.iter().any(|known| &known.key == *step)) {
+            return Err(invalid(format!("the plan has no step {step}")));
+        }
+        let text = match (text.trim(), &comment.quote, &comment.replacement) {
+            ("", Some(quote), Some(replacement)) if replacement.is_empty() => format!("Delete: {}", quote.exact),
+            ("", Some(quote), Some(replacement)) => format!("Replace {} with {replacement}", quote.exact),
+            (text, _, _) => text.to_string(),
+        };
+        let spec = Create {
+            kind: None,
+            text,
+            boards: Vec::new(),
+            priority: None,
+            due: None,
+            with: None,
+            phase: None,
+            blocked_by: Vec::new(),
+            attached_to: Some(Ref::Id(id)),
+            supersedes: None,
+            starred: false,
+        };
+        let note = self.create(&spec)?;
+        self.item(note).comment = Some(Box::new(comment));
+        Ok(note)
+    }
+
     fn item(&mut self, id: u32) -> &mut Item {
         self.data.get_mut(&id).expect("ids are resolved against the draft")
     }

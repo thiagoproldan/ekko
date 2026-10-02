@@ -470,3 +470,51 @@ fn a_write_from_the_cli_reaches_an_open_stream_of_events_within_a_second() {
     assert_eq!((name.as_str(), page), ("version", path.as_str()), "{data}");
     assert_ne!(after, before, "the artifact done is a new version");
 }
+
+/// A comment from the page is the person's note on the artifact, holding
+/// what it is about (task 1105): made on the plan's version, on words that
+/// version holds. A stale version, words the plan lacks, or a write under
+/// Claude Code are refused, and write nothing.
+#[test]
+fn a_comment_from_the_page_is_the_persons_note_on_the_artifact() {
+    let home = Home::new();
+    let written = artifact(&home);
+    let (port, path) = split(written["page"].as_str().unwrap());
+    let token = runtime(&home)["token"].as_str().unwrap().to_string();
+    let post = |body: &Value| {
+        let body = body.to_string();
+        format!(
+            "POST /api/comment HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: ekko_{port}={token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let comment = |version: u32, exact: &str| json!({"page": path, "text": "Which facts?", "comment": {"version": version, "quote": {"exact": exact, "prefix": "## What is known\n", "suffix": "\n## Design", "section": "What is known"}}});
+    let notes = || -> Vec<Value> {
+        let board: Value = serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+        board.as_object().unwrap().values().filter(|item| item.get("comment").is_some()).cloned().collect()
+    };
+
+    for (body, as_claude, refusal) in [
+        (comment(2, "Facts."), false, "HTTP/1.1 409 "),
+        (comment(1, "Fiction."), false, "HTTP/1.1 409 "),
+        (comment(1, "Facts."), true, "HTTP/1.1 403 "),
+    ] {
+        let answer = from_bash(&home, port, &post(&body), as_claude);
+        assert!(answer.starts_with(refusal), "{body}: {answer}");
+        let _ = fs::remove_file(home.join(if as_claude { "answer-claude" } else { "answer-person" }));
+    }
+    assert!(notes().is_empty(), "a refused comment wrote nothing");
+
+    let answer = from_bash(&home, port, &post(&comment(1, "Facts.")), false);
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    let notes = notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let note = &notes[0];
+    assert_eq!(note["description"], "Which facts?");
+    assert_eq!(note["attachedTo"], path.trim_start_matches("/default/").trim_end_matches(".html"));
+    assert_eq!(note["comment"]["version"], 1);
+    assert_eq!(note["comment"]["quote"]["exact"], "Facts.");
+    assert!(note["comment"].get("sent").is_none(), "pending until a review sends it");
+    let by = note["createdBy"].as_object().map(|by| by.keys().cloned().collect::<Vec<_>>());
+    assert!(by.is_none_or(|keys| !keys.iter().any(|key| key == "pid")), "written by the person, no process: {note}");
+}

@@ -274,6 +274,12 @@ pub struct Item {
     /// without artifacts is stored exactly as before. Boxed; see `question`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<Box<Artifact>>,
+    /// On a note the user wrote on an artifact's page (task 1105): what it
+    /// is about, the version it was made on, and whether it was sent and
+    /// resolved. Absent unless set, so a board without comments is stored
+    /// exactly as before. Boxed; see `question`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<Box<Comment>>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -327,6 +333,7 @@ impl Item {
             wait: None,
             cue: None,
             artifact: None,
+            comment: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -368,6 +375,7 @@ impl Item {
             wait: None,
             cue: None,
             artifact: None,
+            comment: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -505,6 +513,54 @@ pub struct Step {
     /// The task the user's approval made of it, by uid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// A comment on an artifact (task 1105), on the note that holds its text:
+/// on words of the plan, on a step, or on the plan as a whole.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Comment {
+    /// The plan's version it was made on.
+    pub version: u32,
+    /// The words it is about, absent when it is about a step or the whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<Quote>,
+    /// What it suggests in place of the quote: empty to delete it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<String>,
+    /// The step it is about, by key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    /// The comment it answers, by uid.
+    #[serde(rename = "replyTo", default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    /// When a review sent it, in milliseconds; pending until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent: Option<i64>,
+    /// When it was resolved, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<i64>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// Words a comment is about, kept as the W3C Web Annotation's quote
+/// selector keeps them, so it finds them again in a later version: the
+/// words, up to 32 characters on either side, and their section.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Quote {
+    pub exact: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub suffix: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub section: String,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -1709,8 +1765,8 @@ mod tests {
         assert!(missing.is_empty(), "no `unknown`, and no reason given here for none: {missing:?}");
         checked.sort();
         let expected = [
-            "Allowance", "Answer", "Approving", "Artifact", "Counters", "Cue", "Earlier", "Holder", "Item", "Linking", "Moved", "Over", "Proposal",
-            "Question", "Refused", "Registered", "Registry", "Step", "Used", "Wait",
+            "Allowance", "Answer", "Approving", "Artifact", "Comment", "Counters", "Cue", "Earlier", "Holder", "Item", "Linking", "Moved", "Over",
+            "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "Step", "Used", "Wait",
         ];
         assert_eq!(checked, expected, "the scan finds the structs it should");
     }

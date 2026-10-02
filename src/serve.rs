@@ -73,6 +73,9 @@ const HEAD_MOST: usize = 16 * 1024;
 /// The most connections answered at once; one more gets 503.
 const CONNECTIONS_MOST: usize = 64;
 
+/// The longest body a request may carry: a comment and what it is about.
+const BODY_MOST: usize = 64 * 1024;
+
 /// How often a stream of `/events` looks for a page's new version
 /// (decision 1165).
 const LOOK: Duration = Duration::from_millis(200);
@@ -431,6 +434,7 @@ struct Request {
     method: String,
     path: String,
     headers: Vec<(String, String)>,
+    body: Vec<u8>,
 }
 
 impl Request {
@@ -454,12 +458,27 @@ fn read_request(stream: &mut impl Read) -> Result<Request, Option<Answer>> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut parsed = httparse::Request::new(&mut headers);
         match parsed.parse(&buffer[..filled]) {
-            Ok(httparse::Status::Complete(_)) => {
-                return Ok(Request {
+            Ok(httparse::Status::Complete(head)) => {
+                let mut request = Request {
                     method: parsed.method.unwrap_or_default().to_string(),
                     path: parsed.path.unwrap_or_default().to_string(),
                     headers: parsed.headers.iter().map(|header| (header.name.to_string(), String::from_utf8_lossy(header.value).into_owned())).collect(),
-                })
+                    body: buffer[head..filled].to_vec(),
+                };
+                let length = request.header("content-length").and_then(|length| length.trim().parse::<usize>().ok()).unwrap_or(0);
+                if length > BODY_MOST {
+                    return Err(Some(Answer::text(413, "the request's body is too long")));
+                }
+                while request.body.len() < length {
+                    let mut more = vec![0; length - request.body.len()];
+                    let read = stream.read(&mut more).map_err(|_| None)?;
+                    if read == 0 {
+                        return Err(None);
+                    }
+                    request.body.extend_from_slice(&more[..read]);
+                }
+                request.body.truncate(length);
+                return Ok(request);
             }
             Ok(httparse::Status::Partial) if filled < buffer.len() => {}
             Ok(httparse::Status::Partial) | Err(httparse::Error::TooManyHeaders) => {
@@ -600,11 +619,70 @@ fn route(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
             }
             Err(why) => Answer::refuse(why, true),
         },
+        ("POST", "/api/comment") => comment(shared, request, socket),
         ("GET", path) => match query.split('&').find_map(|pair| pair.strip_prefix("token=")) {
             Some(token) if path.starts_with("/default/") || path.starts_with("/project/") => opened(shared, path, token),
             _ => font(path).or_else(|| page(shared, path)).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
         },
         _ => Answer::text(405, "the server answers GET, and POST to /stop and /api/who"),
+    }
+}
+
+/// `POST /api/comment`: a comment the person writes on an artifact's page
+/// (task 1105), as JSON: the page's path, the comment's text, and the
+/// comment itself, with the plan's version it was made on and what it is
+/// about. Written as the person's note on the artifact; refused when the
+/// plan moved on, or no longer holds the words.
+fn comment(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Posted {
+        page: String,
+        #[serde(default)]
+        text: String,
+        comment: crate::item::Comment,
+    }
+    let json = |code: u16, value: serde_json::Value| Answer::new(code, "application/json", value.to_string());
+    let person = match writer(shared, request, socket) {
+        Ok(person) => person,
+        Err(why) => return Answer::refuse(why, true),
+    };
+    let posted: Posted = match serde_json::from_slice(&request.body) {
+        Ok(posted) => posted,
+        Err(error) => return json(400, serde_json::json!({"why": format!("not a comment: {error}")})),
+    };
+    let Some((project, uid)) = board_of(&posted.page) else {
+        return json(404, serde_json::json!({"why": format!("{} is no artifact's page", posted.page)}));
+    };
+    let written = crate::directory::locate(&shared.home, &shared.home, None, None, project.as_deref())
+        .map_err(|error| error.to_string())
+        .and_then(|location| crate::ekko::Ekko::at(&location).map_err(|error| error.to_string()))
+        .and_then(|ekko| {
+            let ekko = ekko.acting_as(crate::holder::Actor::person());
+            let mut draft = crate::ops::Draft::open(&ekko).map_err(|error| error.to_string())?;
+            let id = draft.comment(&crate::ops::Ref::Text(uid.clone()), &posted.text, posted.comment).map_err(|error| error.to_string())?;
+            let committed = draft.commit(false).map_err(|error| error.to_string())?;
+            Ok((id, committed.data.get(&id).and_then(|note| note.uid.clone()).unwrap_or_default()))
+        });
+    match written {
+        Ok((id, note)) => {
+            log(&shared.home, &format!("POST /api/comment: note {id} on {uid}, by the user, {person}"));
+            json(200, serde_json::json!({"id": id, "uid": note}))
+        }
+        Err(why) => json(409, serde_json::json!({"why": why})),
+    }
+}
+
+/// The board and the artifact a page's path names: the project's name, or
+/// none for the default board, and the artifact's uid.
+fn board_of(path: &str) -> Option<(Option<String>, String)> {
+    let segments: Vec<String> = path.strip_prefix('/')?.split('/').map(decode).collect::<Option<_>>()?;
+    let (file, board) = segments.split_last()?;
+    let uid = file.strip_suffix(".html")?.to_string();
+    match board {
+        [default] if default == "default" => Some((None, uid)),
+        [project, name] if project == "project" => Some((Some(name.clone()), uid)),
+        _ => None,
     }
 }
 
@@ -829,6 +907,8 @@ impl Answer {
             403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            409 => "Conflict",
+            413 => "Content Too Large",
             431 => "Request Header Fields Too Large",
             _ => "Service Unavailable",
         };
@@ -902,7 +982,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (accepted, _) = listener.accept().unwrap();
-        let request = |host: &str| Request { method: "GET".to_string(), path: "/".to_string(), headers: vec![("Host".to_string(), host.to_string())] };
+        let request = |host: &str| Request { method: "GET".to_string(), path: "/".to_string(), headers: vec![("Host".to_string(), host.to_string())], body: Vec::new() };
         let inode = caller(port, &accepted, &request(&format!("127.0.0.1:{port}"))).unwrap().expect("Linux reads the socket");
         assert_eq!(holders(inode), vec![std::process::id()], "the connecting socket is this process's");
         assert!(caller(port, &accepted, &request("evil.example")).is_err());
@@ -923,7 +1003,7 @@ mod tests {
             let mut headers = vec![("Host".to_string(), "127.0.0.1:9".to_string())];
             headers.extend(origin.map(|origin| ("Origin".to_string(), origin.to_string())));
             headers.extend(cookie.map(|cookie| ("Cookie".to_string(), cookie.to_string())));
-            writer(&shared, &Request { method: "POST".to_string(), path: "/api/who".to_string(), headers }, None).unwrap_err()
+            writer(&shared, &Request { method: "POST".to_string(), path: "/api/who".to_string(), headers, body: Vec::new() }, None).unwrap_err()
         };
         let mine = "a=1; ekko_9=secret; b=2";
         let foreign = ["null", "http://127.0.0.1:8", "http://127.0.0.1:90", "http://localhost:8", "http://localhost:90", "http://evil.example", "https://127.0.0.1:9"];
@@ -1005,6 +1085,7 @@ mod tests {
             method: method.to_string(),
             path: path.to_string(),
             headers: token.map(|token| vec![(TOKEN.to_ascii_lowercase(), token.to_string())]).unwrap_or_default(),
+            body: Vec::new(),
         };
         let status = route(&shared, &request("GET", "/status", None), None);
         assert_eq!(status.code, 200);
@@ -1026,7 +1107,7 @@ mod tests {
     #[test]
     fn the_fonts_of_the_pages_are_served_beside_them_and_kept() {
         let shared = shared();
-        let get = |path: &str| route(&shared, &Request { method: "GET".to_string(), path: path.to_string(), headers: Vec::new() }, None);
+        let get = |path: &str| route(&shared, &Request { method: "GET".to_string(), path: path.to_string(), headers: Vec::new(), body: Vec::new() }, None);
         let (name, bytes) = &crate::artifact::font_files()[1];
         for board in ["/default", "/project/site", "/project/a%20b"] {
             let font = get(&format!("{board}/fonts/{name}"));
