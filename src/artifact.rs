@@ -412,7 +412,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         }
         body.push_str("</div>");
     }
-    let _ = write!(body, "<button class=\"copy\" type=\"button\" data-copy=\"{command}\">Copy command</button></div></aside>");
+    body.push_str("</div></aside>");
 
     // The head of the text: tags, title, byline and actions, then what waits
     // on the user and what the user should know first.
@@ -437,7 +437,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     }
     let _ = write!(
         body,
-        "<span>{} min read</span><span>\u{b7}</span><span>Updated {}</span></div><div class=\"actions\"><span>{}</span><span>{}</span><span>v{version}</span><span class=\"spacer\"></span><button type=\"button\" data-copy=\"{command}\" title=\"Copy command\" aria-label=\"Copy command\">{COPY}</button></div>",
+        "<span>{} min read</span><span>\u{b7}</span><span>Updated {}</span></div><div class=\"actions\"><span>{}</span><span>{}</span><span>v{version}</span></div>",
         reading_minutes(plan),
         esc(&when(item.updated_at.unwrap_or(item.timestamp))),
         plural(steps.len(), "step"),
@@ -530,7 +530,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         parts.push(("map".to_string(), "Map".to_string()));
         let _ = write!(
             body,
-            "<section class=\"part\" id=\"map\" data-part=\"Map\"><h2 class=\"opener\">Map</h2><p>What each step waits on, from the first on the left. A step leads to its place in the list.</p><div class=\"bleed\"><div class=\"strip\">{}</div><div class=\"arrows\" hidden><button type=\"button\" data-by=\"-480\" aria-label=\"Back\">\u{2039}</button><button type=\"button\" data-by=\"480\" aria-label=\"On\">\u{203a}</button></div></div></section>",
+            "<section class=\"part\" id=\"map\" data-part=\"Map\"><h2 class=\"opener\">Map</h2><p>What each step waits on, from the first on the left. A step leads to its place in the list.</p><div class=\"legend\"><span><span class=\"dot proposed\"></span>to approve</span><span><span class=\"dot open\"></span>pending</span><span><span class=\"dot progress\"></span>in progress</span><span><span class=\"dot done\"></span>done</span><span>an arrow: what a step waits on</span></div><div class=\"bleed\"><div class=\"strip\">{}</div><div class=\"arrows\" hidden><button type=\"button\" data-by=\"-480\" aria-label=\"Back\">\u{2039}</button><button type=\"button\" data-by=\"480\" aria-label=\"On\">\u{203a}</button></div></div></section>",
             map(&steps)
         );
     }
@@ -765,9 +765,6 @@ fn unique(taken: &mut Vec<String>, id: &str) -> String {
     taken.push(made.clone());
     made
 }
-
-/// The copy button's icon: two sheets, drawn in the text's colour.
-const COPY: &str = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" aria-hidden=\"true\"><rect x=\"7\" y=\"7\" width=\"9.5\" height=\"9.5\" rx=\"1.5\"/><path d=\"M13 7V5a1.5 1.5 0 0 0-1.5-1.5h-6A1.5 1.5 0 0 0 4 5v6.5A1.5 1.5 0 0 0 5.5 13H7\"/></svg>";
 
 /// The plan's text split at its `## ` headings, outside code fences: each
 /// heading with the Markdown under it, and what comes before the first under
@@ -1357,8 +1354,15 @@ const SCRIPT: &str = r##"(function () {
     arrows.querySelectorAll("button").forEach(function (button) {
       button.addEventListener("click", function () { strip.scrollBy({ left: Number(button.dataset.by), behavior: smooth() }); });
     });
-    var fit = function () { arrows.hidden = strip.scrollWidth <= strip.clientWidth; };
+    // Shown while the strip overflows, each off at the end it reaches.
+    var ends = arrows.querySelectorAll("button");
+    var fit = function () {
+      arrows.hidden = strip.scrollWidth <= strip.clientWidth;
+      ends[0].disabled = strip.scrollLeft <= 0;
+      ends[1].disabled = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 1;
+    };
     addEventListener("resize", fit);
+    strip.addEventListener("scroll", fit);
     fit();
   }
 
@@ -1399,14 +1403,15 @@ const SCRIPT: &str = r##"(function () {
     return { kind: "Section", badge: "\u00a7", label: part.dataset.part, target: part.id, search: ("section " + part.dataset.part).toLowerCase() };
   });
   document.querySelectorAll(".step").forEach(function (step) {
-    var key = step.id.slice(5), title = step.querySelector(".title").textContent;
+    var key = step.id.slice(5), title = step.querySelector(".title").textContent, more = step.querySelector(".more");
     items.push({ kind: "Step \u00b7 " + step.dataset.state, badge: step.querySelector(".num").textContent, label: title, step: key,
-      search: ("step steps " + key + " " + title + " " + step.querySelector(".meta").textContent).toLowerCase() });
+      search: ("step steps " + key + " " + title + " " + step.querySelector(".meta").textContent + " " + (more ? more.textContent : "")).toLowerCase() });
   });
   document.querySelectorAll(".note").forEach(function (note) {
     var kind = note.dataset.kind, title = note.querySelector("h3").textContent, answer = note.querySelector(".answer");
+    var text = Array.prototype.map.call(note.querySelectorAll(".text"), function (part) { return part.textContent; }).join(" ");
     items.push({ kind: kind + " " + note.id.slice(5), badge: kind.charAt(0), label: title, target: note.id,
-      search: ("note notes " + kind + " " + kind + "s " + title + " " + (answer ? answer.textContent : "")).toLowerCase() });
+      search: ("note notes " + kind + " " + kind + "s " + title + " " + (answer ? answer.textContent : "") + " " + text).toLowerCase() });
   });
   function find(text) {
     var words = text.toLowerCase().split(/\s+/).filter(Boolean);
@@ -1504,7 +1509,8 @@ const SCRIPT: &str = r##"(function () {
     render();
   });
   input.addEventListener("keydown", function (event) {
-    if (event.key === "Escape") { close(); return; }
+    // Esc gives up the search: the bar folds empty, back to its hints.
+    if (event.key === "Escape") { input.value = ""; close(); return; }
     if (!bar.classList.contains("open")) { if (event.key !== "Tab") open(false); return; }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
@@ -1593,14 +1599,17 @@ const STYLE: &str = r##"
   --bars-bg: rgba(255, 255, 255, 0.38);
   --add: #e6ffec;
   --del: #ffebe9;
-  /* AKQA's bar, the same over either theme. */
-  --bar-bg: rgba(0, 0, 0, 0.42);
-  --bar-fg: #fff;
-  --bar-hint: #d9d9d9;
-  --bar-muted: #bbb;
-  --bar-chip: rgba(255, 255, 255, 0.04);
-  --bar-chip-on: rgba(255, 255, 255, 0.16);
-  --bar-line: rgba(255, 255, 255, 0.16);
+  /* The bar as light glass over a light page, where AKQA's dark glass
+     read as a grey block (task 1153), opaque enough to read where a
+     browser draws no blur behind it; the dark theme keeps AKQA's. */
+  --bar-bg: rgba(255, 255, 255, 0.88);
+  --bar-edge: rgba(0, 0, 0, 0.1);
+  --bar-fg: #242424;
+  --bar-hint: #6b6b6b;
+  --bar-muted: #6b6b6b;
+  --bar-chip: rgba(0, 0, 0, 0.04);
+  --bar-chip-on: rgba(0, 0, 0, 0.08);
+  --bar-line: rgba(0, 0, 0, 0.1);
   /* AKQA's spring, sampled from its bar opening (note 1149): past the
      target by 14% at a third of the way, settled by 0.9 s. */
   --spring: linear(0, 0.086 3.9%, 0.168 5.8%, 0.3 8.3%, 0.604 13.8%, 0.754 16.7%, 0.893 19.9%, 0.989 22.6%, 1.061 25.4%, 1.114 28.8%, 1.132 31.1%, 1.139 33.9%, 1.136 36.3%, 1.111 41.2%, 1.089 44%, 1.068 46.6%, 1.046 49.4%, 1.029 52.1%, 1.014 54.7%, 0.996 58.6%, 0.989 61.2%, 0.982 63.6%, 0.982 67.3%, 0.986 76.8%, 0.989 80.8%, 0.996 86%, 1 90.9%, 1);
@@ -1624,6 +1633,14 @@ const STYLE: &str = r##"
   --bars-bg: rgba(0, 0, 0, 0.38);
   --add: rgba(46, 160, 67, 0.18);
   --del: rgba(248, 81, 73, 0.18);
+  --bar-bg: rgba(0, 0, 0, 0.42);
+  --bar-edge: transparent;
+  --bar-fg: #fff;
+  --bar-hint: #d9d9d9;
+  --bar-muted: #bbb;
+  --bar-chip: rgba(255, 255, 255, 0.04);
+  --bar-chip-on: rgba(255, 255, 255, 0.16);
+  --bar-line: rgba(255, 255, 255, 0.16);
   color-scheme: dark;
 }
 
@@ -1649,11 +1666,10 @@ button { font: inherit; color: inherit; }
 .standing .mark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--chip); font: 600 13px/1 var(--sans); color: var(--fg); }
 .standing .name { margin: 16px 0 0; font: 500 16px/20px var(--sans); color: var(--fg-strong); }
 .standing .about { margin: 12px 0 0; font: 400 14px/20px var(--sans); color: var(--fg-2); }
-.segments { display: flex; flex-wrap: wrap; gap: 4px; margin: 16px 0 0; }
-.segments span { width: 8px; height: 2px; border-radius: 1px; background: var(--fg); opacity: 0.15; }
+.segments { display: flex; gap: 1px; margin: 16px 0 0; }
+.segments span { flex: 1 1 0; min-width: 1px; height: 6px; border-radius: 1px; background: var(--fg); opacity: 0.15; }
 .segments .done { opacity: 1; }
 .segments .progress { opacity: 1; background: var(--accent); }
-.standing .copy { display: inline-block; margin: 16px 0 0; padding: 0; border: 0; background: none; font: 400 14px/20px var(--sans); color: var(--fg); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 
 .prose .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .prose .tags li { margin: 0; padding: 4px 12px; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--rule); font: 400 13px/20px var(--sans); letter-spacing: normal; color: var(--fg); }
@@ -1662,9 +1678,6 @@ h1 { margin: 24px 0 0; font: 700 42px/52px var(--sans); letter-spacing: -0.011em
 .byline .who { color: var(--fg); }
 .byline .state { padding: 7px 15px; border: 1px solid var(--fg); border-radius: 999px; color: var(--fg); }
 .actions { display: flex; align-items: center; gap: 24px; margin: 32px 0 0; padding: 10px 8px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font: 400 13px/20px var(--sans); color: var(--fg-2); }
-.actions .spacer { flex: 1; }
-.actions button { display: grid; place-items: center; padding: 4px; border: 0; background: none; color: var(--fg-2); cursor: pointer; }
-.actions button:hover { color: var(--fg); }
 
 .callout { margin: 40px 0 0; padding: 20px 24px; border-radius: 8px; background: var(--chip); font: 400 16px/24px var(--sans); color: var(--fg); }
 .callout + .callout { margin-top: 16px; }
@@ -1673,8 +1686,8 @@ h1 { margin: 24px 0 0; font: 700 42px/52px var(--sans); letter-spacing: -0.011em
 /* ---- the plan: AKQA's openers and statement, Medium's text ------------- */
 .prose .statement { margin: 56px 0 0; font: 400 32px/40px var(--serif); letter-spacing: -0.01em; color: var(--fg-strong); }
 .goal, .part { scroll-margin-top: 24px; }
-section.part::before { content: ""; display: block; height: 1px; margin: 120px calc(50% - 50vw + 24px); background: var(--rule); }
-.opener { margin: 0 0 56px; font: 400 88px/0.873 var(--sans); letter-spacing: -0.027em; text-transform: uppercase; overflow-wrap: anywhere; color: var(--fg-strong); }
+section.part::before { content: ""; display: block; height: 1px; margin: 80px calc(50% - 50vw + 24px); background: var(--rule); }
+.opener { margin: 0 0 40px; font: 400 56px/0.873 var(--sans); letter-spacing: -0.027em; text-transform: uppercase; overflow-wrap: anywhere; color: var(--fg-strong); }
 .prose p, .prose li { font: 400 20px/32px var(--serif); letter-spacing: -0.003em; color: var(--fg); }
 .prose p { margin: 2.14em 0 -0.46em; }
 .prose .opener + p, .prose .statement + p { margin-top: 0.94em; }
@@ -1734,7 +1747,11 @@ button.step-head { cursor: pointer; }
 .map .s { position: absolute; right: 14px; bottom: 10px; left: 14px; display: flex; justify-content: space-between; font: 400 11px/16px var(--sans); color: var(--fg-2); }
 .map .s .dot { width: 6px; height: 6px; margin-right: 6px; vertical-align: 1px; }
 .arrows { display: flex; justify-content: flex-end; gap: 8px; max-width: var(--column); margin: 8px auto 0; padding: 0 24px; }
-.arrows button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 50%; background: var(--chip); color: var(--fg); cursor: pointer; }
+.arrows button { display: grid; place-items: center; width: 40px; height: 40px; padding: 0 0 2px; border: 1px solid var(--rule); border-radius: 50%; background: var(--bg); font: 400 24px/1 var(--sans); color: var(--fg-strong); cursor: pointer; }
+.arrows button:hover:not(:disabled) { background: var(--chip); }
+.arrows button:disabled { opacity: 0.3; cursor: default; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 24px 0 0; font: 400 13px/20px var(--sans); color: var(--fg-2); }
+.legend > span { display: inline-flex; align-items: center; gap: 8px; }
 
 /* ---- notes and history ------------------------------------------------- */
 .note, .version { padding: 24px 0; border-top: 1px solid var(--rule); scroll-margin-top: 24px; }
@@ -1773,7 +1790,7 @@ button.step-head { cursor: pointer; }
 .toc a.on .d { background: var(--accent); }
 
 /* ---- AKQA's bar: a pill at the bottom, a panel once clicked ------------ */
-.bar { position: fixed; bottom: 60px; left: 50%; z-index: 30; box-sizing: border-box; width: 320px; height: 56px; overflow: hidden; border-radius: 100px; background: var(--bar-bg); box-shadow: 0 8px 40px rgba(0, 0, 0, 0.05); color: var(--bar-fg); -webkit-backdrop-filter: blur(25px); backdrop-filter: blur(25px); transform: translateX(-50%); transition: width 0.9s var(--spring), height 0.9s var(--spring), border-radius 0.9s var(--spring); }
+.bar { position: fixed; bottom: 60px; left: 50%; z-index: 30; box-sizing: border-box; width: 320px; height: 56px; overflow: hidden; border-radius: 100px; background: var(--bar-bg); box-shadow: 0 0 0 1px var(--bar-edge), 0 8px 40px rgba(0, 0, 0, 0.05); color: var(--bar-fg); -webkit-backdrop-filter: blur(25px); backdrop-filter: blur(25px); transform: translateX(-50%); transition: width 0.9s var(--spring), height 0.9s var(--spring), border-radius 0.9s var(--spring); }
 .bar.open { width: 600px; border-radius: 20px; }
 .bar-inner { position: absolute; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; }
 /* What the panel adds, folded to nothing in the pill, unfolded by the same spring. */
@@ -1785,13 +1802,13 @@ button.step-head { cursor: pointer; }
 .bar-list .item:hover, .bar-list .item.sel { background: var(--bar-chip-on); }
 .bar-list .badge { display: grid; flex: none; place-items: center; width: 24px; height: 24px; border-radius: 4px; background: #000; font: 500 10px/1 var(--sans); color: #fff; }
 .bar-list .what { display: flex; flex-direction: column; min-width: 0; }
-.bar-list .kind { font: 400 11px/14px var(--sans); color: var(--bar-muted); }
-.bar-list .label { overflow: hidden; font: 400 13px/18px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+.bar-list .kind { font: 400 12px/16px var(--sans); color: var(--bar-muted); }
+.bar-list .label { overflow: hidden; font: 400 15px/20px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
 .bar-rule { height: 1px; background: var(--bar-line); }
 .bar-line { position: relative; display: flex; align-items: center; min-height: 56px; padding: 0 40px 0 16px; box-sizing: border-box; font: 400 14px/20px var(--sans); }
 .bar-hint { position: absolute; top: 50%; left: 16px; right: 40px; overflow: hidden; color: var(--bar-hint); white-space: nowrap; pointer-events: none; transform: translateY(-50%); }
-.bar-hint span { display: inline-block; opacity: 0; filter: blur(4px); transition: opacity 0.5s, filter 0.5s; }
-.bar-hint span.in { opacity: 1; filter: blur(0); }
+.bar-hint span { display: inline-block; opacity: 0; transform: translateY(0.3em); transition: opacity 0.5s, transform 0.5s; }
+.bar-hint span.in { opacity: 1; transform: none; }
 .bar input { position: relative; z-index: 1; width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; font: inherit; color: var(--bar-fg); caret-color: var(--bar-fg); }
 .bar-menu { position: absolute; top: 50%; right: 16px; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; background: none; color: var(--bar-fg); cursor: pointer; transform: translateY(-50%); }
 .bar-menu span { position: absolute; width: 16px; height: 1px; border-radius: 1px; background: currentColor; transition: transform 0.3s; }
@@ -1810,7 +1827,7 @@ button.step-head { cursor: pointer; }
   .standing-inner { position: static; }
 }
 @media (max-width: 720px) {
-  .opener { font-size: 56px; }
+  .opener { font-size: 40px; }
   h1 { font-size: 32px; line-height: 40px; }
   .bar.open { width: calc(100vw - 32px); }
   .toc { display: none; }
@@ -1819,7 +1836,7 @@ button.step-head { cursor: pointer; }
   .bar, .bar-fold, .bar-hint span, .toc-card, .toc-bars, .toc-bars span { transition: none; }
 }
 @media print {
-  .top .link, .top .solid, .standing .copy, .actions button, .toc, .bar, .arrows { display: none; }
+  .top .link, .top .solid, .toc, .bar, .arrows { display: none; }
   .step .more { display: block; }
 }
 "##;
@@ -2086,6 +2103,12 @@ mod tests {
         note.attached_to = item.uid.clone();
         let all: ItemMap = BTreeMap::from([(1, item.clone()), (2, note)]);
         let (html, _) = page(&item, &all, None);
+        assert_eq!(html.matches(" data-copy=").count(), 1, "the command is offered once, at the top: {html}");
+        let legend = html.split("id=\"map\"").nth(1).and_then(|map| map.split_once("<div class=\"legend\">")).map(|(before, after)| (before.contains("class=\"strip\""), after.split("</div>").next().unwrap_or("")));
+        assert_eq!(legend.map(|(late, _)| late), Some(false), "the map has a legend above its strip: {html}");
+        for state in ["dot proposed\"></span>to approve", "dot open\"></span>pending", "dot progress\"></span>in progress", "dot done\"></span>done", "an arrow: what a step waits on"] {
+            assert!(legend.is_some_and(|(_, text)| text.contains(state)), "{state}: {legend:?}");
+        }
         let parts = [
             ("plan-goal", "Goal"),
             ("plan-what-is-known", "What is known"),
