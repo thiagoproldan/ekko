@@ -24,7 +24,8 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,14 @@ const HEAD_MOST: usize = 16 * 1024;
 
 /// The most connections answered at once; one more gets 503.
 const CONNECTIONS_MOST: usize = 64;
+
+/// How often a stream of `/events` looks for a page's new version
+/// (decision 1165).
+const LOOK: Duration = Duration::from_millis(200);
+
+/// How long a stream of `/events` stays silent before a comment, whose
+/// failed write finds a browser gone.
+const KEEP: Duration = Duration::from_secs(15);
 
 /// What `serve.json` holds: the server that runs, or the last one that did.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -273,6 +282,9 @@ struct Shared {
     last: AtomicU64,
     /// The connections being answered.
     open: AtomicUsize,
+    /// The pages served, by the path of their html, each with its board's
+    /// file, which a stream of `/events` watches.
+    pages: Mutex<BTreeMap<String, PathBuf>>,
 }
 
 impl Shared {
@@ -310,7 +322,7 @@ pub fn run(home: &Path, idle: Duration) -> Result<(), String> {
     let runtime = Runtime { pid: std::process::id(), port, version: VERSION.to_string(), token };
     save(home, &runtime).map_err(|error| format!("{} cannot be written: {error}", dir.join(RUNTIME).display()))?;
     log(home, &format!("started: version {VERSION}, 127.0.0.1:{port}, pid {}, stops after {} s idle", runtime.pid, idle.as_secs()));
-    let shared = Arc::new(Shared { home: home.to_path_buf(), runtime, began: Instant::now(), last: AtomicU64::new(0), open: AtomicUsize::new(0) });
+    let shared = Arc::new(Shared { home: home.to_path_buf(), runtime, began: Instant::now(), last: AtomicU64::new(0), open: AtomicUsize::new(0), pages: Mutex::default() });
     watch(Arc::clone(&shared), idle);
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -389,6 +401,11 @@ fn handle(shared: &Shared, mut stream: TcpStream) {
     let answer = match read_request(&mut stream) {
         Ok(request) => {
             let answer = match caller(shared.runtime.port, &stream, &request) {
+                Ok(_) if request.method == "GET" && request.path.split('?').next() == Some("/events") => {
+                    events(shared, &mut stream);
+                    shared.touch();
+                    return;
+                }
                 Ok(socket) => route(shared, &request, socket),
                 Err(why) => Answer::refuse(why, false),
             };
@@ -585,7 +602,7 @@ fn route(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
         },
         ("GET", path) => match query.split('&').find_map(|pair| pair.strip_prefix("token=")) {
             Some(token) if path.starts_with("/default/") || path.starts_with("/project/") => opened(shared, path, token),
-            _ => font(path).or_else(|| page(&shared.home, path)).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
+            _ => font(path).or_else(|| page(shared, path)).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
         },
         _ => Answer::text(405, "the server answers GET, and POST to /stop and /api/who"),
     }
@@ -626,7 +643,32 @@ fn same(a: &str, b: &str) -> bool {
 /// `/default/<uid>.html` on the default board, `/project/<name>/<uid>.js` on
 /// a project's, its name escaped as `encode` escapes it. Read from the board
 /// as it is now, so it needs no write to be current.
-fn page(home: &Path, path: &str) -> Option<Answer> {
+fn page(shared: &Shared, path: &str) -> Option<Answer> {
+    let (built, kind) = build(&shared.home, path)?;
+    let answer = match kind.as_str() {
+        "html" => secured(&built.html),
+        "js" => Answer::new(200, "text/javascript; charset=utf-8", crate::artifact::script(&built.version)),
+        _ => return None,
+    };
+    if let Ok(mut pages) = shared.pages.lock() {
+        pages.insert(built.path, built.board);
+    }
+    Some(answer)
+}
+
+/// A page as the board holds it now.
+struct Built {
+    html: String,
+    version: String,
+    /// The path of its html, the one a browser shows.
+    path: String,
+    /// The board's file, which every write replaces.
+    board: PathBuf,
+}
+
+/// The page a path names, built from its board, and the kind the path asks
+/// for: html, or js for the script holding its version.
+fn build(home: &Path, path: &str) -> Option<(Built, String)> {
     let segments: Vec<String> = path.strip_prefix('/')?.split('/').map(decode).collect::<Option<_>>()?;
     let (file, board) = segments.split_last()?;
     let (uid, kind) = file.rsplit_once('.')?;
@@ -647,10 +689,51 @@ fn page(home: &Path, path: &str) -> Option<Answer> {
     let index = crate::ekko::uid_index(&all);
     let item = index.get(uid).and_then(|id| all.get(id)).filter(|item| item.artifact.is_some() && item.trashed.is_none())?;
     let (html, version) = crate::artifact::page(item, &all, folder.as_deref());
-    match kind {
-        "html" => Some(secured(&html)),
-        "js" => Some(Answer::new(200, "text/javascript; charset=utf-8", crate::artifact::script(&version))),
-        _ => None,
+    let page = format!("{}.html", path.rsplit_once('.')?.0);
+    Some((Built { html, version, path: page, board: dir.join("storage").join("storage.json") }, kind.to_string()))
+}
+
+/// `GET /events`: the version of every page this server has served, as
+/// Server-Sent Events on one stream a browser shares among its tabs
+/// (decision 1165). It opens with each page's version, so a tab that missed
+/// a write while it connected still learns of it; then it sends a page's
+/// version whenever a write changes it, looking every `LOOK`, and a comment
+/// after `KEEP` of silence. It ends once a write to the browser fails.
+fn events(shared: &Shared, stream: &mut TcpStream) {
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\nretry: 1000\n\n";
+    if stream.write_all(head.as_bytes()).is_err() {
+        return;
+    }
+    // What was sent of each page: its board's file then, and its version,
+    // empty while the board holds no such page.
+    let mut sent: BTreeMap<String, (Option<(u64, u64)>, String)> = BTreeMap::new();
+    let mut quiet = Instant::now();
+    loop {
+        let pages: Vec<(String, PathBuf)> = shared.pages.lock().map(|pages| pages.clone().into_iter().collect()).unwrap_or_default();
+        let mut out = String::new();
+        for (path, board) in pages {
+            // A write replaces the file by rename, so a new inode is a write.
+            let stamp = fs::metadata(&board).ok().map(|meta| (meta.dev(), meta.ino()));
+            if sent.get(&path).is_some_and(|(seen, _)| *seen == stamp) {
+                continue;
+            }
+            let version = build(&shared.home, &path).map(|(built, _)| built.version).unwrap_or_default();
+            if !version.is_empty() && sent.get(&path).is_none_or(|(_, last)| *last != version) {
+                out.push_str(&format!("event: version\ndata: {path} {version}\n\n"));
+            }
+            sent.insert(path, (stamp, version));
+        }
+        if out.is_empty() && quiet.elapsed() >= KEEP {
+            out.push_str(": keep\n\n");
+        }
+        if !out.is_empty() {
+            if stream.write_all(out.as_bytes()).and_then(|()| stream.flush()).is_err() {
+                return;
+            }
+            quiet = Instant::now();
+        }
+        shared.touch();
+        std::thread::sleep(LOOK);
     }
 }
 
@@ -785,6 +868,7 @@ mod tests {
             began: Instant::now(),
             last: AtomicU64::new(0),
             open: AtomicUsize::new(0),
+            pages: Mutex::default(),
         }
     }
 

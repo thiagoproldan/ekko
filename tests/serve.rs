@@ -409,3 +409,64 @@ fn a_write_is_the_users_only_from_the_page_opened_with_the_token() {
     let log = fs::read_to_string(state(&home).join("serve.log")).unwrap();
     assert!(log.contains("refused POST /api/who: process ") && log.contains("runs under Claude Code"), "{log}");
 }
+
+/// The next event on a stream of /events, comments and other fields passed
+/// over: its name and data, or none when nothing came within `wait`.
+fn next_event(reader: &mut BufReader<TcpStream>, wait: Duration) -> Option<(String, String)> {
+    reader.get_ref().set_read_timeout(Some(wait)).unwrap();
+    let (mut name, mut data) = (String::new(), String::new());
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() && !data.is_empty() {
+            return Some((name, data));
+        }
+        if let Some(value) = line.strip_prefix("event: ") {
+            name = value.to_string();
+        } else if let Some(value) = line.strip_prefix("data: ") {
+            data = value.to_string();
+        }
+    }
+}
+
+/// A stream of /events opens with the version of the page the server served,
+/// sends nothing on a write the page does not show, and carries the page's
+/// new version within a second of a write from the CLI that changes it (task
+/// 1104).
+#[test]
+fn a_write_from_the_cli_reaches_an_open_stream_of_events_within_a_second() {
+    let home = Home::new();
+    let written = artifact(&home);
+    let (port, path) = split(written["page"].as_str().unwrap());
+    let host = format!("127.0.0.1:{port}");
+    assert_eq!(get(port, &path, &host).0, 200, "the page, served once, which the stream then follows");
+
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    write!(stream, "GET /events HTTP/1.1\r\nHost: {host}\r\nAccept: text/event-stream\r\n\r\n").unwrap();
+    let mut reader = BufReader::new(stream);
+    reader.get_ref().set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut head = String::new();
+    while !head.ends_with("\r\n\r\n") {
+        assert!(reader.read_line(&mut head).unwrap() > 0, "{head}");
+    }
+    assert!(head.starts_with("HTTP/1.1 200 ") && head.contains("Content-Type: text/event-stream\r\n"), "{head}");
+    let (name, data) = next_event(&mut reader, Duration::from_secs(5)).expect("the page's version, at once");
+    let (page, before) = data.split_once(' ').unwrap();
+    assert_eq!((name.as_str(), page), ("version", path.as_str()), "{data}");
+
+    assert!(ekko(&home).args(["--task", "Not on the page"]).output().unwrap().status.success());
+    assert_eq!(next_event(&mut reader, Duration::from_millis(800)), None, "a write the page does not show changes no version");
+
+    let began = Instant::now();
+    let checked = ekko(&home).args(["--check", "1"]).output().unwrap();
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stderr));
+    let (name, data) = next_event(&mut reader, Duration::from_secs(1)).expect("the new version, within a second");
+    let took = began.elapsed();
+    assert!(took < Duration::from_secs(1), "{took:?}");
+    let (page, after) = data.split_once(' ').unwrap();
+    assert_eq!((name.as_str(), page), ("version", path.as_str()), "{data}");
+    assert_ne!(after, before, "the artifact done is a new version");
+}
