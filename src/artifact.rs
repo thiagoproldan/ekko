@@ -630,8 +630,16 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         esc(title),
         item.id
     );
+    // The page follows its version (task 1104). Served, it does so through
+    // the one stream of /events a browser holds: the tab holding the Web
+    // Lock opens it and relays it to the others (decision 1165), and every
+    // tab loads its script once whenever the stream opens, so a new server
+    // learns the page and a version missed meanwhile still comes. As a
+    // file, or without locks or BroadcastChannel, it loads its script every
+    // POLL_MS. A version waits while a field other than the bar's, whose
+    // words ekkoKeep keeps, holds words being typed.
     let after = format!(
-        "\";\n  window.ekkoArtifact = function (seen) {{ if (seen === version) return; if (window.ekkoKeep) ekkoKeep(); location.reload(); }};\n  setInterval(function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }}, {POLL_MS});\n  if (location.protocol === \"http:\") fetch(\"/api/who\", {{ method: \"POST\" }}).then(function (answer) {{ return answer.json(); }}).then(function (who) {{\n    var text = who.person ? \" \\u00b7 writes as you\" : \" \\u00b7 reads only: \" + who.why;\n    document.getElementById(\"who\").textContent = text;\n  }}, function () {{}});\n}})();</script>\n</body>\n</html>\n",
+        "\";\n  var check = function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }};\n  window.ekkoArtifact = function (seen) {{\n    if (seen === version) return;\n    var field = document.activeElement;\n    if (field && (field.tagName === \"TEXTAREA\" || field.isContentEditable || (field.tagName === \"INPUT\" && !field.closest(\"#bar\")))) {{\n      field.addEventListener(\"blur\", function () {{ ekkoArtifact(seen); }}, {{ once: true }});\n      return;\n    }}\n    if (window.ekkoKeep) ekkoKeep();\n    location.reload();\n  }};\n  if (location.protocol === \"http:\" && navigator.locks && window.BroadcastChannel && window.EventSource) {{\n    var channel = new BroadcastChannel(\"ekko-events\");\n    var take = function (data) {{\n      if (data === \"open\") return check();\n      var at = data.indexOf(\" \");\n      if (data.slice(0, at) === location.pathname) ekkoArtifact(data.slice(at + 1));\n    }};\n    channel.onmessage = function (message) {{ take(message.data); }};\n    navigator.locks.request(\"ekko-events\", function () {{\n      return new Promise(function () {{\n        var source = new EventSource(\"/events\");\n        source.onopen = function () {{ channel.postMessage(\"open\"); check(); }};\n        source.addEventListener(\"version\", function (event) {{ channel.postMessage(event.data); take(event.data); }});\n      }});\n    }});\n  }} else setInterval(check, {POLL_MS});\n  if (location.protocol === \"http:\") fetch(\"/api/who\", {{ method: \"POST\" }}).then(function (answer) {{ return answer.json(); }}).then(function (who) {{\n    var text = who.person ? \" \\u00b7 writes as you\" : \" \\u00b7 reads only: \" + who.why;\n    document.getElementById(\"who\").textContent = text;\n  }}, function () {{}});\n}})();</script>\n</body>\n</html>\n",
         js_string(uid)
     );
     let version = format!("{:016x}", fnv_from(fnv(before.as_bytes()), after.as_bytes()));
@@ -1053,8 +1061,9 @@ pub fn refresh(dir: &Path, all: &ItemMap, folder: Option<&Path>) {
 }
 
 /// The script beside a page that holds its `version`, which the page loads
-/// every `POLL_MS` and reloads on when it changed: from the file next to a
-/// written page, or from `ekko serve` (task 1102).
+/// every `POLL_MS` as a file, or each time its stream of /events opens when
+/// served (task 1104), and reloads on when it changed: from the file next
+/// to a written page, or from `ekko serve` (task 1102).
 pub fn script(version: &str) -> String {
     format!("ekkoArtifact(\"{version}\");\n")
 }
