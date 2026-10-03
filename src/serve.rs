@@ -389,11 +389,18 @@ fn log(home: &Path, line: &str) {
 /// what a client asked of it. The line as written.
 fn record(home: &Path, line: &str) -> String {
     let line = format!("{} {line}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
-    let _ = fs::create_dir_all(dir(home));
-    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(dir(home).join(LOG)) {
-        let _ = writeln!(file, "{line}");
-    }
+    append(&dir(home), &line);
     line
+}
+
+/// Appends `line` to the log in `dir` as one write, which O_APPEND lands
+/// whole: writeln! makes two, the text and the newline, and two requests
+/// logging at once joined their lines (task 1241).
+fn append(dir: &Path, line: &str) {
+    let _ = fs::create_dir_all(dir);
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(dir.join(LOG)) {
+        let _ = file.write_all(format!("{line}\n").as_bytes());
+    }
 }
 
 /// Answers the one request on `stream`, then closes it.
@@ -1161,5 +1168,27 @@ mod tests {
         let page = get("/default/nothing.html");
         assert_eq!((page.code, page.cache), (404, "no-store"), "anything but a font is kept by none");
         assert!(String::from_utf8_lossy(&page.bytes()).contains("\r\nCache-Control: no-store\r\n"));
+    }
+
+    /// Lines logged at once, as two tabs reloading together log theirs,
+    /// come out each whole and on its own line (task 1241).
+    #[test]
+    fn lines_logged_at_once_stay_whole() {
+        let dir = std::env::temp_dir().join(format!("ekko-serve-log-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        std::thread::scope(|scope| {
+            for thread in 0..8 {
+                let dir = &dir;
+                scope.spawn(move || (0..250).for_each(|n| append(dir, &format!("thread {thread}, line {n}"))));
+            }
+        });
+        let log = fs::read_to_string(dir.join(LOG)).unwrap();
+        let mut lines: Vec<&str> = log.lines().collect();
+        let broken: Vec<&&str> = lines.iter().filter(|line| line.matches("thread").count() != 1).take(3).collect();
+        assert!(broken.is_empty(), "lines joined or empty: {broken:?}");
+        lines.sort_unstable();
+        lines.dedup();
+        assert_eq!(lines.len(), 2000);
+        fs::remove_dir_all(&dir).ok();
     }
 }
