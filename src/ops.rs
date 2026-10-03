@@ -628,6 +628,9 @@ impl<'a> Draft<'a> {
         if let Some(step) = comment.step.as_ref().filter(|step| !artifact.steps.iter().any(|known| &known.key == *step)) {
             return Err(invalid(format!("the plan has no step {step}")));
         }
+        if let Some(why) = crate::artifact::theme_refused(comment.theme.as_deref(), comment.color.as_deref()) {
+            return Err(invalid(why));
+        }
         let text = match (text.trim(), &comment.quote, &comment.replacement) {
             ("", Some(quote), Some(replacement)) if replacement.is_empty() => format!("Delete: {}", quote.exact),
             ("", Some(quote), Some(replacement)) => format!("Replace {} with {replacement}", quote.exact),
@@ -649,6 +652,57 @@ impl<'a> Draft<'a> {
         let note = self.create(&spec)?;
         self.item(note).comment = Some(Box::new(comment));
         Ok(note)
+    }
+
+    /// The person's comment `uid` on the artifact `on`, by id: refused when
+    /// it is no comment of that artifact, is in the trash, or a session
+    /// wrote it, since a session's words are its own to change.
+    fn own_comment(&self, on: &Ref, uid: &str) -> Result<u32, EkkoError> {
+        let artifact = self.resolve(on)?;
+        let of = self.data[&artifact].uid.clone();
+        let found = self.data.values().find(|note| note.uid.as_deref() == Some(uid));
+        let Some(note) = found.filter(|note| note.comment.is_some() && note.trashed.is_none() && of.is_some() && note.attached_to == of) else {
+            return Err(invalid(format!("{uid} is no comment on artifact {artifact}")));
+        };
+        if note.created_by.as_ref().is_some_and(|by| by.pid.is_some()) {
+            return Err(invalid(format!("comment {} is a session's, and only the session changes it", note.id)));
+        }
+        Ok(note.id)
+    }
+
+    /// Changes the person's comment `uid` on the artifact `on` (task 1213):
+    /// its text, its theme or both; what is `None` stays as it is.
+    pub fn edit_comment(&mut self, on: &Ref, uid: &str, text: Option<&str>, theme: Option<&str>, color: Option<&str>) -> Result<u32, EkkoError> {
+        let id = self.own_comment(on, uid)?;
+        if let Some(why) = crate::artifact::theme_refused(theme, color) {
+            return Err(invalid(why));
+        }
+        if let Some(text) = text {
+            if text.trim().is_empty() {
+                return Err(EkkoError::MissingDesc);
+            }
+            crate::ekko::fits("description", text)?;
+        }
+        let note = self.item(id);
+        if let Some(text) = text {
+            note.description = text.to_string();
+        }
+        let comment = note.comment.as_mut().expect("own_comment found a comment");
+        if let Some(theme) = theme {
+            comment.theme = Some(theme.to_string());
+        }
+        if let Some(color) = color {
+            comment.color = Some(color.to_string());
+        }
+        Ok(id)
+    }
+
+    /// Puts the person's comment `uid` on the artifact `on` in the trash,
+    /// which keeps it 30 days (task 1213).
+    pub fn trash_comment(&mut self, on: &Ref, uid: &str) -> Result<u32, EkkoError> {
+        let id = self.own_comment(on, uid)?;
+        self.item(id).trashed = Some(chrono::Local::now().timestamp_millis());
+        Ok(id)
     }
 
     fn item(&mut self, id: u32) -> &mut Item {
@@ -2969,6 +3023,69 @@ mod tests {
         let cleared = batch(&ekko, &[json!({"op": "update", "item": 1, "due": null})]).unwrap();
         assert_eq!(cleared.data[&1].due_date, None);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The person changes and deletes their own comments only, and only on
+    /// the artifact they are on (task 1213); a theme takes one of the
+    /// colors and a short name; a deleted comment goes to the trash, where
+    /// it is no longer changed.
+    #[test]
+    fn the_person_edits_and_trashes_their_own_comments_only() {
+        let (me, _, _) = crate::holder::test_sessions();
+        let (board, dir) = board("comments");
+        let person = Ekko::new(Storage::new(&dir).unwrap()).acting_as(Actor::person());
+        let session = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me);
+        let plan = "Ship\n\n## Goal\nWhy.\n## What is known\nFacts.\n## Design\nHow.\n## Risks and open questions\nNone.";
+        let spec: ArtifactSpec = serde_json::from_value(json!({"text": plan, "steps": [{"key": "one", "text": "First"}]})).unwrap();
+        let mut draft = Draft::open(&session).unwrap();
+        let (first, second) = (draft.artifact(&spec).unwrap(), draft.artifact(&spec).unwrap());
+        draft.commit(false).unwrap();
+        let comment = |theme: Option<&str>, color: Option<&str>| crate::item::Comment {
+            version: 1,
+            quote: Some(crate::item::Quote { exact: "Facts.".into(), prefix: String::new(), suffix: String::new(), section: String::new(), unknown: Default::default() }),
+            replacement: None,
+            step: None,
+            reply_to: None,
+            sent: None,
+            resolved: None,
+            theme: theme.map(str::to_string),
+            color: color.map(str::to_string),
+            unknown: Default::default(),
+        };
+        let long = "x".repeat(41);
+        for (theme, color) in [(None, Some("teal")), (Some(""), Some("blue")), (Some(" Question"), Some("blue")), (Some(long.as_str()), None), (Some("a\nb"), None)] {
+            let mut draft = Draft::open(&person).unwrap();
+            assert!(draft.comment(&Ref::Id(first), "Why?", comment(theme, color)).is_err(), "{theme:?} in {color:?}");
+        }
+        let mut draft = Draft::open(&person).unwrap();
+        let mine = draft.comment(&Ref::Id(first), "Why facts?", comment(Some("Question"), Some("blue"))).unwrap();
+        draft.commit(false).unwrap();
+        let mut draft = Draft::open(&session).unwrap();
+        let theirs = draft.comment(&Ref::Id(first), "Because.", comment(None, None)).unwrap();
+        draft.commit(false).unwrap();
+        let uid = |id: u32| board.storage.get().unwrap()[&id].uid.clone().unwrap();
+
+        let mut draft = Draft::open(&person).unwrap();
+        assert!(draft.edit_comment(&Ref::Id(first), &uid(theirs), Some("Mine now"), None, None).is_err(), "a session's comment is the session's");
+        assert!(draft.trash_comment(&Ref::Id(first), &uid(theirs)).is_err(), "a session's comment is the session's");
+        assert!(draft.edit_comment(&Ref::Id(second), &uid(mine), Some("Elsewhere"), None, None).is_err(), "a comment on another artifact");
+        assert!(draft.edit_comment(&Ref::Id(first), &uid(first), Some("The plan"), None, None).is_err(), "the artifact is no comment");
+        assert!(draft.edit_comment(&Ref::Id(first), &uid(mine), Some("Which facts?"), Some("Dúvida"), Some("teal")).is_err(), "an unknown color");
+        assert!(draft.edit_comment(&Ref::Id(first), &uid(mine), Some("  "), None, None).is_err(), "a comment keeps words");
+        draft.edit_comment(&Ref::Id(first), &uid(mine), Some("Which facts?"), Some("Dúvida"), Some("pink")).unwrap();
+        draft.commit(false).unwrap();
+        let data = board.storage.get().unwrap();
+        let kept = data[&mine].comment.as_deref().unwrap();
+        assert_eq!((data[&mine].description.as_str(), kept.theme.as_deref(), kept.color.as_deref()), ("Which facts?", Some("Dúvida"), Some("pink")));
+        assert_eq!(data[&theirs].description, "Because.", "the session's comment is untouched");
+
+        let mut draft = Draft::open(&person).unwrap();
+        draft.trash_comment(&Ref::Id(first), &uid(mine)).unwrap();
+        draft.commit(false).unwrap();
+        assert!(board.storage.get().unwrap()[&mine].trashed.is_some(), "in the trash, kept 30 days");
+        let mut draft = Draft::open(&person).unwrap();
+        assert!(draft.edit_comment(&Ref::Id(first), &uid(mine), Some("Back"), None, None).is_err(), "a comment in the trash is not changed");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -50,6 +50,27 @@ const KEY_LONGEST: usize = 24;
 /// How often the page looks for a newer version of itself, in milliseconds.
 const POLL_MS: u32 = 2_000;
 
+/// The themes a comment can carry (task 1213): each a color, and the name
+/// the page offers for it until the person renames it there. Six, between
+/// Kindle's four or five and Zotero's eight (decision 1214).
+pub const THEMES: [(&str, &str); 6] =
+    [("yellow", "Note"), ("blue", "Question"), ("pink", "Problem"), ("green", "Agree"), ("purple", "Change"), ("orange", "Idea")];
+
+/// The longest name a theme takes.
+const THEME_LONGEST: usize = 40;
+
+/// Why a comment cannot carry the theme named `theme` in `color`, if it
+/// cannot: a color that is not one of `THEMES`, or a name that is not one
+/// short line.
+pub fn theme_refused(theme: Option<&str>, color: Option<&str>) -> Option<String> {
+    if let Some(color) = color.filter(|color| !THEMES.iter().any(|(key, _)| key == color)) {
+        return Some(format!("{color:?} is not a theme's color: the colors are {}", THEMES.map(|(key, _)| key).join(", ")));
+    }
+    let theme = theme?;
+    let fits = !theme.trim().is_empty() && theme.trim() == theme && theme.chars().count() <= THEME_LONGEST && !theme.chars().any(char::is_control);
+    (!fits).then(|| format!("a theme's name is one line of 1 to {THEME_LONGEST} characters, with no space at either end: {theme:?}"))
+}
+
 /// A step as a session gives it, to write over the plan's steps.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -379,8 +400,9 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     let mut notes: Vec<&Item> =
         all.values().filter(|note| !note.is_task && note.trashed.is_none() && !uid.is_empty() && note.attached_to.as_deref() == Some(uid)).collect();
     notes.sort_by_key(|note| std::cmp::Reverse((note.timestamp, note.id)));
-    // A comment on the plan's words goes in the margin beside them (task
-    // 1105), oldest first; the other notes under Notes.
+    // A comment on the plan's words is those words, colored (task 1213),
+    // and an entry under Comments, oldest first; the other notes go under
+    // Notes.
     let (mut comments, notes): (Vec<&Item>, Vec<&Item>) = notes.into_iter().partition(|note| note.comment.is_some());
     comments.reverse();
     let tasks = steps.iter().filter(|step| step.task.is_some() && step.class != "cancelled").count();
@@ -433,7 +455,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         let _ = write!(body, "<li>{}</li>", plural(notes.len(), "note"));
     }
     if !comments.is_empty() {
-        let _ = write!(body, "<li>{}</li>", plural(comments.len(), "comment"));
+        let _ = write!(body, "<li><a href=\"#comments\">{}</a></li>", plural(comments.len(), "comment"));
     }
     let _ = write!(body, "<li>Version {version}</li></ul><h1>{}</h1><div class=\"byline\">", esc(title));
     if let Some(by) = &by {
@@ -444,11 +466,12 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     }
     let _ = write!(
         body,
-        "<span>{} min read</span><span>\u{b7}</span><span>Updated {}</span></div><div class=\"actions\"><span>{}</span><span>{}</span><span>v{version}</span></div>",
+        "<span>{} min read</span><span>\u{b7}</span><span>Updated {}</span></div><div class=\"actions\"><span>{}</span><span>{}</span>{}<span>v{version}</span></div>",
         reading_minutes(plan),
         esc(&when(item.updated_at.unwrap_or(item.timestamp))),
         plural(steps.len(), "step"),
-        plural(notes.len(), "note")
+        plural(notes.len(), "note"),
+        if comments.is_empty() { String::new() } else { format!("<span>{}</span>", plural(comments.len(), "comment")) }
     );
     let approval = standing.as_ref().and_then(|standing| standing.waiting);
     if let Some(question) = approval {
@@ -490,14 +513,39 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         }
         parts.push((id, heading.clone()));
     }
-    // The comments, as data the script anchors beside their words, or shows
-    // as outdated when the text no longer holds them.
-    let comments: Vec<serde_json::Value> = comments
+    // Comments (task 1213), the notebook of an ebook: each comment's words
+    // are colored in the text by the script, which also sorts these entries
+    // into reading order, keeps the ones whose words are gone, and makes
+    // them the words' aria-details. A reply goes under what it answers.
+    if !comments.is_empty() {
+        parts.push(("comments".to_string(), "Comments".to_string()));
+        body.push_str("<section class=\"part\" id=\"comments\" data-part=\"Comments\"><h2 class=\"opener\">Comments</h2><div class=\"filters\" role=\"toolbar\" aria-label=\"Which comments show\"></div><ol class=\"comments\">");
+        let known: Vec<&str> = comments.iter().filter_map(|note| note.uid.as_deref()).collect();
+        let answers = |note: &Item| note.comment.as_ref().and_then(|comment| comment.reply_to.as_deref()).filter(|to| known.contains(to)).map(str::to_string);
+        for note in comments.iter().filter(|note| answers(note).is_none()) {
+            let replies = comments.iter().filter(|reply| reply.uid.is_some() && answers(reply).as_deref() == note.uid.as_deref());
+            comment_entry(&mut body, note, &replies.collect::<Vec<_>>());
+        }
+        body.push_str("</ol></section>");
+    }
+    // The comments as data the script anchors to their words, and the
+    // themes it offers; both are written even with no comment yet, for the
+    // first one.
+    let data: Vec<serde_json::Value> = comments
         .iter()
-        .map(|note| serde_json::json!({"id": note.id, "uid": note.uid, "text": note.description, "when": when(note.timestamp), "by": written_by(note), "comment": note.comment}))
+        .map(|note| {
+            let mine = note.created_by.as_ref().is_none_or(|by| by.pid.is_none());
+            serde_json::json!({"id": note.id, "uid": note.uid, "text": note.description, "when": when(note.timestamp), "by": written_by(note), "mine": mine, "comment": note.comment})
+        })
         .collect();
-    let comments = serde_json::to_string(&comments).unwrap_or_default().replace('<', "\\u003c");
-    let _ = write!(body, "<aside class=\"margin\" aria-label=\"Comments\"></aside><script type=\"application/json\" id=\"comments\">{comments}</script>");
+    let script_data = |value: &serde_json::Value| value.to_string().replace('<', "\\u003c");
+    let themes = serde_json::json!(THEMES.map(|(color, name)| [color, name]));
+    let _ = write!(
+        body,
+        "<script type=\"application/json\" id=\"comments-data\">{}</script><script type=\"application/json\" id=\"themes\">{}</script>",
+        script_data(&serde_json::json!(data)),
+        script_data(&themes)
+    );
 
     // Steps: AKQA's numbered items, each with its task, opening in place to
     // the rest of its text and when it is done.
@@ -626,7 +674,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     for (id, name) in &parts {
         let _ = write!(body, "<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{}</span></a></li>", esc(name));
     }
-    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-inner\"><div class=\"bar-fold list-fold\"><div class=\"bar-list\" role=\"listbox\"></div><div class=\"bar-rule\"></div></div><div class=\"bar-fold quote-fold\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-why\"></div><div class=\"bar-rule\"></div></div><div class=\"bar-line\"><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
+    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-inner\"><div class=\"bar-fold list-fold\"><div class=\"fold-in\"><div class=\"bar-list\" role=\"listbox\"></div><div class=\"bar-rule\"></div></div></div><div class=\"bar-fold quote-fold\"><div class=\"fold-in\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-themes\" role=\"radiogroup\" aria-label=\"Theme\"></div><div class=\"bar-why\"></div><div class=\"bar-rule\"></div></div></div><div class=\"bar-line\"><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea><button class=\"bar-send\" type=\"button\" aria-label=\"Send the comment\" hidden>\u{2191}</button><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
     let (plan_parts, ours): (Vec<_>, Vec<_>) = parts.iter().partition(|(id, _)| id.starts_with("plan-"));
     if let Some((id, _)) = plan_parts.first() {
         let _ = write!(body, "<a href=\"#{id}\">Plan</a>");
@@ -654,7 +702,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     // POLL_MS. A version waits while a field other than the bar's, whose
     // words ekkoKeep keeps, holds words being typed.
     let after = format!(
-        "\";\n  var check = function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }};\n  window.ekkoArtifact = function (seen) {{\n    if (seen === version) return;\n    var field = document.activeElement;\n    if (field && (field.tagName === \"TEXTAREA\" || field.isContentEditable || (field.tagName === \"INPUT\" && !field.closest(\"#bar\")))) {{\n      field.addEventListener(\"blur\", function () {{ ekkoArtifact(seen); }}, {{ once: true }});\n      return;\n    }}\n    if (window.ekkoKeep) ekkoKeep();\n    location.reload();\n  }};\n  if (location.protocol === \"http:\" && navigator.locks && window.BroadcastChannel && window.EventSource) {{\n    var channel = new BroadcastChannel(\"ekko-events\");\n    var take = function (data) {{\n      if (data === \"open\") return check();\n      var at = data.indexOf(\" \");\n      if (data.slice(0, at) === location.pathname) ekkoArtifact(data.slice(at + 1));\n    }};\n    channel.onmessage = function (message) {{ take(message.data); }};\n    navigator.locks.request(\"ekko-events\", function () {{\n      return new Promise(function () {{\n        var source = new EventSource(\"/events\");\n        source.onopen = function () {{ channel.postMessage(\"open\"); check(); }};\n        source.addEventListener(\"version\", function (event) {{ channel.postMessage(event.data); take(event.data); }});\n      }});\n    }});\n  }} else setInterval(check, {POLL_MS});\n  if (location.protocol === \"http:\") fetch(\"/api/who\", {{ method: \"POST\" }}).then(function (answer) {{ return answer.json(); }}).then(function (who) {{\n    var text = who.person ? \" \\u00b7 writes as you\" : \" \\u00b7 reads only: \" + who.why;\n    document.getElementById(\"who\").textContent = text;\n    if (who.person) document.body.dataset.writes = \"\";\n  }}, function () {{}});\n}})();</script>\n</body>\n</html>\n",
+        "\";\n  var check = function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }};\n  window.ekkoArtifact = function (seen) {{\n    if (seen === version) return;\n    var field = document.activeElement;\n    if (field && (field.tagName === \"TEXTAREA\" || field.isContentEditable || (field.tagName === \"INPUT\" && !field.closest(\".bar-line\")))) {{\n      field.addEventListener(\"blur\", function () {{ ekkoArtifact(seen); }}, {{ once: true }});\n      return;\n    }}\n    if (window.ekkoKeep) ekkoKeep();\n    location.reload();\n  }};\n  if (location.protocol === \"http:\" && navigator.locks && window.BroadcastChannel && window.EventSource) {{\n    var channel = new BroadcastChannel(\"ekko-events\");\n    var take = function (data) {{\n      if (data === \"open\") return check();\n      var at = data.indexOf(\" \");\n      if (data.slice(0, at) === location.pathname) ekkoArtifact(data.slice(at + 1));\n    }};\n    channel.onmessage = function (message) {{ take(message.data); }};\n    navigator.locks.request(\"ekko-events\", function () {{\n      return new Promise(function () {{\n        var source = new EventSource(\"/events\");\n        source.onopen = function () {{ channel.postMessage(\"open\"); check(); }};\n        source.addEventListener(\"version\", function (event) {{ channel.postMessage(event.data); take(event.data); }});\n      }});\n    }});\n  }} else setInterval(check, {POLL_MS});\n  if (location.protocol === \"http:\") fetch(\"/api/who\", {{ method: \"POST\" }}).then(function (answer) {{ return answer.json(); }}).then(function (who) {{\n    var text = who.person ? \" \\u00b7 writes as you\" : \" \\u00b7 reads only: \" + who.why;\n    document.getElementById(\"who\").textContent = text;\n    if (who.person) document.body.dataset.writes = \"\";\n  }}, function () {{}});\n}})();</script>\n</body>\n</html>\n",
         js_string(uid)
     );
     let version = format!("{:016x}", fnv_from(fnv(before.as_bytes()), after.as_bytes()));
@@ -702,6 +750,55 @@ fn shown<'a>(artifact: &'a Artifact, all: &ItemMap) -> Vec<Shown<'a>> {
 fn written_by(item: &Item) -> Option<String> {
     let by = item.created_by.as_ref()?;
     Some(if by.pid.is_none() { "the user".to_string() } else { format!("a session, {}", by.label()) })
+}
+
+/// A comment's theme as the page shows it: its color, and the name it was
+/// written under, else its color's own name; one written before themes is
+/// in the first theme, as the page's filters count it (task 1213).
+fn theme_of(comment: &crate::item::Comment) -> (&'static str, String) {
+    let (color, name) = THEMES.iter().find(|(key, _)| comment.color.as_deref() == Some(*key)).unwrap_or(&THEMES[0]);
+    (color, comment.theme.clone().unwrap_or_else(|| name.to_string()))
+}
+
+/// The state a comment is in: pending until a review sends it, then sent,
+/// and resolved once a session settles it.
+fn comment_state(comment: &crate::item::Comment) -> &'static str {
+    match (comment.resolved, comment.sent) {
+        (Some(_), _) => "resolved",
+        (None, Some(_)) => "sent",
+        (None, None) => "pending",
+    }
+}
+
+/// One entry under Comments: the comment's theme, id and state, who wrote
+/// it and when, the words it is on, its text, and the replies to it.
+fn comment_entry(body: &mut String, note: &Item, replies: &[&&Item]) {
+    let Some(comment) = note.comment.as_deref() else { return };
+    let (color, theme) = theme_of(comment);
+    let state = comment_state(comment);
+    let by = written_by(note).map(|by| format!("{} \u{b7} ", esc(&by))).unwrap_or_default();
+    let _ = write!(
+        body,
+        "<li class=\"entry\" id=\"comment-{id}\" role=\"comment\" data-id=\"{id}\" data-color=\"{color}\" data-state=\"{state}\"><button class=\"entry-head\" type=\"button\"><span class=\"theme\">{}</span><span class=\"id\">{id}</span><span class=\"state\">{state}</span><span class=\"meta\">{by}{}</span></button>",
+        esc(&theme),
+        esc(&when(note.timestamp)),
+        id = note.id
+    );
+    if let Some(quote) = &comment.quote {
+        let _ = write!(body, "<blockquote class=\"said\">{}</blockquote>", esc(&quote.exact));
+    }
+    let _ = write!(body, "<div class=\"text\">{}</div>", esc(&note.description));
+    for reply in replies {
+        let by = written_by(reply).map(|by| format!("{} \u{b7} ", esc(&by))).unwrap_or_default();
+        let _ = write!(
+            body,
+            "<div class=\"reply\" id=\"comment-{}\" role=\"comment\"><div class=\"meta\">{by}{}</div><div class=\"text\">{}</div></div>",
+            reply.id,
+            esc(&when(reply.timestamp)),
+            esc(&reply.description)
+        );
+    }
+    body.push_str("</li>");
 }
 
 /// Where an artifact stands, in the word its tag and its byline give.
@@ -1448,9 +1545,13 @@ const SCRIPT: &str = r##"(function () {
   var listFold = bar.querySelector(".list-fold"), navFold = bar.querySelector(".nav-fold"), menu = bar.querySelector(".bar-menu");
   var quoteFold = bar.querySelector(".quote-fold"), quoteText = bar.querySelector(".bar-quote-text"), why = bar.querySelector(".bar-why");
   var note = bar.querySelector(".bar-note"), line = bar.querySelector(".bar-line");
+  var themesRow = bar.querySelector(".bar-themes"), send = bar.querySelector(".bar-send");
   // The plan's words a comment is being written on, and whether it is on
   // its way to the board.
   var quoting = null, sending = false;
+  // Its theme, the comment it edits if it edits one, and whether the
+  // themes are being renamed.
+  var color = null, editing = null, renaming = false;
   var items = parts.map(function (part) {
     return { kind: "Section", badge: "\u00a7", label: part.dataset.part, target: part.id, search: ("section " + part.dataset.part).toLowerCase() };
   });
@@ -1464,6 +1565,12 @@ const SCRIPT: &str = r##"(function () {
     var text = Array.prototype.map.call(note.querySelectorAll(".text"), function (part) { return part.textContent; }).join(" ");
     items.push({ kind: kind + " " + note.id.slice(5), badge: kind.charAt(0), label: title, target: note.id,
       search: ("note notes " + kind + " " + kind + "s " + title + " " + (answer ? answer.textContent : "") + " " + text).toLowerCase() });
+  });
+  // The comments, by their theme, state, words and text (task 1213).
+  document.querySelectorAll("#comments .entry").forEach(function (entry) {
+    var theme = entry.querySelector(".theme").textContent, text = entry.querySelector(".text").textContent, said = entry.querySelector(".said");
+    items.push({ kind: "Comment " + entry.dataset.id + " \u00b7 " + theme, badge: theme.charAt(0), label: text, target: entry.id, comment: Number(entry.dataset.id),
+      search: ("comment comments " + theme + " " + entry.dataset.state + " " + text + " " + (said ? said.textContent : "")).toLowerCase() });
   });
   function find(text) {
     var words = text.toLowerCase().split(/\s+/).filter(Boolean);
@@ -1515,10 +1622,13 @@ const SCRIPT: &str = r##"(function () {
   }
 
   // The heights the spring moves to: the folds' content, or nothing folded.
+  // Each fold's content is measured on the box inside it, which the fold's
+  // own height does not hold: a fold's scrollHeight is never below the
+  // height it has, so a fold measured by it grows and never shrinks back.
   function size() {
     var open = bar.classList.contains("open");
-    var listHeight = open && !bar.dataset.navOnly && matches.length ? listFold.scrollHeight : 0;
-    var quoteHeight = open && quoting ? quoteFold.scrollHeight : 0;
+    var listHeight = open && !bar.dataset.navOnly && matches.length ? listFold.firstElementChild.offsetHeight : 0;
+    var quoteHeight = open && quoting ? quoteFold.firstElementChild.offsetHeight : 0;
     var navHeight = open && !quoting ? navFold.firstElementChild.offsetHeight : 0;
     listFold.style.height = listHeight + "px";
     quoteFold.style.height = quoteHeight + "px";
@@ -1547,69 +1657,177 @@ const SCRIPT: &str = r##"(function () {
   }
   function go(item) {
     close();
-    if (item.step) openStep(item.step); else jump(item.target);
+    if (item.comment && window.ekkoOpenComment) ekkoOpenComment(item.comment);
+    else if (item.step) openStep(item.step);
+    else jump(item.target);
   }
 
-  // A comment on the plan's words (task 1105), written the way one replies
-  // to part of an answer in Claude: the words picked come into the pill,
-  // quoted above its line, which becomes a field of its own that grows with
-  // the comment; Enter sends it to the board, Shift+Enter starts a line.
-  // The words stay marked in the text meanwhile, by ekkoMark.
-  function quote(words) {
+  // A comment on the plan's words (tasks 1105 and 1213), written the way
+  // one replies to part of an answer in Claude: the words picked come into
+  // the pill, quoted above the themes and its line, which becomes a field of
+  // its own that grows with the comment; Enter sends it to the board,
+  // Shift+Enter starts a line. The words
+  // stay marked in the text, in the theme's color, by ekkoMark. An edit of
+  // a comment is written the same way, over its text.
+  function themes() { return window.ekkoThemes || { list: [["yellow", "Note"]], names: function () { return { yellow: "Note" }; }, last: function () { return "yellow"; }, setLast: function () {}, rename: function () {} }; }
+  function chips() {
+    themesRow.textContent = "";
+    var named = themes().names();
+    themes().list.forEach(function (theme) {
+      var key = theme[0];
+      if (renaming) {
+        var field = document.createElement("input");
+        field.className = "bar-theme-name";
+        field.value = named[key];
+        field.maxLength = 40;
+        field.dataset.color = key;
+        field.setAttribute("aria-label", "Name of the " + key + " theme");
+        field.style.setProperty("--ink", "var(--ink-" + key + ")");
+        themesRow.appendChild(field);
+        return;
+      }
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "bar-theme";
+      chip.dataset.color = key;
+      chip.setAttribute("role", "radio");
+      chip.setAttribute("aria-checked", key === color ? "true" : "false");
+      chip.title = "Comment as " + named[key];
+      chip.style.setProperty("--ink", "var(--ink-" + key + ")");
+      chip.textContent = named[key];
+      themesRow.appendChild(chip);
+    });
+    var edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "bar-theme-edit";
+    edit.textContent = renaming ? "Done" : "Rename";
+    edit.title = renaming ? "Keep these names" : "Name the themes as you use them";
+    themesRow.appendChild(edit);
+  }
+  function pick(key) {
+    color = key;
+    quoteFold.style.setProperty("--ink", "var(--ink-" + key + ")");
+    Array.prototype.forEach.call(themesRow.querySelectorAll(".bar-theme"), function (chip) {
+      chip.setAttribute("aria-checked", chip.dataset.color === key ? "true" : "false");
+    });
+    if (window.ekkoMark) ekkoMark(quoting, key);
+  }
+  function renamed(keep) {
+    if (keep) {
+      var named = {};
+      Array.prototype.forEach.call(themesRow.querySelectorAll(".bar-theme-name"), function (field) { named[field.dataset.color] = field.value; });
+      themes().rename(named);
+    }
+    renaming = false;
+    chips();
+    size();
+    note.focus();
+  }
+  themesRow.addEventListener("click", function (event) {
+    var chip = event.target.closest(".bar-theme"), edit = event.target.closest(".bar-theme-edit");
+    if (chip) { pick(chip.dataset.color); note.focus(); }
+    if (!edit) return;
+    if (renaming) return renamed(true);
+    renaming = true;
+    chips();
+    size();
+    themesRow.querySelector(".bar-theme-name[data-color=\"" + color + "\"]").select();
+  });
+  themesRow.addEventListener("keydown", function (event) {
+    if (!event.target.matches(".bar-theme-name")) return;
+    if (event.key === "Enter") { event.preventDefault(); renamed(true); }
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); renamed(false); }
+  });
+  function quote(words, key, edited) {
+    if (editing && !edited) note.value = "";
     quoting = words;
+    editing = edited || null;
+    renaming = false;
     quoteText.textContent = words.exact;
     why.textContent = "";
     input.hidden = true;
     note.hidden = false;
+    menu.hidden = true;
+    bar.classList.add("quoting");
+    send.hidden = false;
+    note.placeholder = editing ? "Edit the comment" : "Comment on these words";
+    send.setAttribute("aria-label", editing ? "Save the comment" : "Send the comment");
+    send.title = editing ? "Save (Enter)" : "Send (Enter)";
+    chips();
+    pick(key || themes().last());
     grow();
-    if (window.ekkoMark) ekkoMark(words);
     open(false);
   }
-  window.ekkoQuote = quote;
+  window.ekkoQuote = function (words, key) { quote(words, key, null); };
+  window.ekkoEdit = function (target) {
+    quote(target.quote || { exact: "" }, target.color, target);
+    note.value = target.text;
+    grow();
+  };
   function unquote() {
     quoting = null;
+    editing = null;
+    renaming = false;
+    color = null;
     why.textContent = "";
     quoteText.textContent = "";
+    themesRow.textContent = "";
     note.value = "";
     note.hidden = true;
     input.hidden = false;
+    send.hidden = true;
+    menu.hidden = false;
+    bar.classList.remove("quoting");
     grow();
     if (window.ekkoMark) ekkoMark(null);
   }
+  // The field one line high until the comment needs more. Empty, its rows
+  // set it: a placeholder measured while the pill still widens would wrap,
+  // and keep the field two lines high once it is wide.
   function grow() {
     note.style.height = "auto";
-    if (!note.hidden) note.style.height = note.scrollHeight + "px";
+    if (!note.hidden && note.value) note.style.height = note.scrollHeight + "px";
+    send.disabled = sending || !note.value.trim();
     size();
   }
+  bar.addEventListener("transitionend", function (event) { if (event.target === bar && event.propertyName === "width" && quoting) grow(); });
   function refused(text) {
     why.textContent = text;
     size();
   }
   function comment() {
     if (!note.value.trim()) return refused("Write the comment first.");
-    var article = document.querySelector("article.prose");
-    var posted = { page: location.pathname, text: note.value, comment: { version: Number(article.dataset.version), quote: quoting } };
+    var article = document.querySelector("article.prose"), name = themes().names()[color];
+    var path = editing ? "/api/comment/edit" : "/api/comment";
+    var posted = editing
+      ? { page: location.pathname, uid: editing.uid, text: note.value, theme: name, color: color }
+      : { page: location.pathname, text: note.value, comment: { version: Number(article.dataset.version), quote: quoting, theme: name, color: color } };
     // Sent, it is no longer kept across a reload: the write itself makes
     // the new version that reloads the page.
     sending = true;
     note.readOnly = true;
-    fetch("/api/comment", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(posted) })
-      .then(function (answer) { return answer.json().then(function (value) { return { ok: answer.ok, value: value }; }); })
+    send.disabled = true;
+    why.textContent = "";
+    fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(posted) })
+      .then(window.ekkoAnswered || function (answer) { return { ok: answer.ok, why: "the server answered " + answer.status }; })
       .then(function (got) {
-        if (!got.ok) throw new Error(got.value.why || "refused");
+        if (!got.ok) throw new Error(got.why);
+        themes().setLast(color);
         close();
         unquote();
       })
-      .catch(function (error) { refused("Not written: " + error.message); })
+      .catch(function (error) { refused("Not written: " + (window.ekkoUnreached ? ekkoUnreached(error) : error.message)); })
       .then(function () {
         sending = false;
         note.readOnly = false;
+        grow();
       });
   }
   bar.querySelector(".bar-quote-drop").addEventListener("click", function () {
     unquote();
     open(false);
   });
+  send.addEventListener("click", function () { if (!sending) comment(); });
   note.addEventListener("input", grow);
   note.addEventListener("keydown", function (event) {
     if (event.key === "Escape") { unquote(); close(); return; }
@@ -1681,7 +1899,7 @@ const SCRIPT: &str = r##"(function () {
     var kept = { y: scrollY, id: at ? at.id : "", offset: at ? at.getBoundingClientRect().top : 0,
       open: Array.prototype.map.call(document.querySelectorAll(".step.open"), function (step) { return step.id; }) };
     if (bar.classList.contains("open") && !quoting && !sending) kept.bar = input.value;
-    if (quoting && !sending) { kept.quote = quoting; kept.note = note.value; }
+    if (quoting && !sending) { kept.quote = quoting; kept.note = note.value; kept.color = color; kept.editing = editing; }
     try { sessionStorage.setItem(keptAt, JSON.stringify(kept)); history.scrollRestoration = "manual"; } catch (e) {}
   };
   var kept = null;
@@ -1692,7 +1910,9 @@ const SCRIPT: &str = r##"(function () {
       var at = kept.id && document.getElementById(kept.id);
       scrollTo(0, at ? scrollY + at.getBoundingClientRect().top - kept.offset : kept.y);
       try { history.scrollRestoration = "auto"; } catch (e) {}
-      if (kept.quote) { quote(kept.quote); note.value = kept.note || ""; grow(); }
+      if (kept.quote && kept.editing) ekkoEdit(kept.editing);
+      else if (kept.quote) quote(kept.quote, kept.color, null);
+      if (kept.quote) { note.value = kept.note || ""; grow(); }
       if (typeof kept.bar === "string") { input.value = kept.bar; open(false); }
     };
     var settled = function () { document.fonts.ready.then(back); };
@@ -1700,23 +1920,100 @@ const SCRIPT: &str = r##"(function () {
   }
 })();
 
-// Comments on the plan's words (task 1105): each in the margin beside its
-// words, found again by its quote in whatever version the page shows, or
-// outdated when the text no longer holds them. Served to the person, words
-// selected in the plan open Comment, Suggest and Delete.
+// Comments on the plan's words (tasks 1105 and 1213), kept as an ebook keeps
+// its notes (decision 1214): each is its words, tinted in its theme's color,
+// with a pin at their end counting the comments that end there. A click on
+// them opens every comment at that point beside them, and Comments, after
+// the plan, is the notebook. A comment is found again by its quote in
+// whatever version the page shows: exactly, else between the same words on
+// either side when its own changed a little, else it is outdated and kept
+// in the notebook. Served to the person, words selected in the plan offer
+// Comment and the themes; the comment is written in the pill.
 (function () {
-  var data = document.getElementById("comments");
-  var margin = document.querySelector(".margin");
+  var dataNode = document.getElementById("comments-data"), themesNode = document.getElementById("themes");
   var article = document.querySelector("article.prose");
-  if (!data || !margin || !article) return;
-  var comments = JSON.parse(data.textContent);
+  if (!dataNode || !themesNode || !article) return;
+  var comments = JSON.parse(dataNode.textContent);
+  var THEMES = JSON.parse(themesNode.textContent);
   var plan = Array.prototype.slice.call(document.querySelectorAll("[data-plan]"));
+  var notebook = document.getElementById("comments");
   var BLOCK = "p, li, h1, h2, h3, h4, h5, h6, pre, td, th, blockquote, section, dt, dd";
   var AROUND = 32;
+  var WORD = /[\p{L}\p{N}]/u;
+  var byId = {}, byUid = {}, replies = {};
+  comments.forEach(function (note) {
+    byId[note.id] = note;
+    if (note.uid) byUid[note.uid] = note;
+  });
+  // A reply goes under the comment it answers, and is no words of its own.
+  comments.forEach(function (note) {
+    var to = note.comment && note.comment.replyTo;
+    if (to && byUid[to]) (replies[to] = replies[to] || []).push(note);
+  });
+  function isReply(note) { return !!(note.comment && note.comment.replyTo && byUid[note.comment.replyTo]); }
+  function element(tag, className, text) {
+    var made = document.createElement(tag);
+    if (className) made.className = className;
+    if (text) made.textContent = text;
+    return made;
+  }
+  function writes() { return "writes" in document.body.dataset; }
+
+  // The themes: their colors, and their names as the person renamed them
+  // in this browser; else as the person's newest comment in that color
+  // calls it, which reaches another browser, or this one once the server
+  // runs on another port, another origin to localStorage; else as ekko
+  // offers them. A comment keeps the name it was written under, which is
+  // what its reader learns it meant.
+  var NAMES = "ekko-theme-names", LAST = "ekko-theme-last", SHOWN = "ekko-highlights";
+  function stored(key) { try { return JSON.parse(localStorage.getItem(key)); } catch (e) { return null; } }
+  function store(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {} }
+  function known(color) { return THEMES.some(function (theme) { return theme[0] === color; }); }
+  var used = {};
+  comments.slice().sort(function (a, b) { return b.id - a.id; }).forEach(function (note) {
+    var c = note.comment || {};
+    if (note.mine && c.theme && known(c.color) && !used[c.color]) used[c.color] = c.theme;
+  });
+  function names() {
+    var own = stored(NAMES) || {}, named = {};
+    THEMES.forEach(function (theme) {
+      var key = theme[0];
+      named[key] = typeof own[key] === "string" && own[key] ? own[key] : used[key] || theme[1];
+    });
+    return named;
+  }
+  // A name as the server takes it: one line of 1 to 40 characters.
+  function fitted(name) {
+    return Array.from(String(name || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim()).slice(0, 40).join("").trim();
+  }
+  function colorOf(note) { var c = note.comment || {}; return known(c.color) ? c.color : THEMES[0][0]; }
+  // A comment written before themes, or without one, goes by its color's
+  // name, as the filters count it.
+  function themeOf(note) {
+    var c = note.comment || {};
+    return c.theme || names()[colorOf(note)];
+  }
+  function stateOf(note) { var c = note.comment || {}; return c.resolved ? "resolved" : c.sent ? "sent" : "pending"; }
+  window.ekkoThemes = {
+    list: THEMES,
+    names: names,
+    // Every name kept, ekko's own too, so a name set back to ekko's is not
+    // taken again from a comment; an emptied one is ekko's again.
+    rename: function (named) {
+      var own = {};
+      THEMES.forEach(function (theme) { own[theme[0]] = fitted(named[theme[0]]) || theme[1]; });
+      store(NAMES, own);
+      relabel();
+      filters();
+    },
+    last: function () { var color = stored(LAST); return known(color) ? color : THEMES[0][0]; },
+    setLast: function (color) { if (known(color)) store(LAST, color); }
+  };
 
   // The plan's words as shown_words has them on the server: each run of
   // white space one space, every block apart from the next; and for each
-  // character, the text node and offset it came from.
+  // character, the text node and offset it came from, the space between
+  // two blocks marked as no character of either.
   function words() {
     var text = "", at = [], last = null, space = true;
     plan.forEach(function (root) {
@@ -1725,7 +2022,7 @@ const SCRIPT: &str = r##"(function () {
       } });
       for (var node = walker.nextNode(); node; node = walker.nextNode()) {
         var block = node.parentElement.closest(BLOCK);
-        if (block !== last && !space) { text += " "; at.push([node, 0]); space = true; }
+        if (block !== last && !space) { text += " "; at.push([node, 0, true]); space = true; }
         last = block;
         var value = node.nodeValue;
         for (var i = 0; i < value.length; i++) {
@@ -1748,19 +2045,58 @@ const SCRIPT: &str = r##"(function () {
     var part = node.parentElement.closest("[data-plan]");
     return part && part.dataset.part || "";
   }
-  // Where a quote's words are now: of each place that holds them, the one
-  // whose surroundings and section match best, as the W3C's quote selector
-  // finds its words.
+  function flat(text) { return String(text || "").replace(/\s+/g, " "); }
+  // How alike two runs of words are, from 0 to 1: by edit distance, or by
+  // the words they share when they are too long to compare letter by letter.
+  function alike(a, b) {
+    var longest = Math.max(a.length, b.length);
+    if (!longest || a === b) return 1;
+    if (a.length * b.length > 4000000) {
+      var seen = {}, both = 0, x = a.toLowerCase().split(" "), y = b.toLowerCase().split(" ");
+      x.forEach(function (word) { seen[word] = true; });
+      y.forEach(function (word) { if (seen[word]) both++; });
+      return both / Math.max(x.length, y.length);
+    }
+    var row = [];
+    for (var j = 0; j <= b.length; j++) row[j] = j;
+    for (var i = 1; i <= a.length; i++) {
+      var diagonal = row[0];
+      row[0] = i;
+      for (j = 1; j <= b.length; j++) {
+        var above = row[j];
+        row[j] = Math.min(above + 1, row[j - 1] + 1, diagonal + (a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1));
+        diagonal = above;
+      }
+    }
+    return 1 - row[b.length] / longest;
+  }
+  // Where a quote's words are now, as the W3C's quote selector finds them:
+  // of the places that hold them, the one whose surroundings and section
+  // match best. Else, as Hypothesis anchors, the words between the same
+  // words on either side, when they are close enough to the quote's: the
+  // comment then says its words changed.
   function find(index, quote) {
-    var exact = quote.exact.replace(/\s+/g, " ").trim(), best = null, score = -1;
+    var exact = flat(quote.exact).trim(), prefix = flat(quote.prefix), suffix = flat(quote.suffix);
     if (!exact) return null;
+    var best = null, score = -1;
     for (var at = index.text.indexOf(exact); at >= 0; at = index.text.indexOf(exact, at + 1)) {
-      var here = same(index.text.slice(Math.max(0, at - AROUND), at), (quote.prefix || "").replace(/\s+/g, " "), true)
-        + same(index.text.slice(at + exact.length), (quote.suffix || "").replace(/\s+/g, " "), false)
+      var here = same(index.text.slice(Math.max(0, at - AROUND), at), prefix, true) + same(index.text.slice(at + exact.length), suffix, false)
         + (partOf(index.at[at][0]) === (quote.section || "") ? 1 : 0);
       if (here > score) { best = [at, at + exact.length]; score = here; }
     }
-    return best;
+    if (best) return { span: best, changed: false };
+    var before = prefix.slice(-20), after = suffix.slice(0, 20), text = index.text, close = 0;
+    if (before.trim().length < 8 || after.trim().length < 8) return null;
+    for (var from = text.indexOf(before); from >= 0; from = text.indexOf(before, from + 1)) {
+      var start = from + before.length, end = text.indexOf(after, start);
+      if (end < 0 || end - start > exact.length * 2 + 40) continue;
+      while (start < end && text.charAt(start) === " ") start++;
+      while (end > start && text.charAt(end - 1) === " ") end--;
+      if (end <= start) continue;
+      var near = alike(text.slice(start, end), exact);
+      if (near > close) { best = [start, end]; close = near; }
+    }
+    return close >= 0.5 ? { span: best, changed: true } : null;
   }
   function range(index, span) {
     var r = document.createRange(), first = index.at[span[0]], last = index.at[span[1] - 1];
@@ -1768,149 +2104,474 @@ const SCRIPT: &str = r##"(function () {
     r.setEnd(last[0], last[1] + 1);
     return r;
   }
-  function element(tag, className, text) {
-    var made = document.createElement(tag);
-    if (className) made.className = className;
-    if (text) made.textContent = text;
-    return made;
-  }
 
-  // The cards, oldest first; a reply under the comment it answers.
-  var index = words(), placed = [], cards = {}, ranges = [];
-  var on = window.Highlight && window.CSS && CSS.highlights ? new Highlight() : null;
-  margin.appendChild(element("div", "margin-head", "Comments"));
+  // Each comment found again, but a reply's or a resolved one's, which
+  // color no words.
+  var index = words(), anchored = [];
   comments.forEach(function (note) {
-    var c = note.comment || {}, quote = c.quote, span = quote ? find(index, quote) : null;
-    var kind = c.replacement === "" ? "Deletion" : typeof c.replacement === "string" ? "Suggestion" : "Comment";
-    var card = element("div", "comment" + (c.resolved ? " resolved" : ""));
-    var head = [kind, note.by || "", note.when];
-    if (!c.sent) head.push("pending");
-    if (quote && !span) head.push("outdated, made on version " + c.version);
-    if (c.resolved) head.push("resolved");
-    card.appendChild(element("div", "kind", head.filter(Boolean).join(" · ")));
-    if (quote) {
-      var said = element("div", "quote" + (span ? "" : " gone") + (kind === "Comment" && span ? " plain" : ""));
-      said.appendChild(element(kind === "Comment" ? "span" : "del", "", quote.exact));
-      if (kind === "Suggestion") { said.appendChild(document.createTextNode(" ")); said.appendChild(element("ins", "", c.replacement)); }
-      card.appendChild(said);
-    }
-    var written = kind === "Deletion" ? "Delete: " + (quote && quote.exact) : kind === "Suggestion" ? "Replace " + (quote && quote.exact) + " with " + c.replacement : "";
-    if (note.text && note.text !== written) card.appendChild(element("div", "text", note.text));
-    if (note.uid) cards[note.uid] = card;
-    var parent = c.replyTo && cards[c.replyTo];
-    if (parent) { card.classList.add("reply"); parent.appendChild(card); return; }
-    if (!span) card.classList.add("outdated");
-    var r = span ? range(index, span) : null;
-    if (r) ranges.push(r);
-    card.addEventListener("click", function () {
-      placed.forEach(function (other) { other.card.classList.toggle("on", other.card === card); });
-      if (!r) return;
-      if (on) { on.clear(); on.add(r); }
-      var top = r.getBoundingClientRect().top;
-      if (top < 80 || top > innerHeight - 80) scrollBy({ top: top - innerHeight / 3, behavior: "smooth" });
-    });
-    margin.appendChild(card);
-    placed.push({ card: card, range: r });
+    var c = note.comment || {};
+    note.found = c.quote && !isReply(note) && !c.resolved ? find(index, c.quote) : null;
+    if (note.found) anchored.push(note);
   });
-  if (!placed.length) margin.hidden = true;
-  if (on) {
-    var all = new Highlight();
-    ranges.forEach(function (r) { all.add(r); });
-    CSS.highlights.set("ekko-comment", all);
-    CSS.highlights.set("ekko-comment-on", on);
+  // The words cut where any comment begins or ends: each piece colored for
+  // the comments over it, one mark per text node, wrapped from the end so
+  // the offsets still to wrap hold.
+  var cuts = [];
+  anchored.forEach(function (note) { cuts.push(note.found.span[0], note.found.span[1]); });
+  cuts = cuts.sort(function (a, b) { return a - b; }).filter(function (cut, i, all) { return i === 0 || cut !== all[i - 1]; });
+  var pieces = [], ends = {};
+  for (var k = 0; k + 1 < cuts.length; k++) {
+    var from = cuts[k], to = cuts[k + 1];
+    var over = anchored.filter(function (note) { return note.found.span[0] <= from && note.found.span[1] >= to; });
+    if (!over.length) continue;
+    var piece = null;
+    for (var i = from; i < to; i++) {
+      var entry = index.at[i];
+      if (entry[2]) { piece = null; continue; }
+      if (piece && piece.node === entry[0]) { piece.end = entry[1] + 1; continue; }
+      piece = { node: entry[0], start: entry[1], end: entry[1] + 1, order: i, to: to, notes: over };
+      pieces.push(piece);
+    }
   }
-  // The words a comment is being written on in the pill, marked until it
-  // is sent or given up; found again by their quote after a reload.
-  var quoted = on ? new Highlight() : null;
-  if (quoted) {
-    quoted.priority = 1;
-    CSS.highlights.set("ekko-quoted", quoted);
+  function paint(mark, notes) {
+    var colors = [];
+    THEMES.forEach(function (theme) {
+      if (notes.some(function (note) { return colorOf(note) === theme[0]; })) colors.push(theme[0]);
+    });
+    if (colors.length === 1) {
+      mark.style.setProperty("--tint", "var(--tint-" + colors[0] + ")");
+      if (notes.length > 1) mark.dataset.stack = Math.min(notes.length, 3);
+      return;
+    }
+    var share = 100 / colors.length;
+    mark.style.backgroundColor = "transparent";
+    mark.style.backgroundImage = "linear-gradient(" + colors.map(function (color, i) {
+      return "var(--tint-" + color + ") " + (i * share).toFixed(2) + "% " + ((i + 1) * share).toFixed(2) + "%";
+    }).join(", ") + ")";
   }
-  window.ekkoMark = function (quote) {
-    if (!quoted) return;
-    quoted.clear();
-    var now = words(), span = quote && find(now, quote);
-    if (span) quoted.add(range(now, span));
-  };
-  // Beside the text, each card level with its words and below the one
-  // before it, the outdated ones at the plan's top; in a narrower window
-  // the margin is a list after the plan, which needs no placing.
-  function lay() {
-    var beside = getComputedStyle(margin).position === "absolute";
-    var origin = margin.getBoundingClientRect().top, below = 0;
-    var start = plan.length ? plan[0].getBoundingClientRect().top - origin : 0;
-    placed.map(function (one) { return { card: one.card, want: one.range ? one.range.getBoundingClientRect().top - origin : start }; })
-      .sort(function (a, b) { return a.want - b.want; })
-      .forEach(function (one) {
-        if (!beside) { one.card.style.top = ""; return; }
-        var top = Math.max(one.want, below);
-        one.card.style.top = top + "px";
-        below = top + one.card.offsetHeight + 12;
-      });
+  pieces.sort(function (a, b) { return b.order - a.order; }).forEach(function (piece) {
+    var r = document.createRange();
+    r.setStart(piece.node, piece.start);
+    r.setEnd(piece.node, piece.end);
+    var mark = element("mark", "c");
+    mark.dataset.ids = piece.notes.map(function (note) { return note.id; }).join(" ");
+    mark.setAttribute("aria-details", piece.notes.map(function (note) { return "comment-" + note.id; }).join(" "));
+    paint(mark, piece.notes);
+    r.surroundContents(mark);
+    if (!ends[piece.to]) ends[piece.to] = mark;
+  });
+  // A pin where comments end, as Kindle marks a note: a dot in their color,
+  // with their count when they are several; a button, so the keyboard
+  // reaches them too.
+  Object.keys(ends).forEach(function (to) {
+    var ending = anchored.filter(function (note) { return note.found.span[1] === Number(to); });
+    if (!ending.length) return;
+    var pin = element("button", "pin");
+    pin.type = "button";
+    pin.dataset.ids = ending.map(function (note) { return note.id; }).join(" ");
+    if (ending.length > 1) pin.dataset.n = ending.length;
+    var inks = [];
+    ending.forEach(function (note) { if (inks.indexOf(colorOf(note)) < 0) inks.push(colorOf(note)); });
+    pin.style.background = inks.length === 1 ? "var(--ink-" + inks[0] + ")" : "linear-gradient(90deg, " + inks.map(function (color, i) {
+      return "var(--ink-" + color + ") " + (i * 100 / inks.length).toFixed(2) + "% " + ((i + 1) * 100 / inks.length).toFixed(2) + "%";
+    }).join(", ") + ")";
+    pin.setAttribute("aria-label", ending.length === 1 ? themeOf(ending[0]) + " comment " + ending[0].id + ": " + ending[0].text : ending.length + " comments end here");
+    var mark = ends[to];
+    (mark.closest("a") || mark).after(pin);
+  });
+  function marksOf(id) {
+    return Array.prototype.filter.call(article.querySelectorAll("mark.c"), function (mark) { return (" " + mark.dataset.ids + " ").indexOf(" " + id + " ") >= 0; });
   }
-  lay();
-  document.fonts.ready.then(lay);
-  addEventListener("resize", lay);
+  // The words of one comment underlined in its color: which words it is
+  // on, among others over the same ones.
+  function light(id) {
+    Array.prototype.forEach.call(article.querySelectorAll("mark.c.lit"), function (mark) { mark.classList.remove("lit"); });
+    if (id == null || !byId[id]) return;
+    marksOf(id).forEach(function (mark) {
+      mark.classList.add("lit");
+      mark.style.setProperty("--lit", "var(--ink-" + colorOf(byId[id]) + ")");
+    });
+  }
 
-  // Words selected in the plan, served to the person who can write, offer
-  // one button, as Claude offers Reply on part of an answer: it takes them
-  // into the pill, where the comment is written.
+  // The comments at a point, beside the words: each with its theme, id,
+  // state, text and replies, and, served to its writer, Edit and Delete.
+  var pop = element("div", "pop");
+  pop.hidden = true;
+  pop.tabIndex = -1;
+  pop.setAttribute("role", "dialog");
+  document.body.appendChild(pop);
+  var popIds = null, popFrom = null;
+  function command() { var copy = document.querySelector("[data-copy]"); return copy ? copy.dataset.copy : "ekko artifact"; }
+  // What the server answered: whether it wrote, and why not.
+  function answered(answer) {
+    return answer.text().then(function (body) {
+      var why = "";
+      try { why = JSON.parse(body).why || ""; } catch (e) { why = body.trim(); }
+      return { ok: answer.ok, why: why || "the server answered " + answer.status };
+    });
+  }
+  window.ekkoAnswered = answered;
+  window.ekkoUnreached = function (error) { return error instanceof TypeError ? "the server does not answer; " + command() + " starts it again" : error.message; };
+  function entryOf(note, several, same) {
+    var c = note.comment || {}, color = colorOf(note);
+    var box = element("div", "pop-item" + (same ? " same" : ""));
+    box.dataset.id = note.id;
+    box.style.setProperty("--ink", "var(--ink-" + color + ")");
+    var head = element("div", "pop-head");
+    head.appendChild(element("span", "theme", themeOf(note)));
+    head.appendChild(element("span", "id", String(note.id)));
+    head.appendChild(element("span", "state", stateOf(note)));
+    if (note.found && note.found.changed) head.appendChild(element("span", "state changed", "words changed"));
+    if (same) head.appendChild(element("span", "same-words", "same words"));
+    box.appendChild(head);
+    if (c.quote && !same && (several || (note.found && note.found.changed))) {
+      var said = element("div", "said" + (note.found && note.found.changed ? " was" : ""), c.quote.exact);
+      if (note.found && note.found.changed) said.setAttribute("aria-label", "It was on: " + c.quote.exact);
+      box.appendChild(said);
+    }
+    box.appendChild(element("div", "text", note.text));
+    (replies[note.uid] || []).forEach(function (reply) {
+      var answer = element("div", "pop-reply");
+      answer.appendChild(element("div", "meta", (reply.by || "") + " · " + reply.when));
+      answer.appendChild(element("div", "text", reply.text));
+      box.appendChild(answer);
+    });
+    // Who wrote it and when, and, served to its writer, Edit and Delete on
+    // the same line, so many comments at a point still read as a list.
+    var foot = element("div", "pop-foot");
+    foot.appendChild(element("span", "meta", (note.by ? note.by + " · " : "") + note.when));
+    box.appendChild(foot);
+    if (writes() && note.mine && note.uid) {
+      var actions = element("span", "pop-actions");
+      var edit = element("button", "", "Edit"), remove = element("button", "danger", "Delete");
+      edit.type = remove.type = "button";
+      edit.addEventListener("click", function () {
+        shut(false);
+        if (window.ekkoEdit) ekkoEdit({ id: note.id, uid: note.uid, text: note.text, quote: c.quote, color: color });
+      });
+      remove.addEventListener("click", function () {
+        actions.textContent = "";
+        actions.appendChild(element("span", "ask", "Delete this comment? The trash keeps it 30 days."));
+        var yes = element("button", "danger", "Delete"), no = element("button", "", "Keep");
+        yes.type = no.type = "button";
+        no.addEventListener("click", function () { open(popIds, popFrom); });
+        yes.addEventListener("click", function () {
+          yes.disabled = no.disabled = true;
+          fetch("/api/comment/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ page: location.pathname, uid: note.uid }) })
+            .then(answered)
+            .then(function (got) {
+              if (!got.ok) throw new Error(got.why);
+              actions.textContent = "";
+              actions.appendChild(element("span", "ask", "Deleted."));
+            })
+            .catch(function (error) {
+              yes.disabled = no.disabled = false;
+              actions.appendChild(element("span", "why", "Not deleted: " + ekkoUnreached(error)));
+            });
+        });
+        actions.appendChild(yes);
+        actions.appendChild(no);
+        yes.focus();
+      });
+      actions.appendChild(edit);
+      actions.appendChild(remove);
+      foot.appendChild(actions);
+    }
+    box.addEventListener("mouseenter", function () { light(note.id); });
+    box.addEventListener("focusin", function () { light(note.id); });
+    return box;
+  }
+  // Below the line clicked, or above it when there is more room there, as
+  // Floating UI's flip and size place a popover: never past the window's
+  // top or into the pill's band, scrolling inside when the comments are
+  // taller than the room; never wider than the column.
+  var EDGE = 12, BAND = 128;
+  function place(from, y) {
+    var rects = Array.prototype.slice.call(from.getClientRects());
+    var line = rects.filter(function (rect) { return y >= rect.top && y <= rect.bottom; })[0] || rects[rects.length - 1] || from.getBoundingClientRect();
+    var column = article.getBoundingClientRect(), width = Math.min(400, column.width);
+    pop.style.width = width + "px";
+    pop.style.left = scrollX + Math.max(column.left, Math.min(line.left, column.right - width)) + "px";
+    pop.style.maxHeight = "";
+    var height = pop.offsetHeight, below = innerHeight - BAND - line.bottom - 8, above = line.top - 8 - EDGE;
+    var under = height <= below || below >= above, room = under ? below : above;
+    if (height > room) {
+      pop.style.maxHeight = Math.max(room, 96) + "px";
+      height = pop.offsetHeight;
+    }
+    pop.style.top = scrollY + (under ? line.bottom + 8 : line.top - 8 - height) + "px";
+  }
+  function open(ids, from, y) {
+    ids = ids.filter(function (id) { return byId[id]; });
+    if (!ids.length || !from) return;
+    // In reading order, those on the very same words one after another,
+    // their words quoted once.
+    var spanOf = function (id) { var found = byId[id].found; return found ? found.span : [0, 0]; };
+    ids.sort(function (a, b) { return spanOf(a)[0] - spanOf(b)[0] || spanOf(a)[1] - spanOf(b)[1] || a - b; });
+    popIds = ids;
+    popFrom = from;
+    pop.textContent = "";
+    pop.setAttribute("aria-label", ids.length === 1 ? "Comment " + ids[0] : ids.length + " comments on these words");
+    if (ids.length > 1) pop.appendChild(element("div", "pop-count", ids.length + " comments on these words"));
+    ids.forEach(function (id, i) {
+      var same = i > 0 && spanOf(id).join() === spanOf(ids[i - 1]).join();
+      pop.appendChild(entryOf(byId[id], ids.length > 1, same));
+    });
+    pop.style.visibility = "hidden";
+    pop.hidden = false;
+    place(from, y == null ? from.getBoundingClientRect().top + 1 : y);
+    pop.style.visibility = "";
+    light(ids[0]);
+    pop.focus({ preventScroll: true });
+  }
+  function shut(back) {
+    if (pop.hidden) return;
+    pop.hidden = true;
+    popIds = null;
+    light(null);
+    if (back && popFrom && popFrom.isConnected && popFrom.focus) popFrom.focus({ preventScroll: true });
+  }
+  window.ekkoShut = shut;
+  pop.addEventListener("mouseleave", function () { if (popIds) light(popIds[0]); });
+  article.addEventListener("click", function (event) {
+    var hit = event.target.closest("mark.c, .pin");
+    if (!hit || hit.classList.contains("off")) return;
+    // A link in the words still goes where it points, and a drag over them
+    // is a selection to comment on.
+    if (!hit.classList.contains("pin") && (event.target.closest("a") || !getSelection().isCollapsed)) return;
+    event.preventDefault();
+    open(hit.dataset.ids.split(" ").map(Number), hit, event.clientY);
+  });
+  document.addEventListener("pointerdown", function (event) {
+    if (!pop.hidden && !pop.contains(event.target) && !event.target.closest("mark.c, .pin")) shut(false);
+  });
+  addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && !pop.hidden) { event.preventDefault(); shut(true); }
+  });
+  addEventListener("resize", function () { if (popIds && popFrom && popFrom.isConnected) place(popFrom, popFrom.getBoundingClientRect().top + 1); });
+  // A comment on words still in the plan opens at them; one whose words
+  // are gone, or one resolved, at its entry under Comments, so it can be
+  // read, edited and deleted there too.
+  window.ekkoOpenComment = function (id) {
+    var at = marksOf(id)[0] || document.getElementById("comment-" + id);
+    if (!at) return;
+    at.scrollIntoView({ block: "center" });
+    open([id], at);
+  };
+  window.ekkoComment = function (id) { return byId[id]; };
+  // The comments open and the notebook's filter, kept across the reload a
+  // new version makes, as ekkoKeep keeps where the reader was.
+  var keptAt = "ekko-comments " + location.pathname, keep = window.ekkoKeep;
+  var filter = null, shown = stored(SHOWN) !== false;
+  window.ekkoKeep = function () {
+    if (keep) keep();
+    try { sessionStorage.setItem(keptAt, JSON.stringify({ open: popIds, filter: filter })); } catch (e) {}
+  };
+  var kept = null;
+  try { kept = JSON.parse(sessionStorage.getItem(keptAt)); sessionStorage.removeItem(keptAt); } catch (e) {}
+
+  // The notebook: in reading order, the outdated ones last; each says
+  // where its words stand, and opens them.
+  var list = notebook && notebook.querySelector("ol.comments"), chipsBar = notebook && notebook.querySelector(".filters");
+  var entries = list ? Array.prototype.slice.call(list.children) : [];
+  function placeOf(entry) { var note = byId[entry.dataset.id]; return note && note.found ? note.found.span[0] : Infinity; }
+  entries.sort(function (a, b) { return placeOf(a) - placeOf(b) || a.dataset.id - b.dataset.id; }).forEach(function (entry) { list.appendChild(entry); });
+  entries.forEach(function (entry) {
+    var note = byId[entry.dataset.id];
+    if (!note) return;
+    var c = note.comment || {}, head = entry.querySelector(".entry-head");
+    entry.style.setProperty("--ink", "var(--ink-" + colorOf(note) + ")");
+    if (c.quote && !note.found && !c.resolved) {
+      entry.classList.add("outdated");
+      head.appendChild(element("span", "state gone", "outdated: made on version " + c.version));
+    }
+    if (note.found && note.found.changed) head.appendChild(element("span", "state changed", "words changed"));
+    if (c.resolved) entry.classList.add("resolved");
+    head.addEventListener("click", function () { ekkoOpenComment(note.id); });
+  });
+  // A comment with no theme's name of its own goes by its color's, as this
+  // browser names it.
+  function relabel() {
+    entries.forEach(function (entry) {
+      var note = byId[entry.dataset.id];
+      if (note && !(note.comment || {}).theme) entry.querySelector(".theme").textContent = themeOf(note);
+    });
+  }
+  relabel();
+  function filters() {
+    if (!chipsBar) return;
+    chipsBar.textContent = "";
+    var named = names(), counts = {}, outdated = entries.filter(function (entry) { return entry.classList.contains("outdated"); }).length;
+    entries.forEach(function (entry) { counts[entry.dataset.color] = (counts[entry.dataset.color] || 0) + 1; });
+    var chip = function (label, value, count, ink) {
+      var button = element("button", "filter");
+      button.type = "button";
+      button.setAttribute("aria-pressed", filter === value ? "true" : "false");
+      if (ink) { button.appendChild(element("span", "dot")); button.style.setProperty("--ink", "var(--ink-" + ink + ")"); }
+      button.appendChild(document.createTextNode(label));
+      button.appendChild(element("span", "count", String(count)));
+      button.addEventListener("click", function () { filter = filter === value ? null : value; apply(); filters(); });
+      chipsBar.appendChild(button);
+    };
+    chip("All", null, entries.length);
+    THEMES.forEach(function (theme) { if (counts[theme[0]]) chip(named[theme[0]], theme[0], counts[theme[0]], theme[0]); });
+    if (outdated) chip("Outdated", "outdated", outdated);
+    var toggle = element("button", "filter switch", "Highlights");
+    toggle.type = "button";
+    toggle.setAttribute("aria-pressed", shown ? "true" : "false");
+    toggle.title = "Show the comments' colors in the text";
+    toggle.addEventListener("click", function () { shown = !shown; store(SHOWN, shown); apply(); filters(); });
+    chipsBar.appendChild(toggle);
+  }
+  // A theme picked shows its comments alone, here and in the text; the
+  // switch takes every color off the text, to read it clean.
+  function apply() {
+    entries.forEach(function (entry) {
+      entry.hidden = filter === "outdated" ? !entry.classList.contains("outdated") : !!filter && entry.dataset.color !== filter;
+    });
+    Array.prototype.forEach.call(article.querySelectorAll("mark.c, .pin"), function (hit) {
+      var on = shown && (!filter || filter === "outdated" || hit.dataset.ids.split(" ").some(function (id) { return byId[id] && colorOf(byId[id]) === filter; }));
+      hit.classList.toggle("off", !on);
+    });
+    if (!shown || (filter && filter !== "outdated")) shut(false);
+  }
+  if (kept && kept.filter !== undefined) filter = kept.filter;
+  filters();
+  apply();
+  if (kept && kept.open) {
+    var reopen = function () {
+      var ids = kept.open.filter(function (id) { return marksOf(id).length; });
+      if (ids.length) open(ids, marksOf(ids[0])[0]);
+    };
+    document.fonts.ready.then(function () { requestAnimationFrame(reopen); });
+  }
+
+  // The words the pill is writing a comment on, marked in their theme's
+  // color until it is sent or given up; found again by their quote after
+  // a reload.
+  var quoted = {};
+  if (window.Highlight && window.CSS && CSS.highlights) {
+    THEMES.forEach(function (theme) {
+      var highlight = new Highlight();
+      highlight.priority = 1;
+      CSS.highlights.set("ekko-quoted-" + theme[0], highlight);
+      quoted[theme[0]] = highlight;
+    });
+  }
+  window.ekkoMark = function (quote, color) {
+    Object.keys(quoted).forEach(function (key) { quoted[key].clear(); });
+    if (!quote) return;
+    var now = words(), found = find(now, quote), highlight = quoted[known(color) ? color : THEMES[0][0]];
+    if (found && highlight) highlight.add(range(now, found.span));
+  };
+
+  // Words selected in the plan, served to the person who can write: one
+  // button and the themes, as Claude offers Reply on part of an answer and
+  // an ebook its colors. Either takes the words, snapped to whole words as
+  // an ebook's selection is, into the pill.
   var tools = element("div", "select-tools");
   tools.hidden = true;
-  var take = element("button", "", "Comment");
+  var take = element("button", "take"), takeLabel = element("span", "label", "Comment"), takeKey = element("kbd", "", "C");
   take.type = "button";
-  take.appendChild(element("kbd", "", "C"));
+  take.appendChild(takeLabel);
+  take.appendChild(takeKey);
   tools.appendChild(take);
+  var swatches = element("span", "swatches");
+  THEMES.forEach(function (theme) {
+    var swatch = element("button", "swatch");
+    swatch.type = "button";
+    swatch.dataset.color = theme[0];
+    swatch.style.setProperty("--ink", "var(--ink-" + theme[0] + ")");
+    swatches.appendChild(swatch);
+  });
+  tools.appendChild(swatches);
   document.body.appendChild(tools);
   var chosen = null;
+  // A color pointed at says its theme and its key where Comment stood.
+  function told(swatch) {
+    var i = swatch ? Array.prototype.indexOf.call(swatches.children, swatch) : -1;
+    takeLabel.textContent = swatch ? names()[swatch.dataset.color] : "Comment";
+    takeKey.textContent = swatch ? String(i + 1) : "C";
+  }
+  swatches.addEventListener("mouseover", function (event) { told(event.target.closest(".swatch")); });
+  swatches.addEventListener("focusin", function (event) { told(event.target.closest(".swatch")); });
+  swatches.addEventListener("mouseleave", function () { told(null); });
+  swatches.addEventListener("focusout", function () { told(null); });
 
-  function selected() {
-    if (!("writes" in document.body.dataset) || !window.ekkoQuote) return null;
+  function selected(snap) {
+    if (!writes() || !window.ekkoQuote) return null;
     var selection = getSelection();
     if (!selection.rangeCount || selection.isCollapsed) return null;
     var r = selection.getRangeAt(0);
     if (!plan.some(function (part) { return r.intersectsNode(part); })) return null;
-    var index = words(), start = -1, end = -1;
-    for (var i = 0; i < index.at.length; i++) {
-      var node = index.at[i][0], offset = index.at[i][1];
+    var now = words(), start = -1, end = -1;
+    for (var i = 0; i < now.at.length; i++) {
+      var node = now.at[i][0], offset = now.at[i][1];
       if (r.comparePoint(node, offset) === 0 && r.comparePoint(node, offset + 1) === 0) {
         if (start < 0) start = i;
         end = i + 1;
       }
     }
-    while (start >= 0 && start < end && index.text.charAt(start) === " ") start++;
-    while (end > start && index.text.charAt(end - 1) === " ") end--;
+    while (start >= 0 && start < end && now.text.charAt(start) === " ") start++;
+    while (end > start && now.text.charAt(end - 1) === " ") end--;
     if (start < 0 || end <= start) return null;
+    while (start > 0 && WORD.test(now.text.charAt(start - 1)) && WORD.test(now.text.charAt(start))) start--;
+    while (end < now.text.length && WORD.test(now.text.charAt(end)) && WORD.test(now.text.charAt(end - 1))) end++;
+    var whole = range(now, [start, end]);
+    if (snap) { selection.removeAllRanges(); selection.addRange(whole); }
     return {
-      quote: { exact: index.text.slice(start, end), prefix: index.text.slice(Math.max(0, start - AROUND), start),
-        suffix: index.text.slice(end, end + AROUND), section: partOf(index.at[start][0]) },
-      box: r.getBoundingClientRect()
+      quote: { exact: now.text.slice(start, end), prefix: now.text.slice(Math.max(0, start - AROUND), start),
+        suffix: now.text.slice(end, end + AROUND), section: partOf(now.at[start][0]) },
+      box: whole.getBoundingClientRect()
     };
   }
-  function offer() {
-    chosen = selected();
+  function offer(snap) {
+    chosen = selected(snap);
     tools.hidden = !chosen;
     if (!chosen) return;
-    tools.style.top = scrollY + chosen.box.top - tools.offsetHeight - 8 + "px";
-    tools.style.left = Math.max(8, scrollX + chosen.box.left + chosen.box.width / 2 - tools.offsetWidth / 2) + "px";
+    shut(false);
+    var named = names();
+    Array.prototype.forEach.call(swatches.children, function (swatch, i) {
+      swatch.title = named[swatch.dataset.color] + " (" + (i + 1) + ")";
+      swatch.setAttribute("aria-label", "Comment as " + named[swatch.dataset.color]);
+    });
+    take.title = "Comment as " + named[ekkoThemes.last()];
+    told(null);
+    // Above the words, else below them when the window's top would cut it;
+    // never past either side of the window.
+    var top = chosen.box.top - tools.offsetHeight - 8;
+    if (top < EDGE) top = chosen.box.bottom + 8;
+    tools.style.top = scrollY + top + "px";
+    tools.style.left = scrollX + Math.max(8, Math.min(chosen.box.left + chosen.box.width / 2 - tools.offsetWidth / 2, document.documentElement.clientWidth - tools.offsetWidth - 8)) + "px";
   }
-  document.addEventListener("pointerup", function (event) { if (!tools.contains(event.target)) setTimeout(offer, 0); });
-  document.addEventListener("keyup", function (event) { if (event.shiftKey || event.key === "Shift") offer(); });
+  document.addEventListener("pointerup", function (event) { if (!tools.contains(event.target)) setTimeout(function () { offer(true); }, 0); });
+  document.addEventListener("keyup", function (event) { if (event.shiftKey || event.key === "Shift") offer(false); });
   tools.addEventListener("pointerdown", function (event) { event.preventDefault(); });
-  take.addEventListener("click", function () {
+  // The tools go with the selection: when it is gone, on Esc, and to where
+  // the words are after the window changes size.
+  document.addEventListener("selectionchange", function () { if (!tools.hidden && getSelection().isCollapsed) tools.hidden = true; });
+  addEventListener("keydown", function (event) { if (event.key === "Escape" && !tools.hidden) tools.hidden = true; });
+  addEventListener("resize", function () { if (!tools.hidden) offer(false); });
+  function taken(color) {
     if (!chosen) return;
     tools.hidden = true;
     getSelection().removeAllRanges();
-    ekkoQuote(chosen.quote);
+    ekkoQuote(chosen.quote, color || ekkoThemes.last());
+  }
+  take.addEventListener("click", function () { taken(null); });
+  swatches.addEventListener("click", function (event) {
+    var swatch = event.target.closest(".swatch");
+    if (swatch) taken(swatch.dataset.color);
   });
-  // C takes the words too, so a selection made with Shift and the arrows
-  // needs no mouse.
+  // C takes the words in the last theme, 1 to 6 in that theme, so a
+  // selection made with Shift and the arrows needs no mouse.
   addEventListener("keydown", function (event) {
-    if (event.key !== "c" || event.ctrlKey || event.metaKey || event.altKey || tools.hidden || !chosen) return;
+    if (tools.hidden || !chosen || event.ctrlKey || event.metaKey || event.altKey) return;
     var active = document.activeElement;
     if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
-    event.preventDefault();
-    take.click();
+    var digit = Number(event.key);
+    if (event.key === "c") { event.preventDefault(); taken(null); }
+    else if (digit >= 1 && digit <= THEMES.length) { event.preventDefault(); taken(THEMES[digit - 1][0]); }
   });
 })();"##;
 
@@ -1952,9 +2613,28 @@ const STYLE: &str = r##"
   --bar-chip: rgba(0, 0, 0, 0.04);
   --bar-chip-on: rgba(0, 0, 0, 0.08);
   --bar-line: rgba(0, 0, 0, 0.1);
+  /* The pill while a comment is written in it: a page of its own, which
+     the big words of a heading under it must not show through. */
+  --bar-solid: #fff;
+  --pop-chip: rgba(0, 0, 0, 0.06);
+  --pop-hover: rgba(0, 0, 0, 0.035);
   /* AKQA's spring, sampled from its bar opening (note 1149): past the
      target by 14% at a third of the way, settled by 0.9 s. */
   --spring: linear(0, 0.086 3.9%, 0.168 5.8%, 0.3 8.3%, 0.604 13.8%, 0.754 16.7%, 0.893 19.9%, 0.989 22.6%, 1.061 25.4%, 1.114 28.8%, 1.132 31.1%, 1.139 33.9%, 1.136 36.3%, 1.111 41.2%, 1.089 44%, 1.068 46.6%, 1.046 49.4%, 1.029 52.1%, 1.014 54.7%, 0.996 58.6%, 0.989 61.2%, 0.982 63.6%, 0.982 67.3%, 0.986 76.8%, 0.989 80.8%, 0.996 86%, 1 90.9%, 1);
+  /* The comments' themes (task 1213): the tint their words take, and the
+     ink of their pins and stripes, one pair per color of THEMES. */
+  --tint-yellow: rgba(255, 200, 0, 0.3);
+  --tint-blue: rgba(40, 120, 255, 0.18);
+  --tint-pink: rgba(255, 40, 120, 0.16);
+  --tint-green: rgba(30, 170, 80, 0.2);
+  --tint-purple: rgba(130, 70, 255, 0.16);
+  --tint-orange: rgba(255, 120, 0, 0.22);
+  --ink-yellow: #d9a400;
+  --ink-blue: #2f6fdf;
+  --ink-pink: #e0336e;
+  --ink-green: #1f9d55;
+  --ink-purple: #7c4ddb;
+  --ink-orange: #e86f00;
   color-scheme: light;
 }
 
@@ -1983,6 +2663,21 @@ const STYLE: &str = r##"
   --bar-chip: rgba(255, 255, 255, 0.04);
   --bar-chip-on: rgba(255, 255, 255, 0.16);
   --bar-line: rgba(255, 255, 255, 0.16);
+  --bar-solid: #191919;
+  --pop-chip: rgba(255, 255, 255, 0.12);
+  --pop-hover: rgba(255, 255, 255, 0.06);
+  --tint-yellow: rgba(255, 210, 0, 0.26);
+  --tint-blue: rgba(80, 150, 255, 0.3);
+  --tint-pink: rgba(255, 80, 150, 0.28);
+  --tint-green: rgba(60, 200, 110, 0.26);
+  --tint-purple: rgba(160, 110, 255, 0.32);
+  --tint-orange: rgba(255, 140, 30, 0.28);
+  --ink-yellow: #ffd60a;
+  --ink-blue: #5aa0ff;
+  --ink-pink: #ff5a96;
+  --ink-green: #46c878;
+  --ink-purple: #aa78ff;
+  --ink-orange: #ff9628;
   color-scheme: dark;
 }
 
@@ -2137,6 +2832,11 @@ button.step-head { cursor: pointer; }
 .bar-inner { position: absolute; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; }
 /* What the panel adds, folded to nothing in the pill, unfolded by the same spring. */
 .bar-fold { height: 0; overflow: hidden; opacity: 0; transition: height 0.9s var(--spring), opacity 0.55s; }
+/* A fold lays out at the width the pill opens to, from the first frame of
+   its spring: measured then, it is the height it ends at, and the pill
+   uncovers it as it widens. */
+.fold-in { display: flow-root; }
+.bar.open .fold-in { width: 600px; }
 .bar.open .bar-fold { opacity: 1; }
 .bar-list { max-height: 327px; overflow-y: auto; padding: 8px; scrollbar-width: thin; }
 .bar-list:empty { display: none; }
@@ -2162,50 +2862,95 @@ button.step-head { cursor: pointer; }
 .bar-nav a { padding: 6px 14px; border-radius: 999px; background: var(--bar-chip); font: 400 13px/19.5px var(--sans); letter-spacing: -0.025em; color: var(--bar-muted); text-decoration: none; transition: background-color 0.3s, color 0.3s; }
 .bar-nav a:hover, .bar-nav a.on { background: var(--bar-chip-on); color: var(--bar-fg); }
 
-/* Comments (task 1105), mockup A's: cards in a margin right of the text,
-   each level with its words, which a highlight marks. A selection's one
-   button floats over it; the comment is written in the pill, below the
-   words it quotes. */
-.bar-quote { display: flex; align-items: flex-start; gap: 8px; margin: 12px 12px 8px; padding: 8px 10px; border-left: 2px solid var(--bar-muted); border-radius: 4px; background: var(--bar-chip); font: 400 13px/18px var(--sans); color: var(--bar-muted); }
+/* Comments (task 1213, decision 1214), an ebook's notes: the words tinted
+   in their theme, darker where comments of one theme stack and banded where
+   themes meet, a pin where comments end, and the comments at a point in a
+   popover beside their words. A selection offers Comment and the themes;
+   the comment is written in the pill, below the words it quotes and the
+   themes. */
+.prose mark.c { padding: 0; border-radius: 0; background-color: var(--tint, var(--tint-yellow)); color: inherit; cursor: pointer; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.prose mark.c[data-stack="2"] { background-image: linear-gradient(var(--tint), var(--tint)); }
+.prose mark.c[data-stack="3"] { background-image: linear-gradient(var(--tint), var(--tint)), linear-gradient(var(--tint), var(--tint)); }
+.prose mark.c.off { background: none !important; box-shadow: none; cursor: auto; }
+/* After .off: a comment opened from the list underlines its words even
+   with the highlights off. */
+.prose mark.c.lit { box-shadow: inset 0 -0.16em 0 var(--lit); }
+.prose .pin { display: inline-block; box-sizing: border-box; width: 9px; height: 9px; margin: 0 2px 0 1px; padding: 0; border: 0; border-radius: 50%; vertical-align: 0.7em; font: 700 10px/15px var(--sans); color: var(--page); text-align: center; cursor: pointer; }
+.prose .pin[data-n] { width: auto; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; vertical-align: 0.45em; }
+.prose .pin[data-n]::after { content: attr(data-n); }
+.prose .pin.off { display: none; }
+.prose .pin:focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 2px; }
+::highlight(ekko-quoted-yellow) { background-color: var(--tint-yellow); }
+::highlight(ekko-quoted-blue) { background-color: var(--tint-blue); }
+::highlight(ekko-quoted-pink) { background-color: var(--tint-pink); }
+::highlight(ekko-quoted-green) { background-color: var(--tint-green); }
+::highlight(ekko-quoted-purple) { background-color: var(--tint-purple); }
+::highlight(ekko-quoted-orange) { background-color: var(--tint-orange); }
+.pop { position: absolute; z-index: 40; box-sizing: border-box; max-height: min(60vh, 520px); overflow-y: auto; padding: 6px; border-radius: 12px; background: var(--card); box-shadow: var(--card-shadow), 0 0 0 1px var(--rule); font: 400 14px/20px var(--sans); color: var(--fg); outline: none; overscroll-behavior: contain; }
+.pop-item { position: relative; padding: 10px 12px 10px 18px; border-radius: 8px; }
+.pop-item::before { content: ""; position: absolute; top: 12px; bottom: 12px; left: 6px; width: 3px; border-radius: 2px; background: var(--ink); }
+.pop-item + .pop-item { margin-top: 2px; }
+.pop-count { position: sticky; top: 0; z-index: 1; margin: -6px -6px 0; padding: 10px 18px 6px; background: var(--card); font: 500 12px/18px var(--sans); color: var(--fg-2); }
+.pop-head .same-words { font-style: italic; }
+.pop-item:hover, .pop-item:focus-within { background: var(--pop-hover); }
+.pop-head, .entry-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font: 400 12px/18px var(--sans); color: var(--fg-2); }
+.pop-head .theme, .entry-head .theme { font-weight: 600; color: var(--fg-strong); }
+.pop-head .state, .entry-head .state { padding: 0 7px; border-radius: 999px; background: var(--pop-chip); }
+.pop-head .changed, .entry-head .changed, .entry-head .gone { color: #b54708; }
+.pop .said { display: -webkit-box; overflow: hidden; margin: 6px 0 0; font: italic 400 14px/20px var(--serif); color: var(--fg-2); -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.pop .said.was, .prose .entry.outdated .said { text-decoration: line-through; }
+.pop .text, .prose .entry .text { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
+.pop .meta { margin: 6px 0 0; font-size: 12px; color: var(--fg-2); }
+.pop-reply { margin: 8px 0 0; padding: 0 0 0 10px; border-left: 2px solid var(--rule); }
+.pop-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 6px 0 0; }
+.pop-foot .meta { margin: 0; }
+.pop-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 0 auto; }
+.pop-actions button { padding: 3px 10px; border: 0; border-radius: 999px; background: var(--bg); box-shadow: inset 0 0 0 1px var(--rule); font: 500 12px/18px var(--sans); color: var(--fg); cursor: pointer; }
+.pop-actions .danger { color: #d92d20; }
+.pop-actions .ask { font-size: 12px; color: var(--fg); }
+.pop-actions .why { flex-basis: 100%; font-size: 12px; color: #d92d20; }
+.select-tools { position: absolute; z-index: 30; display: flex; align-items: center; gap: 2px; padding: 4px; border-radius: 999px; background: var(--fg); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18); }
+.select-tools .take { padding: 6px 12px; border: 0; border-radius: 999px; background: none; font: 500 13px/18px var(--sans); color: var(--bg); cursor: pointer; }
+.select-tools .take:hover { background: rgba(127, 127, 127, 0.35); }
+.select-tools .take .label { display: inline-block; min-width: 4.6em; }
+.select-tools kbd { margin: 0 0 0 8px; padding: 0 5px; border-radius: 4px; background: rgba(127, 127, 127, 0.35); font: 500 11px/16px var(--sans); }
+.select-tools .swatches { display: flex; gap: 6px; padding: 0 10px 0 6px; }
+.select-tools .swatch { width: 16px; height: 16px; padding: 0; border: 2px solid var(--fg); border-radius: 50%; background: var(--ink); box-shadow: 0 0 0 1px rgba(127, 127, 127, 0.6); cursor: pointer; }
+.select-tools .swatch:hover, .select-tools .swatch:focus-visible { transform: scale(1.25); }
+.bar-quote { display: flex; align-items: flex-start; gap: 8px; margin: 12px 12px 8px; padding: 8px 10px; border-left: 3px solid var(--ink, var(--bar-muted)); border-radius: 4px; background: var(--bar-chip); font: 400 13px/18px var(--sans); color: var(--bar-muted); }
 .bar-quote-text { flex: 1; display: -webkit-box; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .bar-quote-drop { flex: none; padding: 0 4px; border: 0; background: none; font: 400 16px/18px var(--sans); color: var(--bar-muted); cursor: pointer; }
+.bar-themes { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 12px 10px; }
+.bar-themes:empty { display: none; }
+.bar-theme, .bar-theme-name { box-sizing: border-box; height: 26px; padding: 0 10px 0 24px; border: 0; border-radius: 999px; background: var(--bar-chip) radial-gradient(circle at 13px 50%, var(--ink) 0 4px, transparent 5px) no-repeat; font: 400 12px/26px var(--sans); color: var(--bar-muted); cursor: pointer; }
+.bar-theme[aria-checked="true"] { background-color: var(--bar-chip-on); color: var(--bar-fg); box-shadow: inset 0 0 0 1.5px var(--ink); }
+.bar-theme-name { width: 104px; outline: 0; color: var(--bar-fg); cursor: text; box-shadow: inset 0 0 0 1px var(--bar-line); }
+.bar-theme-name:focus { box-shadow: inset 0 0 0 1.5px var(--ink); }
+.bar-theme-edit { height: 26px; padding: 0 8px; border: 0; background: none; font: 400 12px/26px var(--sans); color: var(--bar-muted); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .bar-why { margin: 0 16px 8px; font: 400 12px/16px var(--sans); color: #d92d20; }
 .bar-why:empty { display: none; }
 .bar input::placeholder, .bar-note::placeholder { color: var(--bar-hint); }
 .bar-note { display: block; box-sizing: border-box; width: 100%; max-height: 160px; padding: 18px 0; border: 0; outline: 0; background: transparent; resize: none; font: inherit; color: var(--bar-fg); caret-color: var(--bar-fg); }
-.bar input[hidden], .bar-note[hidden] { display: none; }
-::highlight(ekko-comment) { background-color: rgba(255, 196, 0, 0.3); }
-::highlight(ekko-comment-on) { background-color: rgba(255, 196, 0, 0.65); }
-::highlight(ekko-quoted) { background-color: rgba(255, 196, 0, 0.65); }
-.margin { position: absolute; top: 0; left: calc(100% + 40px); width: 216px; }
-.margin[hidden], .select-tools[hidden] { display: none; }
-.margin-head { display: none; }
-.comment { position: absolute; left: 0; right: 0; padding: 12px 14px; border-radius: 8px; background: var(--page); box-shadow: 0 0 0 1px var(--rule), 0 2px 8px rgba(0, 0, 0, 0.06); font: 400 13px/20px var(--sans); color: var(--fg); cursor: pointer; }
-.comment.on { box-shadow: 0 0 0 2px var(--fg); }
-.comment .kind { font-size: 12px; line-height: 18px; color: var(--fg-2); }
-.comment.outdated .kind { color: #b54708; }
-.comment .quote { margin: 6px 0 0; font: 400 14px/20px var(--serif); }
-.comment .quote.plain { display: none; }
-.comment .quote.gone { opacity: 0.7; }
-.comment del { color: var(--fg-2); }
-.comment ins { text-decoration: none; background: rgba(26, 137, 23, 0.16); }
-.comment .text { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.comment.reply { position: static; margin: 10px 0 0; padding: 10px 0 0; border-top: 1px solid var(--rule); border-radius: 0; box-shadow: none; }
-.comment.resolved { opacity: 0.6; }
-.select-tools { position: absolute; z-index: 30; display: flex; gap: 2px; padding: 4px; border-radius: 999px; background: var(--fg); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18); }
-.select-tools button { padding: 6px 12px; border: 0; border-radius: 999px; background: none; font: 500 13px/18px var(--sans); color: var(--bg); cursor: pointer; }
-.select-tools button:hover { background: rgba(127, 127, 127, 0.35); }
-.select-tools kbd { margin: 0 0 0 8px; padding: 0 5px; border-radius: 4px; background: rgba(127, 127, 127, 0.35); font: 500 11px/16px var(--sans); }
-
-/* The margin needs 256px right of the text and the column at the left
-   232px, and the window 1336px for both and the section bars; a narrower
-   one lists the comments after the plan. */
-@media (max-width: 1335px) {
-  .margin { position: static; width: auto; margin: 64px 0 0; }
-  .margin-head { display: block; margin: 0 0 16px; font: 600 13px/20px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); }
-  .comment { position: static; margin: 0 0 12px; }
-  .comment .quote.plain { display: block; }
-}
+.bar.quoting { background: var(--bar-solid); }
+.bar.quoting .bar-line { padding-right: 56px; }
+.bar-send { position: absolute; right: 12px; bottom: 12px; display: grid; place-items: center; width: 32px; height: 32px; padding: 0 0 2px; border: 0; border-radius: 50%; background: var(--bar-fg); font: 600 17px/1 var(--sans); color: var(--page); cursor: pointer; }
+.bar-send:disabled { opacity: 0.3; cursor: default; }
+#comments .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 32px 0 0; }
+#comments .filter { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border: 0; border-radius: 999px; background: none; box-shadow: inset 0 0 0 1px var(--rule); font: 400 13px/30px var(--sans); color: var(--fg); cursor: pointer; }
+#comments .filter .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink); }
+#comments .filter .count { color: var(--fg-2); }
+#comments .filter[aria-pressed="true"] { background: var(--fg); color: var(--bg); box-shadow: none; }
+#comments .filter[aria-pressed="true"] .count { color: inherit; opacity: 0.7; }
+#comments .filter.switch { margin-left: auto; }
+.prose ol.comments { margin: 24px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
+.prose li.entry { position: relative; margin: 0; padding: 16px 0 16px 18px; border-bottom: 1px solid var(--rule); font: 400 14px/20px var(--sans); letter-spacing: normal; }
+.prose li.entry::before { content: ""; position: absolute; top: 18px; bottom: 18px; left: 0; width: 3px; border-radius: 2px; background: var(--ink, var(--ink-yellow)); }
+.entry-head { width: 100%; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; }
+.prose .entry .said { display: -webkit-box; overflow: hidden; margin: 8px 0 0; padding: 0 0 0 12px; border-left: 2px solid var(--rule); font: italic 400 16px/24px var(--serif); color: var(--fg-2); -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.prose .entry .text { font: 400 16px/24px var(--sans); }
+.prose .entry .reply { margin: 12px 0 0; padding: 0 0 0 12px; border-left: 2px solid var(--rule); }
+.prose .entry .reply .meta { font-size: 12px; color: var(--fg-2); }
+.prose li.entry.resolved { opacity: 0.6; }
 
 /* The column at the left needs 232px beside the text, and the window
    1176px for that; a narrower one puts it above the text. */
@@ -2217,13 +2962,15 @@ button.step-head { cursor: pointer; }
   .opener { font-size: 40px; }
   h1 { font-size: 32px; line-height: 40px; }
   .bar.open { width: calc(100vw - 32px); }
+  .bar.open .fold-in { width: calc(100vw - 32px); }
   .toc { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .bar, .bar-fold, .bar-hint span, .toc-card, .toc-bars, .toc-bars span { transition: none; }
 }
 @media print {
-  .top .link, .top .solid, .toc, .bar, .arrows, .select-tools { display: none; }
+  .top .link, .top .solid, .toc, .bar, .arrows, .select-tools, .pop, .prose .pin, #comments .filters { display: none; }
+  .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
 }
 "##;
@@ -2479,29 +3226,69 @@ mod tests {
     }
 
     #[test]
-    fn a_comment_goes_to_the_margin_and_quotes_the_words_as_shown() {
+    fn a_comment_is_its_words_and_an_entry_under_comments() {
         let text = "Ship\n\n## Design\nThe `comment` field, un**kept**, out*in*side, at[here](https://example.com), s~~trike~~d.\n\n- one\n- two\n";
         assert_eq!(shown_words(text), "Ship Design The comment field, unkept, outinside, athere, striked. one two", "markup glued to words adds no space");
         let item = artifact_item(1, text, Vec::new());
-        let mut comment = Item::new_note(2, "Why here?".to_string(), vec!["My Board".to_string()]);
-        comment.attached_to = item.uid.clone();
-        comment.comment = Some(Box::new(crate::item::Comment {
-            version: 1,
-            quote: Some(crate::item::Quote { exact: "comment field".into(), prefix: String::new(), suffix: String::new(), section: "Design".into(), unknown: BTreeMap::new() }),
-            replacement: None,
-            step: None,
-            reply_to: None,
-            sent: None,
-            resolved: None,
-            unknown: BTreeMap::new(),
-        }));
-        let mut note = Item::new_note(3, "A plain note".to_string(), vec!["My Board".to_string()]);
+        let on = |id: u32, words: &str, theme: Option<&str>, color: Option<&str>, reply_to: Option<String>| {
+            let mut note = Item::new_note(id, format!("Comment {id}"), vec!["My Board".to_string()]);
+            note.attached_to = item.uid.clone();
+            note.comment = Some(Box::new(crate::item::Comment {
+                version: 1,
+                quote: Some(crate::item::Quote { exact: words.into(), prefix: String::new(), suffix: String::new(), section: "Design".into(), unknown: BTreeMap::new() }),
+                replacement: None,
+                step: None,
+                reply_to,
+                sent: None,
+                resolved: None,
+                theme: theme.map(str::to_string),
+                color: color.map(str::to_string),
+                unknown: BTreeMap::new(),
+            }));
+            note
+        };
+        let plain = on(2, "comment field", None, None, None);
+        let themed = on(3, "unkept", Some("Dúvida"), Some("blue"), None);
+        let reply = on(4, "unkept", None, None, themed.uid.clone());
+        let mut note = Item::new_note(5, "A plain note".to_string(), vec!["My Board".to_string()]);
         note.attached_to = item.uid.clone();
-        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone()), (2, comment), (3, note)]), None);
-        let data = html.split("<script type=\"application/json\" id=\"comments\">").nth(1).and_then(|rest| rest.split("</script>").next()).unwrap_or_default();
-        assert!(data.contains("\"exact\":\"comment field\"") && data.contains("Why here?"), "{data}");
-        assert!(html.contains("id=\"note-3\"") && !html.contains("id=\"note-2\""), "the comment is in the margin, not under Notes: {html}");
-        assert!(html.contains("<li>1 note</li>") && html.contains("<li>1 comment</li>"), "{html}");
+        let all = BTreeMap::from([(1, item.clone()), (2, plain), (3, themed), (4, reply), (5, note)]);
+        let (html, _) = page(&item, &all, None);
+        let data = |id: &str| html.split(&format!("<script type=\"application/json\" id=\"{id}\">")).nth(1).and_then(|rest| rest.split("</script>").next()).unwrap_or_default().to_string();
+        let comments: serde_json::Value = serde_json::from_str(&data("comments-data")).unwrap();
+        assert_eq!(comments.as_array().map(Vec::len), Some(3), "{comments}");
+        assert_eq!(comments[1]["comment"]["color"], "blue");
+        assert_eq!(comments[1]["mine"], true, "written by the person, no process");
+        let themes: serde_json::Value = serde_json::from_str(&data("themes")).unwrap();
+        assert_eq!(themes, serde_json::json!(THEMES.map(|(color, name)| [color, name])), "the themes go out even before the first comment");
+        assert!(html.contains("id=\"note-5\"") && !html.contains("id=\"note-2\"") && !html.contains("id=\"note-3\""), "comments are no Notes: {html}");
+        let entry = |id: u32| html.split(&format!("<li class=\"entry\" id=\"comment-{id}\"")).nth(1).and_then(|rest| rest.split("</li>").next()).map(str::to_string);
+        let plain = entry(2).expect("the plain comment's entry");
+        assert!(plain.contains("data-color=\"yellow\"") && plain.contains("<span class=\"theme\">Note</span>") && plain.contains("comment field"), "{plain}");
+        let themed = entry(3).expect("the themed comment's entry");
+        assert!(themed.contains("data-color=\"blue\"") && themed.contains("<span class=\"theme\">Dúvida</span>") && themed.contains("role=\"comment\""), "{themed}");
+        assert!(themed.contains("<div class=\"reply\" id=\"comment-4\" role=\"comment\">"), "the reply is under what it answers: {themed}");
+        assert!(entry(4).is_none(), "a reply is no entry of its own");
+        assert!(html.contains("<li><a href=\"#comments\">3 comments</a></li>") && html.contains("<li>1 note</li>"), "{html}");
+        assert!(!html.contains("class=\"margin\""), "no card is beside the text");
+    }
+
+    /// Each color of THEMES has its tint and its ink in both looks, and the
+    /// highlight that marks words being quoted: the rule over every theme,
+    /// so a seventh color cannot ship half drawn.
+    #[test]
+    fn every_theme_has_its_colors_in_both_looks() {
+        let (light, dark) = STYLE.split_once(":root[data-theme=\"dark\"]").expect("a dark look");
+        let dark = dark.split_once('}').map_or("", |(block, _)| block);
+        for (color, _) in THEMES {
+            for name in [format!("--tint-{color}:"), format!("--ink-{color}:")] {
+                assert!(light.contains(&name) && dark.contains(&name), "{name} in both looks");
+            }
+            assert!(STYLE.contains(&format!("::highlight(ekko-quoted-{color}) {{ background-color: var(--tint-{color}); }}")), "{color} marks words being quoted");
+        }
+        assert_eq!(theme_refused(Some("Question"), Some("blue")), None);
+        assert!(theme_refused(None, Some("teal")).is_some() && theme_refused(Some(""), None).is_some() && theme_refused(Some(&"x".repeat(41)), None).is_some());
+        assert_eq!(theme_refused(Some(&"é".repeat(40)), None), None, "forty characters, not bytes");
     }
 
     #[test]

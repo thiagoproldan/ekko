@@ -346,7 +346,11 @@ fn from_bash(home: &Path, port: u16, request: &str, as_claude: bool) -> String {
     let mut command = if as_claude {
         let bash = String::from_utf8(Command::new("sh").args(["-c", "command -v bash"]).output().unwrap().stdout).unwrap();
         let claude = home.join("claude");
-        fs::copy(bash.trim(), &claude).unwrap();
+        // Copied once: the copy keeps the store's read-only mode, which
+        // refuses a second copy over it.
+        if !claude.exists() {
+            fs::copy(bash.trim(), &claude).unwrap();
+        }
         let mut command = Command::new(claude);
         command.arg("-c").arg(script);
         command
@@ -355,7 +359,20 @@ fn from_bash(home: &Path, port: u16, request: &str, as_claude: bool) -> String {
         command.arg("-c").arg(format!("(sleep 0.5; {script}) > /dev/null 2>&1 &"));
         command
     };
-    assert!(command.env("REQUEST", request).env("OUT", &out).status().unwrap().success());
+    command.env("REQUEST", request).env("OUT", &out);
+    // A file just copied is busy to run while another test's fork, made
+    // before its exec, still holds the copy open: run it a moment later.
+    let mut tries = 0;
+    let status = loop {
+        match command.status() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => break other.unwrap(),
+        }
+    };
+    assert!(status.success());
     assert!(until(10, || out.exists()), "bash never got its answer");
     fs::read_to_string(out).unwrap()
 }
@@ -522,4 +539,62 @@ fn a_comment_from_the_page_is_the_persons_note_on_the_artifact() {
     let _ = fs::remove_file(home.join("answer-person"));
     let answer = from_bash(&home, port, &post(&comment(1, "Facts, in code and bold.")), false);
     assert!(answer.starts_with("HTTP/1.1 200 "), "the words as the page shows them: {answer}");
+}
+
+/// The person edits and deletes their comment from the page (task 1213):
+/// its text, theme and color change, and a deletion puts it in the trash;
+/// Claude is refused, as are an unknown color, a body that mixes a new
+/// comment with an edit, and a comment already deleted, each writing
+/// nothing.
+#[test]
+fn the_person_edits_and_deletes_their_comment_from_the_page() {
+    let home = Home::new();
+    let written = artifact(&home);
+    let (port, path) = split(written["page"].as_str().unwrap());
+    let token = runtime(&home)["token"].as_str().unwrap().to_string();
+    let post = |to: &str, body: &Value| {
+        let body = body.to_string();
+        format!(
+            "POST {to} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: ekko_{port}={token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let ask = |to: &str, body: Value, as_claude: bool| {
+        let _ = fs::remove_file(home.join(if as_claude { "answer-claude" } else { "answer-person" }));
+        from_bash(&home, port, &post(to, &body), as_claude)
+    };
+    let comment = || -> Value {
+        let board: Value = serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+        board.as_object().unwrap().values().find(|item| item.get("comment").is_some()).cloned().unwrap_or_default()
+    };
+    let quote = json!({"exact": "Facts", "prefix": "", "suffix": "", "section": "What is known"});
+    let answer = ask("/api/comment", json!({"page": path, "text": "Which facts?", "comment": {"version": 1, "quote": quote, "theme": "Question", "color": "blue"}}), false);
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    let uid = comment()["uid"].as_str().unwrap().to_string();
+    assert_eq!((&comment()["comment"]["theme"], &comment()["comment"]["color"]), (&json!("Question"), &json!("blue")));
+
+    for (to, body, as_claude, refusal) in [
+        ("/api/comment/edit", json!({"page": path, "uid": uid, "text": "Claude's words"}), true, "HTTP/1.1 403 "),
+        ("/api/comment/edit", json!({"page": path, "uid": uid, "color": "teal"}), false, "HTTP/1.1 409 "),
+        ("/api/comment/edit", json!({"page": path, "uid": uid, "comment": {"version": 1}}), false, "HTTP/1.1 400 "),
+        ("/api/comment/delete", json!({"page": path, "uid": uid, "text": "and words"}), false, "HTTP/1.1 400 "),
+        ("/api/comment/delete", json!({"page": path, "uid": uid}), true, "HTTP/1.1 403 "),
+    ] {
+        let answer = ask(to, body.clone(), as_claude);
+        assert!(answer.starts_with(refusal), "{to} {body}: {answer}");
+    }
+    assert_eq!(comment()["description"], "Which facts?", "a refused edit wrote nothing");
+    assert!(comment().get("trashed").is_none(), "a refused deletion wrote nothing");
+
+    let answer = ask("/api/comment/edit", json!({"page": path, "uid": uid, "text": "Which facts, exactly?", "theme": "Dúvida", "color": "pink"}), false);
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    let edited = comment();
+    assert_eq!((&edited["description"], &edited["comment"]["theme"], &edited["comment"]["color"]), (&json!("Which facts, exactly?"), &json!("Dúvida"), &json!("pink")));
+    assert_eq!(edited["comment"]["quote"]["exact"], "Facts", "an edit keeps the words it is on");
+
+    let answer = ask("/api/comment/delete", json!({"page": path, "uid": uid}), false);
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    assert!(comment().get("trashed").is_some(), "in the trash");
+    let answer = ask("/api/comment/delete", json!({"page": path, "uid": uid}), false);
+    assert!(answer.starts_with("HTTP/1.1 409 "), "a comment deleted already: {answer}");
 }

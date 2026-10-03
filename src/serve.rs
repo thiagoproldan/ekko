@@ -619,28 +619,40 @@ fn route(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
             }
             Err(why) => Answer::refuse(why, true),
         },
-        ("POST", "/api/comment") => comment(shared, request, socket),
+        ("POST", "/api/comment") => comment(shared, request, socket, "new"),
+        ("POST", "/api/comment/edit") => comment(shared, request, socket, "edit"),
+        ("POST", "/api/comment/delete") => comment(shared, request, socket, "delete"),
         ("GET", path) => match query.split('&').find_map(|pair| pair.strip_prefix("token=")) {
             Some(token) if path.starts_with("/default/") || path.starts_with("/project/") => opened(shared, path, token),
             _ => font(path).or_else(|| page(shared, path)).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
         },
-        _ => Answer::text(405, "the server answers GET, and POST to /stop and /api/who"),
+        _ => Answer::text(405, "the server answers GET, and POST to /stop, /api/who and /api/comment"),
     }
 }
 
-/// `POST /api/comment`: a comment the person writes on an artifact's page
-/// (task 1105), as JSON: the page's path, the comment's text, and the
-/// comment itself, with the plan's version it was made on and what it is
-/// about. Written as the person's note on the artifact; refused when the
-/// plan moved on, or no longer holds the words.
-fn comment(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
+/// `POST /api/comment`, `/api/comment/edit` and `/api/comment/delete`: the
+/// person's comments on an artifact's page (tasks 1105 and 1213), as JSON
+/// naming the page's path. A new comment carries its text and the comment
+/// itself, with the plan's version it was made on and what it is about; an
+/// edit names a comment by uid with the text, theme or color it takes; a
+/// deletion names one alone, and puts it in the trash. Each is written as
+/// the person on the artifact's board, and refused when the plan moved on,
+/// no longer holds the words, or the comment is not the person's.
+fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -> Answer {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Posted {
         page: String,
         #[serde(default)]
-        text: String,
-        comment: crate::item::Comment,
+        text: Option<String>,
+        #[serde(default)]
+        comment: Option<crate::item::Comment>,
+        #[serde(default)]
+        uid: Option<String>,
+        #[serde(default)]
+        theme: Option<String>,
+        #[serde(default)]
+        color: Option<String>,
     }
     let json = |code: u16, value: serde_json::Value| Answer::new(code, "application/json", value.to_string());
     let person = match writer(shared, request, socket) {
@@ -654,19 +666,44 @@ fn comment(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
     let Some((project, uid)) = board_of(&posted.page) else {
         return json(404, serde_json::json!({"why": format!("{} is no artifact's page", posted.page)}));
     };
+    let fields = match how {
+        "new" => posted.comment.is_some() && posted.uid.is_none() && posted.theme.is_none() && posted.color.is_none(),
+        "edit" => posted.uid.is_some() && posted.comment.is_none(),
+        _ => posted.uid.is_some() && posted.comment.is_none() && posted.text.is_none() && posted.theme.is_none() && posted.color.is_none(),
+    };
+    if !fields {
+        let wants = match how {
+            "new" => "a new comment takes page, text and comment",
+            "edit" => "an edit takes page, uid, and any of text, theme and color",
+            _ => "a deletion takes page and uid",
+        };
+        return json(400, serde_json::json!({ "why": wants }));
+    }
     let written = crate::directory::locate(&shared.home, &shared.home, None, None, project.as_deref())
         .map_err(|error| error.to_string())
         .and_then(|location| crate::ekko::Ekko::at(&location).map_err(|error| error.to_string()))
         .and_then(|ekko| {
             let ekko = ekko.acting_as(crate::holder::Actor::person());
             let mut draft = crate::ops::Draft::open(&ekko).map_err(|error| error.to_string())?;
-            let id = draft.comment(&crate::ops::Ref::Text(uid.clone()), &posted.text, posted.comment).map_err(|error| error.to_string())?;
+            let on = crate::ops::Ref::Text(uid.clone());
+            let id = match (how, posted.comment, posted.uid.as_deref()) {
+                ("new", Some(comment), _) => draft.comment(&on, posted.text.as_deref().unwrap_or_default(), comment),
+                ("edit", _, Some(note)) => draft.edit_comment(&on, note, posted.text.as_deref(), posted.theme.as_deref(), posted.color.as_deref()),
+                (_, _, Some(note)) => draft.trash_comment(&on, note),
+                _ => unreachable!("the fields were checked"),
+            }
+            .map_err(|error| error.to_string())?;
             let committed = draft.commit(false).map_err(|error| error.to_string())?;
             Ok((id, committed.data.get(&id).and_then(|note| note.uid.clone()).unwrap_or_default()))
         });
     match written {
         Ok((id, note)) => {
-            log(&shared.home, &format!("POST /api/comment: note {id} on {uid}, by the user, {person}"));
+            let did = match how {
+                "new" => "note",
+                "edit" => "edited note",
+                _ => "trashed note",
+            };
+            log(&shared.home, &format!("POST /api/comment: {did} {id} on {uid}, by the user, {person}"));
             json(200, serde_json::json!({"id": id, "uid": note}))
         }
         Err(why) => json(409, serde_json::json!({"why": why})),

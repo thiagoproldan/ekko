@@ -543,6 +543,13 @@ pub struct Comment {
     /// When it was resolved, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<i64>,
+    /// Its theme, by the name the person called it when they wrote it, so a
+    /// reader learns what they meant (task 1213).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    /// That theme's color, one of `artifact::THEMES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
