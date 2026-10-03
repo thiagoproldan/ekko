@@ -787,11 +787,7 @@ impl<'a> Draft<'a> {
             1 => format!(", sending comment {}", pending[0].1),
             _ => format!(", sending comments {}", pending.iter().map(|(_, id, _)| id.to_string()).collect::<Vec<_>>().join(", ")),
         };
-        let said = match verdict {
-            Review::APPROVE => format!("Approved version {version}{comments}."),
-            Review::CHANGES => format!("Changes requested on version {version}{comments}."),
-            _ => format!("Commented on version {version}{comments}."),
-        };
+        let said = crate::artifact::review_said(verdict, version, &pending.iter().map(|(_, id, _)| *id).collect::<Vec<_>>());
         let spec = Create {
             kind: None,
             text: if text.is_empty() { said.clone() } else { text.to_string() },
@@ -823,7 +819,7 @@ impl<'a> Draft<'a> {
             answered = self.data[&question].uid.clone();
         }
         let comments = pending.into_iter().map(|(_, _, uid)| uid).collect();
-        self.item(note).review = Some(Box::new(Review { verdict: verdict.to_string(), version, comments, answered, unknown: Default::default() }));
+        self.item(note).review = Some(Box::new(Review { verdict: verdict.to_string(), version, comments, answered, resolved: None, unknown: Default::default() }));
         Ok(note)
     }
 

@@ -365,7 +365,7 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
         found.extend(reply_to.as_deref().map(|uid| ("answers", uid)));
     }
     if let Some(review) = review.as_deref() {
-        let Review { comments, answered, verdict: _, version: _, unknown: _ } = review;
+        let Review { comments, answered, verdict: _, version: _, resolved: _, unknown: _ } = review;
         found.extend(comments.iter().map(|uid| ("sends", uid.as_str())));
         found.extend(answered.as_deref().map(|uid| ("answers", uid)));
     }
@@ -462,8 +462,8 @@ fn arriving(item: &Item, id: u32) -> Item {
         })
     });
     let review = review.as_deref().map(|review| {
-        let Review { verdict, version, comments, answered, unknown } = review;
-        Box::new(Review { verdict: verdict.clone(), version: *version, comments: comments.clone(), answered: answered.clone(), unknown: unknown.clone() })
+        let Review { verdict, version, comments, answered, resolved, unknown } = review;
+        Box::new(Review { verdict: verdict.clone(), version: *version, comments: comments.clone(), answered: answered.clone(), resolved: *resolved, unknown: unknown.clone() })
     });
     let wait = wait.as_deref().map(|wait| {
         let Wait { rev: _, over, on, until, by, unknown } = wait;

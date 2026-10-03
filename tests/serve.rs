@@ -664,6 +664,13 @@ impl Session {
         }
     }
 
+    /// The text of tool `tool`'s answer, called as request `id`.
+    fn call(&mut self, id: u64, tool: &str, arguments: Value) -> String {
+        self.send(json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}));
+        let reply = self.reply(id, Duration::from_secs(10)).expect("a reply");
+        reply["result"]["content"][0]["text"].as_str().unwrap().to_string()
+    }
+
     /// Asks the user, through ask, to approve the plan of artifact 1.
     fn ask_approval(&mut self, id: u64) {
         let options = json!([
@@ -743,4 +750,54 @@ fn a_review_from_the_page_returns_the_ask_that_waits_on_it() {
     assert!(step["task"].is_string(), "the approval made the step's task: {step}");
     let log = fs::read_to_string(state(&home).join("serve.log")).unwrap();
     assert!(log.contains("POST /api/review: approve in note ") && log.contains("refused POST /api/review: process "), "{log}");
+}
+
+/// The user's feedback from the page reaches the session working the
+/// artifact in its next ekko reply, once (task 1108): a comment sent alone
+/// with Send now, then a review that sends the others with it. The prime
+/// counts what no session resolved yet.
+#[test]
+fn feedback_from_the_page_is_told_in_the_next_reply_of_the_session_working_the_artifact() {
+    let home = Home::new();
+    let written = artifact(&home);
+    let (port, path) = split(written["page"].as_str().unwrap());
+    let token = runtime(&home)["token"].as_str().unwrap().to_string();
+    let send = |to: &str, body: Value| -> Value {
+        let body = body.to_string();
+        let request = format!(
+            "POST {to} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: ekko_{port}={token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = fs::remove_file(home.join("answer-person"));
+        let answer = from_bash(&home, port, &request, false);
+        assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+        serde_json::from_str(answer.split_once("\r\n\r\n").unwrap().1).unwrap()
+    };
+    let comment = |text: &str| {
+        let quote = json!({"exact": "Facts", "prefix": "## What is known\n", "suffix": "\n## Design", "section": "What is known"});
+        send("/api/comment", json!({"page": path, "text": text, "comment": {"version": 1, "quote": quote}}))
+    };
+
+    let mut session = Session::start(&home);
+    let held = session.call(2, "set_state", json!({"items": [1], "state": "progress"}));
+    assert!(held.starts_with("{\"ok\":true"), "{held}");
+    let first = comment("Which facts?");
+    assert!(!session.call(3, "next", json!({})).contains("ekko: "), "a pending comment waits on the user");
+    send("/api/comment/send", json!({"page": path, "uid": first["uid"]}));
+    let told = session.call(4, "next", json!({}));
+    let line = format!("\n\nekko: Comment {} from the user, sent alone from the page of artifact 1 (Ship the page), on \"Facts\": Which facts?\n", first["id"]);
+    assert!(told.ends_with(&line), "{told}");
+    assert!(!session.call(5, "next", json!({})).contains("ekko: "), "once");
+
+    let (second, third) = (comment("And these?"), comment("And those?"));
+    let review = send("/api/review", json!({"page": path, "verdict": "comment", "version": 1, "text": "Two more."}));
+    let told = session.call(6, "next", json!({}));
+    let line = format!(
+        "\n\nekko: Review {} from the user, on artifact 1 (Ship the page): commented on version 1, sending comments {}, {}. It says: Two more.\n",
+        review["id"], second["id"], third["id"]
+    );
+    assert!(told.ends_with(&line), "{told}");
+    assert!(!session.call(7, "next", json!({})).contains("ekko: "), "once, with the comments it sent");
+    let prime = session.call(8, "prime", json!({}));
+    assert!(prime.contains("1 review and 3 comments to resolve"), "{prime}");
 }

@@ -582,6 +582,10 @@ pub struct Review {
     /// the plan, which Approve and Request changes answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered: Option<String>,
+    /// When a session resolved it. Until then it is feedback that waits on
+    /// the sessions working the artifact (task 1108).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<i64>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]

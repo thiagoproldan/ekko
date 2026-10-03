@@ -787,9 +787,10 @@ impl Server {
     }
 
     /// `text`, and after it what this session has not been told yet (see
-    /// `wake::untold`): its waits another's write ended, the answers to the
-    /// questions its ask left open, and the waits others keep on its work --
-    /// each once, on the board it started on (task 389).
+    /// `wake::untold`): the user's feedback on an artifact it works, its
+    /// waits another's write ended, the answers to the questions its ask left
+    /// open, and the waits others keep on its work -- each once, on the board
+    /// it started on (tasks 389 and 1108).
     fn told(&self, text: String) -> String {
         let Some(process) = self.actor.process.as_ref().filter(|_| self.mode == Mode::Board) else { return text };
         let Ok((ekko, location)) = self.open() else { return text };

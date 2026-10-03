@@ -5,14 +5,15 @@
 //! board's file changes, and its exit 2 wakes a session sitting idle; the
 //! session's next ekko reply carries the same lines, for a client without
 //! that hook. The session holding a task is told, once and only in a reply,
-//! that another waits on it.
+//! that another waits on it. So are the sessions working an artifact, by the
+//! hook too, of the user's feedback from its page (task 1108).
 //!
 //! What was told is kept outside the board, since reading the board writes
 //! nothing to it: a marker file per line, in a folder per Claude Code
 //! process, made with `create_new` so that two hook runs racing on one
 //! write cannot both wake the session.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -86,8 +87,9 @@ fn forget_ended(home: &Path) {
 }
 
 /// What `me` has not been told yet on the board `ekko` has open, each line
-/// marked as told as it is returned: its waits that another's write ended,
-/// and the answers to the questions its ask left open -- and, with
+/// marked as told as it is returned: the user's feedback on an artifact it
+/// works, its waits that another's write ended, and the answers to the
+/// questions its ask left open -- and, with
 /// `holding`, the waits other sessions keep on the tasks it holds. Only what
 /// moved after `since`, the cursor its session last started from: its prime,
 /// or the changes its resume was given, already said what came before.
@@ -108,6 +110,79 @@ pub fn untold(ekko: &Ekko, me: &Actor, told: &Told, since: u64, holding: bool) -
     let titled = |item: &Item| agent::headline(&item.description, item.is_task, TITLED);
 
     let mut lines = Vec::new();
+    // The user's feedback from an artifact's page (task 1108): each review,
+    // and each comment sent alone, told once to the sessions working the
+    // artifact -- holding it or a step's task in progress, or having asked a
+    // question about it still open when the feedback came. Told before the
+    // answers, so a review that answered a question this session's ask left
+    // open is told once, as the review.
+    let holds = |item: &Item| State::of(item) == Some(State::Progress) && item.held_by.as_ref().is_some_and(mine);
+    let works = |artifact: &Item, rev: u64| {
+        let steps = artifact.artifact.as_deref().map_or(&[][..], |plan| plan.steps.as_slice());
+        holds(artifact)
+            || steps.iter().filter_map(|step| by_uid.get(step.task.as_deref()?)).any(|task| holds(task))
+            || all.values().any(|asked| {
+                asked.trashed.is_none()
+                    && asked.attached_to.is_some()
+                    && asked.attached_to == artifact.uid
+                    && asked.question.as_ref().is_some_and(|question| {
+                        question.asked_by.as_ref().is_some_and(mine) && question.answer.as_ref().is_none_or(|answer| answer.rev >= rev)
+                    })
+            })
+    };
+    let reviewed: HashSet<&str> = all.values().filter_map(|note| note.review.as_deref()).flat_map(|review| review.comments.iter().map(String::as_str)).collect();
+    for note in all.values().filter(|note| crate::artifact::feedback(note)) {
+        let (Some(uid), Some(rev)) = (note.uid.as_deref(), note.rev) else { continue };
+        if rev <= since || (note.review.is_none() && reviewed.contains(uid)) {
+            continue;
+        }
+        let Some(artifact) = note.attached_to.as_deref().and_then(|on| by_uid.get(on).copied()).filter(|item| item.artifact.is_some()) else { continue };
+        if !works(artifact, rev) || !told.mark(&format!("feedback-{uid}")) {
+            continue;
+        }
+        let answered = note.review.as_deref().and_then(|review| review.answered.as_deref()).and_then(|question| by_uid.get(question).copied());
+        let asked_here = answered.filter(|question| question.question.as_ref().is_some_and(|asked| asked.asked_by.as_ref().is_some_and(mine)));
+        if let Some(question) = asked_here.and_then(|question| question.uid.as_deref()) {
+            // An answer to this session's question came back in the reply of
+            // the ask that waited on it, naming the review; one its ask left
+            // open is told here, within the review.
+            if !told.has(&format!("open-{question}")) {
+                continue;
+            }
+            told.mark(&format!("answer-{question}"));
+        }
+        let on = format!("artifact {} ({})", artifact.id, agent::clip(crate::ekko::title(&artifact.description), TITLED));
+        if let Some(review) = note.review.as_deref() {
+            let ids: Vec<u32> = review.comments.iter().filter_map(|comment| by_uid.get(comment.as_str())).map(|comment| comment.id).collect();
+            let verdict = match review.verdict.as_str() {
+                crate::item::Review::APPROVE => format!("approved version {}", review.version),
+                crate::item::Review::CHANGES => format!("changes requested on version {}", review.version),
+                _ => format!("commented on version {}", review.version),
+            };
+            let answering = answered
+                .and_then(|question| Some((question.id, question.question.as_ref()?.answer.as_ref()?)))
+                .map(|(id, answer)| format!(", answering question {id} with \"{}\"", crate::menu::picked(&answer.text)))
+                .unwrap_or_default();
+            let sending = match ids.as_slice() {
+                [] => String::new(),
+                [one] => format!(", sending comment {one}"),
+                many => format!(", sending comments {}", many.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")),
+            };
+            let says = if note.description == crate::artifact::review_said(&review.verdict, review.version, &ids) {
+                String::new()
+            } else {
+                format!(" It says: {}", agent::clip(&note.description, QUOTED))
+            };
+            lines.push(format!("Review {} from the user, on {on}: {verdict}{answering}{sending}.{says}", note.id));
+        } else if let Some(comment) = note.comment.as_deref() {
+            let at = match (&comment.quote, &comment.step) {
+                (Some(quote), _) => format!(", on \"{}\"", agent::clip(&quote.exact, TITLED)),
+                (None, Some(step)) => format!(", on step {step}"),
+                (None, None) => String::new(),
+            };
+            lines.push(format!("Comment {} from the user, sent alone from the page of {on}{at}: {}", note.id, agent::clip(&note.description, QUOTED)));
+        }
+    }
     for note in all.values().filter(|note| note.trashed.is_none()) {
         let Some(uid) = note.uid.as_deref() else { continue };
         if let Some(wait) = &note.wait {

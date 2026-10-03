@@ -216,6 +216,10 @@ pub struct Standing {
     pub proposed: usize,
     /// The version is past the one the user approved.
     pub changed: bool,
+    /// The user's reviews and sent comments on it, from its page, that no
+    /// session resolved yet (task 1108).
+    pub reviews: usize,
+    pub comments: usize,
 }
 
 impl Standing {
@@ -240,6 +244,14 @@ impl Standing {
                 (true, None) => {}
             }
         }
+        let (mut reviews, mut comments) = (0, 0);
+        for note in all.values().filter(|note| item.uid.is_some() && note.attached_to == item.uid && feedback(note)) {
+            if note.review.is_some() {
+                reviews += 1;
+            } else {
+                comments += 1;
+            }
+        }
         Some(Standing {
             state,
             waiting: approval_asked(item, all).map(|question| question.id),
@@ -249,6 +261,8 @@ impl Standing {
             cancelled,
             proposed,
             changed: artifact.approved_version.is_some_and(|approved| artifact.version > approved),
+            reviews,
+            comments,
         })
     }
 
@@ -279,6 +293,13 @@ impl Standing {
         }
         if self.changed {
             words.push("changed since approved".to_string());
+        }
+        let count = |n: usize, what: &str| if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") };
+        match (self.reviews, self.comments) {
+            (0, 0) => {}
+            (reviews, 0) => words.push(format!("{} to resolve", count(reviews, "review"))),
+            (0, comments) => words.push(format!("{} to resolve", count(comments, "comment"))),
+            (reviews, comments) => words.push(format!("{} and {} to resolve", count(reviews, "review"), count(comments, "comment"))),
         }
         words.join(", ")
     }
@@ -394,6 +415,36 @@ pub fn approval_answers(question: &Item) -> (String, String) {
     let (_, _, options, _) = crate::menu::parse(&question.description);
     let other = options.into_iter().map(|option| option.label).find(|label| *label != approves).unwrap_or_else(|| "Request changes".to_string());
     (approves, other)
+}
+
+/// What a review says when the user wrote nothing: its verdict, the version
+/// and the comments it sent, by id (task 1106).
+pub fn review_said(verdict: &str, version: u32, comments: &[u32]) -> String {
+    let sending = match comments {
+        [] => String::new(),
+        [one] => format!(", sending comment {one}"),
+        many => format!(", sending comments {}", many.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")),
+    };
+    match verdict {
+        Review::APPROVE => format!("Approved version {version}{sending}."),
+        Review::CHANGES => format!("Changes requested on version {version}{sending}."),
+        _ => format!("Commented on version {version}{sending}."),
+    }
+}
+
+/// Whether `note` is the user's feedback from an artifact's page that waits
+/// on the sessions (task 1108): a review, or a comment sent, written as the
+/// person and neither trashed nor resolved. An approval with nothing to say,
+/// no words and no comments, waits on nobody: its answer made the tasks.
+pub fn feedback(note: &Item) -> bool {
+    if note.trashed.is_some() || note.created_by.as_ref().is_some_and(|by| by.pid.is_some()) {
+        return false;
+    }
+    if let Some(review) = note.review.as_deref() {
+        let bare = review.verdict == Review::APPROVE && review.comments.is_empty() && note.description == review_said(Review::APPROVE, review.version, &[]);
+        return review.resolved.is_none() && !bare;
+    }
+    note.comment.as_deref().is_some_and(|comment| comment.sent.is_some() && comment.resolved.is_none())
 }
 
 /// The open question asking the user to approve `item`'s plan, if one does:
@@ -4411,6 +4462,92 @@ mod tests {
             assert_eq!(review_data(&data[&target], &data, 2)["approve"], Value::Null, "answered, nothing waits");
             apply(&as_user, json!({"op": "set_state", "items": [target], "state": "cancelled"})).unwrap();
             assert!(review(&as_user, "comment", "Late.", 2).unwrap_err().to_string().contains("is cancelled"), "a closed plan takes no review");
+            std::fs::remove_dir_all(&home).ok();
+        }
+
+        /// The user's feedback from the page is told once to each session
+        /// working the artifact, and to no other (task 1108): a comment sent
+        /// alone, then a review, told with the comments it sent and the
+        /// answer it gave a question that session's ask left open; the hook
+        /// wakes a session with it once. Until a session resolves them, the
+        /// artifact's standing counts them.
+        #[test]
+        fn feedback_from_the_page_is_told_once_to_the_sessions_working_the_artifact() {
+            let home = crate::paths::test_dir("ekko-artifact-told");
+            let dir = home.join(".ekko");
+            let (holder, asker, idle) = test_sessions();
+            let (as_holder, as_asker, as_user) = (ekko_at(&dir, &holder), ekko_at(&dir, &asker), ekko_at(&dir, &Actor::person()));
+            let target = artifact(&as_holder, json!({"text": plan("Ship the page"), "steps": [{"key": "one", "text": "The step"}]})).unwrap();
+            apply(&as_holder, json!({"op": "set_state", "items": [target], "state": "progress"})).unwrap();
+            let asked = ask(&as_asker, &home, target).unwrap();
+            let board = || as_user.storage.get().unwrap();
+            let uid = |id: u32| board()[&id].uid.clone().unwrap();
+            let told = |actor: &Actor| crate::wake::Told::of(&home, actor.process.as_ref().unwrap());
+            told(&asker).left_open(&uid(asked));
+            let untold = |actor: &Actor, since: u64| crate::wake::untold(&ekko_at(&dir, actor), actor, &told(actor), since, false).unwrap();
+            let words = || Standing::of(&board()[&target], &board()).unwrap().words();
+            let on = Ref::Id(target);
+            let comment = |text: &str| {
+                let quote = crate::item::Quote { exact: "Text.".into(), prefix: String::new(), suffix: String::new(), section: String::new(), unknown: Default::default() };
+                let pending = crate::item::Comment { version: 1, quote: Some(quote), replacement: None, step: None, reply_to: None, sent: None, resolved: None, theme: None, color: None, unknown: Default::default() };
+                let mut draft = Draft::open(&as_user).unwrap();
+                let id = draft.comment(&on, text, pending).unwrap();
+                draft.commit(false).unwrap();
+                id
+            };
+            let send = |id: u32| {
+                let mut draft = Draft::open(&as_user).unwrap();
+                draft.send_comment(&on, &uid(id)).unwrap();
+                draft.commit(false).unwrap();
+            };
+
+            let first = comment("Why text?");
+            assert!(untold(&holder, 0).is_empty(), "a pending comment waits on the user");
+            send(first);
+            let alone = format!("Comment {first} from the user, sent alone from the page of artifact {target} (Ship the page), on \"Text.\": Why text?");
+            assert_eq!(untold(&holder, 0), vec![alone.clone()], "the session holding the artifact");
+            assert!(untold(&holder, 0).is_empty(), "once");
+            assert_eq!(untold(&asker, 0), vec![alone], "the session that asked about it");
+            assert!(untold(&idle, 0).is_empty(), "no other session");
+            assert_eq!(words(), format!("waiting on you: question {asked}, 1 comment to resolve"));
+
+            let (second, third) = (comment("And here?"), comment("And there?"));
+            let revision = as_user.storage.get_counters().unwrap().revision;
+            let mut draft = Draft::open(&as_user).unwrap();
+            let changes = draft.review(&on, "changes", "Split the step.\nIt does two things.", 1).unwrap();
+            draft.commit(false).unwrap();
+            assert!(untold(&holder, revision + 1).is_empty(), "a session that started after it had it in its prime");
+            let review = format!(
+                "Review {changes} from the user, on artifact {target} (Ship the page): changes requested on version 1, answering question {asked} with \"Ainda não\", sending comments {second}, {third}. It says: Split the step. It does two things."
+            );
+            assert_eq!(untold(&holder, revision), vec![review.clone()], "the review, and not the comments it sent");
+            assert_eq!(untold(&asker, 0), vec![review], "the answer the asker's ask left open is told within the review");
+            assert!(untold(&asker, 0).is_empty(), "once");
+            assert!(untold(&idle, 0).is_empty(), "no other session");
+            assert_eq!(words(), "draft, 1 step, 1 review and 3 comments to resolve");
+
+            let fourth = comment("Last one.");
+            send(fourth);
+            let input = json!({"hook_event_name": "FileChanged", "file_path": as_holder.storage.storage_path()}).to_string();
+            assert_eq!(crate::wake::hook(&as_holder, &input, &home, "default board"), std::process::ExitCode::from(2), "the hook wakes the session");
+            assert_eq!(crate::wake::hook(&as_holder, &input, &home, "default board"), std::process::ExitCode::SUCCESS, "once");
+            assert!(untold(&holder, 0).is_empty(), "and its reply does not tell it again");
+
+            let data = board();
+            let mut resolved = data[&first].clone();
+            resolved.comment.as_mut().unwrap().resolved = Some(1);
+            let mut settled = data[&changes].clone();
+            settled.review.as_mut().unwrap().resolved = Some(1);
+            let mut bare = data[&changes].clone();
+            let written = bare.review.as_mut().unwrap();
+            (written.verdict, written.comments) = ("approve".into(), Vec::new());
+            bare.description = "Approved version 1.".into();
+            let mut worded = bare.clone();
+            worded.description = "Approved, start with the step.".into();
+            let mut theirs = data[&fourth].clone();
+            theirs.created_by = Some(holder.holder(1));
+            assert!(feedback(&data[&first]) && feedback(&data[&changes]) && feedback(&worded), "feedback");
+            assert!(!feedback(&data[&asked]) && !feedback(&resolved) && !feedback(&settled) && !feedback(&bare) && !feedback(&theirs), "not feedback");
             std::fs::remove_dir_all(&home).ok();
         }
 
