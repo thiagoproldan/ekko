@@ -1,7 +1,7 @@
 //! Artifacts (task 1019): the plan for one goal, which lives across
 //! sessions. A session writes it with the MCP tool `artifact`, the user reads
-//! it on a web page ekko writes, and approves it in ekko's menu, where the
-//! answer makes tasks of its steps.
+//! it on a web page ekko writes, and approves it in ekko's menu or with a
+//! review on that page (task 1106), whose answer makes tasks of its steps.
 //!
 //! An artifact is a task with `Item::artifact` set. Its text is the plan, in
 //! Markdown under `HEADINGS`, and the field holds what ekko acts on: the
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::item::{Artifact, Earlier, Item, State, Step};
+use crate::item::{Artifact, Earlier, Item, Review, State, Step};
 use crate::storage::ItemMap;
 
 /// The headings a plan holds, in this order: what the goal is and why, what
@@ -372,12 +372,34 @@ impl StepOf {
     }
 }
 
-/// The open question asking the user to approve `item`'s plan, if one does.
-pub fn approval_asked<'a>(item: &Item, all: &'a ItemMap) -> Option<&'a Item> {
-    let uid = item.uid.as_deref()?;
-    all.values()
+/// The open questions asking the user to approve `item`'s plan, newest
+/// first: a review from the page answers the newest about the version the
+/// plan is at with Approve, and the newest with Request changes (task 1106).
+pub fn approvals_asked<'a>(item: &Item, all: &'a ItemMap) -> Vec<&'a Item> {
+    let Some(uid) = item.uid.as_deref() else { return Vec::new() };
+    let mut asking: Vec<&Item> = all
+        .values()
         .filter(|note| note.trashed.is_none())
-        .find(|note| note.question.as_ref().is_some_and(|question| question.answer.is_none() && question.approve.as_ref().is_some_and(|approve| approve.artifact == uid)))
+        .filter(|note| note.question.as_ref().is_some_and(|question| question.answer.is_none() && question.approve.as_ref().is_some_and(|approve| approve.artifact == uid)))
+        .collect();
+    asking.sort_by_key(|note| std::cmp::Reverse((note.timestamp, note.id)));
+    asking
+}
+
+/// The two answers of a question asking to approve a plan: the one that
+/// approves, which the session wrote first (ekko's word on a question
+/// without its own), and the other, which a review requesting changes gives.
+pub fn approval_answers(question: &Item) -> (String, String) {
+    let approves = question.question.as_ref().and_then(|asked| asked.applies.clone()).unwrap_or_else(|| APPROVE.to_string());
+    let (_, _, options, _) = crate::menu::parse(&question.description);
+    let other = options.into_iter().map(|option| option.label).find(|label| *label != approves).unwrap_or_else(|| "Request changes".to_string());
+    (approves, other)
+}
+
+/// The open question asking the user to approve `item`'s plan, if one does:
+/// the newest, on a board that holds more than one.
+pub fn approval_asked<'a>(item: &Item, all: &'a ItemMap) -> Option<&'a Item> {
+    approvals_asked(item, all).into_iter().next()
 }
 
 /// The page of artifact `item` on the board `all`, whose project folder is
@@ -417,7 +439,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     let mut body = String::new();
     let _ = write!(
         body,
-        "<header class=\"top\"><span class=\"wordmark\">ekko</span><span class=\"where\">{} \u{b7} artifact {}<span id=\"who\"></span></span><span class=\"spacer\"></span><button class=\"link\" id=\"theme\" type=\"button\">Dark</button><button class=\"solid\" type=\"button\" data-copy=\"{command}\">Copy command</button></header>",
+        "<header class=\"top\"><span class=\"wordmark\">ekko</span><span class=\"where\">{} \u{b7} artifact {}<span id=\"who\"></span></span><span class=\"spacer\"></span><button class=\"link\" id=\"theme\" type=\"button\">Dark</button><button class=\"review writes-only\" type=\"button\" data-review>Review<span class=\"count\"></span></button><button class=\"solid\" type=\"button\" data-copy=\"{command}\">Copy command</button></header>",
         esc(&board),
         item.id
     );
@@ -475,7 +497,9 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     );
     let approval = standing.as_ref().and_then(|standing| standing.waiting);
     if let Some(question) = approval {
-        let answer = format!("It asks you to approve this plan: answer it in ekko's menu, or with <code>ekko --answer {question}</code> in a terminal.");
+        let answer = format!(
+            "It asks you to approve this plan: answer it in ekko's menu<span class=\"writes-only\">, with Review at the top</span>, or with <code>ekko --answer {question}</code> in a terminal."
+        );
         callout(&mut body, &format!("Waiting on you: question {question}"), &answer);
     }
     for question in notes.iter().filter(|note| note.question.as_ref().is_some_and(|question| question.answer.is_none()) && Some(note.id) != approval) {
@@ -542,9 +566,10 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     let themes = serde_json::json!(THEMES.map(|(color, name)| [color, name]));
     let _ = write!(
         body,
-        "<script type=\"application/json\" id=\"comments-data\">{}</script><script type=\"application/json\" id=\"themes\">{}</script>",
+        "<script type=\"application/json\" id=\"comments-data\">{}</script><script type=\"application/json\" id=\"themes\">{}</script><script type=\"application/json\" id=\"review-data\">{}</script>",
         script_data(&serde_json::json!(data)),
-        script_data(&themes)
+        script_data(&themes),
+        script_data(&review_data(item, all, version))
     );
 
     // Steps: AKQA's numbered items, each with its task, opening in place to
@@ -617,6 +642,9 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
             if let Some(answer) = note.question.as_ref().and_then(|question| question.answer.as_ref()) {
                 let _ = write!(body, "<span class=\"answer\">\u{2713} {}</span>", esc(crate::menu::picked(&answer.text)));
             }
+            if let Some(review) = note.review.as_deref() {
+                let _ = write!(body, "<p class=\"verdict\" data-verdict=\"{}\">{}</p>", esc(&review.verdict), esc(&review_words(review, all)));
+            }
             match (rest.as_str(), note.question.is_some()) {
                 ("", _) => {}
                 (rest, true) => {
@@ -674,7 +702,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     for (id, name) in &parts {
         let _ = write!(body, "<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{}</span></a></li>", esc(name));
     }
-    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-surface\"><div class=\"bar-fold list-fold\" inert><div class=\"fold-in\"><div class=\"bar-list\" role=\"listbox\" aria-label=\"Suggestions\"></div></div></div><div class=\"bar-fold quote-fold\" inert><div class=\"fold-in\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-themes\" role=\"radiogroup\" aria-label=\"Theme\"></div><div class=\"bar-why\"></div></div></div><div class=\"bar-hairline\" aria-hidden=\"true\"></div><div class=\"bar-line\"><div class=\"bar-field\"><span class=\"bar-cursor\" aria-hidden=\"true\"></span><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea></div><button class=\"bar-send\" type=\"button\" aria-label=\"Send the comment\" hidden>\u{2191}</button><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\" aria-expanded=\"false\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\" inert><div class=\"fold-in\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
+    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-surface\"><div class=\"bar-fold list-fold\" inert><div class=\"fold-in\"><div class=\"bar-list\" role=\"listbox\" aria-label=\"Suggestions\"></div></div></div><div class=\"bar-fold quote-fold\" inert><div class=\"fold-in\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-themes\" role=\"radiogroup\" aria-label=\"Theme\"></div><div class=\"bar-tell\"></div><div class=\"bar-why\"></div></div></div><div class=\"bar-hairline\" aria-hidden=\"true\"></div><div class=\"bar-line\"><div class=\"bar-field\"><span class=\"bar-cursor\" aria-hidden=\"true\"></span><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea></div><button class=\"bar-send\" type=\"button\" aria-label=\"Send the comment\" hidden>\u{2191}</button><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\" aria-expanded=\"false\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\" inert><div class=\"fold-in\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
     let (plan_parts, ours): (Vec<_>, Vec<_>) = parts.iter().partition(|(id, _)| id.starts_with("plan-"));
     if let Some((id, _)) = plan_parts.first() {
         let _ = write!(body, "<a href=\"#{id}\">Plan</a>");
@@ -760,8 +788,8 @@ fn theme_of(comment: &crate::item::Comment) -> (&'static str, String) {
     (color, comment.theme.clone().unwrap_or_else(|| name.to_string()))
 }
 
-/// The state a comment is in: pending until a review sends it, then sent,
-/// and resolved once a session settles it.
+/// The state a comment is in: pending until a review or Send now sends it,
+/// then sent, and resolved once a session settles it.
 fn comment_state(comment: &crate::item::Comment) -> &'static str {
     match (comment.resolved, comment.sent) {
         (Some(_), _) => "resolved",
@@ -801,6 +829,49 @@ fn comment_entry(body: &mut String, note: &Item, replies: &[&&Item]) {
     body.push_str("</li>");
 }
 
+/// What a review from the page needs (task 1106): the version it is made
+/// on; whether the plan is still worked; the question Approve answers, the
+/// newest asking to approve this version, with the answer it gives and the
+/// tasks it makes; and the question Request changes answers, the newest,
+/// with its answer and the version it asked about.
+fn review_data(item: &Item, all: &ItemMap, version: u32) -> serde_json::Value {
+    let asking = approvals_asked(item, all);
+    let about = |question: &Item| question.question.as_ref().and_then(|asked| asked.approve.as_ref()).map(|approve| approve.version);
+    let approve = asking.iter().find(|question| about(question) == Some(version)).map(|question| {
+        let steps = item.artifact.as_deref().map(|plan| plan.steps.as_slice()).unwrap_or_default();
+        let keys = question.question.as_ref().and_then(|asked| asked.approve.as_ref()).map(|approve| approve.steps.as_slice()).unwrap_or_default();
+        let tasks: Vec<String> =
+            keys.iter().filter_map(|key| steps.iter().find(|step| &step.key == key)).map(|step| format!("{}: {}", step.key, crate::ekko::title(&step.text))).collect();
+        serde_json::json!({"id": question.id, "answers": approval_answers(question).0, "tasks": tasks})
+    });
+    let changes = asking.first().map(|question| serde_json::json!({"id": question.id, "answers": approval_answers(question).1, "version": about(question)}));
+    let open = State::of(item).is_some_and(State::is_open);
+    serde_json::json!({"version": version, "open": open, "approve": approve, "changes": changes})
+}
+
+/// A review as the page sums it up: its verdict and version, the comments
+/// it sent and the question it answered (task 1106).
+fn review_words(review: &Review, all: &ItemMap) -> String {
+    let index = crate::ekko::uid_index(all);
+    let id = |uid: &String| index.get(uid.as_str()).map_or_else(|| "one no longer here".to_string(), u32::to_string);
+    let verdict = match review.verdict.as_str() {
+        Review::APPROVE => "Approved",
+        Review::CHANGES => "Changes requested on",
+        _ => "Commented on",
+    };
+    let mut words = format!("{verdict} version {}", review.version);
+    match review.comments.as_slice() {
+        [] => {}
+        [one] => words.push_str(&format!(", sending comment {}", id(one))),
+        many => words.push_str(&format!(", sending comments {}", many.iter().map(id).collect::<Vec<_>>().join(", "))),
+    }
+    if let Some(question) = &review.answered {
+        words.push_str(&format!("; it answered question {}", id(question)));
+    }
+    words.push('.');
+    words
+}
+
 /// Where an artifact stands, in the word its tag and its byline give.
 fn phase(standing: &Standing) -> &'static str {
     match standing.state {
@@ -835,6 +906,9 @@ fn callout(body: &mut String, head: &str, text: &str) {
 
 /// A note's kind, as the page heads it: an open question stands apart.
 fn note_kind(note: &Item) -> String {
+    if note.review.is_some() {
+        return "Review".to_string();
+    }
     match (&note.question, note.mark()) {
         (Some(question), _) if question.answer.is_none() => "Open question".to_string(),
         (Some(_), _) => "Question".to_string(),
@@ -1562,6 +1636,10 @@ const SCRIPT: &str = r##"(function () {
   // Its theme, the comment it edits if it edits one, and whether the
   // themes are being renamed.
   var color = null, editing = null, renaming = false;
+  // A review being written (task 1106): its verdict, and whether Approve
+  // was pressed once, its tasks listed for the second press to confirm.
+  var reviewing = null, confirming = false, tell = bar.querySelector(".bar-tell"), drop = bar.querySelector(".bar-quote-drop");
+  function writing() { return !!(quoting || reviewing); }
   var items = parts.map(function (part) {
     return { kind: "Section", badge: "\u00a7", label: part.dataset.part, target: part.id, search: ("section " + part.dataset.part).toLowerCase() };
   });
@@ -1705,7 +1783,7 @@ const SCRIPT: &str = r##"(function () {
   }
   // A field written in while the pill still widens wraps at the width it
   // has then: once wide, it is measured again.
-  var width = new Motion(widths().slim, function (v) { surface.style.width = v + "px"; }, function () { if (quoting) grow(); });
+  var width = new Motion(widths().slim, function (v) { surface.style.width = v + "px"; }, function () { if (writing()) grow(); });
   var radius = new Motion(100, function (v) { surface.style.borderRadius = v + "px"; });
   var lineY = new Motion(3.5, function (v) { turn.y = v; cross(); });
   var lineR = new Motion(0, function (v) { turn.r = v; cross(); });
@@ -1730,9 +1808,9 @@ const SCRIPT: &str = r##"(function () {
     lineY.to(expanded ? 0 : 3.5, LINES);
     lineR.to(expanded ? 45 : 0, LINES);
     menu.setAttribute("aria-expanded", expanded ? "true" : "false");
-    unfold(folds.list, expanded && !quoting && matches.length > 0, delay);
-    unfold(folds.quote, expanded && !!quoting, delay);
-    unfold(folds.nav, expanded && !quoting, delay);
+    unfold(folds.list, expanded && !writing() && matches.length > 0, delay);
+    unfold(folds.quote, expanded && writing(), delay);
+    unfold(folds.nav, expanded && !writing(), delay);
     rule.height.to(expanded ? 1 : 0, panel(delay));
     rule.opacity.to(expanded ? 1 : 0, panel(delay));
   }
@@ -1760,7 +1838,7 @@ const SCRIPT: &str = r##"(function () {
     void hint.offsetWidth;
     Array.prototype.forEach.call(hint.children, function (span) { span.className = ""; });
   }
-  function idle() { return !expanded && !input.value && !quoting && !still.matches && hints.length > 1; }
+  function idle() { return !expanded && !input.value && !writing() && !still.matches && hints.length > 1; }
   // The next comes in a frame after the last word is gone, as AKQA's does
   // once its exit has finished (measured: 17 to 26 ms); a word hidden
   // meanwhile ends no transition, so a timer stands in for it.
@@ -1810,7 +1888,7 @@ const SCRIPT: &str = r##"(function () {
   // The list, an item coming in from a blur the first time it is listed.
   var listed = {};
   function render() {
-    var text = quoting ? "" : query(), had = listed;
+    var text = writing() ? "" : query(), had = listed;
     matches = text ? find(text).slice(0, 40) : [];
     selected = -1;
     listed = {};
@@ -1849,15 +1927,15 @@ const SCRIPT: &str = r##"(function () {
   // otherwise what it holds is picked.
   function open(fill) {
     hold();
-    if (fill && !input.value && !quoting) input.value = hints[shown][0];
-    var was = expanded, field = quoting ? note : input;
+    if (fill && !input.value && !writing()) input.value = hints[shown][0];
+    var was = expanded, field = writing() ? note : input;
     expanded = true;
     bar.classList.add("open");
     typed();
     if (document.activeElement !== field) field.focus({ preventScroll: true });
     // Picked again a frame later, as AKQA does, past what the press that
     // focused it does to the selection.
-    if (!quoting) {
+    if (!writing()) {
       input.select();
       requestAnimationFrame(function () { if (document.activeElement === input && expanded) input.select(); });
     }
@@ -1945,6 +2023,16 @@ const SCRIPT: &str = r##"(function () {
     note.focus();
   }
   themesRow.addEventListener("click", function (event) {
+    var verdict = event.target.closest(".bar-verdict");
+    if (verdict && reviewing) {
+      reviewing.verdict = verdict.dataset.verdict;
+      confirming = false;
+      verdicts();
+      told();
+      size();
+      note.focus();
+      return;
+    }
     var chip = event.target.closest(".bar-theme"), edit = event.target.closest(".bar-theme-edit");
     if (chip) { pick(chip.dataset.color); note.focus(); }
     if (!edit) return;
@@ -1960,6 +2048,7 @@ const SCRIPT: &str = r##"(function () {
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); renamed(false); }
   });
   function quote(words, key, edited) {
+    if (reviewing) unreview(false);
     if (editing && !edited) note.value = "";
     quoting = words;
     editing = edited || null;
@@ -2008,7 +2097,7 @@ const SCRIPT: &str = r##"(function () {
   function grow() {
     note.style.height = "auto";
     if (!note.hidden && note.value) note.style.height = note.scrollHeight + "px";
-    send.disabled = sending || !note.value.trim();
+    send.disabled = sending || (!reviewing && !note.value.trim());
     size();
   }
   function refused(text) {
@@ -2043,18 +2132,182 @@ const SCRIPT: &str = r##"(function () {
         grow();
       });
   }
-  bar.querySelector(".bar-quote-drop").addEventListener("click", function () {
-    unquote();
+  function sent() {
+    if (sending) return;
+    if (reviewing) submit(); else comment();
+  }
+  drop.addEventListener("click", function () {
+    if (reviewing) unreview(false); else unquote();
     open(false);
   });
-  send.addEventListener("click", function () { if (!sending) comment(); });
-  note.addEventListener("input", grow);
+  send.addEventListener("click", sent);
+  note.addEventListener("input", function () {
+    if (confirming) { confirming = false; told(); }
+    grow();
+  });
   note.addEventListener("keydown", function (event) {
-    if (event.key === "Escape") { unquote(); close(false); return; }
+    if (event.key === "Escape") {
+      if (reviewing) unreview(false); else unquote();
+      close(false);
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
-      if (!sending) comment();
+      sent();
     }
+  });
+
+  // A review (task 1106), written in the pill as GitHub's is in its box:
+  // what it says, and its verdict, Comment, Approve or Request changes. It
+  // sends every comment of the person's still pending. Approve answers the
+  // question asking to approve this version once a second press confirms
+  // the tasks it lists; Request changes answers the newest such question
+  // the other way. What it says is kept while a comment is written.
+  var reviewNode = document.getElementById("review-data");
+  var asked = reviewNode ? JSON.parse(reviewNode.textContent) : null;
+  var VERDICTS = [["comment", "Comment"], ["approve", "Approve"], ["changes", "Request changes"]];
+  var summary = "", chosen = "comment", DOT = " " + String.fromCharCode(183) + " ";
+  function pendingMine() { return window.ekkoPending ? ekkoPending() : []; }
+  function verdicts() {
+    themesRow.textContent = "";
+    themesRow.setAttribute("aria-label", "Verdict");
+    VERDICTS.forEach(function (verdict) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "bar-verdict";
+      chip.dataset.verdict = verdict[0];
+      chip.setAttribute("role", "radio");
+      chip.setAttribute("aria-checked", verdict[0] === reviewing.verdict ? "true" : "false");
+      chip.textContent = verdict[1];
+      if (verdict[0] === "approve" && !asked.approve) {
+        chip.disabled = true;
+        chip.title = asked.changes
+          ? "Question " + asked.changes.id + " asks to approve version " + asked.changes.version + ": the session asks again"
+          : "No question asks to approve this plan: the session asks when it is ready";
+      }
+      themesRow.appendChild(chip);
+    });
+  }
+  // What the review sends and answers, said in the fold: Approve's tasks
+  // listed, and once it was pressed, what the next press does.
+  function told() {
+    var pending = pendingMine().length;
+    quoteText.textContent = "Review of version " + asked.version + DOT + (pending === 1 ? "1 pending comment" : (pending || "No") + " pending comments");
+    tell.textContent = "";
+    var say = function (text, className) {
+      var line = document.createElement("p");
+      line.textContent = text;
+      if (className) line.className = className;
+      tell.appendChild(line);
+    };
+    if (reviewing.verdict === "approve" && asked.approve) {
+      var tasks = asked.approve.tasks;
+      say("Approve answers question " + asked.approve.id + " with \"" + asked.approve.answers + "\" and makes " + (tasks.length === 1 ? "this task:" : "these " + tasks.length + " tasks:"));
+      var list = document.createElement("ul");
+      tasks.forEach(function (task) {
+        var item = document.createElement("li");
+        item.textContent = task;
+        list.appendChild(item);
+      });
+      if (tasks.length) tell.appendChild(list);
+      if (confirming) say("Send again to approve.", "confirm");
+    } else if (reviewing.verdict === "changes") {
+      say(asked.changes
+        ? "Request changes answers question " + asked.changes.id + " with \"" + asked.changes.answers + "\", naming this review."
+        : "No question waits on an answer: the review goes to the board as it is.");
+    } else {
+      say("Comment sends the pending comments, and answers no question.");
+    }
+  }
+  function review(verdict) {
+    if (!asked) return;
+    if (quoting && note.value.trim()) {
+      note.focus();
+      return refused("Send or drop the comment first.");
+    }
+    if (quoting) unquote();
+    var picked = typeof verdict === "string" ? verdict : reviewing ? reviewing.verdict : chosen;
+    reviewing = { verdict: picked === "approve" && !asked.approve ? "comment" : picked };
+    confirming = false;
+    why.textContent = "";
+    input.hidden = true;
+    note.hidden = false;
+    menu.hidden = true;
+    bar.classList.add("quoting", "reviewing");
+    send.hidden = false;
+    note.value = summary;
+    note.placeholder = "What the review says";
+    note.setAttribute("aria-label", "What the review says");
+    drop.setAttribute("aria-label", "Close the review");
+    send.setAttribute("aria-label", "Send the review");
+    send.title = "Send the review (Enter)";
+    quoteFold.style.setProperty("--ink", "var(--bar-ink-muted)");
+    verdicts();
+    told();
+    grow();
+    open(false);
+  }
+  window.ekkoReview = review;
+  // Sent, what it said and its verdict go with it; given up, both are
+  // kept for the next.
+  function unreview(sent) {
+    summary = sent ? "" : note.value;
+    chosen = sent || !reviewing ? "comment" : reviewing.verdict;
+    reviewing = null;
+    confirming = false;
+    why.textContent = "";
+    quoteText.textContent = "";
+    themesRow.textContent = "";
+    themesRow.setAttribute("aria-label", "Theme");
+    tell.textContent = "";
+    note.value = "";
+    note.hidden = true;
+    input.hidden = false;
+    send.hidden = true;
+    menu.hidden = false;
+    bar.classList.remove("quoting", "reviewing");
+    send.setAttribute("aria-label", "Send the comment");
+    send.title = "Send (Enter)";
+    note.setAttribute("aria-label", "Comment on the quoted words");
+    drop.setAttribute("aria-label", "Drop the quote");
+    grow();
+  }
+  function submit() {
+    if (reviewing.verdict !== "approve" && !note.value.trim() && !pendingMine().length) {
+      return refused("Write what the review says, or comment on the plan's words first.");
+    }
+    if (reviewing.verdict === "approve" && !confirming) {
+      confirming = true;
+      told();
+      size();
+      return;
+    }
+    var article = document.querySelector("article.prose");
+    var posted = { page: location.pathname, verdict: reviewing.verdict, version: Number(article.dataset.version), text: note.value };
+    sending = true;
+    note.readOnly = true;
+    send.disabled = true;
+    why.textContent = "";
+    fetch("/api/review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(posted) })
+      .then(window.ekkoAnswered || function (answer) { return { ok: answer.ok, why: "the server answered " + answer.status }; })
+      .then(function (got) {
+        if (!got.ok) throw new Error(got.why);
+        close(false);
+        unreview(true);
+      })
+      .catch(function (error) {
+        confirming = false;
+        told();
+        refused("Not sent: " + (window.ekkoUnreached ? ekkoUnreached(error) : error.message));
+      })
+      .then(function () {
+        sending = false;
+        note.readOnly = false;
+        grow();
+      });
+  }
+  document.querySelectorAll("[data-review]").forEach(function (button) {
+    button.addEventListener("click", review);
   });
 
   // A press on the pill focuses its input, and the focus opens it; the
@@ -2063,7 +2316,7 @@ const SCRIPT: &str = r##"(function () {
     if (event.target.closest(".bar-menu, .bar-send") || event.target === note) return;
     if (expanded && event.target === input) return;
     event.preventDefault();
-    if (quoting) { note.focus(); return; }
+    if (writing()) { note.focus(); return; }
     pointed = !expanded;
     input.focus();
   });
@@ -2078,7 +2331,7 @@ const SCRIPT: &str = r##"(function () {
     if (expanded) close(true); else open(false);
   });
   input.addEventListener("input", function () {
-    if (quoting) return;
+    if (writing()) return;
     typed();
     render();
   });
@@ -2101,14 +2354,14 @@ const SCRIPT: &str = r##"(function () {
   });
   document.addEventListener("pointerdown", function (event) {
     // A comment being written stays open while other words are picked.
-    if (expanded && !quoting && !bar.contains(event.target)) close(false);
+    if (expanded && !writing() && !bar.contains(event.target)) close(false);
   });
   addEventListener("keydown", function (event) {
     if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
     var active = document.activeElement;
     if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
     event.preventDefault();
-    if (quoting) open(false); else input.focus();
+    if (writing()) open(false); else input.focus();
   });
   addEventListener("resize", size);
   words(hints[shown][0], false);
@@ -2131,6 +2384,9 @@ const SCRIPT: &str = r##"(function () {
       open: Array.prototype.map.call(document.querySelectorAll(".step.open"), function (step) { return step.id; }) };
     if (bar.classList.contains("open") && !quoting && !sending) kept.bar = input.value;
     if (quoting && !sending) { kept.quote = quoting; kept.note = note.value; kept.color = color; kept.editing = editing; }
+    if (reviewing && !sending) kept.review = { verdict: reviewing.verdict, note: note.value };
+    if (summary) kept.summary = summary;
+    if (chosen !== "comment") kept.chosen = chosen;
     try { sessionStorage.setItem(keptAt, JSON.stringify(kept)); history.scrollRestoration = "manual"; } catch (e) {}
   };
   var kept = null;
@@ -2144,6 +2400,9 @@ const SCRIPT: &str = r##"(function () {
       if (kept.quote && kept.editing) ekkoEdit(kept.editing);
       else if (kept.quote) quote(kept.quote, kept.color, null);
       if (kept.quote) { note.value = kept.note || ""; grow(); }
+      summary = kept.summary || "";
+      chosen = kept.chosen || "comment";
+      if (kept.review) { summary = kept.review.note || ""; review(kept.review.verdict); }
       if (typeof kept.bar === "string") { input.value = kept.bar; open(false); }
     };
     var settled = function () { document.fonts.ready.then(back); };
@@ -2225,6 +2484,13 @@ const SCRIPT: &str = r##"(function () {
     return c.theme || names()[colorOf(note)];
   }
   function stateOf(note) { var c = note.comment || {}; return c.resolved ? "resolved" : c.sent ? "sent" : "pending"; }
+  // The person's comments still pending, which a review sends (task 1106),
+  // counted on Review at the top.
+  window.ekkoPending = function () { return comments.filter(function (note) { return note.mine && stateOf(note) === "pending"; }); };
+  Array.prototype.forEach.call(document.querySelectorAll("[data-review] .count"), function (count) {
+    var pending = ekkoPending().length;
+    count.textContent = pending ? String(pending) : "";
+  });
   window.ekkoThemes = {
     list: THEMES,
     names: names,
@@ -2504,6 +2770,28 @@ const SCRIPT: &str = r##"(function () {
         actions.appendChild(no);
         yes.focus();
       });
+      // A pending comment sent alone, outside a review, as GitHub's single
+      // comment goes (task 1106).
+      if (stateOf(note) === "pending") {
+        var now = element("button", "", "Send now");
+        now.type = "button";
+        now.title = "Send it to the session now, outside a review";
+        now.addEventListener("click", function () {
+          now.disabled = true;
+          fetch("/api/comment/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ page: location.pathname, uid: note.uid }) })
+            .then(answered)
+            .then(function (got) {
+              if (!got.ok) throw new Error(got.why);
+              actions.textContent = "";
+              actions.appendChild(element("span", "ask", "Sent."));
+            })
+            .catch(function (error) {
+              now.disabled = false;
+              actions.appendChild(element("span", "why", "Not sent: " + ekkoUnreached(error)));
+            });
+        });
+        actions.appendChild(now);
+      }
       actions.appendChild(edit);
       actions.appendChild(remove);
       foot.appendChild(actions);
@@ -2932,6 +3220,10 @@ button { font: inherit; color: inherit; }
 .top .link { padding: 0; border: 0; background: none; font: 400 14px/20px var(--sans); color: var(--fg-2); cursor: pointer; }
 .top .link:hover { color: var(--fg); }
 .top .solid { padding: 8px 16px; border: 0; border-radius: 999px; background: var(--fg); color: var(--bg); font: 400 14px/20px var(--sans); cursor: pointer; }
+.top .review { display: inline-flex; align-items: center; gap: 8px; padding: 7px 15px; border: 1px solid var(--fg); border-radius: 999px; background: none; color: var(--fg); font: 400 14px/20px var(--sans); cursor: pointer; }
+.top .review .count { box-sizing: border-box; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--fg); color: var(--bg); font: 600 12px/20px var(--sans); text-align: center; }
+.top .review .count:empty { display: none; }
+body:not([data-writes]) .writes-only { display: none !important; }
 
 /* ---- the page: Medium's column, where it stands beside it -------------- */
 .page { position: relative; max-width: var(--column); margin: 0 auto; padding: 32px 24px 240px; box-sizing: content-box; }
@@ -3034,6 +3326,7 @@ button.step-head { cursor: pointer; }
 .note.open .kind { color: var(--accent); }
 .prose .note h3, .prose .version h3 { margin: 4px 0 0; font: 600 20px/24px var(--sans); letter-spacing: -0.01em; color: var(--fg-strong); }
 .note .answer { display: inline-block; margin: 12px 0 0; padding: 4px 12px; border-radius: 999px; background: var(--chip); font: 400 13px/20px var(--sans); color: var(--fg); }
+.note .verdict { margin: 8px 0 0; font: 400 14px/20px var(--sans); color: var(--fg-2); }
 .prose .note .text { margin: 12px 0 0; font: 400 18px/28px var(--serif); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
 .note details { margin: 12px 0 0; }
 .note summary { font: 400 14px/20px var(--sans); color: var(--fg-2); cursor: pointer; }
@@ -3189,6 +3482,14 @@ button.step-head { cursor: pointer; }
 .bar-theme-name { width: 104px; outline: 0; color: var(--bar-ink); cursor: text; box-shadow: inset 0 0 0 1px var(--bar-line); }
 .bar-theme-name:focus { box-shadow: inset 0 0 0 1.5px var(--ink); }
 .bar-theme-edit { height: 26px; padding: 0 8px; border: 0; background: none; font: 400 12px/26px var(--sans); color: var(--bar-ink-muted); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.bar-verdict { box-sizing: border-box; height: 26px; padding: 0 12px; border: 0; border-radius: 999px; background: var(--bar-fill); font: 400 12px/26px var(--sans); color: var(--bar-ink-muted); cursor: pointer; }
+.bar-verdict[aria-checked="true"] { background: var(--bar-fill-on); color: var(--bar-ink); box-shadow: inset 0 0 0 1.5px var(--bar-ink); }
+.bar-verdict:disabled { opacity: 0.4; cursor: default; }
+.bar-tell { margin: 0 16px 8px; font: 400 12px/16px var(--sans); color: var(--bar-ink-muted); }
+.bar-tell:empty { display: none; }
+.bar-tell p { margin: 0; }
+.bar-tell ul { max-height: 112px; margin: 4px 0 0; padding: 0 0 0 16px; overflow: auto; }
+.bar-tell .confirm { margin-top: 6px; font-weight: 600; color: var(--bar-ink); }
 .bar-why { margin: 0 16px 8px; font: 400 12px/16px var(--sans); color: #d92d20; }
 .bar-why:empty { display: none; }
 .bar input::placeholder, .bar-note::placeholder { color: var(--bar-ink-idle); }
@@ -3229,7 +3530,7 @@ button.step-head { cursor: pointer; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in { animation: none; }
 }
 @media print {
-  .top .link, .top .solid, .toc, .bar, .arrows, .select-tools, .pop, .prose .pin, #comments .filters { display: none; }
+  .top .link, .top .solid, .top .review, .toc, .bar, .arrows, .select-tools, .pop, .prose .pin, #comments .filters { display: none; }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
 }
@@ -3854,7 +4155,9 @@ mod tests {
                 let (html, _) = page(&data[&target], &data, None);
                 html.split("<div class=\"callout\">").skip(1).map(|rest| rest.split("</div>").next().unwrap_or_default().to_string()).collect::<Vec<_>>()
             };
-            let waiting = format!("<b>Waiting on you: question {first}</b>It asks you to approve this plan: answer it in ekko's menu, or with <code>ekko --answer {first}</code> in a terminal.");
+            let waiting = format!(
+                "<b>Waiting on you: question {first}</b>It asks you to approve this plan: answer it in ekko's menu<span class=\"writes-only\">, with Review at the top</span>, or with <code>ekko --answer {first}</code> in a terminal."
+            );
             assert_eq!(callouts(), [waiting], "the approval asked, once, though the question is attached to the artifact too");
             let shown = || {
                 let data = board();
@@ -3989,6 +4292,125 @@ mod tests {
             assert!(!data.values().any(|item| item.description.starts_with("The step")), "the first step's task goes with the rest");
             assert!(data[&target].blocked_by.as_ref().is_none_or(Vec::is_empty));
             assert!(data[&asked].question.as_ref().unwrap().answer.is_some(), "the answer stays recorded");
+            std::fs::remove_dir_all(&home).ok();
+        }
+
+        /// A review from the page (task 1106), as GitHub's go: it sends the
+        /// person's pending comments and no one else's. Request changes
+        /// answers the question asking to approve the plan with its other
+        /// answer, naming the review; Approve answers with the one that
+        /// approves, which makes the tasks, only once a question asks about
+        /// the version the plan is at. Comment answers nothing and needs
+        /// something to say; Send now sends one comment alone; a comment is
+        /// written pending; and only the person reviews.
+        #[test]
+        fn a_review_sends_the_pending_comments_and_answers_the_approval() {
+            let home = crate::paths::test_dir("ekko-artifact-review");
+            let dir = home.join(".ekko");
+            let (session, _, _) = test_sessions();
+            let (as_session, as_user) = (ekko_at(&dir, &session), ekko_at(&dir, &Actor::person()));
+            let steps = json!([{"key": "field", "text": "The field\nWhere it is stored."}, {"key": "tool", "text": "The tool", "after": ["field"]}]);
+            let target = artifact(&as_session, json!({"text": plan("Ship the page"), "steps": steps})).unwrap();
+            let board = || as_user.storage.get().unwrap();
+            let on = Ref::Id(target);
+            let pending = |sent: Option<i64>| crate::item::Comment {
+                version: board()[&target].artifact.as_ref().unwrap().version,
+                quote: Some(crate::item::Quote { exact: "Text.".into(), prefix: String::new(), suffix: String::new(), section: String::new(), unknown: Default::default() }),
+                replacement: None,
+                step: None,
+                reply_to: None,
+                sent,
+                resolved: None,
+                theme: None,
+                color: None,
+                unknown: Default::default(),
+            };
+            let comment = |ekko: &Ekko, text: &str| {
+                let mut draft = Draft::open(ekko).unwrap();
+                let id = draft.comment(&on, text, pending(None)).unwrap();
+                draft.commit(false).unwrap();
+                id
+            };
+            let review = |ekko: &Ekko, verdict: &str, text: &str, version: u32| -> Result<(u32, Vec<String>), EkkoError> {
+                let mut draft = Draft::open(ekko)?;
+                let id = draft.review(&on, verdict, text, version)?;
+                Ok((id, draft.commit(false)?.notices))
+            };
+            let sent = |id: u32| board()[&id].comment.as_ref().unwrap().sent.is_some();
+            let uid = |id: u32| board()[&id].uid.clone().unwrap();
+            let made = || board()[&target].artifact.as_ref().unwrap().steps.iter().filter(|step| step.task.is_some()).count();
+
+            let refused = Draft::open(&as_user).unwrap().comment(&on, "Sent already?", pending(Some(1))).unwrap_err().to_string();
+            assert!(refused.contains("written pending"), "{refused}");
+            let (first, second, theirs) = (comment(&as_user, "Why text?"), comment(&as_user, "And here?"), comment(&as_session, "A session's"));
+            assert!(review(&as_session, "comment", "Mine", 1).unwrap_err().to_string().contains("the user's"), "a session does not review");
+            assert!(review(&as_user, "merge", "", 1).unwrap_err().to_string().contains("no verdict"));
+            assert!(review(&as_user, "comment", "", 2).unwrap_err().to_string().contains("plan is at version 1"));
+            assert!(review(&as_user, "approve", "", 1).unwrap_err().to_string().contains("no question asks to approve"));
+            assert!(!sent(first) && !sent(second), "a refused review sends nothing");
+
+            let asked = ask(&as_session, &home, target).unwrap();
+            let (changes, _) = review(&as_user, "changes", "Split the field step.\nIt does two things.", 1).unwrap();
+            let data = board();
+            let answer = &data[&asked].question.as_ref().unwrap().answer.as_ref().unwrap().text;
+            assert_eq!(answer, &format!("Ainda não \u{2014} note: changes requested on the artifact's page, in review {changes}: Split the field step."));
+            assert!(data[&asked].question.as_ref().unwrap().answer.as_ref().unwrap().by_person(), "the person's answer");
+            let note = &data[&changes];
+            assert_eq!((note.description.as_str(), note.attached_to.clone()), ("Split the field step.\nIt does two things.", data[&target].uid.clone()));
+            let written = note.review.as_deref().unwrap();
+            assert_eq!((written.verdict.as_str(), written.version), ("changes", 1));
+            assert_eq!(written.comments, [uid(first), uid(second)], "the person's pending comments, oldest first");
+            assert_eq!(written.answered, Some(uid(asked)));
+            assert!(note.created_by.as_ref().is_none_or(|by| by.pid.is_none()), "the person's note");
+            assert!(sent(first) && sent(second) && !sent(theirs), "sent: the person's, not the session's");
+            assert_eq!(made(), 0, "changes requested make nothing");
+            let (html, _) = page(&data[&target], &data, None);
+            assert!(html.contains(&format!("<div class=\"kind\">Review {changes} ")), "a review in Notes");
+            assert!(html.contains(&format!("<p class=\"verdict\" data-verdict=\"changes\">Changes requested on version 1, sending comments {first}, {second}; it answered question {asked}.</p>")), "{html}");
+            assert!(html.contains("<button class=\"review writes-only\" type=\"button\" data-review>Review<span class=\"count\"></span></button>"));
+
+            assert!(review(&as_user, "comment", "  ", 1).unwrap_err().to_string().contains("nothing to send"), "nothing pending, nothing said");
+            let (commented, _) = review(&as_user, "comment", "Looks closer.", 1).unwrap();
+            assert_eq!(board()[&commented].review.as_ref().unwrap().answered, None, "Comment answers nothing");
+
+            let third = comment(&as_user, "One more");
+            let theirs_uid = uid(theirs);
+            let third_uid = uid(third);
+            let mut draft = Draft::open(&as_user).unwrap();
+            assert!(draft.send_comment(&on, &theirs_uid).is_err(), "a session's comment is the session's to send");
+            draft.send_comment(&on, &third_uid).unwrap();
+            draft.commit(false).unwrap();
+            assert!(sent(third), "Send now");
+            let refused = Draft::open(&as_user).unwrap().send_comment(&on, &uid(third)).unwrap_err().to_string();
+            assert!(refused.contains("not pending"), "{refused}");
+
+            let stale = ask(&as_session, &home, target).unwrap();
+            apply(&as_session, json!({"op": "edit", "item": target, "append": "\nOne more line."})).unwrap();
+            let refused = review(&as_user, "approve", "", 2).unwrap_err().to_string();
+            assert!(refused.contains(&format!("question {stale} asks to approve version 1")), "{refused}");
+            let data = board();
+            assert_eq!(review_data(&data[&target], &data, 2)["approve"], Value::Null, "no question asks about version 2");
+            assert_eq!(review_data(&data[&target], &data, 2)["changes"]["id"], json!(stale));
+            review(&as_user, "comment", "Still reading.", 2).unwrap();
+            assert!(board()[&stale].question.as_ref().unwrap().answer.is_none(), "Comment leaves the question open");
+            let (_, _) = review(&as_user, "changes", "Older words.", 2).unwrap();
+            assert!(board()[&stale].question.as_ref().unwrap().answer.is_some(), "Request changes answers the newest question, whatever its version");
+            let current = ask(&as_session, &home, target).unwrap();
+            let data = board();
+            let shown = review_data(&data[&target], &data, 2);
+            assert_eq!(shown["approve"]["id"], json!(current));
+            assert_eq!(shown["approve"]["answers"], json!("Aprovar"));
+            assert_eq!(shown["approve"]["tasks"], json!(["field: The field", "tool: The tool"]));
+            assert_eq!(shown["changes"]["answers"], json!("Ainda não"));
+            let (approved, notices) = review(&as_user, "approve", "", 2).unwrap();
+            assert!(notices.iter().any(|notice| notice.contains("plan is approved")), "{notices:?}");
+            assert_eq!(made(), 2, "Approve makes the tasks");
+            let data = board();
+            assert_eq!(data[&current].question.as_ref().unwrap().answer.as_ref().unwrap().text, format!("Aprovar \u{2014} note: approved on the artifact's page, in review {approved}"));
+            assert_eq!(data[&approved].description, "Approved version 2.", "said for the person, who wrote nothing");
+            assert_eq!(review_data(&data[&target], &data, 2)["approve"], Value::Null, "answered, nothing waits");
+            apply(&as_user, json!({"op": "set_state", "items": [target], "state": "cancelled"})).unwrap();
+            assert!(review(&as_user, "comment", "Late.", 2).unwrap_err().to_string().contains("is cancelled"), "a closed plan takes no review");
             std::fs::remove_dir_all(&home).ok();
         }
 

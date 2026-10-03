@@ -40,7 +40,7 @@ pub const TERMINAL: &str = "EKKO_TERMINAL";
 
 /// What joins the note the user adds with Tab to the answer it goes with,
 /// as the board records it.
-const NOTE: &str = " — note: ";
+pub(crate) const NOTE: &str = " — note: ";
 
 /// The answer the user picked, without the note they added to it: what a
 /// question proposing a cue, a call let through or a link compares with the

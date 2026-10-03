@@ -598,3 +598,149 @@ fn the_person_edits_and_deletes_their_comment_from_the_page() {
     let answer = ask("/api/comment/delete", json!({"page": path, "uid": uid}), false);
     assert!(answer.starts_with("HTTP/1.1 409 "), "a comment deleted already: {answer}");
 }
+
+/// `ekko --mcp` on the default board of `home`, kept running as a session's
+/// is, whose menu opens with a script standing in for the terminal: it says
+/// the menu is up and waits, so ask's call waits on the board for its
+/// answers, as it does while the user has the menu open.
+struct Session {
+    child: process::Child,
+    stdin: Option<process::ChildStdin>,
+    messages: std::sync::mpsc::Receiver<Value>,
+    seen: Vec<Value>,
+}
+
+impl Session {
+    fn start(home: &Path) -> Session {
+        let script = home.join("terminal.sh");
+        // The arguments end in `<ekko> --menu <file>`; the pid file beside
+        // the file is how the menu says it is up.
+        let body = "spec=; prev=\nfor a in \"$@\"; do\n  [ \"$prev\" = --menu ] && spec=$a\n  prev=$a\ndone\necho $$ > \"${spec%.json}.pid\"\necho $$ >> \"$(dirname \"$0\")/menus\"\nexec sleep 60\n";
+        fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
+        fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut child = ekko(home)
+            .arg("--mcp")
+            .env("EKKO_TERMINAL", &script)
+            .env_remove("CLAUDECODE")
+            .env("XDG_RUNTIME_DIR", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, messages) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(serde_json::from_str(&line).unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let stdin = child.stdin.take();
+        let mut session = Session { child, stdin, messages, seen: Vec::new() };
+        session.send(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}}}));
+        session.reply(1, Duration::from_secs(10)).expect("initialized");
+        session
+    }
+
+    fn send(&mut self, message: Value) {
+        writeln!(self.stdin.as_mut().unwrap(), "{message}").unwrap();
+    }
+
+    /// The reply to request `id`, if it comes within `wait`.
+    fn reply(&mut self, id: u64, wait: Duration) -> Option<Value> {
+        let deadline = Instant::now() + wait;
+        loop {
+            if let Some(found) = self.seen.iter().find(|message| message["id"] == id && message.get("method").is_none()) {
+                return Some(found.clone());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.messages.recv_timeout(left) {
+                Ok(message) => self.seen.push(message),
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Asks the user, through ask, to approve the plan of artifact 1.
+    fn ask_approval(&mut self, id: u64) {
+        let options = json!([
+            {"label": "Approve it", "recommended": true, "why": "its steps become tasks", "example": "one task a step"},
+            {"label": "Not yet", "why": "nothing changes", "example": "the plan stays as it is"}
+        ]);
+        let question = json!({"text": "Approve the plan?", "explain": "What the approval does.", "approve": 1, "options": options});
+        self.send(json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": "ask", "arguments": {"questions": [question]}}}));
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A review from the page answers the question a session's ask waits on
+/// (task 1106): Request changes returns the call with the other answer,
+/// naming the review, and closes the menu; Approve returns it with the
+/// answer that approves, which makes the plan's tasks. A review under
+/// Claude Code is refused and writes nothing.
+#[test]
+fn a_review_from_the_page_returns_the_ask_that_waits_on_it() {
+    let home = Home::new();
+    let written = artifact(&home);
+    let (port, path) = split(written["page"].as_str().unwrap());
+    let token = runtime(&home)["token"].as_str().unwrap().to_string();
+    let post = |body: &Value| {
+        let body = body.to_string();
+        format!(
+            "POST /api/review HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: ekko_{port}={token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let send = |body: Value, as_claude: bool| {
+        let _ = fs::remove_file(home.join(if as_claude { "answer-claude" } else { "answer-person" }));
+        from_bash(&home, port, &post(&body), as_claude)
+    };
+    let board = || -> Value { serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap() };
+    let reviews = || board().as_object().unwrap().values().filter(|item| item.get("review").is_some()).count();
+    let menus = || fs::read_to_string(home.join("menus")).unwrap_or_default().lines().map(str::to_string).collect::<Vec<_>>();
+    let up = |n: usize| until(10, || menus().len() == n);
+    let answer = |reply: &Value| -> Value {
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str::<Value>(text).unwrap_or_else(|_| panic!("{text}"))["answers"][0]["answer"].clone()
+    };
+
+    let mut session = Session::start(&home);
+    session.ask_approval(2);
+    assert!(up(1), "the menu came up");
+    assert_eq!(session.reply(2, Duration::from_millis(1500)), None, "ask waits on the menu");
+
+    let refused = send(json!({"page": path, "verdict": "changes", "version": 1, "text": "Claude's words"}), true);
+    assert!(refused.starts_with("HTTP/1.1 403 "), "{refused}");
+    assert_eq!(reviews(), 0, "a refused review wrote nothing");
+
+    let sent = send(json!({"page": path, "verdict": "changes", "version": 1, "text": "Split the step."}), false);
+    assert!(sent.starts_with("HTTP/1.1 200 "), "{sent}");
+    let review: Value = serde_json::from_str(sent.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let returned = session.reply(2, Duration::from_secs(5)).expect("ask returned once the page answered");
+    assert_eq!(answer(&returned), json!(format!("Not yet \u{2014} note: changes requested on the artifact's page, in review {}: Split the step.", review["id"])));
+    let menu = menus()[0].clone();
+    assert!(until(5, || fs::metadata(format!("/proc/{menu}")).is_err()), "the menu closed");
+
+    session.ask_approval(3);
+    assert!(up(2), "the menu came up again");
+    let sent = send(json!({"page": path, "verdict": "approve", "version": 1}), false);
+    assert!(sent.starts_with("HTTP/1.1 200 "), "{sent}");
+    let review: Value = serde_json::from_str(sent.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert!(review["notices"].as_array().unwrap().iter().any(|notice| notice.as_str().unwrap().contains("plan is approved")), "{review}");
+    let returned = session.reply(3, Duration::from_secs(5)).expect("ask returned once the page approved");
+    assert_eq!(answer(&returned), json!(format!("Approve it \u{2014} note: approved on the artifact's page, in review {}", review["id"])));
+    let step = board()["1"]["artifact"]["steps"][0].clone();
+    assert!(step["task"].is_string(), "the approval made the step's task: {step}");
+    let log = fs::read_to_string(state(&home).join("serve.log")).unwrap();
+    assert!(log.contains("POST /api/review: approve in note ") && log.contains("refused POST /api/review: process "), "{log}");
+}

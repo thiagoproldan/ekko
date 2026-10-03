@@ -38,7 +38,7 @@ use serde::Serialize;
 use crate::directory::{self, DirectoryError, Location};
 use crate::ekko::{Ekko, EkkoError, Outcome};
 use crate::holder::Holder;
-use crate::item::{Answer, Approving, Artifact, Comment, CueOn, Item, Over, Proposal, Question, Step, Wait};
+use crate::item::{Answer, Approving, Artifact, Comment, CueOn, Item, Over, Proposal, Question, Review, Step, Wait};
 use crate::storage::{ItemMap, Moved};
 
 /// An item `--move-to` took: its id on the board it left and on the one it
@@ -305,6 +305,7 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
         cue,
         artifact,
         comment,
+        review,
         id: _,
         date: _,
         timestamp: _,
@@ -363,6 +364,11 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
         let Comment { reply_to, version: _, quote: _, replacement: _, step: _, sent: _, resolved: _, theme: _, color: _, unknown: _ } = comment;
         found.extend(reply_to.as_deref().map(|uid| ("answers", uid)));
     }
+    if let Some(review) = review.as_deref() {
+        let Review { comments, answered, verdict: _, version: _, unknown: _ } = review;
+        found.extend(comments.iter().map(|uid| ("sends", uid.as_str())));
+        found.extend(answered.as_deref().map(|uid| ("answers", uid)));
+    }
     found
 }
 
@@ -410,6 +416,7 @@ fn arriving(item: &Item, id: u32) -> Item {
         cue,
         artifact,
         comment,
+        review,
     } = item;
     let question = question.as_deref().map(|question| {
         let Question { rev: _, answer, asked_by, cue, allow, link, applies, approve, unknown } = question;
@@ -453,6 +460,10 @@ fn arriving(item: &Item, id: u32) -> Item {
             color: color.clone(),
             unknown: unknown.clone(),
         })
+    });
+    let review = review.as_deref().map(|review| {
+        let Review { verdict, version, comments, answered, unknown } = review;
+        Box::new(Review { verdict: verdict.clone(), version: *version, comments: comments.clone(), answered: answered.clone(), unknown: unknown.clone() })
     });
     let wait = wait.as_deref().map(|wait| {
         let Wait { rev: _, over, on, until, by, unknown } = wait;
@@ -502,6 +513,7 @@ fn arriving(item: &Item, id: u32) -> Item {
         cue,
         artifact,
         comment,
+        review,
     }
 }
 

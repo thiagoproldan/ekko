@@ -280,6 +280,12 @@ pub struct Item {
     /// exactly as before. Boxed; see `question`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<Box<Comment>>,
+    /// On a note the user sent from an artifact's page as a review (task
+    /// 1106): its verdict, the version it was made on, the comments it sent
+    /// and the question it answered. Absent unless set, so a board without
+    /// reviews is stored exactly as before. Boxed; see `question`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<Box<Review>>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -334,6 +340,7 @@ impl Item {
             cue: None,
             artifact: None,
             comment: None,
+            review: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -376,6 +383,7 @@ impl Item {
             cue: None,
             artifact: None,
             comment: None,
+            review: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -437,7 +445,8 @@ pub struct Question {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applies: Option<String>,
     /// An artifact's plan the session asks the user to approve (task 1019),
-    /// which the user's answer in ekko's menu makes tasks of.
+    /// which the user's answer, in ekko's menu or a review on the page,
+    /// makes tasks of.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approve: Option<Approving>,
     /// What a later version keeps here that this one does not know, written
@@ -554,6 +563,36 @@ pub struct Comment {
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
     pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// A review of an artifact's plan (task 1106), on the note that holds its
+/// summary, as GitHub's reviews go: the comments the user left pending are
+/// sent together, with a verdict, `APPROVE`, `CHANGES` or `COMMENT`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Review {
+    /// What the user decided: one of `Review::VERDICTS`. A string, so a
+    /// verdict a later version adds reads here as one this one does not know.
+    pub verdict: String,
+    /// The plan's version it was made on.
+    pub version: u32,
+    /// The comments it sent, by uid, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
+    /// The question it answered, by uid: the one asking the user to approve
+    /// the plan, which Approve and Request changes answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered: Option<String>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+impl Review {
+    pub const APPROVE: &'static str = "approve";
+    pub const CHANGES: &'static str = "changes";
+    pub const COMMENT: &'static str = "comment";
+    pub const VERDICTS: [&'static str; 3] = [Review::APPROVE, Review::CHANGES, Review::COMMENT];
 }
 
 /// Words a comment is about, kept as the W3C Web Annotation's quote
@@ -1773,7 +1812,7 @@ mod tests {
         checked.sort();
         let expected = [
             "Allowance", "Answer", "Approving", "Artifact", "Comment", "Counters", "Cue", "Earlier", "Holder", "Item", "Linking", "Moved", "Over",
-            "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "Step", "Used", "Wait",
+            "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "Review", "Step", "Used", "Wait",
         ];
         assert_eq!(checked, expected, "the scan finds the structs it should");
     }

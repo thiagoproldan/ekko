@@ -629,22 +629,26 @@ fn route(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
         ("POST", "/api/comment") => comment(shared, request, socket, "new"),
         ("POST", "/api/comment/edit") => comment(shared, request, socket, "edit"),
         ("POST", "/api/comment/delete") => comment(shared, request, socket, "delete"),
+        ("POST", "/api/comment/send") => comment(shared, request, socket, "send"),
+        ("POST", "/api/review") => review(shared, request, socket),
         ("GET", path) => match query.split('&').find_map(|pair| pair.strip_prefix("token=")) {
             Some(token) if path.starts_with("/default/") || path.starts_with("/project/") => opened(shared, path, token),
             _ => font(path).or_else(|| page(shared, path)).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
         },
-        _ => Answer::text(405, "the server answers GET, and POST to /stop, /api/who and /api/comment"),
+        _ => Answer::text(405, "the server answers GET, and POST to /stop, /api/who, /api/comment and /api/review"),
     }
 }
 
-/// `POST /api/comment`, `/api/comment/edit` and `/api/comment/delete`: the
-/// person's comments on an artifact's page (tasks 1105 and 1213), as JSON
-/// naming the page's path. A new comment carries its text and the comment
-/// itself, with the plan's version it was made on and what it is about; an
-/// edit names a comment by uid with the text, theme or color it takes; a
-/// deletion names one alone, and puts it in the trash. Each is written as
-/// the person on the artifact's board, and refused when the plan moved on,
-/// no longer holds the words, or the comment is not the person's.
+/// `POST /api/comment`, `/api/comment/edit`, `/api/comment/delete` and
+/// `/api/comment/send`: the person's comments on an artifact's page (tasks
+/// 1105, 1213 and 1106), as JSON naming the page's path. A new comment
+/// carries its text and the comment itself, with the plan's version it was
+/// made on and what it is about; an edit names a comment by uid with the
+/// text, theme or color it takes; a deletion names one alone, and puts it in
+/// the trash; Send now names one alone, and sends it outside a review. Each
+/// is written as the person on the artifact's board, and refused when the
+/// plan moved on, no longer holds the words, or the comment is not the
+/// person's.
 fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -> Answer {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -661,7 +665,6 @@ fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -
         #[serde(default)]
         color: Option<String>,
     }
-    let json = |code: u16, value: serde_json::Value| Answer::new(code, "application/json", value.to_string());
     let person = match writer(shared, request, socket) {
         Ok(person) => person,
         Err(why) => return Answer::refuse(why, true),
@@ -673,41 +676,37 @@ fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -
     let Some((project, uid)) = board_of(&posted.page) else {
         return json(404, serde_json::json!({"why": format!("{} is no artifact's page", posted.page)}));
     };
+    let alone = posted.uid.is_some() && posted.comment.is_none() && posted.text.is_none() && posted.theme.is_none() && posted.color.is_none();
     let fields = match how {
         "new" => posted.comment.is_some() && posted.uid.is_none() && posted.theme.is_none() && posted.color.is_none(),
         "edit" => posted.uid.is_some() && posted.comment.is_none(),
-        _ => posted.uid.is_some() && posted.comment.is_none() && posted.text.is_none() && posted.theme.is_none() && posted.color.is_none(),
+        _ => alone,
     };
     if !fields {
         let wants = match how {
             "new" => "a new comment takes page, text and comment",
             "edit" => "an edit takes page, uid, and any of text, theme and color",
+            "send" => "Send now takes page and uid",
             _ => "a deletion takes page and uid",
         };
         return json(400, serde_json::json!({ "why": wants }));
     }
-    let written = crate::directory::locate(&shared.home, &shared.home, None, None, project.as_deref())
-        .map_err(|error| error.to_string())
-        .and_then(|location| crate::ekko::Ekko::at(&location).map_err(|error| error.to_string()))
-        .and_then(|ekko| {
-            let ekko = ekko.acting_as(crate::holder::Actor::person());
-            let mut draft = crate::ops::Draft::open(&ekko).map_err(|error| error.to_string())?;
-            let on = crate::ops::Ref::Text(uid.clone());
-            let id = match (how, posted.comment, posted.uid.as_deref()) {
-                ("new", Some(comment), _) => draft.comment(&on, posted.text.as_deref().unwrap_or_default(), comment),
-                ("edit", _, Some(note)) => draft.edit_comment(&on, note, posted.text.as_deref(), posted.theme.as_deref(), posted.color.as_deref()),
-                (_, _, Some(note)) => draft.trash_comment(&on, note),
-                _ => unreachable!("the fields were checked"),
-            }
-            .map_err(|error| error.to_string())?;
-            let committed = draft.commit(false).map_err(|error| error.to_string())?;
-            Ok((id, committed.data.get(&id).and_then(|note| note.uid.clone()).unwrap_or_default()))
-        });
+    let written = as_person(shared, project.as_deref(), |draft| {
+        let on = crate::ops::Ref::Text(uid.clone());
+        match (how, posted.comment, posted.uid.as_deref()) {
+            ("new", Some(comment), _) => draft.comment(&on, posted.text.as_deref().unwrap_or_default(), comment),
+            ("edit", _, Some(note)) => draft.edit_comment(&on, note, posted.text.as_deref(), posted.theme.as_deref(), posted.color.as_deref()),
+            ("send", _, Some(note)) => draft.send_comment(&on, note),
+            (_, _, Some(note)) => draft.trash_comment(&on, note),
+            _ => unreachable!("the fields were checked"),
+        }
+    });
     match written {
-        Ok((id, note)) => {
+        Ok((id, note, _)) => {
             let did = match how {
                 "new" => "note",
                 "edit" => "edited note",
+                "send" => "sent note",
                 _ => "trashed note",
             };
             log(&shared.home, &format!("POST /api/comment: {did} {id} on {uid}, by the user, {person}"));
@@ -715,6 +714,61 @@ fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -
         }
         Err(why) => json(409, serde_json::json!({"why": why})),
     }
+}
+
+/// `POST /api/review`: the person's review of an artifact's plan from its
+/// page (task 1106), as JSON naming the page's path, the verdict --
+/// approve, changes or comment -- the plan's version it was made on, and
+/// what it says. It sends the person's pending comments there, and answers
+/// the question asking to approve the plan, as `Draft::review` does; the
+/// reply holds the review note and what the write made of it.
+fn review(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Posted {
+        page: String,
+        verdict: String,
+        version: u32,
+        #[serde(default)]
+        text: String,
+    }
+    let person = match writer(shared, request, socket) {
+        Ok(person) => person,
+        Err(why) => return Answer::refuse(why, true),
+    };
+    let posted: Posted = match serde_json::from_slice(&request.body) {
+        Ok(posted) => posted,
+        Err(error) => return json(400, serde_json::json!({"why": format!("not a review: {error}")})),
+    };
+    let Some((project, uid)) = board_of(&posted.page) else {
+        return json(404, serde_json::json!({"why": format!("{} is no artifact's page", posted.page)}));
+    };
+    let written = as_person(shared, project.as_deref(), |draft| draft.review(&crate::ops::Ref::Text(uid.clone()), &posted.verdict, &posted.text, posted.version));
+    match written {
+        Ok((id, note, notices)) => {
+            log(&shared.home, &format!("POST /api/review: {} in note {id} on {uid}, by the user, {person}", posted.verdict));
+            json(200, serde_json::json!({"id": id, "uid": note, "notices": notices}))
+        }
+        Err(why) => json(409, serde_json::json!({"why": why})),
+    }
+}
+
+/// An answer in JSON.
+fn json(code: u16, value: serde_json::Value) -> Answer {
+    Answer::new(code, "application/json", value.to_string())
+}
+
+/// Writes `write` on the board of the project named, or on the default
+/// board, as the person: the item it names, its uid, and the write's
+/// notices; or why nothing was written.
+fn as_person(shared: &Shared, project: Option<&str>, write: impl FnOnce(&mut crate::ops::Draft) -> Result<u32, crate::ekko::EkkoError>) -> Result<(u32, String, Vec<String>), String> {
+    let location = crate::directory::locate(&shared.home, &shared.home, None, None, project).map_err(|error| error.to_string())?;
+    let ekko = crate::ekko::Ekko::at(&location).map_err(|error| error.to_string())?.acting_as(crate::holder::Actor::person());
+    let mut draft = crate::ops::Draft::open(&ekko).map_err(|error| error.to_string())?;
+    let id = write(&mut draft).map_err(|error| error.to_string())?;
+    let committed = draft.commit(false).map_err(|error| error.to_string())?;
+    let uid = committed.data.get(&id).and_then(|note| note.uid.clone()).unwrap_or_default();
+    Ok((id, uid, committed.notices))
 }
 
 /// The board and the artifact a page's path names: the project's name, or

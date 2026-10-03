@@ -23,7 +23,7 @@ use crate::ekko::{
     Linked,
 };
 use crate::holder::Whose;
-use crate::item::{Answer, Approving, Artifact, Cue, CueOn, How, Item, Knowledge, Linking, Proposal, Question, Setting, State, Until, Wait};
+use crate::item::{Answer, Approving, Artifact, Cue, CueOn, How, Item, Knowledge, Linking, Proposal, Question, Review, Setting, State, Until, Wait};
 use crate::storage::{ItemMap, LockGuard};
 
 /// An item as a caller names it: a display id, a uid, or `$N` for the item
@@ -631,6 +631,11 @@ impl<'a> Draft<'a> {
         if let Some(why) = crate::artifact::theme_refused(comment.theme.as_deref(), comment.color.as_deref()) {
             return Err(invalid(why));
         }
+        // Pending as written: a review or Send now sends it (task 1106), and
+        // a session resolves it.
+        if comment.sent.is_some() || comment.resolved.is_some() {
+            return Err(invalid("a comment is written pending: a review or Send now sends it, and the session resolves it"));
+        }
         let text = match (text.trim(), &comment.quote, &comment.replacement) {
             ("", Some(quote), Some(replacement)) if replacement.is_empty() => format!("Delete: {}", quote.exact),
             ("", Some(quote), Some(replacement)) => format!("Replace {} with {replacement}", quote.exact),
@@ -703,6 +708,123 @@ impl<'a> Draft<'a> {
         let id = self.own_comment(on, uid)?;
         self.item(id).trashed = Some(chrono::Local::now().timestamp_millis());
         Ok(id)
+    }
+
+    /// Sends the person's pending comment `uid` on the artifact `on` alone,
+    /// as GitHub's single comment goes, outside any review (task 1106).
+    pub fn send_comment(&mut self, on: &Ref, uid: &str) -> Result<u32, EkkoError> {
+        let id = self.own_comment(on, uid)?;
+        let comment = self.item(id).comment.as_mut().expect("own_comment found a comment");
+        if comment.sent.is_some() || comment.resolved.is_some() {
+            return Err(invalid(format!("comment {id} is not pending: it was sent already")));
+        }
+        comment.sent = Some(chrono::Local::now().timestamp_millis());
+        Ok(id)
+    }
+
+    /// The person's review of the artifact `on`, sent from its page (task
+    /// 1106), as GitHub's reviews go: a note holding `text`, its summary,
+    /// and the verdict, which sends every comment of theirs still pending
+    /// there. While a question asks the user to approve the plan, Approve
+    /// answers it with the answer that approves, which makes the tasks, and
+    /// Request changes with the other, naming the review; Comment leaves it
+    /// open. Refused when the plan moved on from `version`, when Approve has
+    /// no question asking to approve that version, when the artifact is
+    /// closed, and when Request changes or Comment has nothing to say.
+    pub fn review(&mut self, on: &Ref, verdict: &str, text: &str, version: u32) -> Result<u32, EkkoError> {
+        if !self.ekko.actor.as_ref().is_none_or(|actor| actor.is_person()) {
+            return Err(invalid("a review is the user's, sent from the artifact's page"));
+        }
+        if !Review::VERDICTS.contains(&verdict) {
+            return Err(invalid(format!("{verdict:?} is no verdict: a review is approve, changes or comment")));
+        }
+        crate::ekko::fits("review", text)?;
+        let id = self.resolve(on)?;
+        let item = &self.data[&id];
+        let (Some(artifact), Some(uid)) = (item.artifact.as_deref().filter(|_| item.trashed.is_none()), item.uid.clone()) else {
+            return Err(invalid(format!("{id} is not an artifact")));
+        };
+        if version != artifact.version {
+            return Err(invalid(format!("the plan is at version {} now, and the review was made on version {version}", artifact.version)));
+        }
+        if !State::of(item).is_some_and(State::is_open) {
+            return Err(invalid(format!("artifact {id} is {}: a review is of a plan still worked", State::of(item).map_or("closed", State::word))));
+        }
+        // Approve answers the newest question about this version, Request
+        // changes the newest.
+        let asking = crate::artifact::approvals_asked(item, &self.data);
+        let answers = match verdict {
+            Review::APPROVE => {
+                let about = |note: &&Item| note.question.as_ref().and_then(|question| question.approve.as_ref()).is_some_and(|approve| approve.version == version);
+                match (asking.iter().copied().find(about), asking.first()) {
+                    (Some(question), _) => Some(question.id),
+                    (None, Some(question)) => {
+                        let asked = question.question.as_ref().and_then(|question| question.approve.as_ref()).map_or(0, |approve| approve.version);
+                        return Err(invalid(format!("question {} asks to approve version {asked}, and the plan is at version {version}: the session asks again", question.id)));
+                    }
+                    (None, None) => return Err(invalid("no question asks to approve this plan: the session asks with ask's approve when it is ready")),
+                }
+            }
+            Review::CHANGES => asking.first().map(|question| question.id),
+            _ => None,
+        };
+        // The person's comments still pending there, oldest first.
+        let mut pending: Vec<(i64, u32, String)> = self
+            .data
+            .values()
+            .filter(|note| note.attached_to.as_deref() == Some(uid.as_str()) && note.trashed.is_none())
+            .filter(|note| note.created_by.as_ref().is_none_or(|by| by.pid.is_none()))
+            .filter(|note| note.comment.as_ref().is_some_and(|comment| comment.sent.is_none() && comment.resolved.is_none()))
+            .filter_map(|note| Some((note.timestamp, note.id, note.uid.clone()?)))
+            .collect();
+        pending.sort();
+        let text = text.trim();
+        if verdict != Review::APPROVE && text.is_empty() && pending.is_empty() {
+            return Err(invalid("nothing to send: write what the review says, or comment on the plan's words first"));
+        }
+        let comments = match pending.len() {
+            0 => String::new(),
+            1 => format!(", sending comment {}", pending[0].1),
+            _ => format!(", sending comments {}", pending.iter().map(|(_, id, _)| id.to_string()).collect::<Vec<_>>().join(", ")),
+        };
+        let said = match verdict {
+            Review::APPROVE => format!("Approved version {version}{comments}."),
+            Review::CHANGES => format!("Changes requested on version {version}{comments}."),
+            _ => format!("Commented on version {version}{comments}."),
+        };
+        let spec = Create {
+            kind: None,
+            text: if text.is_empty() { said.clone() } else { text.to_string() },
+            boards: Vec::new(),
+            priority: None,
+            due: None,
+            with: None,
+            phase: None,
+            blocked_by: Vec::new(),
+            attached_to: Some(Ref::Id(id)),
+            supersedes: None,
+            starred: false,
+        };
+        let note = self.create(&spec)?;
+        let now = chrono::Local::now().timestamp_millis();
+        for (_, comment, _) in &pending {
+            if let Some(comment) = self.item(*comment).comment.as_mut() {
+                comment.sent = Some(now);
+            }
+        }
+        let mut answered = None;
+        if let Some(question) = answers {
+            let (approves, other) = crate::artifact::approval_answers(&self.data[&question]);
+            let label = if verdict == Review::APPROVE { approves } else { other };
+            let named = format!("{} on the artifact's page, in review {note}", if verdict == Review::APPROVE { "approved" } else { "changes requested" });
+            let summary = if text.is_empty() { comments.trim_start_matches(", ").to_string() } else { crate::ekko::title(text).to_string() };
+            let answer = if summary.is_empty() { format!("{label}{}{named}", crate::menu::NOTE) } else { format!("{label}{}{named}: {summary}", crate::menu::NOTE) };
+            self.answer(&Ref::Id(question), &answer)?;
+            answered = self.data[&question].uid.clone();
+        }
+        let comments = pending.into_iter().map(|(_, _, uid)| uid).collect();
+        self.item(note).review = Some(Box::new(Review { verdict: verdict.to_string(), version, comments, answered, unknown: Default::default() }));
+        Ok(note)
     }
 
     fn item(&mut self, id: u32) -> &mut Item {
@@ -1173,7 +1295,7 @@ impl<'a> Draft<'a> {
         }
         if let Some(asked) = crate::artifact::approval_asked(item, &self.data) {
             return Err(invalid(format!(
-                "question {} asks to approve artifact {target} already: the user answers it in ekko's menu",
+                "question {} asks to approve artifact {target} already: the user answers it in ekko's menu, or with Review on the artifact's page",
                 asked.id
             )));
         }
