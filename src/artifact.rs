@@ -379,6 +379,10 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     let mut notes: Vec<&Item> =
         all.values().filter(|note| !note.is_task && note.trashed.is_none() && !uid.is_empty() && note.attached_to.as_deref() == Some(uid)).collect();
     notes.sort_by_key(|note| std::cmp::Reverse((note.timestamp, note.id)));
+    // A comment on the plan's words goes in the margin beside them (task
+    // 1105), oldest first; the other notes under Notes.
+    let (mut comments, notes): (Vec<&Item>, Vec<&Item>) = notes.into_iter().partition(|note| note.comment.is_some());
+    comments.reverse();
     let tasks = steps.iter().filter(|step| step.task.is_some() && step.class != "cancelled").count();
     let done = steps.iter().filter(|step| step.class == "done").count();
     let version = artifact.map_or(0, |artifact| artifact.version);
@@ -416,7 +420,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
 
     // The head of the text: tags, title, byline and actions, then what waits
     // on the user and what the user should know first.
-    body.push_str("<article class=\"prose\"><ul class=\"tags\"><li>Artifact</li>");
+    let _ = write!(body, "<article class=\"prose\" data-version=\"{version}\"><ul class=\"tags\"><li>Artifact</li>");
     if let Some(phase) = phase {
         let _ = write!(body, "<li>{phase}</li>");
     }
@@ -427,6 +431,9 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     }
     if !notes.is_empty() {
         let _ = write!(body, "<li>{}</li>", plural(notes.len(), "note"));
+    }
+    if !comments.is_empty() {
+        let _ = write!(body, "<li>{}</li>", plural(comments.len(), "comment"));
     }
     let _ = write!(body, "<li>Version {version}</li></ul><h1>{}</h1><div class=\"byline\">", esc(title));
     if let Some(by) = &by {
@@ -471,18 +478,26 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     let mut goal_shown = false;
     for (heading, text) in &cut {
         if heading.is_empty() {
-            let _ = write!(body, "<section class=\"lead\">{}</section>", markdown(text));
+            let _ = write!(body, "<section class=\"lead\" data-plan>{}</section>", markdown(text));
             continue;
         }
         let id = unique(&mut ids, &format!("plan-{}", slug(heading)));
         if heading == "Goal" && !goal_shown {
             goal_shown = true;
-            let _ = write!(body, "<section class=\"goal\" id=\"{id}\" data-part=\"Goal\">{}</section>", goal(text));
+            let _ = write!(body, "<section class=\"goal\" id=\"{id}\" data-part=\"Goal\" data-plan>{}</section>", goal(text));
         } else {
-            let _ = write!(body, "<section class=\"part\" id=\"{id}\" data-part=\"{}\"><h2 class=\"opener\">{}</h2>{}</section>", esc(heading), esc(heading), markdown(text));
+            let _ = write!(body, "<section class=\"part\" id=\"{id}\" data-part=\"{}\" data-plan><h2 class=\"opener\">{}</h2>{}</section>", esc(heading), esc(heading), markdown(text));
         }
         parts.push((id, heading.clone()));
     }
+    // The comments, as data the script anchors beside their words, or shows
+    // as outdated when the text no longer holds them.
+    let comments: Vec<serde_json::Value> = comments
+        .iter()
+        .map(|note| serde_json::json!({"id": note.id, "uid": note.uid, "text": note.description, "when": when(note.timestamp), "by": written_by(note), "comment": note.comment}))
+        .collect();
+    let comments = serde_json::to_string(&comments).unwrap_or_default().replace('<', "\\u003c");
+    let _ = write!(body, "<aside class=\"margin\" aria-label=\"Comments\"></aside><script type=\"application/json\" id=\"comments\">{comments}</script>");
 
     // Steps: AKQA's numbered items, each with its task, opening in place to
     // the rest of its text and when it is done.
@@ -611,7 +626,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     for (id, name) in &parts {
         let _ = write!(body, "<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{}</span></a></li>", esc(name));
     }
-    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-inner\"><div class=\"bar-fold list-fold\"><div class=\"bar-list\" role=\"listbox\"></div><div class=\"bar-rule\"></div></div><div class=\"bar-line\"><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
+    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-inner\"><div class=\"bar-fold list-fold\"><div class=\"bar-list\" role=\"listbox\"></div><div class=\"bar-rule\"></div></div><div class=\"bar-fold quote-fold\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-why\"></div><div class=\"bar-rule\"></div></div><div class=\"bar-line\"><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
     let (plan_parts, ours): (Vec<_>, Vec<_>) = parts.iter().partition(|(id, _)| id.starts_with("plan-"));
     if let Some((id, _)) = plan_parts.first() {
         let _ = write!(body, "<a href=\"#{id}\">Plan</a>");
@@ -639,7 +654,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     // POLL_MS. A version waits while a field other than the bar's, whose
     // words ekkoKeep keeps, holds words being typed.
     let after = format!(
-        "\";\n  var check = function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }};\n  window.ekkoArtifact = function (seen) {{\n    if (seen === version) return;\n    var field = document.activeElement;\n    if (field && (field.tagName === \"TEXTAREA\" || field.isContentEditable || (field.tagName === \"INPUT\" && !field.closest(\"#bar\")))) {{\n      field.addEventListener(\"blur\", function () {{ ekkoArtifact(seen); }}, {{ once: true }});\n      return;\n    }}\n    if (window.ekkoKeep) ekkoKeep();\n    location.reload();\n  }};\n  if (location.protocol === \"http:\" && navigator.locks && window.BroadcastChannel && window.EventSource) {{\n    var channel = new BroadcastChannel(\"ekko-events\");\n    var take = function (data) {{\n      if (data === \"open\") return check();\n      var at = data.indexOf(\" \");\n      if (data.slice(0, at) === location.pathname) ekkoArtifact(data.slice(at + 1));\n    }};\n    channel.onmessage = function (message) {{ take(message.data); }};\n    navigator.locks.request(\"ekko-events\", function () {{\n      return new Promise(function () {{\n        var source = new EventSource(\"/events\");\n        source.onopen = function () {{ channel.postMessage(\"open\"); check(); }};\n        source.addEventListener(\"version\", function (event) {{ channel.postMessage(event.data); take(event.data); }});\n      }});\n    }});\n  }} else setInterval(check, {POLL_MS});\n  if (location.protocol === \"http:\") fetch(\"/api/who\", {{ method: \"POST\" }}).then(function (answer) {{ return answer.json(); }}).then(function (who) {{\n    var text = who.person ? \" \\u00b7 writes as you\" : \" \\u00b7 reads only: \" + who.why;\n    document.getElementById(\"who\").textContent = text;\n  }}, function () {{}});\n}})();</script>\n</body>\n</html>\n",
+        "\";\n  var check = function () {{\n    var script = document.createElement(\"script\");\n    script.src = \"{}.js?t=\" + Date.now();\n    script.onload = script.onerror = function () {{ script.remove(); }};\n    document.head.appendChild(script);\n  }};\n  window.ekkoArtifact = function (seen) {{\n    if (seen === version) return;\n    var field = document.activeElement;\n    if (field && (field.tagName === \"TEXTAREA\" || field.isContentEditable || (field.tagName === \"INPUT\" && !field.closest(\"#bar\")))) {{\n      field.addEventListener(\"blur\", function () {{ ekkoArtifact(seen); }}, {{ once: true }});\n      return;\n    }}\n    if (window.ekkoKeep) ekkoKeep();\n    location.reload();\n  }};\n  if (location.protocol === \"http:\" && navigator.locks && window.BroadcastChannel && window.EventSource) {{\n    var channel = new BroadcastChannel(\"ekko-events\");\n    var take = function (data) {{\n      if (data === \"open\") return check();\n      var at = data.indexOf(\" \");\n      if (data.slice(0, at) === location.pathname) ekkoArtifact(data.slice(at + 1));\n    }};\n    channel.onmessage = function (message) {{ take(message.data); }};\n    navigator.locks.request(\"ekko-events\", function () {{\n      return new Promise(function () {{\n        var source = new EventSource(\"/events\");\n        source.onopen = function () {{ channel.postMessage(\"open\"); check(); }};\n        source.addEventListener(\"version\", function (event) {{ channel.postMessage(event.data); take(event.data); }});\n      }});\n    }});\n  }} else setInterval(check, {POLL_MS});\n  if (location.protocol === \"http:\") fetch(\"/api/who\", {{ method: \"POST\" }}).then(function (answer) {{ return answer.json(); }}).then(function (who) {{\n    var text = who.person ? \" \\u00b7 writes as you\" : \" \\u00b7 reads only: \" + who.why;\n    document.getElementById(\"who\").textContent = text;\n    if (who.person) document.body.dataset.writes = \"\";\n  }}, function () {{}});\n}})();</script>\n</body>\n</html>\n",
         js_string(uid)
     );
     let version = format!("{:016x}", fnv_from(fnv(before.as_bytes()), after.as_bytes()));
@@ -1145,6 +1160,29 @@ fn events(text: &str) -> Vec<pulldown_cmark::Event<'_>> {
     events
 }
 
+/// The plan's words as the page shows them, each run of white space one
+/// space and every block apart from the next: where a comment's quote,
+/// taken from the page, is found again (task 1105).
+pub fn shown_words(text: &str) -> String {
+    use pulldown_cmark::{Event, Tag, TagEnd};
+    let mut out = String::new();
+    for event in events(text) {
+        match event {
+            Event::Text(words) | Event::Code(words) => out.push_str(&words),
+            Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. } | Tag::Image { .. })
+            | Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link | TagEnd::Image) => {}
+            Event::Start(_) | Event::End(_) | Event::SoftBreak | Event::HardBreak | Event::Rule => out.push(' '),
+            _ => {}
+        }
+    }
+    collapsed(&out)
+}
+
+/// `text` with each run of white space one space, and none at either end.
+pub fn collapsed(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The plan's Markdown as HTML, by the rules of `events`.
 fn markdown(text: &str) -> String {
     let mut out = String::new();
@@ -1408,6 +1446,11 @@ const SCRIPT: &str = r##"(function () {
   var bar = document.getElementById("bar");
   var input = bar.querySelector("input"), hint = bar.querySelector(".bar-hint"), list = bar.querySelector(".bar-list");
   var listFold = bar.querySelector(".list-fold"), navFold = bar.querySelector(".nav-fold"), menu = bar.querySelector(".bar-menu");
+  var quoteFold = bar.querySelector(".quote-fold"), quoteText = bar.querySelector(".bar-quote-text"), why = bar.querySelector(".bar-why");
+  var note = bar.querySelector(".bar-note"), line = bar.querySelector(".bar-line");
+  // The plan's words a comment is being written on, and whether it is on
+  // its way to the board.
+  var quoting = null, sending = false;
   var items = parts.map(function (part) {
     return { kind: "Section", badge: "\u00a7", label: part.dataset.part, target: part.id, search: ("section " + part.dataset.part).toLowerCase() };
   });
@@ -1453,7 +1496,7 @@ const SCRIPT: &str = r##"(function () {
   function hintVisible() { hint.style.visibility = input.value || bar.classList.contains("open") ? "hidden" : "visible"; }
 
   function render() {
-    matches = find(input.value).slice(0, 40);
+    matches = quoting ? [] : find(input.value).slice(0, 40);
     selected = Math.min(selected, Math.max(matches.length - 1, 0));
     list.textContent = "";
     matches.forEach(function (item, i) {
@@ -1475,20 +1518,22 @@ const SCRIPT: &str = r##"(function () {
   function size() {
     var open = bar.classList.contains("open");
     var listHeight = open && !bar.dataset.navOnly && matches.length ? listFold.scrollHeight : 0;
-    var navHeight = open ? navFold.firstElementChild.offsetHeight : 0;
+    var quoteHeight = open && quoting ? quoteFold.scrollHeight : 0;
+    var navHeight = open && !quoting ? navFold.firstElementChild.offsetHeight : 0;
     listFold.style.height = listHeight + "px";
+    quoteFold.style.height = quoteHeight + "px";
     navFold.style.height = navHeight + "px";
-    bar.style.height = 56 + listHeight + navHeight + "px";
+    bar.style.height = line.offsetHeight + listHeight + quoteHeight + navHeight + "px";
   }
 
   function open(navOnly) {
     if (navOnly) bar.dataset.navOnly = "1"; else delete bar.dataset.navOnly;
     bar.classList.add("open");
-    var hinted = !navOnly && !input.value;
+    var hinted = !navOnly && !input.value && !quoting;
     if (hinted) input.value = hints[shown][1];
     hintVisible();
     render();
-    input.focus();
+    (quoting ? note : input).focus();
     // The hint's words, picked, so the first key typed takes their place.
     if (hinted) input.select();
   }
@@ -1498,11 +1543,81 @@ const SCRIPT: &str = r##"(function () {
     hintVisible();
     size();
     input.blur();
+    note.blur();
   }
   function go(item) {
     close();
     if (item.step) openStep(item.step); else jump(item.target);
   }
+
+  // A comment on the plan's words (task 1105), written the way one replies
+  // to part of an answer in Claude: the words picked come into the pill,
+  // quoted above its line, which becomes a field of its own that grows with
+  // the comment; Enter sends it to the board, Shift+Enter starts a line.
+  // The words stay marked in the text meanwhile, by ekkoMark.
+  function quote(words) {
+    quoting = words;
+    quoteText.textContent = words.exact;
+    why.textContent = "";
+    input.hidden = true;
+    note.hidden = false;
+    grow();
+    if (window.ekkoMark) ekkoMark(words);
+    open(false);
+  }
+  window.ekkoQuote = quote;
+  function unquote() {
+    quoting = null;
+    why.textContent = "";
+    quoteText.textContent = "";
+    note.value = "";
+    note.hidden = true;
+    input.hidden = false;
+    grow();
+    if (window.ekkoMark) ekkoMark(null);
+  }
+  function grow() {
+    note.style.height = "auto";
+    if (!note.hidden) note.style.height = note.scrollHeight + "px";
+    size();
+  }
+  function refused(text) {
+    why.textContent = text;
+    size();
+  }
+  function comment() {
+    if (!note.value.trim()) return refused("Write the comment first.");
+    var article = document.querySelector("article.prose");
+    var posted = { page: location.pathname, text: note.value, comment: { version: Number(article.dataset.version), quote: quoting } };
+    // Sent, it is no longer kept across a reload: the write itself makes
+    // the new version that reloads the page.
+    sending = true;
+    note.readOnly = true;
+    fetch("/api/comment", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(posted) })
+      .then(function (answer) { return answer.json().then(function (value) { return { ok: answer.ok, value: value }; }); })
+      .then(function (got) {
+        if (!got.ok) throw new Error(got.value.why || "refused");
+        close();
+        unquote();
+      })
+      .catch(function (error) { refused("Not written: " + error.message); })
+      .then(function () {
+        sending = false;
+        note.readOnly = false;
+      });
+  }
+  bar.querySelector(".bar-quote-drop").addEventListener("click", function () {
+    unquote();
+    open(false);
+  });
+  note.addEventListener("input", grow);
+  note.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") { unquote(); close(); return; }
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (!sending) comment();
+    }
+  });
 
   bar.querySelector(".bar-line").addEventListener("click", function (event) {
     if (event.target.closest(".bar-menu")) return;
@@ -1513,6 +1628,7 @@ const SCRIPT: &str = r##"(function () {
     if (bar.classList.contains("open")) close(); else open(true);
   });
   input.addEventListener("input", function () {
+    if (quoting) return;
     delete bar.dataset.navOnly;
     selected = 0;
     render();
@@ -1537,7 +1653,8 @@ const SCRIPT: &str = r##"(function () {
     });
   });
   document.addEventListener("pointerdown", function (event) {
-    if (bar.classList.contains("open") && !bar.contains(event.target)) close();
+    // A comment being written stays open while other words are picked.
+    if (bar.classList.contains("open") && !quoting && !bar.contains(event.target)) close();
   });
   addEventListener("keydown", function (event) {
     if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -1563,7 +1680,8 @@ const SCRIPT: &str = r##"(function () {
     var at = anchor();
     var kept = { y: scrollY, id: at ? at.id : "", offset: at ? at.getBoundingClientRect().top : 0,
       open: Array.prototype.map.call(document.querySelectorAll(".step.open"), function (step) { return step.id; }) };
-    if (bar.classList.contains("open")) kept.bar = input.value;
+    if (bar.classList.contains("open") && !quoting && !sending) kept.bar = input.value;
+    if (quoting && !sending) { kept.quote = quoting; kept.note = note.value; }
     try { sessionStorage.setItem(keptAt, JSON.stringify(kept)); history.scrollRestoration = "manual"; } catch (e) {}
   };
   var kept = null;
@@ -1574,11 +1692,226 @@ const SCRIPT: &str = r##"(function () {
       var at = kept.id && document.getElementById(kept.id);
       scrollTo(0, at ? scrollY + at.getBoundingClientRect().top - kept.offset : kept.y);
       try { history.scrollRestoration = "auto"; } catch (e) {}
+      if (kept.quote) { quote(kept.quote); note.value = kept.note || ""; grow(); }
       if (typeof kept.bar === "string") { input.value = kept.bar; open(false); }
     };
     var settled = function () { document.fonts.ready.then(back); };
     if (document.readyState === "complete") settled(); else addEventListener("load", settled);
   }
+})();
+
+// Comments on the plan's words (task 1105): each in the margin beside its
+// words, found again by its quote in whatever version the page shows, or
+// outdated when the text no longer holds them. Served to the person, words
+// selected in the plan open Comment, Suggest and Delete.
+(function () {
+  var data = document.getElementById("comments");
+  var margin = document.querySelector(".margin");
+  var article = document.querySelector("article.prose");
+  if (!data || !margin || !article) return;
+  var comments = JSON.parse(data.textContent);
+  var plan = Array.prototype.slice.call(document.querySelectorAll("[data-plan]"));
+  var BLOCK = "p, li, h1, h2, h3, h4, h5, h6, pre, td, th, blockquote, section, dt, dd";
+  var AROUND = 32;
+
+  // The plan's words as shown_words has them on the server: each run of
+  // white space one space, every block apart from the next; and for each
+  // character, the text node and offset it came from.
+  function words() {
+    var text = "", at = [], last = null, space = true;
+    plan.forEach(function (root) {
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: function (node) {
+        return node.parentElement.closest(".opener") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+      } });
+      for (var node = walker.nextNode(); node; node = walker.nextNode()) {
+        var block = node.parentElement.closest(BLOCK);
+        if (block !== last && !space) { text += " "; at.push([node, 0]); space = true; }
+        last = block;
+        var value = node.nodeValue;
+        for (var i = 0; i < value.length; i++) {
+          var white = /\s/.test(value.charAt(i));
+          if (white && space) continue;
+          text += white ? " " : value.charAt(i);
+          at.push([node, i]);
+          space = white;
+        }
+      }
+    });
+    return { text: text, at: at };
+  }
+  function same(a, b, fromEnd) {
+    var n = 0;
+    while (n < a.length && n < b.length && (fromEnd ? a.charAt(a.length - 1 - n) === b.charAt(b.length - 1 - n) : a.charAt(n) === b.charAt(n))) n++;
+    return n;
+  }
+  function partOf(node) {
+    var part = node.parentElement.closest("[data-plan]");
+    return part && part.dataset.part || "";
+  }
+  // Where a quote's words are now: of each place that holds them, the one
+  // whose surroundings and section match best, as the W3C's quote selector
+  // finds its words.
+  function find(index, quote) {
+    var exact = quote.exact.replace(/\s+/g, " ").trim(), best = null, score = -1;
+    if (!exact) return null;
+    for (var at = index.text.indexOf(exact); at >= 0; at = index.text.indexOf(exact, at + 1)) {
+      var here = same(index.text.slice(Math.max(0, at - AROUND), at), (quote.prefix || "").replace(/\s+/g, " "), true)
+        + same(index.text.slice(at + exact.length), (quote.suffix || "").replace(/\s+/g, " "), false)
+        + (partOf(index.at[at][0]) === (quote.section || "") ? 1 : 0);
+      if (here > score) { best = [at, at + exact.length]; score = here; }
+    }
+    return best;
+  }
+  function range(index, span) {
+    var r = document.createRange(), first = index.at[span[0]], last = index.at[span[1] - 1];
+    r.setStart(first[0], first[1]);
+    r.setEnd(last[0], last[1] + 1);
+    return r;
+  }
+  function element(tag, className, text) {
+    var made = document.createElement(tag);
+    if (className) made.className = className;
+    if (text) made.textContent = text;
+    return made;
+  }
+
+  // The cards, oldest first; a reply under the comment it answers.
+  var index = words(), placed = [], cards = {}, ranges = [];
+  var on = window.Highlight && window.CSS && CSS.highlights ? new Highlight() : null;
+  margin.appendChild(element("div", "margin-head", "Comments"));
+  comments.forEach(function (note) {
+    var c = note.comment || {}, quote = c.quote, span = quote ? find(index, quote) : null;
+    var kind = c.replacement === "" ? "Deletion" : typeof c.replacement === "string" ? "Suggestion" : "Comment";
+    var card = element("div", "comment" + (c.resolved ? " resolved" : ""));
+    var head = [kind, note.by || "", note.when];
+    if (!c.sent) head.push("pending");
+    if (quote && !span) head.push("outdated, made on version " + c.version);
+    if (c.resolved) head.push("resolved");
+    card.appendChild(element("div", "kind", head.filter(Boolean).join(" · ")));
+    if (quote) {
+      var said = element("div", "quote" + (span ? "" : " gone") + (kind === "Comment" && span ? " plain" : ""));
+      said.appendChild(element(kind === "Comment" ? "span" : "del", "", quote.exact));
+      if (kind === "Suggestion") { said.appendChild(document.createTextNode(" ")); said.appendChild(element("ins", "", c.replacement)); }
+      card.appendChild(said);
+    }
+    var written = kind === "Deletion" ? "Delete: " + (quote && quote.exact) : kind === "Suggestion" ? "Replace " + (quote && quote.exact) + " with " + c.replacement : "";
+    if (note.text && note.text !== written) card.appendChild(element("div", "text", note.text));
+    if (note.uid) cards[note.uid] = card;
+    var parent = c.replyTo && cards[c.replyTo];
+    if (parent) { card.classList.add("reply"); parent.appendChild(card); return; }
+    if (!span) card.classList.add("outdated");
+    var r = span ? range(index, span) : null;
+    if (r) ranges.push(r);
+    card.addEventListener("click", function () {
+      placed.forEach(function (other) { other.card.classList.toggle("on", other.card === card); });
+      if (!r) return;
+      if (on) { on.clear(); on.add(r); }
+      var top = r.getBoundingClientRect().top;
+      if (top < 80 || top > innerHeight - 80) scrollBy({ top: top - innerHeight / 3, behavior: "smooth" });
+    });
+    margin.appendChild(card);
+    placed.push({ card: card, range: r });
+  });
+  if (!placed.length) margin.hidden = true;
+  if (on) {
+    var all = new Highlight();
+    ranges.forEach(function (r) { all.add(r); });
+    CSS.highlights.set("ekko-comment", all);
+    CSS.highlights.set("ekko-comment-on", on);
+  }
+  // The words a comment is being written on in the pill, marked until it
+  // is sent or given up; found again by their quote after a reload.
+  var quoted = on ? new Highlight() : null;
+  if (quoted) {
+    quoted.priority = 1;
+    CSS.highlights.set("ekko-quoted", quoted);
+  }
+  window.ekkoMark = function (quote) {
+    if (!quoted) return;
+    quoted.clear();
+    var now = words(), span = quote && find(now, quote);
+    if (span) quoted.add(range(now, span));
+  };
+  // Beside the text, each card level with its words and below the one
+  // before it, the outdated ones at the plan's top; in a narrower window
+  // the margin is a list after the plan, which needs no placing.
+  function lay() {
+    var beside = getComputedStyle(margin).position === "absolute";
+    var origin = margin.getBoundingClientRect().top, below = 0;
+    var start = plan.length ? plan[0].getBoundingClientRect().top - origin : 0;
+    placed.map(function (one) { return { card: one.card, want: one.range ? one.range.getBoundingClientRect().top - origin : start }; })
+      .sort(function (a, b) { return a.want - b.want; })
+      .forEach(function (one) {
+        if (!beside) { one.card.style.top = ""; return; }
+        var top = Math.max(one.want, below);
+        one.card.style.top = top + "px";
+        below = top + one.card.offsetHeight + 12;
+      });
+  }
+  lay();
+  document.fonts.ready.then(lay);
+  addEventListener("resize", lay);
+
+  // Words selected in the plan, served to the person who can write, offer
+  // one button, as Claude offers Reply on part of an answer: it takes them
+  // into the pill, where the comment is written.
+  var tools = element("div", "select-tools");
+  tools.hidden = true;
+  var take = element("button", "", "Comment");
+  take.type = "button";
+  take.appendChild(element("kbd", "", "C"));
+  tools.appendChild(take);
+  document.body.appendChild(tools);
+  var chosen = null;
+
+  function selected() {
+    if (!("writes" in document.body.dataset) || !window.ekkoQuote) return null;
+    var selection = getSelection();
+    if (!selection.rangeCount || selection.isCollapsed) return null;
+    var r = selection.getRangeAt(0);
+    if (!plan.some(function (part) { return r.intersectsNode(part); })) return null;
+    var index = words(), start = -1, end = -1;
+    for (var i = 0; i < index.at.length; i++) {
+      var node = index.at[i][0], offset = index.at[i][1];
+      if (r.comparePoint(node, offset) === 0 && r.comparePoint(node, offset + 1) === 0) {
+        if (start < 0) start = i;
+        end = i + 1;
+      }
+    }
+    while (start >= 0 && start < end && index.text.charAt(start) === " ") start++;
+    while (end > start && index.text.charAt(end - 1) === " ") end--;
+    if (start < 0 || end <= start) return null;
+    return {
+      quote: { exact: index.text.slice(start, end), prefix: index.text.slice(Math.max(0, start - AROUND), start),
+        suffix: index.text.slice(end, end + AROUND), section: partOf(index.at[start][0]) },
+      box: r.getBoundingClientRect()
+    };
+  }
+  function offer() {
+    chosen = selected();
+    tools.hidden = !chosen;
+    if (!chosen) return;
+    tools.style.top = scrollY + chosen.box.top - tools.offsetHeight - 8 + "px";
+    tools.style.left = Math.max(8, scrollX + chosen.box.left + chosen.box.width / 2 - tools.offsetWidth / 2) + "px";
+  }
+  document.addEventListener("pointerup", function (event) { if (!tools.contains(event.target)) setTimeout(offer, 0); });
+  document.addEventListener("keyup", function (event) { if (event.shiftKey || event.key === "Shift") offer(); });
+  tools.addEventListener("pointerdown", function (event) { event.preventDefault(); });
+  take.addEventListener("click", function () {
+    if (!chosen) return;
+    tools.hidden = true;
+    getSelection().removeAllRanges();
+    ekkoQuote(chosen.quote);
+  });
+  // C takes the words too, so a selection made with Shift and the arrows
+  // needs no mouse.
+  addEventListener("keydown", function (event) {
+    if (event.key !== "c" || event.ctrlKey || event.metaKey || event.altKey || tools.hidden || !chosen) return;
+    var active = document.activeElement;
+    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
+    event.preventDefault();
+    take.click();
+  });
 })();"##;
 
 /// The look of mockup D (decision 1151): Medium's article in the light
@@ -1829,6 +2162,51 @@ button.step-head { cursor: pointer; }
 .bar-nav a { padding: 6px 14px; border-radius: 999px; background: var(--bar-chip); font: 400 13px/19.5px var(--sans); letter-spacing: -0.025em; color: var(--bar-muted); text-decoration: none; transition: background-color 0.3s, color 0.3s; }
 .bar-nav a:hover, .bar-nav a.on { background: var(--bar-chip-on); color: var(--bar-fg); }
 
+/* Comments (task 1105), mockup A's: cards in a margin right of the text,
+   each level with its words, which a highlight marks. A selection's one
+   button floats over it; the comment is written in the pill, below the
+   words it quotes. */
+.bar-quote { display: flex; align-items: flex-start; gap: 8px; margin: 12px 12px 8px; padding: 8px 10px; border-left: 2px solid var(--bar-muted); border-radius: 4px; background: var(--bar-chip); font: 400 13px/18px var(--sans); color: var(--bar-muted); }
+.bar-quote-text { flex: 1; display: -webkit-box; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.bar-quote-drop { flex: none; padding: 0 4px; border: 0; background: none; font: 400 16px/18px var(--sans); color: var(--bar-muted); cursor: pointer; }
+.bar-why { margin: 0 16px 8px; font: 400 12px/16px var(--sans); color: #d92d20; }
+.bar-why:empty { display: none; }
+.bar input::placeholder, .bar-note::placeholder { color: var(--bar-hint); }
+.bar-note { display: block; box-sizing: border-box; width: 100%; max-height: 160px; padding: 18px 0; border: 0; outline: 0; background: transparent; resize: none; font: inherit; color: var(--bar-fg); caret-color: var(--bar-fg); }
+.bar input[hidden], .bar-note[hidden] { display: none; }
+::highlight(ekko-comment) { background-color: rgba(255, 196, 0, 0.3); }
+::highlight(ekko-comment-on) { background-color: rgba(255, 196, 0, 0.65); }
+::highlight(ekko-quoted) { background-color: rgba(255, 196, 0, 0.65); }
+.margin { position: absolute; top: 0; left: calc(100% + 40px); width: 216px; }
+.margin[hidden], .select-tools[hidden] { display: none; }
+.margin-head { display: none; }
+.comment { position: absolute; left: 0; right: 0; padding: 12px 14px; border-radius: 8px; background: var(--page); box-shadow: 0 0 0 1px var(--rule), 0 2px 8px rgba(0, 0, 0, 0.06); font: 400 13px/20px var(--sans); color: var(--fg); cursor: pointer; }
+.comment.on { box-shadow: 0 0 0 2px var(--fg); }
+.comment .kind { font-size: 12px; line-height: 18px; color: var(--fg-2); }
+.comment.outdated .kind { color: #b54708; }
+.comment .quote { margin: 6px 0 0; font: 400 14px/20px var(--serif); }
+.comment .quote.plain { display: none; }
+.comment .quote.gone { opacity: 0.7; }
+.comment del { color: var(--fg-2); }
+.comment ins { text-decoration: none; background: rgba(26, 137, 23, 0.16); }
+.comment .text { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comment.reply { position: static; margin: 10px 0 0; padding: 10px 0 0; border-top: 1px solid var(--rule); border-radius: 0; box-shadow: none; }
+.comment.resolved { opacity: 0.6; }
+.select-tools { position: absolute; z-index: 30; display: flex; gap: 2px; padding: 4px; border-radius: 999px; background: var(--fg); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18); }
+.select-tools button { padding: 6px 12px; border: 0; border-radius: 999px; background: none; font: 500 13px/18px var(--sans); color: var(--bg); cursor: pointer; }
+.select-tools button:hover { background: rgba(127, 127, 127, 0.35); }
+.select-tools kbd { margin: 0 0 0 8px; padding: 0 5px; border-radius: 4px; background: rgba(127, 127, 127, 0.35); font: 500 11px/16px var(--sans); }
+
+/* The margin needs 256px right of the text and the column at the left
+   232px, and the window 1336px for both and the section bars; a narrower
+   one lists the comments after the plan. */
+@media (max-width: 1335px) {
+  .margin { position: static; width: auto; margin: 64px 0 0; }
+  .margin-head { display: block; margin: 0 0 16px; font: 600 13px/20px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); }
+  .comment { position: static; margin: 0 0 12px; }
+  .comment .quote.plain { display: block; }
+}
+
 /* The column at the left needs 232px beside the text, and the window
    1176px for that; a narrower one puts it above the text. */
 @media (max-width: 1175px) {
@@ -1845,7 +2223,7 @@ button.step-head { cursor: pointer; }
   .bar, .bar-fold, .bar-hint span, .toc-card, .toc-bars, .toc-bars span { transition: none; }
 }
 @media print {
-  .top .link, .top .solid, .toc, .bar, .arrows { display: none; }
+  .top .link, .top .solid, .toc, .bar, .arrows, .select-tools { display: none; }
   .step .more { display: block; }
 }
 "##;
@@ -2101,6 +2479,32 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_goes_to_the_margin_and_quotes_the_words_as_shown() {
+        let text = "Ship\n\n## Design\nThe `comment` field, un**kept**, out*in*side, at[here](https://example.com), s~~trike~~d.\n\n- one\n- two\n";
+        assert_eq!(shown_words(text), "Ship Design The comment field, unkept, outinside, athere, striked. one two", "markup glued to words adds no space");
+        let item = artifact_item(1, text, Vec::new());
+        let mut comment = Item::new_note(2, "Why here?".to_string(), vec!["My Board".to_string()]);
+        comment.attached_to = item.uid.clone();
+        comment.comment = Some(Box::new(crate::item::Comment {
+            version: 1,
+            quote: Some(crate::item::Quote { exact: "comment field".into(), prefix: String::new(), suffix: String::new(), section: "Design".into(), unknown: BTreeMap::new() }),
+            replacement: None,
+            step: None,
+            reply_to: None,
+            sent: None,
+            resolved: None,
+            unknown: BTreeMap::new(),
+        }));
+        let mut note = Item::new_note(3, "A plain note".to_string(), vec!["My Board".to_string()]);
+        note.attached_to = item.uid.clone();
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone()), (2, comment), (3, note)]), None);
+        let data = html.split("<script type=\"application/json\" id=\"comments\">").nth(1).and_then(|rest| rest.split("</script>").next()).unwrap_or_default();
+        assert!(data.contains("\"exact\":\"comment field\"") && data.contains("Why here?"), "{data}");
+        assert!(html.contains("id=\"note-3\"") && !html.contains("id=\"note-2\""), "the comment is in the margin, not under Notes: {html}");
+        assert!(html.contains("<li>1 note</li>") && html.contains("<li>1 comment</li>"), "{html}");
+    }
+
+    #[test]
     fn the_page_holds_its_parts_in_order_its_notes_and_how_its_text_changed() {
         let made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"])]).unwrap();
         let mut item = artifact_item(1, &plan("Ship"), made);
@@ -2189,7 +2593,7 @@ mod tests {
         for id in ["plan-steps", "plan-steps-2", "steps"] {
             assert_eq!(html.matches(&format!(" id=\"{id}\" data-part=\"Steps\"")).count(), 1, "{id}: {html}");
         }
-        assert!(html.contains("<section class=\"part\" id=\"plan-goal-2\" data-part=\"Goal\"><h2 class=\"opener\">Goal</h2><p>Once more.</p>"), "only the first Goal opens the plan: {html}");
+        assert!(html.contains("<section class=\"part\" id=\"plan-goal-2\" data-part=\"Goal\" data-plan><h2 class=\"opener\">Goal</h2><p>Once more.</p>"), "only the first Goal opens the plan: {html}");
     }
 
     #[test]

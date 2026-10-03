@@ -619,7 +619,10 @@ impl<'a> Draft<'a> {
         if comment.version != artifact.version {
             return Err(invalid(format!("the plan is at version {} now, and the comment was made on version {}", artifact.version, comment.version)));
         }
-        if let Some(quote) = comment.quote.as_ref().filter(|quote| quote.exact.is_empty() || !item.description.contains(&quote.exact)) {
+        // The words as written, or as the page shows them, which a selection
+        // there takes without the Markdown around them.
+        let held = |exact: &str| item.description.contains(exact) || crate::artifact::shown_words(&item.description).contains(&crate::artifact::collapsed(exact));
+        if let Some(quote) = comment.quote.as_ref().filter(|quote| quote.exact.trim().is_empty() || !held(&quote.exact)) {
             return Err(invalid(format!("version {} of the plan does not hold {:?}", artifact.version, quote.exact)));
         }
         if let Some(step) = comment.step.as_ref().filter(|step| !artifact.steps.iter().any(|known| &known.key == *step)) {

@@ -45,7 +45,7 @@ fn runtime(home: &Path) -> Value {
 /// An artifact on the default board, written by the artifact tool: the
 /// tool's reply.
 fn artifact(home: &Path) -> Value {
-    let plan = "Ship the page\n\n## Goal\nWhy.\n## What is known\nFacts.\n## Design\nHow.\n## Risks and open questions\nNone.";
+    let plan = "Ship the page\n\n## Goal\nWhy.\n## What is known\nFacts, in `code` and **bold**.\n## Design\nHow.\n## Risks and open questions\nNone.";
     let lines = [
         json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}}}),
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "artifact", "arguments": {"text": plan, "steps": [{"key": "one", "text": "The first step"}]}}}),
@@ -495,9 +495,9 @@ fn a_comment_from_the_page_is_the_persons_note_on_the_artifact() {
     };
 
     for (body, as_claude, refusal) in [
-        (comment(2, "Facts."), false, "HTTP/1.1 409 "),
+        (comment(2, "Facts"), false, "HTTP/1.1 409 "),
         (comment(1, "Fiction."), false, "HTTP/1.1 409 "),
-        (comment(1, "Facts."), true, "HTTP/1.1 403 "),
+        (comment(1, "Facts"), true, "HTTP/1.1 403 "),
     ] {
         let answer = from_bash(&home, port, &post(&body), as_claude);
         assert!(answer.starts_with(refusal), "{body}: {answer}");
@@ -505,7 +505,7 @@ fn a_comment_from_the_page_is_the_persons_note_on_the_artifact() {
     }
     assert!(notes().is_empty(), "a refused comment wrote nothing");
 
-    let answer = from_bash(&home, port, &post(&comment(1, "Facts.")), false);
+    let answer = from_bash(&home, port, &post(&comment(1, "Facts")), false);
     assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
     let notes = notes();
     assert_eq!(notes.len(), 1, "{notes:?}");
@@ -513,8 +513,13 @@ fn a_comment_from_the_page_is_the_persons_note_on_the_artifact() {
     assert_eq!(note["description"], "Which facts?");
     assert_eq!(note["attachedTo"], path.trim_start_matches("/default/").trim_end_matches(".html"));
     assert_eq!(note["comment"]["version"], 1);
-    assert_eq!(note["comment"]["quote"]["exact"], "Facts.");
+    assert_eq!(note["comment"]["quote"]["exact"], "Facts");
     assert!(note["comment"].get("sent").is_none(), "pending until a review sends it");
     let by = note["createdBy"].as_object().map(|by| by.keys().cloned().collect::<Vec<_>>());
     assert!(by.is_none_or(|keys| !keys.iter().any(|key| key == "pid")), "written by the person, no process: {note}");
+
+    // Words selected on the page come without the Markdown around them.
+    let _ = fs::remove_file(home.join("answer-person"));
+    let answer = from_bash(&home, port, &post(&comment(1, "Facts, in code and bold.")), false);
+    assert!(answer.starts_with("HTTP/1.1 200 "), "the words as the page shows them: {answer}");
 }
