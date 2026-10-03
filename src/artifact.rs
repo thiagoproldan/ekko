@@ -674,7 +674,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     for (id, name) in &parts {
         let _ = write!(body, "<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{}</span></a></li>", esc(name));
     }
-    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-inner\"><div class=\"bar-fold list-fold\"><div class=\"fold-in\"><div class=\"bar-list\" role=\"listbox\"></div><div class=\"bar-rule\"></div></div></div><div class=\"bar-fold quote-fold\"><div class=\"fold-in\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-themes\" role=\"radiogroup\" aria-label=\"Theme\"></div><div class=\"bar-why\"></div><div class=\"bar-rule\"></div></div></div><div class=\"bar-line\"><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea><button class=\"bar-send\" type=\"button\" aria-label=\"Send the comment\" hidden>\u{2191}</button><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
+    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-surface\"><div class=\"bar-fold list-fold\" inert><div class=\"fold-in\"><div class=\"bar-list\" role=\"listbox\" aria-label=\"Suggestions\"></div></div></div><div class=\"bar-fold quote-fold\" inert><div class=\"fold-in\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-themes\" role=\"radiogroup\" aria-label=\"Theme\"></div><div class=\"bar-why\"></div></div></div><div class=\"bar-hairline\" aria-hidden=\"true\"></div><div class=\"bar-line\"><div class=\"bar-field\"><span class=\"bar-cursor\" aria-hidden=\"true\"></span><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea></div><button class=\"bar-send\" type=\"button\" aria-label=\"Send the comment\" hidden>\u{2191}</button><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\" aria-expanded=\"false\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\" inert><div class=\"fold-in\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
     let (plan_parts, ours): (Vec<_>, Vec<_>) = parts.iter().partition(|(id, _)| id.starts_with("plan-"));
     if let Some((id, _)) = plan_parts.first() {
         let _ = write!(body, "<a href=\"#{id}\">Plan</a>");
@@ -682,7 +682,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     for (id, name) in ours {
         let _ = write!(body, "<a href=\"#{id}\">{name}</a>");
     }
-    body.push_str("</nav></div></div></div>");
+    body.push_str("</nav></div></div></div></div>");
 
     // The page before its version and after it: the version is the hash of
     // the two, so a change to anything the page holds, its style and script
@@ -1529,6 +1529,14 @@ const SCRIPT: &str = r##"(function () {
     current = at;
     bars.forEach(function (bar, i) { bar.classList.toggle("on", i === at); });
     rows.forEach(function (row, i) { row.classList.toggle("on", i === at); });
+    // The pill's menu marks it too, as AKQA's marks the page it is on: the
+    // plan's parts all under Plan.
+    var id = parts[at] ? parts[at].id : "";
+    document.querySelectorAll(".bar-nav a").forEach(function (a) {
+      var to = a.getAttribute("href").slice(1);
+      if (to === id || (to.indexOf("plan-") === 0 && id.indexOf("plan-") === 0)) a.setAttribute("aria-current", "true");
+      else a.removeAttribute("aria-current");
+    });
   }
   var following = false;
   addEventListener("scroll", function () {
@@ -1538,13 +1546,15 @@ const SCRIPT: &str = r##"(function () {
   }, { passive: true });
   follow();
 
-  // AKQA's bar: a pill a click unfolds into a panel, which finds a part, a
-  // step or a note of the page.
-  var bar = document.getElementById("bar");
+  // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
+  // into a panel, which finds a part, a step, a note or a comment of the
+  // page. The surface's width and radius, its folds and its menu's lines
+  // move as AKQA's do, by the springs and tweens Motion runs there.
+  var bar = document.getElementById("bar"), surface = bar.querySelector(".bar-surface");
   var input = bar.querySelector("input"), hint = bar.querySelector(".bar-hint"), list = bar.querySelector(".bar-list");
   var listFold = bar.querySelector(".list-fold"), navFold = bar.querySelector(".nav-fold"), menu = bar.querySelector(".bar-menu");
   var quoteFold = bar.querySelector(".quote-fold"), quoteText = bar.querySelector(".bar-quote-text"), why = bar.querySelector(".bar-why");
-  var note = bar.querySelector(".bar-note"), line = bar.querySelector(".bar-line");
+  var note = bar.querySelector(".bar-note"), line = bar.querySelector(".bar-line"), hairline = bar.querySelector(".bar-hairline");
   var themesRow = bar.querySelector(".bar-themes"), send = bar.querySelector(".bar-send");
   // The plan's words a comment is being written on, and whether it is on
   // its way to the board.
@@ -1578,85 +1588,296 @@ const SCRIPT: &str = r##"(function () {
   }
   // The suggestions the pill cycles through, each with what it looks for:
   // one that would find nothing on this page is not offered.
-  var hints = [["Steps in progress", "in progress"], ["Open questions", "open question"], ["Jump to a step", ""], ["Show the map", "map"], ["What the design says", "design"]]
-    .filter(function (hint) { return hint[1] ? find(hint[1]).length > 0 : items.some(function (item) { return item.step; }); });
-  if (!hints.length) hints = [["Jump to a section", ""]];
-  var shown = 0, selected = 0, matches = [];
+  var hints = [["Steps in progress", "in progress"], ["Open questions", "open question"], ["Jump to a step", "step"], ["Show the map", "map"], ["What the design says", "design"]]
+    .filter(function (hint) { return find(hint[1]).length > 0; });
+  if (!hints.length) hints = [["Jump to a section", "section"]];
+  // The suggestion showing, the item picked by the arrows (none at first,
+  // as in AKQA's list), what the list shows, whether the bar is a panel,
+  // and whether a pointer is what is focusing it.
+  var shown = 0, selected = -1, matches = [], expanded = false, pointed = false;
 
-  // A suggestion comes in word by word, each from a blur, and leaves the same
-  // way. Each word but the last ends in a no-break space, which the end of
-  // its inline block keeps where it drops a space.
-  function showHint() {
-    var words = hints[shown][0].split(" ");
-    hint.textContent = "";
-    words.forEach(function (word, i) {
-      var span = document.createElement("span");
-      span.textContent = word + (i < words.length - 1 ? "\u00a0" : "");
-      hint.appendChild(span);
-      setTimeout(function () { span.classList.add("in"); }, 60 * i + 20);
-    });
-    setTimeout(function () {
-      Array.prototype.forEach.call(hint.children, function (span, i) { setTimeout(function () { span.classList.remove("in"); }, 40 * i); });
-      setTimeout(function () { shown = (shown + 1) % hints.length; showHint(); }, 700);
-    }, 2600);
+  // Motion's animations (motion.dev), as AKQA's bar runs them: a spring by
+  // its stiffness, damping and mass, or by the time it seems to take and its
+  // bounce; a tween by its duration and cubic Bezier. A value sent somewhere
+  // new leaves from where it is, at the speed it has. The settings are
+  // AKQA's: its surface's spring, its menu lines', its panels'.
+  var SURFACE = { stiffness: 270, damping: 24, mass: 1.9 };
+  var LINES = { stiffness: 380, damping: 26, mass: 1.9 };
+  var EASE = [0.2, 0.65, 0.3, 1];
+  var still = matchMedia("(prefers-reduced-motion: reduce)");
+  function panel(delay) { return { visualDuration: 0.5, bounce: 0, delay: delay }; }
+  function bezier(x1, y1, x2, y2) {
+    var at = function (t, a, b) { return (((1 - 3 * b + 3 * a) * t + (3 * b - 6 * a)) * t + 3 * a) * t; };
+    return function (x) {
+      if (x <= 0 || x >= 1) return x <= 0 ? 0 : 1;
+      var low = 0, high = 1, t, off, i = 0;
+      do { t = low + (high - low) / 2; off = at(t, x1, x2) - x; if (off > 0) high = t; else low = t; } while (Math.abs(off) > 1e-7 && ++i < 12);
+      return at(t, y1, y2);
+    };
   }
-  function hintVisible() { hint.style.visibility = input.value || bar.classList.contains("open") ? "hidden" : "visible"; }
+  // Where a spring is t ms after it left `from` at `speed` a second.
+  function spring(how, from, to, speed) {
+    var k = how.stiffness, c = how.damping, m = how.mass;
+    if (how.visualDuration !== undefined) {
+      var root = 2 * Math.PI / (how.visualDuration * 1.2);
+      k = root * root;
+      c = 2 * Math.min(Math.max(1 - (how.bounce || 0), 0.05), 1) * Math.sqrt(k);
+      m = 1;
+    }
+    var zeta = c / (2 * Math.sqrt(k * m)), w0 = Math.sqrt(k / m) / 1000, delta = to - from, v0 = -speed / 1000;
+    if (zeta < 1) {
+      var wd = w0 * Math.sqrt(1 - zeta * zeta);
+      return function (t) { return to - Math.exp(-zeta * w0 * t) * ((v0 + zeta * w0 * delta) / wd * Math.sin(wd * t) + delta * Math.cos(wd * t)); };
+    }
+    if (zeta === 1) return function (t) { return to - Math.exp(-w0 * t) * (delta + (v0 + w0 * delta) * t); };
+    var wh = w0 * Math.sqrt(zeta * zeta - 1);
+    return function (t) {
+      var f = Math.min(wh * t, 300);
+      return to - Math.exp(-zeta * w0 * t) * ((v0 + zeta * w0 * delta) * Math.sinh(f) + wh * delta * Math.cosh(f)) / wh;
+    };
+  }
+  // One value the bar moves, drawn by `apply` each frame; `rest` runs once
+  // it settles. All of them share one frame loop.
+  var moving = [], ticking = false;
+  function tick(now) {
+    var was = moving;
+    moving = [];
+    was.forEach(function (motion) { if (motion.step(now) && moving.indexOf(motion) < 0) moving.push(motion); });
+    ticking = moving.length > 0;
+    if (ticking) requestAnimationFrame(tick);
+  }
+  function Motion(value, apply, rest) { this.value = this.target = value; this.apply = apply; this.rest = rest; this.run = null; apply(value); }
+  Motion.prototype.speed = function (now) {
+    var run = this.run, t = run ? now - run.start : 0;
+    if (t <= 0) return 0;
+    var back = Math.max(t - 5, 0);
+    return (run.at(t) - run.at(back)) / (t - back) * 1000;
+  };
+  Motion.prototype.to = function (target, how) {
+    if (target === this.target) return;
+    var now = performance.now(), from = this.value, speed = this.speed(now), at, done;
+    this.target = target;
+    if (still.matches) how = { duration: 0.15 };
+    if (how.duration !== undefined) {
+      var ease = bezier.apply(null, how.ease || [0.42, 0, 0.58, 1]), span = how.duration * 1000;
+      at = function (t) { return from + (target - from) * ease(Math.min(t / span, 1)); };
+      done = function (t) { return t >= span; };
+    } else {
+      at = spring(how, from, target, speed);
+      // Motion's rest: within half a unit and slower than 2 a second, or
+      // a hundredth of that for a move under 5 units.
+      var fine = Math.abs(target - from) < 5, slow = fine ? 0.01 : 2, near = fine ? 0.005 : 0.5;
+      done = function (t) {
+        var back = Math.max(t - 5, 0);
+        return Math.abs(target - at(t)) <= near && Math.abs((at(t) - at(back)) / (t - back || 1) * 1000) <= slow;
+      };
+    }
+    this.run = { at: at, done: done, start: now + (how.delay || 0) * 1000 };
+    if (moving.indexOf(this) < 0) moving.push(this);
+    if (!ticking) { ticking = true; requestAnimationFrame(tick); }
+  };
+  Motion.prototype.step = function (now) {
+    var run = this.run;
+    if (!run) return false;
+    var t = now - run.start;
+    if (t < 0) return true;
+    if (run.done(t)) {
+      this.run = null;
+      this.value = this.target;
+      this.apply(this.value);
+      if (this.rest) this.rest();
+      return false;
+    }
+    this.value = run.at(t);
+    this.apply(this.value);
+    return true;
+  };
 
+  // The pill's width and the panel's, AKQA's on a desktop and its phone's
+  // margins on a narrow window.
+  function widths() {
+    return { wide: innerWidth < 720 ? innerWidth - 24 : 600, slim: Math.min(320, innerWidth - 46) };
+  }
+  var lines = menu.querySelectorAll("span"), turn = { y: 3.5, r: 0 };
+  function cross() {
+    lines[0].style.transform = "translateY(" + -turn.y + "px) rotate(" + turn.r + "deg)";
+    lines[1].style.transform = "translateY(" + turn.y + "px) rotate(" + -turn.r + "deg)";
+  }
+  // A field written in while the pill still widens wraps at the width it
+  // has then: once wide, it is measured again.
+  var width = new Motion(widths().slim, function (v) { surface.style.width = v + "px"; }, function () { if (quoting) grow(); });
+  var radius = new Motion(100, function (v) { surface.style.borderRadius = v + "px"; });
+  var lineY = new Motion(3.5, function (v) { turn.y = v; cross(); });
+  var lineR = new Motion(0, function (v) { turn.r = v; cross(); });
+  function Fold(element) {
+    this.element = element;
+    this.height = new Motion(0, function (v) { element.style.height = v + "px"; });
+    this.opacity = new Motion(0, function (v) { element.style.opacity = v; });
+  }
+  var folds = { list: new Fold(listFold), quote: new Fold(quoteFold), nav: new Fold(navFold) }, rule = new Fold(hairline);
+
+  // Where the bar is heading: the pill, or the panel with what it holds.
+  // A fold's height is a tween, slower open than shut and a moment late
+  // open; its opacity, and the rule's, the panels' spring, a moment late
+  // while the bar has the focus. Each fold's content lays out at the
+  // panel's width from the first frame, so it is measured at the height it
+  // ends at (and its scrollHeight is never read: note 1216).
+  function size() {
+    var w = widths(), delay = bar.contains(document.activeElement) ? 0.08 : 0;
+    Array.prototype.forEach.call(bar.querySelectorAll(".fold-in"), function (inner) { inner.style.width = w.wide + "px"; });
+    width.to(expanded ? w.wide : w.slim, SURFACE);
+    radius.to(expanded ? 20 : 100, SURFACE);
+    lineY.to(expanded ? 0 : 3.5, LINES);
+    lineR.to(expanded ? 45 : 0, LINES);
+    menu.setAttribute("aria-expanded", expanded ? "true" : "false");
+    unfold(folds.list, expanded && !quoting && matches.length > 0, delay);
+    unfold(folds.quote, expanded && !!quoting, delay);
+    unfold(folds.nav, expanded && !quoting, delay);
+    rule.height.to(expanded ? 1 : 0, panel(delay));
+    rule.opacity.to(expanded ? 1 : 0, panel(delay));
+  }
+  function unfold(fold, open, delay) {
+    fold.element.inert = !open;
+    fold.height.to(open ? fold.element.firstElementChild.getBoundingClientRect().height : 0, open ? { duration: 0.55, ease: EASE, delay: 0.08 } : { duration: 0.32, ease: EASE });
+    fold.opacity.to(open ? 1 : 0, panel(delay));
+  }
+
+  // The hint, AKQA's prompt cycler: a suggestion's words come in one after
+  // another from a blur, 35 ms apart, and leave the same way 20 ms apart;
+  // the next starts to leave 3.2 s after the last did, while the bar is
+  // shut and empty. Each word but the last ends in a no-break space, which
+  // the end of its inline block keeps where it drops a space.
+  var cycle = 0, leaving = 0;
+  function words(text, enter) {
+    hint.textContent = "";
+    text.split(" ").forEach(function (word, i, all) {
+      var span = document.createElement("span");
+      span.textContent = word + (i < all.length - 1 ? "\u00a0" : "");
+      if (enter) { span.className = "out"; span.style.transitionDelay = 0.035 * i + "s"; }
+      hint.appendChild(span);
+    });
+    if (!enter) return;
+    void hint.offsetWidth;
+    Array.prototype.forEach.call(hint.children, function (span) { span.className = ""; });
+  }
+  function idle() { return !expanded && !input.value && !quoting && !still.matches && hints.length > 1; }
+  // The next comes in a frame after the last word is gone, as AKQA's does
+  // once its exit has finished (measured: 17 to 26 ms); a word hidden
+  // meanwhile ends no transition, so a timer stands in for it.
+  function advance() {
+    clearTimeout(cycle);
+    clearTimeout(leaving);
+    shown = (shown + 1) % hints.length;
+    var spans = hint.children, last = spans[spans.length - 1];
+    var next = function () { requestAnimationFrame(function () { if (leaving) { leaving = 0; words(hints[shown][0], true); } }); };
+    Array.prototype.forEach.call(spans, function (span, i) { span.style.transitionDelay = 0.02 * i + "s"; span.className = "out"; });
+    leaving = setTimeout(next, 400 + 20 * spans.length);
+    if (last) last.addEventListener("transitionend", function gone(event) {
+      if (event.propertyName !== "opacity") return;
+      last.removeEventListener("transitionend", gone);
+      clearTimeout(leaving);
+      next();
+    });
+    else next();
+    if (idle()) cycle = setTimeout(advance, 3200);
+  }
+  // Open, the suggestion showing stays, whole; shut and empty again, the
+  // next comes soon after, and the cycle goes on.
+  function hold() {
+    clearTimeout(cycle);
+    if (leaving) { clearTimeout(leaving); leaving = 0; words(hints[shown][0], false); }
+  }
+  function resume(after) {
+    clearTimeout(cycle);
+    if (idle()) cycle = setTimeout(advance, after);
+  }
+  function typed() { bar.classList.toggle("typed", !!input.value); }
+
+  // What the input looks for: a suggestion's own search when it holds the
+  // suggestion's words, as AKQA's prompts carry theirs.
+  function query() {
+    var text = input.value.trim();
+    for (var i = 0; i < hints.length; i++) if (hints[i][0] === text) return hints[i][1];
+    return text;
+  }
+  // AKQA's picture for a result without one: a gradient its title's hash picks.
+  function tint(text) {
+    var hash = 0x811c9dc5;
+    for (var i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x1000193);
+    var hue = Math.abs(hash) % 360;
+    return "linear-gradient(135deg, hsl(" + hue + " 35% 28%), hsl(" + (hue + 40) % 360 + " 45% 18%))";
+  }
+  // The list, an item coming in from a blur the first time it is listed.
+  var listed = {};
   function render() {
-    matches = quoting ? [] : find(input.value).slice(0, 40);
-    selected = Math.min(selected, Math.max(matches.length - 1, 0));
+    var text = quoting ? "" : query(), had = listed;
+    matches = text ? find(text).slice(0, 40) : [];
+    selected = -1;
+    listed = {};
     list.textContent = "";
-    matches.forEach(function (item, i) {
-      var button = document.createElement("button");
+    matches.forEach(function (item) {
+      var key = item.kind + "\n" + item.label, button = document.createElement("button");
       button.type = "button";
-      button.className = "item" + (i === selected ? " sel" : "");
+      button.className = had[key] ? "item" : "item in";
       button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", "false");
       button.innerHTML = '<span class="badge"></span><span class="what"><span class="kind"></span><span class="label"></span></span>';
-      button.querySelector(".badge").textContent = item.badge;
+      var badge = button.querySelector(".badge");
+      badge.textContent = item.badge;
+      badge.style.backgroundImage = tint(item.label);
       button.querySelector(".kind").textContent = item.kind;
       button.querySelector(".label").textContent = item.label;
+      // The input keeps the focus, as in AKQA's list.
+      button.addEventListener("mousedown", function (event) { event.preventDefault(); });
       button.addEventListener("click", function () { go(item); });
+      listed[key] = true;
       list.appendChild(button);
     });
     size();
   }
-
-  // The heights the spring moves to: the folds' content, or nothing folded.
-  // Each fold's content is measured on the box inside it, which the fold's
-  // own height does not hold: a fold's scrollHeight is never below the
-  // height it has, so a fold measured by it grows and never shrinks back.
-  function size() {
-    var open = bar.classList.contains("open");
-    var listHeight = open && !bar.dataset.navOnly && matches.length ? listFold.firstElementChild.offsetHeight : 0;
-    var quoteHeight = open && quoting ? quoteFold.firstElementChild.offsetHeight : 0;
-    var navHeight = open && !quoting ? navFold.firstElementChild.offsetHeight : 0;
-    listFold.style.height = listHeight + "px";
-    quoteFold.style.height = quoteHeight + "px";
-    navFold.style.height = navHeight + "px";
-    bar.style.height = line.offsetHeight + listHeight + quoteHeight + navHeight + "px";
+  function choose(i) {
+    selected = i;
+    Array.prototype.forEach.call(list.children, function (button, j) {
+      button.classList.toggle("sel", j === i);
+      button.setAttribute("aria-selected", j === i ? "true" : "false");
+    });
+    if (list.children[i]) list.children[i].scrollIntoView({ block: "nearest" });
   }
 
-  function open(navOnly) {
-    if (navOnly) bar.dataset.navOnly = "1"; else delete bar.dataset.navOnly;
+  // Open, as AKQA's bar opens: a click on the empty pill fills it with the
+  // suggestion showing, picked, so the first key typed takes its place;
+  // otherwise what it holds is picked.
+  function open(fill) {
+    hold();
+    if (fill && !input.value && !quoting) input.value = hints[shown][0];
+    var was = expanded, field = quoting ? note : input;
+    expanded = true;
     bar.classList.add("open");
-    var hinted = !navOnly && !input.value && !quoting;
-    if (hinted) input.value = hints[shown][1];
-    hintVisible();
-    render();
-    (quoting ? note : input).focus();
-    // The hint's words, picked, so the first key typed takes their place.
-    if (hinted) input.select();
+    typed();
+    if (document.activeElement !== field) field.focus({ preventScroll: true });
+    // Picked again a frame later, as AKQA does, past what the press that
+    // focused it does to the selection.
+    if (!quoting) {
+      input.select();
+      requestAnimationFrame(function () { if (document.activeElement === input && expanded) input.select(); });
+    }
+    if (!was || fill) render(); else size();
   }
-  function close() {
+  // Shut, back to the pill: Esc and a click elsewhere keep the text, the
+  // menu's cross and a jump clear it (task 1223: a part's name left in the
+  // field had to be erased before anything else could be typed).
+  function close(clear) {
+    if (clear) input.value = "";
+    expanded = false;
     bar.classList.remove("open");
-    delete bar.dataset.navOnly;
-    hintVisible();
-    size();
+    typed();
     input.blur();
     note.blur();
+    if (clear) render(); else size();
+    resume(450);
   }
   function go(item) {
-    close();
+    close(true);
     if (item.comment && window.ekkoOpenComment) ekkoOpenComment(item.comment);
     else if (item.step) openStep(item.step);
     else jump(item.target);
@@ -1790,7 +2011,6 @@ const SCRIPT: &str = r##"(function () {
     send.disabled = sending || !note.value.trim();
     size();
   }
-  bar.addEventListener("transitionend", function (event) { if (event.target === bar && event.propertyName === "width" && quoting) grow(); });
   function refused(text) {
     why.textContent = text;
     size();
@@ -1813,7 +2033,7 @@ const SCRIPT: &str = r##"(function () {
       .then(function (got) {
         if (!got.ok) throw new Error(got.why);
         themes().setLast(color);
-        close();
+        close(false);
         unquote();
       })
       .catch(function (error) { refused("Not written: " + (window.ekkoUnreached ? ekkoUnreached(error) : error.message)); })
@@ -1830,41 +2050,50 @@ const SCRIPT: &str = r##"(function () {
   send.addEventListener("click", function () { if (!sending) comment(); });
   note.addEventListener("input", grow);
   note.addEventListener("keydown", function (event) {
-    if (event.key === "Escape") { unquote(); close(); return; }
+    if (event.key === "Escape") { unquote(); close(false); return; }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       if (!sending) comment();
     }
   });
 
-  bar.querySelector(".bar-line").addEventListener("click", function (event) {
-    if (event.target.closest(".bar-menu")) return;
-    if (!bar.classList.contains("open")) open(false);
+  // A press on the pill focuses its input, and the focus opens it; the
+  // menu, the list and the nav keep the focus where it is, as AKQA's do.
+  line.addEventListener("mousedown", function (event) {
+    if (event.target.closest(".bar-menu, .bar-send") || event.target === note) return;
+    if (expanded && event.target === input) return;
+    event.preventDefault();
+    if (quoting) { note.focus(); return; }
+    pointed = !expanded;
+    input.focus();
   });
+  input.addEventListener("focus", function () {
+    var fill = pointed;
+    pointed = false;
+    if (!expanded) open(fill);
+  });
+  menu.addEventListener("mousedown", function (event) { event.preventDefault(); });
   menu.addEventListener("click", function (event) {
     event.stopPropagation();
-    if (bar.classList.contains("open")) close(); else open(true);
+    if (expanded) close(true); else open(false);
   });
   input.addEventListener("input", function () {
     if (quoting) return;
-    delete bar.dataset.navOnly;
-    selected = 0;
+    typed();
     render();
   });
   input.addEventListener("keydown", function (event) {
-    // Esc gives up the search: the bar folds empty, back to its hints.
-    if (event.key === "Escape") { input.value = ""; close(); return; }
-    if (!bar.classList.contains("open")) { if (event.key !== "Tab") open(false); return; }
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (event.key === "Escape") { event.preventDefault(); close(false); return; }
+    if (!expanded) { if (event.key !== "Tab") open(false); return; }
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && matches.length) {
       event.preventDefault();
-      selected = (selected + (event.key === "ArrowDown" ? 1 : -1) + matches.length) % Math.max(matches.length, 1);
-      render();
-      var sel = list.querySelector(".sel");
-      if (sel) sel.scrollIntoView({ block: "nearest" });
+      var down = event.key === "ArrowDown";
+      choose(selected < 0 ? (down ? 0 : matches.length - 1) : (selected + (down ? 1 : matches.length - 1)) % matches.length);
     }
-    if (event.key === "Enter" && matches[selected]) go(matches[selected]);
+    if (event.key === "Enter" && matches.length) { event.preventDefault(); go(matches[Math.max(selected, 0)]); }
   });
   bar.querySelectorAll(".bar-nav a").forEach(function (a) {
+    a.addEventListener("mousedown", function (event) { event.preventDefault(); });
     a.addEventListener("click", function (event) {
       event.preventDefault();
       go({ target: a.getAttribute("href").slice(1) });
@@ -1872,18 +2101,20 @@ const SCRIPT: &str = r##"(function () {
   });
   document.addEventListener("pointerdown", function (event) {
     // A comment being written stays open while other words are picked.
-    if (bar.classList.contains("open") && !quoting && !bar.contains(event.target)) close();
+    if (expanded && !quoting && !bar.contains(event.target)) close(false);
   });
   addEventListener("keydown", function (event) {
     if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
     var active = document.activeElement;
     if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
     event.preventDefault();
-    open(false);
+    if (quoting) open(false); else input.focus();
   });
-  showHint();
-  hintVisible();
+  addEventListener("resize", size);
+  words(hints[shown][0], false);
+  typed();
   size();
+  resume(3200);
 
   // Where the reader was, kept across the reload a new version of the page
   // makes: the last part, step or note begun above the window's top and how
@@ -2602,25 +2833,25 @@ const STYLE: &str = r##"
   --bars-bg: rgba(255, 255, 255, 0.38);
   --add: #e6ffec;
   --del: #ffebe9;
-  /* The bar as light glass over a light page, where AKQA's dark glass
-     read as a grey block (task 1153), opaque enough to read where a
-     browser draws no blur behind it; the dark theme keeps AKQA's. */
-  --bar-bg: rgba(255, 255, 255, 0.88);
-  --bar-edge: rgba(0, 0, 0, 0.1);
-  --bar-fg: #242424;
-  --bar-hint: #6b6b6b;
-  --bar-muted: #6b6b6b;
-  --bar-chip: rgba(0, 0, 0, 0.04);
-  --bar-chip-on: rgba(0, 0, 0, 0.08);
-  --bar-line: rgba(0, 0, 0, 0.1);
-  /* The pill while a comment is written in it: a page of its own, which
-     the big words of a heading under it must not show through. */
-  --bar-solid: #fff;
+  /* AKQA's bar over a light page (task 1223, measured on akqa.com): its
+     glass, a black wash under a white one and a backdrop blur, and the
+     ink AKQA draws on it. */
+  --bar-black: 0.06;
+  --bar-white: 0.58;
+  --bar-blur: 27px;
+  --bar-ink: #000;
+  --bar-ink-strong: #191919;
+  --bar-ink-idle: #323232;
+  --bar-ink-muted: rgba(0, 0, 0, 0.66);
+  --bar-ink-nav: #393939;
+  --bar-fill: rgba(0, 0, 0, 0.04);
+  --bar-fill-on: rgba(0, 0, 0, 0.16);
+  --bar-line: rgba(0, 0, 0, 0.08);
+  --bar-rim: rgba(0, 0, 0, 0.16);
+  --bar-halo: rgba(0, 0, 0, 0.25);
+  --bar-core: #000;
   --pop-chip: rgba(0, 0, 0, 0.06);
   --pop-hover: rgba(0, 0, 0, 0.035);
-  /* AKQA's spring, sampled from its bar opening (note 1149): past the
-     target by 14% at a third of the way, settled by 0.9 s. */
-  --spring: linear(0, 0.086 3.9%, 0.168 5.8%, 0.3 8.3%, 0.604 13.8%, 0.754 16.7%, 0.893 19.9%, 0.989 22.6%, 1.061 25.4%, 1.114 28.8%, 1.132 31.1%, 1.139 33.9%, 1.136 36.3%, 1.111 41.2%, 1.089 44%, 1.068 46.6%, 1.046 49.4%, 1.029 52.1%, 1.014 54.7%, 0.996 58.6%, 0.989 61.2%, 0.982 63.6%, 0.982 67.3%, 0.986 76.8%, 0.989 80.8%, 0.996 86%, 1 90.9%, 1);
   /* The comments' themes (task 1213): the tint their words take, and the
      ink of their pins and stripes, one pair per color of THEMES. */
   --tint-yellow: rgba(255, 200, 0, 0.3);
@@ -2655,15 +2886,21 @@ const STYLE: &str = r##"
   --bars-bg: rgba(0, 0, 0, 0.38);
   --add: rgba(46, 160, 67, 0.18);
   --del: rgba(248, 81, 73, 0.18);
-  --bar-bg: rgba(0, 0, 0, 0.42);
-  --bar-edge: transparent;
-  --bar-fg: #fff;
-  --bar-hint: #d9d9d9;
-  --bar-muted: #bbb;
-  --bar-chip: rgba(255, 255, 255, 0.04);
-  --bar-chip-on: rgba(255, 255, 255, 0.16);
-  --bar-line: rgba(255, 255, 255, 0.16);
-  --bar-solid: #191919;
+  /* AKQA's bar over a dark page. */
+  --bar-black: 0.42;
+  --bar-white: 0.1;
+  --bar-blur: 25px;
+  --bar-ink: #fff;
+  --bar-ink-strong: #e9e9e9;
+  --bar-ink-idle: #d9d9d9;
+  --bar-ink-muted: rgba(255, 255, 255, 0.64);
+  --bar-ink-nav: #bbb;
+  --bar-fill: rgba(255, 255, 255, 0.04);
+  --bar-fill-on: rgba(255, 255, 255, 0.16);
+  --bar-line: rgba(255, 255, 255, 0.1);
+  --bar-rim: rgba(255, 255, 255, 0.16);
+  --bar-halo: rgba(255, 255, 255, 0.25);
+  --bar-core: #fff;
   --pop-chip: rgba(255, 255, 255, 0.12);
   --pop-hover: rgba(255, 255, 255, 0.06);
   --tint-yellow: rgba(255, 210, 0, 0.26);
@@ -2827,40 +3064,65 @@ button.step-head { cursor: pointer; }
 .toc a.on .d { background: var(--accent); }
 
 /* ---- AKQA's bar: a pill at the bottom, a panel once clicked ------------ */
-.bar { position: fixed; bottom: 60px; left: 50%; z-index: 30; box-sizing: border-box; width: 320px; height: 56px; overflow: hidden; border-radius: 100px; background: var(--bar-bg); box-shadow: 0 0 0 1px var(--bar-edge), 0 8px 40px rgba(0, 0, 0, 0.05); color: var(--bar-fg); -webkit-backdrop-filter: blur(25px); backdrop-filter: blur(25px); transform: translateX(-50%); transition: width 0.9s var(--spring), height 0.9s var(--spring), border-radius 0.9s var(--spring); }
-.bar.open { width: 600px; border-radius: 20px; }
-.bar-inner { position: absolute; right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; }
-/* What the panel adds, folded to nothing in the pill, unfolded by the same spring. */
-.bar-fold { height: 0; overflow: hidden; opacity: 0; transition: height 0.9s var(--spring), opacity 0.55s; }
-/* A fold lays out at the width the pill opens to, from the first frame of
-   its spring: measured then, it is the height it ends at, and the pill
+/* As measured on akqa.com (task 1223): the bar fixed 60px above the
+   window's bottom and centred; in it the surface, whose width and radius
+   the page's script moves by AKQA's springs and whose height is its
+   content's, so it grows upward as its folds open: the list above the
+   field, then a hairline, the field, the nav below. Its glass and ink are
+   the theme's, and change with it as AKQA's do, in 0.3 s. */
+@property --bar-gleam { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+.bar { position: fixed; bottom: 60px; left: 50%; z-index: 30; transform: translateX(-50%); }
+.bar-surface { position: relative; box-sizing: border-box; width: 320px; overflow: hidden; border-radius: 100px; background-color: rgba(0, 0, 0, var(--bar-black)); background-image: linear-gradient(rgba(255, 255, 255, var(--bar-white)), rgba(255, 255, 255, var(--bar-white))); box-shadow: 0 8px 40px 0 rgba(0, 0, 0, 0.05); color: var(--bar-ink); -webkit-backdrop-filter: blur(var(--bar-blur)); backdrop-filter: blur(var(--bar-blur)); }
+.bar-surface, .bar-surface * { transition: background-color 0.3s, background-image 0.3s, color 0.3s, border-color 0.3s, box-shadow 0.3s, -webkit-backdrop-filter 0.3s, backdrop-filter 0.3s; }
+/* The gleam: a ring of the surface's edge, faint but for a highlight going
+   round it every 3 s; with the focus in the bar, a still line instead. */
+.bar-surface::before { content: ""; position: absolute; inset: 0; z-index: 2; box-sizing: border-box; padding: 1px; border-radius: inherit; background: conic-gradient(from var(--bar-gleam), var(--bar-rim) 0deg, var(--bar-rim) 116deg, var(--bar-halo) 160deg, var(--bar-core) 180deg, var(--bar-halo) 200deg, var(--bar-rim) 244deg, var(--bar-rim) 360deg); opacity: 0.82; pointer-events: none; -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); animation: bar-gleam 3s linear infinite; }
+@keyframes bar-gleam { to { --bar-gleam: 360deg; } }
+.bar-surface:focus-within { outline: 1px solid var(--bar-line); outline-offset: -1px; }
+.bar-surface:focus-within::before { content: none; }
+/* What the panel adds, folded to nothing in the pill. Each fold's content
+   lays out at the panel's width (the script sets it), so the fold is
+   measured at the height it ends at from the first frame, and the surface
    uncovers it as it widens. */
+.bar-fold { height: 0; overflow: hidden; opacity: 0; }
 .fold-in { display: flow-root; }
-.bar.open .fold-in { width: 600px; }
-.bar.open .bar-fold { opacity: 1; }
-.bar-list { max-height: 327px; overflow-y: auto; padding: 8px; scrollbar-width: thin; }
+.bar-hairline { height: 0; overflow: hidden; opacity: 0; background: var(--bar-line); pointer-events: none; }
+.bar-list { max-height: min(327px, calc(100dvh - 140px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .bar-list:empty { display: none; }
-.bar-list .item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; border: 0; border-radius: 8px; background: none; color: var(--bar-fg); text-align: left; cursor: pointer; }
-.bar-list .item:hover, .bar-list .item.sel { background: var(--bar-chip-on); }
-.bar-list .badge { display: grid; flex: none; place-items: center; width: 24px; height: 24px; border-radius: 4px; background: #000; font: 500 10px/1 var(--sans); color: #fff; }
-.bar-list .what { display: flex; flex-direction: column; min-width: 0; }
-.bar-list .kind { font: 400 12px/16px var(--sans); color: var(--bar-muted); }
-.bar-list .label { overflow: hidden; font: 400 15px/20px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
-.bar-rule { height: 1px; background: var(--bar-line); }
-.bar-line { position: relative; display: flex; align-items: center; min-height: 56px; padding: 0 40px 0 16px; box-sizing: border-box; font: 400 14px/20px var(--sans); }
-.bar-hint { position: absolute; top: 50%; left: 16px; right: 40px; overflow: hidden; color: var(--bar-hint); white-space: nowrap; pointer-events: none; transform: translateY(-50%); }
-.bar-hint span { display: inline-block; opacity: 0; transform: translateY(0.3em); transition: opacity 0.5s, transform 0.5s; }
-.bar-hint span.in { opacity: 1; transform: none; }
-.bar input { position: relative; z-index: 1; width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; font: inherit; color: var(--bar-fg); caret-color: var(--bar-fg); }
-.bar-menu { position: absolute; top: 50%; right: 16px; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; background: none; color: var(--bar-fg); cursor: pointer; transform: translateY(-50%); }
-.bar-menu span { position: absolute; width: 16px; height: 1px; border-radius: 1px; background: currentColor; transition: transform 0.3s; }
-.bar-menu span:first-child { transform: translateY(-3px); }
-.bar-menu span:last-child { transform: translateY(3px); }
-.bar.open .bar-menu span:first-child { transform: rotate(45deg); }
-.bar.open .bar-menu span:last-child { transform: rotate(-45deg); }
-.bar-nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 16px; }
-.bar-nav a { padding: 6px 14px; border-radius: 999px; background: var(--bar-chip); font: 400 13px/19.5px var(--sans); letter-spacing: -0.025em; color: var(--bar-muted); text-decoration: none; transition: background-color 0.3s, color 0.3s; }
-.bar-nav a:hover, .bar-nav a.on { background: var(--bar-chip-on); color: var(--bar-fg); }
+.bar-list .item { display: flex; align-items: center; gap: 8px; box-sizing: border-box; width: 100%; padding: 8px 16px; border: 1px solid transparent; background: none; color: var(--bar-ink); text-align: left; cursor: pointer; }
+.bar-list .item.in { animation: bar-item-in 0.35s cubic-bezier(0.2, 0.65, 0.3, 1) both; }
+@keyframes bar-item-in { from { opacity: 0; filter: blur(6px); } }
+.bar-list .item:hover, .bar-list .item.sel { background: var(--bar-fill); }
+.bar-list .badge { display: grid; flex: none; place-items: center; width: 40px; height: 40px; border-radius: 2.667px; font: 500 14px/1 var(--sans); color: #fff; }
+.bar-list .what { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.bar-list .kind { overflow: hidden; font: 400 14px/21px var(--sans); color: var(--bar-ink-muted); text-overflow: ellipsis; white-space: nowrap; }
+.bar-list .label { overflow: hidden; font: 400 14px/19.25px var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+/* The field's row: 56px in the pill, 60px in the panel, as AKQA's. */
+.bar-line { position: relative; display: flex; align-items: center; gap: 12px; box-sizing: border-box; min-height: 56px; padding: 16px 40px 16px 16px; font: 400 14px/21px var(--sans); }
+.bar.open .bar-line { padding: 18px 56px 18px 16px; }
+.bar-field { position: relative; display: flex; flex: 1; align-items: center; min-width: 0; min-height: 24px; }
+.bar input { position: relative; z-index: 1; display: block; box-sizing: border-box; width: 100%; min-width: 0; height: 24px; padding: 0; border: 0; outline: 0; background: transparent; font: 400 16px/24px var(--sans); color: var(--bar-ink-strong); caret-color: var(--bar-ink-strong); }
+.bar input::selection, .bar-note::selection { background: rgba(0, 0, 0, 0.16); }
+/* The hint: the suggestion showing, word by word, each coming in from a
+   blur and leaving into one (the script staggers them). */
+.bar-hint { position: absolute; inset: 0; display: flex; align-items: center; overflow: hidden; color: var(--bar-ink-idle); white-space: nowrap; pointer-events: none; }
+.bar-hint span { display: inline-block; transition: opacity 0.4s cubic-bezier(0.2, 0.65, 0.3, 1), filter 0.4s cubic-bezier(0.2, 0.65, 0.3, 1); }
+.bar-hint span.out { opacity: 0; filter: blur(8px); transition-duration: 0.3s; transition-timing-function: cubic-bezier(0.25, 0.1, 0.35, 1); }
+/* A caret that breathes before the hint while the pill waits. */
+.bar-cursor { position: absolute; top: 50%; left: 0; width: 2px; height: 16px; border-radius: 1px; background: var(--bar-ink-strong); opacity: 0.18; pointer-events: none; transform: translate(-3px, -50%); transition: opacity 0.2s ease-out; animation: bar-cursor 1.6s ease-in-out infinite; }
+@keyframes bar-cursor { 50% { opacity: 0.55; } }
+.bar-surface:focus-within .bar-cursor { opacity: 0; animation: none; }
+.bar.typed .bar-hint, .bar.typed .bar-cursor, .bar.quoting .bar-hint, .bar.quoting .bar-cursor { display: none; }
+/* The menu: two lines a spring crosses while the bar is a panel. */
+.bar-menu { position: absolute; top: 50%; right: 16px; z-index: 1; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--bar-ink); cursor: pointer; transform: translateY(-50%); transition: opacity 0.15s, color 0.3s; }
+.bar-menu:hover { opacity: 0.8; }
+.bar-menu:active { transform: translateY(-50%) scale(0.97); }
+.bar-menu span { position: absolute; top: 50%; left: 4px; width: 16px; height: 1px; margin-top: -0.5px; border-radius: 1px; background: currentColor; }
+.bar-menu span:first-child { transform: translateY(-3.5px); }
+.bar-menu span:last-child { transform: translateY(3.5px); }
+.bar-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 16px; }
+.bar-nav a { display: inline-flex; flex: none; align-items: center; padding: 6px 14px; border: 1px solid transparent; border-radius: 999px; background: var(--bar-fill); font: 400 13px/19.5px var(--sans); letter-spacing: -0.025em; color: var(--bar-ink-nav); text-decoration: none; }
+.bar-nav a:hover, .bar-nav a[aria-current] { background: var(--bar-fill-on); }
 
 /* Comments (task 1213, decision 1214), an ebook's notes: the words tinted
    in their theme, darker where comments of one theme stack and banded where
@@ -2917,23 +3179,22 @@ button.step-head { cursor: pointer; }
 .select-tools .swatches { display: flex; gap: 6px; padding: 0 10px 0 6px; }
 .select-tools .swatch { width: 16px; height: 16px; padding: 0; border: 2px solid var(--fg); border-radius: 50%; background: var(--ink); box-shadow: 0 0 0 1px rgba(127, 127, 127, 0.6); cursor: pointer; }
 .select-tools .swatch:hover, .select-tools .swatch:focus-visible { transform: scale(1.25); }
-.bar-quote { display: flex; align-items: flex-start; gap: 8px; margin: 12px 12px 8px; padding: 8px 10px; border-left: 3px solid var(--ink, var(--bar-muted)); border-radius: 4px; background: var(--bar-chip); font: 400 13px/18px var(--sans); color: var(--bar-muted); }
+.bar-quote { display: flex; align-items: flex-start; gap: 8px; margin: 12px 12px 8px; padding: 8px 10px; border-left: 3px solid var(--ink, var(--bar-ink-muted)); border-radius: 4px; background: var(--bar-fill); font: 400 13px/18px var(--sans); color: var(--bar-ink-muted); }
 .bar-quote-text { flex: 1; display: -webkit-box; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
-.bar-quote-drop { flex: none; padding: 0 4px; border: 0; background: none; font: 400 16px/18px var(--sans); color: var(--bar-muted); cursor: pointer; }
+.bar-quote-drop { flex: none; padding: 0 4px; border: 0; background: none; font: 400 16px/18px var(--sans); color: var(--bar-ink-muted); cursor: pointer; }
 .bar-themes { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 12px 10px; }
 .bar-themes:empty { display: none; }
-.bar-theme, .bar-theme-name { box-sizing: border-box; height: 26px; padding: 0 10px 0 24px; border: 0; border-radius: 999px; background: var(--bar-chip) radial-gradient(circle at 13px 50%, var(--ink) 0 4px, transparent 5px) no-repeat; font: 400 12px/26px var(--sans); color: var(--bar-muted); cursor: pointer; }
-.bar-theme[aria-checked="true"] { background-color: var(--bar-chip-on); color: var(--bar-fg); box-shadow: inset 0 0 0 1.5px var(--ink); }
-.bar-theme-name { width: 104px; outline: 0; color: var(--bar-fg); cursor: text; box-shadow: inset 0 0 0 1px var(--bar-line); }
+.bar-theme, .bar-theme-name { box-sizing: border-box; height: 26px; padding: 0 10px 0 24px; border: 0; border-radius: 999px; background: var(--bar-fill) radial-gradient(circle at 13px 50%, var(--ink) 0 4px, transparent 5px) no-repeat; font: 400 12px/26px var(--sans); color: var(--bar-ink-muted); cursor: pointer; }
+.bar-theme[aria-checked="true"] { background-color: var(--bar-fill-on); color: var(--bar-ink); box-shadow: inset 0 0 0 1.5px var(--ink); }
+.bar-theme-name { width: 104px; outline: 0; color: var(--bar-ink); cursor: text; box-shadow: inset 0 0 0 1px var(--bar-line); }
 .bar-theme-name:focus { box-shadow: inset 0 0 0 1.5px var(--ink); }
-.bar-theme-edit { height: 26px; padding: 0 8px; border: 0; background: none; font: 400 12px/26px var(--sans); color: var(--bar-muted); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.bar-theme-edit { height: 26px; padding: 0 8px; border: 0; background: none; font: 400 12px/26px var(--sans); color: var(--bar-ink-muted); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .bar-why { margin: 0 16px 8px; font: 400 12px/16px var(--sans); color: #d92d20; }
 .bar-why:empty { display: none; }
-.bar input::placeholder, .bar-note::placeholder { color: var(--bar-hint); }
-.bar-note { display: block; box-sizing: border-box; width: 100%; max-height: 160px; padding: 18px 0; border: 0; outline: 0; background: transparent; resize: none; font: inherit; color: var(--bar-fg); caret-color: var(--bar-fg); }
-.bar.quoting { background: var(--bar-solid); }
-.bar.quoting .bar-line { padding-right: 56px; }
-.bar-send { position: absolute; right: 12px; bottom: 12px; display: grid; place-items: center; width: 32px; height: 32px; padding: 0 0 2px; border: 0; border-radius: 50%; background: var(--bar-fg); font: 600 17px/1 var(--sans); color: var(--page); cursor: pointer; }
+.bar input::placeholder, .bar-note::placeholder { color: var(--bar-ink-idle); }
+.bar-note { display: block; box-sizing: border-box; width: 100%; max-height: 160px; padding: 16px 0; border: 0; outline: 0; background: transparent; resize: none; font: 400 16px/24px var(--sans); color: var(--bar-ink-strong); caret-color: var(--bar-ink-strong); }
+.bar.quoting .bar-line { padding: 0 56px 0 16px; }
+.bar-send { position: absolute; right: 12px; bottom: 12px; display: grid; place-items: center; width: 32px; height: 32px; padding: 0 0 2px; border: 0; border-radius: 50%; background: var(--bar-ink); font: 600 17px/1 var(--sans); color: var(--page); cursor: pointer; }
 .bar-send:disabled { opacity: 0.3; cursor: default; }
 #comments .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 32px 0 0; }
 #comments .filter { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border: 0; border-radius: 999px; background: none; box-shadow: inset 0 0 0 1px var(--rule); font: 400 13px/30px var(--sans); color: var(--fg); cursor: pointer; }
@@ -2961,12 +3222,11 @@ button.step-head { cursor: pointer; }
 @media (max-width: 720px) {
   .opener { font-size: 40px; }
   h1 { font-size: 32px; line-height: 40px; }
-  .bar.open { width: calc(100vw - 32px); }
-  .bar.open .fold-in { width: calc(100vw - 32px); }
   .toc { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .bar, .bar-fold, .bar-hint span, .toc-card, .toc-bars, .toc-bars span { transition: none; }
+  .bar-hint span, .toc-card, .toc-bars, .toc-bars span { transition: none; }
+  .bar-surface::before, .bar-cursor, .bar-list .item.in { animation: none; }
 }
 @media print {
   .top .link, .top .solid, .toc, .bar, .arrows, .select-tools, .pop, .prose .pin, #comments .filters { display: none; }
