@@ -1041,12 +1041,13 @@ $ ekko -r 1 2
 
 ### Board History
 
-Every write replaces `storage.json` whole, and a project's board is kept out of git, so Ekko keeps the versions a write replaced in `.ekko/history/`, named by the time each was written: the last 50, then the newest of each day for two weeks. They are hard links to files no write touches again, so keeping them costs no copy; on a board of 330 KB they come to about 21 MB.
+Every write replaces `storage.json` whole, and a project's board is kept out of git, so Ekko keeps the versions it writes in `.ekko/history/`, the current one among them, named by the time each was written: the last 50, then the newest of each day for two weeks. Each is a hard link to a file no write touches again, so keeping them costs no copy; on a board of 330 KB they come to about 21 MB. A write links its version there before putting it in place, and touches the version it replaces only by replacing it: Claude Code's FileChanged follows `storage.json` by its inode, and a touch before the rename could leave that watch on the old file, deaf to every write after (task 1248). A version Ekko did not write -- by hand, or by an older Ekko -- is copied in before a write replaces it.
 
-To go back to one, stop whatever writes to the board -- Claude Code sessions included -- and copy it over `.ekko/storage/storage.json`. The revision counter is left as it is, so the next write carries on past it; a session holding a cursor from before the copy should prime again.
+To go back to one, stop whatever writes to the board -- Claude Code sessions included -- and put a copy of it in place by rename. Copied over `.ekko/storage/storage.json` itself, it would overwrite the current version's file, which history holds too. The revision counter is left as it is, so the next write carries on past it; a session holding a cursor from before the copy should prime again.
 
 ```
-$ cp .ekko/history/1790110000000000000.json .ekko/storage/storage.json
+$ cp .ekko/history/1790110000000000000.json .ekko/storage/restore.json
+$ mv .ekko/storage/restore.json .ekko/storage/storage.json
 ```
 
 ### List Items

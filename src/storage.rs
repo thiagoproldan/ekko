@@ -218,8 +218,15 @@ impl Storage {
     }
 
     pub fn set(&self, data: &ItemMap) -> Result<(), StorageError> {
-        self.keep_version();
-        let version = write_atomic(&self.storage_file, &self.temp_dir, data)?;
+        // Nothing before the rename touches the version it replaces. Claude
+        // Code's FileChanged follows storage.json by its inode, and an event
+        // on it before the rename could leave that watch on the old inode for
+        // good (task 1248). So history takes the new version before it is put
+        // in place, and the old one only by copy, when no write kept it.
+        self.keep_unkept_version();
+        let content = json::to_pretty_string(data)?;
+        let version = replace_durably_keeping(&self.storage_file, &self.temp_dir, content.as_bytes(), Some(&self.history_dir))?;
+        self.prune_history();
         // The version this write made is the map it wrote, so the read after
         // it -- the MCP server reads the board after every write -- parses
         // nothing (task 859). A later write by any process is a new inode.
@@ -262,7 +269,7 @@ impl Storage {
     /// linked never changes. A copy where it cannot, across filesystems --
     /// or across btrfs subvolumes, where `fs::copy` clones instead. Put in
     /// place by rename, so a copy is always a whole file. Best effort, like
-    /// `keep_version`: a copy that cannot be made never stops the write.
+    /// history: a copy that cannot be made never stops the write.
     fn copy_out(&self, file: &Path) {
         let Some(copy) = self.copy_of(file) else { return };
         let (Ok(source), Some(parent)) = (fs::metadata(file), copy.parent()) else { return };
@@ -284,20 +291,32 @@ impl Storage {
         }
     }
 
-    /// Keeps the version of storage.json this write is about to replace, in
-    /// `history/`, since the board is kept out of git and every write
-    /// replaces the file whole. A hard link costs no copy: a write replaces
-    /// the file by rename, so the old version's inode is never written again.
-    /// Named by that version's modification time, which orders them, and
-    /// pruned on the way past (see `HISTORY_RECENT`). Best effort: a history
-    /// that cannot be kept never stops the write it would have recorded.
-    fn keep_version(&self) {
-        let Ok(modified) = fs::metadata(&self.storage_file).and_then(|meta| meta.modified()) else { return };
-        let Ok(at) = modified.duration_since(UNIX_EPOCH) else { return };
-        if fs::create_dir_all(&self.history_dir).is_err() {
+    /// Copies into `history/` the version of storage.json this write is about
+    /// to replace, when no write kept it there: one a hand or an older ekko
+    /// wrote. Every version a write makes is kept already, linked before the
+    /// rename that put it in place (see `set`). A copy only reads the file,
+    /// where a link would be an event on it. Best effort: a version that
+    /// cannot be kept never stops the write.
+    fn keep_unkept_version(&self) {
+        let Ok(meta) = fs::metadata(&self.storage_file) else { return };
+        let Some(name) = history_name(&meta) else { return };
+        let kept = self.history_dir.join(name);
+        if kept.exists() || fs::create_dir_all(&self.history_dir).is_err() {
             return;
         }
-        let _ = fs::hard_link(&self.storage_file, self.history_dir.join(format!("{}.json", at.as_nanos())));
+        // Whole or not at all: copied beside the board's other temp files,
+        // then put in place by rename.
+        let temp = temp_file_path(&kept, &self.temp_dir);
+        if fs::copy(&self.storage_file, &temp).is_err() || fs::rename(&temp, &kept).is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+    }
+
+    /// Lets go of the versions `history/` no longer keeps, on the way past
+    /// each write (see `HISTORY_RECENT`). The board is kept out of git and
+    /// every write replaces storage.json whole, so history is what undoes a
+    /// bad write.
+    fn prune_history(&self) {
         let Ok(entries) = fs::read_dir(&self.history_dir) else { return };
         let kept: Vec<u128> = entries
             .flatten()
@@ -770,20 +789,48 @@ fn write_atomic(path: &Path, temp_dir: &Path, data: &ItemMap) -> Result<Version,
 /// board. Answers with the version written: the temp file's, read before the
 /// rename, which carries its inode, times and length over to `path`.
 fn replace_durably(path: &Path, temp_dir: &Path, content: &[u8]) -> Result<Version, StorageError> {
+    replace_durably_keeping(path, temp_dir, content, None)
+}
+
+/// `replace_durably`, linking the new version into `history` too, while it
+/// is still the temp file: once it is `path`, the link would be an event on
+/// the file a watcher follows (see `Storage::set`). A link the rename never
+/// followed is taken back.
+fn replace_durably_keeping(path: &Path, temp_dir: &Path, content: &[u8], history: Option<&Path>) -> Result<Version, StorageError> {
     use std::io::Write as _;
     let temp_file = temp_file_path(path, temp_dir);
     let mut file = File::create(&temp_file)?;
     file.write_all(content)?;
     file.sync_all()?;
-    let version = Version::of(&file.metadata()?);
+    let meta = file.metadata()?;
+    let version = Version::of(&meta);
     drop(file);
-    fs::rename(&temp_file, path)?;
+    let kept = history.and_then(|history| link_into(history, &temp_file, &meta));
+    if let Err(error) = fs::rename(&temp_file, path) {
+        if let Some(kept) = kept {
+            let _ = fs::remove_file(kept);
+        }
+        return Err(error.into());
+    }
     // Best effort: some filesystems refuse to sync a directory, and the
     // rename itself has already happened.
     if let Some(dir) = path.parent().and_then(|parent| File::open(parent).ok()) {
         let _ = dir.sync_all();
     }
     Ok(version)
+}
+
+/// Links `file`, a version of storage.json whose metadata is `meta`, into
+/// `history`. The link, when one was made.
+fn link_into(history: &Path, file: &Path, meta: &fs::Metadata) -> Option<PathBuf> {
+    let kept = history.join(history_name(meta)?);
+    (fs::create_dir_all(history).is_ok() && fs::hard_link(file, &kept).is_ok()).then_some(kept)
+}
+
+/// The name `history/` keeps a version under: its modification time in
+/// nanoseconds, which orders the versions.
+fn history_name(meta: &fs::Metadata) -> Option<String> {
+    Some(format!("{}.json", meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos()))
 }
 
 /// pid + nanosecond timestamp instead of the JS version's random hex --
@@ -1247,25 +1294,97 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// A write keeps the version it replaced, byte for byte, in history; the
-    /// first write has none to keep.
+    /// History keeps each version a write makes, the board's current one
+    /// among them, as a link to the very file; and a version no ekko wrote,
+    /// a hand's or an older ekko's, byte for byte once a write replaces it.
     #[test]
-    fn a_write_keeps_the_version_it_replaces() {
+    fn history_keeps_each_version_written_and_any_other_it_replaces() {
         let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
-        let history = || fs::read_dir(dir.join("history")).map(|entries| entries.count()).unwrap_or(0);
+        let file = dir.join("storage").join("storage.json");
+        let history = || -> Vec<PathBuf> { fs::read_dir(dir.join("history")).unwrap().map(|entry| entry.unwrap().path()).collect() };
+        let linked = |kept: &[PathBuf]| kept.iter().any(|path| fs::metadata(path).unwrap().ino() == fs::metadata(&file).unwrap().ino());
         storage.set(&BTreeMap::new()).unwrap();
-        assert_eq!(history(), 0, "nothing was there to keep");
+        let first = fs::read(&file).unwrap();
+        assert_eq!(history().len(), 1, "the first version");
+        assert!(linked(&history()), "the version written, linked");
 
-        let before = fs::read(dir.join("storage").join("storage.json")).unwrap();
+        let hand = dir.join("storage").join("hand.json");
+        fs::write(&hand, b"{\"by\": \"hand\"}\n").unwrap();
+        fs::rename(&hand, &file).unwrap();
         let mut data = BTreeMap::new();
         data.insert(1, Item::new_task(1, "kept".into(), vec!["My Board".into()], 1));
         storage.set(&data).unwrap();
 
-        let kept: Vec<PathBuf> = fs::read_dir(dir.join("history")).unwrap().map(|entry| entry.unwrap().path()).collect();
-        assert_eq!(kept.len(), 1);
-        assert_eq!(fs::read(&kept[0]).unwrap(), before, "the replaced version, whole");
+        let kept = history();
+        assert_eq!(kept.len(), 3, "the first version, the hand's and the new one");
+        let texts: Vec<Vec<u8>> = kept.iter().map(|path| fs::read(path).unwrap()).collect();
+        assert!(texts.contains(&first), "the first version, whole");
+        assert!(texts.contains(&b"{\"by\": \"hand\"}\n".to_vec()), "the hand's version, whole");
+        assert!(linked(&kept), "the version written, linked");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Claude Code's FileChanged follows storage.json by its inode, through
+    /// chokidar: at an event on it, the watch stats the path and moves to the
+    /// inode the path names now, but it drops an event that comes within 5 ms
+    /// of the one before. So the first event a write gives the version it
+    /// replaces must come from the rename that replaces it. History's link
+    /// to that version came about 10 ms before the rename, and the watch went
+    /// deaf whenever the rename's event was dropped (task 1248). Read here
+    /// as the watch reads it, for all a write does: history kept and pruned,
+    /// the board copied out, and a version no ekko wrote.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_write_touches_the_version_it_replaces_only_by_replacing_it() {
+        let dir = temp_ekko_dir();
+        fs::write(dir.join("project.json"), r#"{"name": "site", "id": "abc"}"#).unwrap();
+        let storage = Storage::new(&dir).unwrap().copied_to(Some(temp_ekko_dir().join("copy")));
+        let file = dir.join("storage").join("storage.json");
+        let mut data = BTreeMap::new();
+        storage.set(&data).unwrap();
+        // Old enough to be pruned, so the writes below prune them.
+        fs::create_dir_all(dir.join("history")).unwrap();
+        for old in 0..60u128 {
+            fs::write(dir.join("history").join(format!("{}.json", 1_000_000_000_000 + old)), "{}").unwrap();
+        }
+        for write in 1..=5 {
+            if write == 5 {
+                let hand = dir.join("storage").join("hand.json");
+                fs::write(&hand, fs::read(&file).unwrap()).unwrap();
+                fs::rename(&hand, &file).unwrap();
+            }
+            let replaced = fs::metadata(&file).unwrap().ino();
+            let first = inode_at_first_event(&file);
+            data.insert(write, sample_item(write));
+            storage.set(&data).unwrap();
+            let named = first.join().unwrap();
+            assert!(named.is_some(), "write {write}: no event on the version it replaced");
+            assert_ne!(named, Some(replaced), "write {write}: an event on the version it replaces came while storage.json still named it");
+        }
+        assert!(fs::read_dir(dir.join("history")).unwrap().count() < 60, "the writes pruned history");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The inode `file` names when the first event comes on the inode it
+    /// names now, as a watch that stats the path at each event sees it: with
+    /// the events Claude Code's watch asks for (mask c06 in its fdinfo).
+    /// `None` when no event comes within 5 s. Armed when it returns.
+    #[cfg(target_os = "linux")]
+    fn inode_at_first_event(file: &Path) -> std::thread::JoinHandle<Option<u64>> {
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = std::ffi::CString::new(file.as_os_str().as_bytes()).unwrap();
+        let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+        assert!(fd >= 0, "inotify_init1");
+        let mask = libc::IN_MODIFY | libc::IN_ATTRIB | libc::IN_DELETE_SELF | libc::IN_MOVE_SELF;
+        assert!(unsafe { libc::inotify_add_watch(fd, path.as_ptr(), mask) } >= 0, "inotify_add_watch");
+        let file = file.to_path_buf();
+        std::thread::spawn(move || {
+            let mut ready = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let named = (unsafe { libc::poll(&mut ready, 1, 5_000) } == 1).then(|| fs::metadata(&file).unwrap().ino());
+            unsafe { libc::close(fd) };
+            named
+        })
     }
 
     /// History keeps the newest 50 versions, then the newest of each day for
@@ -1288,7 +1407,7 @@ mod tests {
         assert_eq!(stale, expected, "past the newest 50, one a day for 14 days");
     }
 
-    /// Pruned at every write, as `keep_version` prunes it, history still ends
+    /// Pruned at every write, as `prune_history` prunes it, history still ends
     /// up with each earlier day's last version: nothing newer of that day is
     /// ever written to replace it. Days counted back from the write lost
     /// them all (task 640).
