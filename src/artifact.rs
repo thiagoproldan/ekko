@@ -514,19 +514,22 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     }
     if let Some(standing) = &standing {
         let waiting = if standing.waiting.is_some() { " waiting" } else { "" };
-        let _ = write!(body, "<span class=\"state{waiting}\">{}</span>", esc(&capitalized(&standing.words())));
+        let _ = write!(body, "<span class=\"state{waiting}\">{}</span>", phase(standing));
     }
-    let _ = write!(body, "</p><h1 class=\"words\">{}</h1>", word_spans(title));
+    let _ = write!(body, "</p>{}", headline(title));
+    // What waits on the user, AKQA's black banner under the title (task
+    // 1368): the approval asked, with Review beside it, then each other
+    // question open. What only informs is a quiet box.
     let approval = standing.as_ref().and_then(|standing| standing.waiting);
     if let Some(question) = approval {
         let answer = format!(
-            "It asks you to approve this plan: answer it in ekko's menu<span class=\"writes-only\">, with <button class=\"inline\" type=\"button\" data-review>Review</button> on this page</span>, or with <code>ekko --answer {question}</code> in a terminal."
+            "It asks you to approve this plan: answer it in ekko's menu<span class=\"writes-only\">, with Review on this page</span>, or with <code>ekko --answer {question}</code> in a terminal."
         );
-        callout(&mut body, &format!("Waiting on you: question {question}"), &answer);
+        banner(&mut body, &format!("Waiting on you: question {question}"), &answer, "<button class=\"pill writes-only\" type=\"button\" data-review>Review</button>");
     }
     for question in notes.iter().filter(|note| note.question.as_ref().is_some_and(|question| question.answer.is_none()) && Some(note.id) != approval) {
         let answer = format!("{}: answer it in ekko's menu, or with <code>ekko --answer {}</code> in a terminal.", esc(crate::ekko::title(&question.description)), question.id);
-        callout(&mut body, &format!("Waiting on you: question {}", question.id), &answer);
+        banner(&mut body, &format!("Waiting on you: question {}", question.id), &answer, "");
     }
     if let (Some(artifact), Some(true)) = (artifact, standing.as_ref().map(|standing| standing.changed)) {
         let changed = format!("The plan changed after version {} was approved: History shows how.", artifact.approved_version.unwrap_or_default());
@@ -536,6 +539,29 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         let away = if item.trashed.is_some() { "in the trash" } else { "stashed" };
         callout(&mut body, &capitalized(away), &format!("This artifact is {away}."));
     }
+    // The plan's facts once, AKQA's row of results, each leading to its
+    // part: the steps done, the notes, the comments, replies counted, and
+    // the version.
+    body.push_str("<div class=\"facts\">");
+    let mut fact = |to: &str, big: String, small: String| {
+        let _ = write!(body, "<a class=\"fact\" href=\"#{to}\"><b>{}</b><span>{}</span></a>", esc(&big), esc(&small));
+    };
+    let unit = |count: usize, word: &str| if count == 1 { word.to_string() } else { format!("{word}s") };
+    let proposed = standing.as_ref().map_or(0, |standing| standing.proposed);
+    if tasks > 0 {
+        let more = if proposed > 0 { format!(" \u{b7} {proposed} to approve") } else { String::new() };
+        fact("steps", format!("{done}/{tasks}"), format!("steps done{more}"));
+    } else if !steps.is_empty() {
+        fact("steps", steps.len().to_string(), unit(steps.len(), "step"));
+    }
+    if !notes.is_empty() {
+        fact("notes", notes.len().to_string(), unit(notes.len(), "note"));
+    }
+    if !comments.is_empty() {
+        fact("comments", comments.len().to_string(), unit(comments.len(), "comment"));
+    }
+    fact("history", format!("v{version}"), if version > 1 { "the current version" } else { "the first version" }.to_string());
+    body.push_str("</div>");
 
     // The plan, a scene to a section: the Goal's first sentence as its
     // statement, each other section opened by its heading; what comes
@@ -983,10 +1009,44 @@ fn two_tones(heading: &str) -> (String, Option<String>) {
     (words[..cut].join(" "), Some(words[cut..].join(" ")))
 }
 
-/// A box above the plan for what the user should know first: `head`, and
-/// `text`, which is HTML.
+/// A box in the first scene for what the user should know first: `head`,
+/// and `text`, which is HTML.
 fn callout(body: &mut String, head: &str, text: &str) {
     let _ = write!(body, "<div class=\"callout\"><b>{}</b>{text}</div>", esc(head));
+}
+
+/// What waits on the user, as AKQA's black banner: `head`, `text`, which is
+/// HTML, and `act` beside them, the button that answers it if the page has
+/// one.
+fn banner(body: &mut String, head: &str, text: &str, act: &str) {
+    let _ = write!(body, "<div class=\"callout waits\"><div class=\"said\"><b>{}</b>{text}</div>{act}</div>", esc(head));
+}
+
+/// Where an artifact stands, in the word the first scene's chip gives.
+fn phase(standing: &Standing) -> &'static str {
+    match standing.state {
+        State::Done => "Done",
+        State::Cancelled => "Cancelled",
+        _ if standing.waiting.is_some() => "Waiting on you",
+        _ if standing.tasks == 0 => "Draft",
+        _ => "Approved",
+    }
+}
+
+/// A title as AKQA sets a headline (task 1368), word by word: up to its
+/// first ": ", " -- " or " \u{2014} " in ink, the rest in grey on lines of
+/// its own. The title whole is its name, the mark being left out.
+fn headline(title: &str) -> String {
+    let cut = [": ", " -- ", " \u{2014} "].iter().filter_map(|mark| title.find(mark).map(|at| (at, at + mark.len()))).min();
+    match cut {
+        Some((end, start)) if end > 0 && start < title.len() => format!(
+            "<h1 class=\"words\" aria-label=\"{}\"><span class=\"l1\">{}</span> <span class=\"l2\">{}</span></h1>",
+            esc(title),
+            word_spans(&title[..end]),
+            word_spans(&title[start..])
+        ),
+        _ => format!("<h1 class=\"words\">{}</h1>", word_spans(title)),
+    }
 }
 
 /// A note's kind, as the page heads it: an open question stands apart.
@@ -1720,6 +1780,10 @@ const SCRIPT: &str = r##"(function () {
   }
   rows.forEach(function (row) {
     row.addEventListener("click", function (event) { event.preventDefault(); jump(row.getAttribute("href").slice(1)); });
+  });
+  // The first scene's facts lead to their parts as the index does.
+  document.querySelectorAll(".fact").forEach(function (fact) {
+    fact.addEventListener("click", function (event) { event.preventDefault(); jump(fact.getAttribute("href").slice(1)); });
   });
   var current = -1;
   function follow() {
@@ -3595,7 +3659,7 @@ body:not([data-writes]) .writes-only { display: none !important; }
 .page { padding: 0 0 240px; }
 .scene { position: relative; box-sizing: border-box; padding: clamp(96px, 14vh, 160px) max(var(--gutter), calc((100% - var(--wide)) / 2)); }
 .scene > * { max-width: var(--measure); }
-.scene > :is(h1, .opener, .bleed) { max-width: none; }
+.scene > :is(h1, .opener, .bleed, .facts, .waits) { max-width: none; }
 
 /* ---- the first scene: where the plan stands, and its title ------------ */
 .hero { display: flex; flex-direction: column; justify-content: center; min-height: 100vh; padding-top: 96px; padding-bottom: 168px; }
@@ -3606,10 +3670,31 @@ body:not([data-writes]) .writes-only { display: none !important; }
 .kicker .state.waiting::before { animation: breathe 1.6s ease-in-out infinite; }
 @keyframes breathe { 50% { opacity: 0.25; } }
 .hero h1 { margin: 0; font: 400 clamp(40px, 7.2vw, 104px)/0.92 var(--sans); letter-spacing: -0.04em; text-transform: uppercase; overflow-wrap: anywhere; color: var(--fg-strong); }
+.hero h1 .l1, .hero h1 .l2 { display: block; }
+.hero h1 .l2 { color: var(--fg-3); }
+/* A plan that waits on the user gives its banner the room: the title steps
+   down, so the facts stay clear of the pill. */
+.hero:has(.waits) h1 { font-size: clamp(36px, 5.6vw, 80px); }
+/* The plan's facts, AKQA's row of results: a number in serif over what it
+   counts, rising as the pointer comes. */
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-top: clamp(40px, 8vh, 96px); border-top: 1px solid var(--rule); }
+.hero .fact { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 20px 24px 0 0; color: var(--fg-strong); text-decoration: none; }
+.fact b { font: 400 clamp(36px, 4.4vw, 64px)/1 var(--serif); letter-spacing: -0.02em; transition: transform 0.6s var(--curve); }
+.fact span { font: 400 14px/20px var(--sans); color: var(--fg-2); transition: color 0.3s ease; }
+.fact:hover b { transform: translateY(-4px); }
+.fact:hover span { color: var(--fg-strong); }
+.fact:focus-visible, .pill:focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 3px; }
+/* AKQA's pill button. */
+.pill { display: inline-flex; flex: none; align-items: center; gap: 8px; height: 40px; padding: 0 18px; border: 0; border-radius: 999px; background: var(--raise); font: 400 14px/40px var(--sans); color: var(--fg); cursor: pointer; transition: background-color 0.3s ease, color 0.3s ease; }
 .callout { margin: 32px 0 0; padding: 20px 24px; border-radius: 16px; background: var(--chip); font: 400 16px/24px var(--sans); color: var(--fg); }
 .callout + .callout { margin-top: 16px; }
 .callout b { display: block; margin: 0 0 4px; font-weight: 600; color: var(--fg-strong); }
-.callout button.inline { padding: 0; border: 0; background: none; font: inherit; color: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+/* What waits on the user: AKQA's black banner, inverted in either mode. */
+.callout.waits { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 24px; border-radius: 20px; background: var(--fg-strong); color: var(--bg); }
+.callout.waits .said { flex: 1 1 320px; font: 400 20px/28px var(--serif); }
+.callout.waits b { margin: 0 0 6px; font: 400 13px/16px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: inherit; opacity: 0.7; }
+.prose .callout.waits code { background: rgba(127, 127, 127, 0.25); color: inherit; }
+.callout.waits .pill { background: var(--bg); color: var(--fg-strong); }
 .hero .lead { margin-top: 40px; }
 
 /* ---- openers, as AKQA's: capitals, weight 400, tight, line two grey --- */
@@ -3932,7 +4017,7 @@ button.step-head { cursor: pointer; }
 }
 /* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
-  :root, .mark, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side { transition: none; }
+  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side { transition: none; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
 }
 /* A plain document: black on white whatever the theme or the scene, each
@@ -4104,7 +4189,7 @@ mod tests {
         assert!(html.contains("<p class=\"statement\">A <strong>bold</strong> goal.</p>"), "{html}");
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;") && !html.contains("<script>alert"), "raw HTML in a plan is shown, not run: {html}");
         assert!(html.contains("<span class=\"title\">First &lt;step&gt;</span>") && html.contains("data-state=\"to approve\""), "{html}");
-        assert!(html.contains("<p class=\"kicker\"><span>Artifact 1</span><span class=\"state\">Draft, 1 step</span></p>"), "{html}");
+        assert!(html.contains("<p class=\"kicker\"><span>Artifact 1</span><span class=\"state\">Draft</span></p>"), "{html}");
         assert_eq!(version.len(), 16);
         let (again, same) = page(&item, &all, Some(Path::new("/projects/site")));
         assert_eq!((again, same), (html.clone(), version.clone()), "the same board writes the same page");
@@ -4374,7 +4459,7 @@ mod tests {
         for gone in ["class=\"standing\"", "class=\"tags\"", "class=\"byline\"", "class=\"actions\"", " min read"] {
             assert!(!html.contains(gone), "{gone}: {html}");
         }
-        assert!(html.contains("<p class=\"kicker\"><span>Artifact 7</span><span>Priority 3</span><span class=\"state\">Draft, 2 steps</span></p>"), "{html}");
+        assert!(html.contains("<p class=\"kicker\"><span>Artifact 7</span><span>Priority 3</span><span class=\"state\">Draft</span></p>"), "{html}");
         assert!(html.contains("<p class=\"about\">Project site<span id=\"who\"></span></p>"), "the board, and whom the page writes as: {html}");
 
         // Scenes, in the page's order, each in its mode; the index names
@@ -4520,7 +4605,7 @@ mod tests {
     }
 
     #[test]
-    fn a_callout_says_what_waits_on_the_user_and_nothing_else_has_one() {
+    fn a_banner_says_what_waits_on_the_user_and_nothing_else_is_one() {
         let made = steps(&[], &[spec("a", Some("First"), &[])]).unwrap();
         let item = artifact_item(1, &plan("Ship"), made);
         let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
@@ -4534,8 +4619,8 @@ mod tests {
         answered.question = Some(serde_json::from_value(serde_json::json!({"rev": 1, "answer": {"text": "The docs", "at": 0, "rev": 2}})).unwrap());
         let all: ItemMap = BTreeMap::from([(1, item.clone()), (2, asked), (3, answered)]);
         let (html, _) = page(&item, &all, None);
-        assert_eq!(html.matches("class=\"callout\"").count(), 1, "the open question only: {html}");
-        assert!(html.contains("<div class=\"callout\"><b>Waiting on you: question 2</b>Which comes first?: answer it in ekko's menu, or with <code>ekko --answer 2</code> in a terminal.</div>"), "{html}");
+        assert_eq!(html.matches("class=\"callout").count(), 1, "the open question only: {html}");
+        assert!(html.contains("<div class=\"callout waits\"><div class=\"said\"><b>Waiting on you: question 2</b>Which comes first?: answer it in ekko's menu, or with <code>ekko --answer 2</code> in a terminal.</div></div>"), "a banner, without Review, which does not answer it: {html}");
         assert!(html.contains("<div class=\"note open\" id=\"note-2\" data-kind=\"Open question\">") && html.contains("<span class=\"answer\">\u{2713} The docs</span>"), "{html}");
 
         let mut changed = item.clone();
@@ -4543,8 +4628,70 @@ mod tests {
         (plan_now.version, plan_now.approved_version) = (2, Some(1));
         changed.trashed = Some(1);
         let (html, _) = page(&changed, &BTreeMap::from([(1, changed.clone())]), None);
-        assert!(html.contains("<b>Changed since it was approved</b>The plan changed after version 1 was approved: History shows how."), "{html}");
-        assert!(html.contains("<b>In the trash</b>This artifact is in the trash."), "{html}");
+        assert!(html.contains("<div class=\"callout\"><b>Changed since it was approved</b>The plan changed after version 1 was approved: History shows how.</div>"), "{html}");
+        assert!(html.contains("<div class=\"callout\"><b>In the trash</b>This artifact is in the trash.</div>"), "{html}");
+        assert!(!html.contains("class=\"callout waits\""), "they wait on nobody: no banner: {html}");
+    }
+
+    #[test]
+    fn the_first_scene_says_each_fact_once_and_its_title_in_two_tones() {
+        let mut made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"]), spec("c", Some("Third"), &[])]).unwrap();
+        let mut done = Item::new_task(2, "First".into(), vec![], 1);
+        State::Done.write(&mut done);
+        let open = Item::new_task(3, "Second".into(), vec![], 1);
+        made[0].task = done.uid.clone();
+        made[1].task = open.uid.clone();
+        let mut item = artifact_item(1, &plan("Ship: the page -- at last"), made);
+        let plan_now = item.artifact.as_mut().unwrap();
+        (plan_now.version, plan_now.approved_version) = (3, Some(3));
+        let mut note = Item::new_note(4, "Keep it light.".to_string(), vec!["My Board".to_string()]);
+        note.attached_to = item.uid.clone();
+        let comment = |id: u32, reply_to: Option<String>| {
+            let mut note = Item::new_note(id, format!("Comment {id}"), vec!["My Board".to_string()]);
+            note.attached_to = item.uid.clone();
+            note.comment = Some(Box::new(crate::item::Comment {
+                version: 3,
+                quote: None,
+                replacement: None,
+                step: None,
+                reply_to,
+                sent: None,
+                resolved: None,
+                applied: None,
+                theme: None,
+                color: None,
+                unknown: BTreeMap::new(),
+            }));
+            note
+        };
+        let first = comment(5, None);
+        let reply = comment(6, first.uid.clone());
+        let mut all: ItemMap = BTreeMap::from([(1, item.clone()), (2, done), (3, open), (4, note), (5, first), (6, reply), (7, comment(7, None))]);
+        let hero = |all: &ItemMap| {
+            let (html, _) = page(&all[&1], all, None);
+            html.split("<section class=\"scene hero\"").nth(1).and_then(|rest| rest.split("<section class=\"scene ").next()).unwrap_or_default().to_string()
+        };
+        let shown = hero(&all);
+        assert!(
+            shown.contains("<h1 class=\"words\" aria-label=\"Ship: the page -- at last\"><span class=\"l1\"><span class=\"w\">Ship</span></span> <span class=\"l2\"><span class=\"w\">the</span> <span class=\"w\">page</span> <span class=\"w\">--</span> <span class=\"w\">at</span> <span class=\"w\">last</span></span></h1>"),
+            "the title in two tones, cut at its first mark: {shown}"
+        );
+        assert!(shown.contains("<p class=\"kicker\"><span>Artifact 1</span><span class=\"state\">Approved</span></p>"), "{shown}");
+        let facts = "<div class=\"facts\"><a class=\"fact\" href=\"#steps\"><b>1/2</b><span>steps done \u{b7} 1 to approve</span></a><a class=\"fact\" href=\"#notes\"><b>1</b><span>note</span></a><a class=\"fact\" href=\"#comments\"><b>3</b><span>comments</span></a><a class=\"fact\" href=\"#history\"><b>v3</b><span>the current version</span></a></div>";
+        assert!(shown.contains(facts), "the plan's facts, a reply counted among the comments: {shown}");
+        for fact in ["1/2", "done", "to approve", "<b>1</b>", "<b>3</b>", "v3", "version", "Approved"] {
+            assert_eq!(shown.matches(fact).count(), 1, "{fact}, once: {shown}");
+        }
+        assert!(!shown.contains("callout"), "nothing waits on the user: no banner: {shown}");
+
+        let mut asked = Item::new_note(8, "Approve it?".to_string(), vec!["My Board".to_string()]);
+        asked.attached_to = item.uid.clone();
+        asked.question = Some(serde_json::from_value(serde_json::json!({"rev": 1, "approve": {"artifact": item.uid, "version": 3, "steps": ["c"]}})).unwrap());
+        all.insert(8, asked);
+        let shown = hero(&all);
+        assert!(shown.contains("<span class=\"state waiting\">Waiting on you</span>"), "{shown}");
+        assert_eq!(shown.matches("<div class=\"callout waits\">").count(), 1, "{shown}");
+        assert!(shown.contains("in a terminal.</div><button class=\"pill writes-only\" type=\"button\" data-review>Review</button></div>"), "Review beside what it answers: {shown}");
     }
 
     #[test]
@@ -4707,17 +4854,17 @@ mod tests {
             let callouts = || {
                 let data = board();
                 let (html, _) = page(&data[&target], &data, None);
-                html.split("<div class=\"callout\">").skip(1).map(|rest| rest.split("</div>").next().unwrap_or_default().to_string()).collect::<Vec<_>>()
+                html.split("<div class=\"callout waits\"><div class=\"said\">").skip(1).map(|rest| rest.split("</div>").next().unwrap_or_default().to_string()).collect::<Vec<_>>()
             };
             let waiting = format!(
-                "<b>Waiting on you: question {first}</b>It asks you to approve this plan: answer it in ekko's menu<span class=\"writes-only\">, with <button class=\"inline\" type=\"button\" data-review>Review</button> on this page</span>, or with <code>ekko --answer {first}</code> in a terminal."
+                "<b>Waiting on you: question {first}</b>It asks you to approve this plan: answer it in ekko's menu<span class=\"writes-only\">, with Review on this page</span>, or with <code>ekko --answer {first}</code> in a terminal."
             );
             assert_eq!(callouts(), [waiting], "the approval asked, once, though the question is attached to the artifact too");
             let shown = || {
                 let data = board();
                 page(&data[&target], &data, None).0
             };
-            assert!(shown().contains(&format!("<span class=\"state waiting\">Waiting on you: question {first}")) && shown().contains("<p class=\"about\">Written by a session, "), "{}", shown());
+            assert!(shown().contains("<span class=\"state waiting\">Waiting on you</span>") && shown().contains(&format!("<b>Waiting on you: question {first}</b>")) && shown().contains("<p class=\"about\">Written by a session, "), "{}", shown());
             answer(&as_user, first, "Ainda não").unwrap();
             assert_eq!(callouts(), Vec::<String>::new(), "answered, it waits no more");
             assert_eq!(made(), 0, "the second answer");
@@ -4750,7 +4897,7 @@ mod tests {
             assert_eq!(blockers, [&field, &tool, &page].map(|task| task.uid.clone().unwrap()), "the tasks block the artifact");
             assert!(field.id < tool.id && tool.id < page.id, "made in the plan's order");
             assert_eq!(Standing::of(&data[&target], &data).unwrap().words(), "approved, 0 of 3 done");
-            assert!(shown().contains("<span class=\"state\">Approved, 0 of 3 done</span>"), "{}", shown());
+            assert!(shown().contains("<span class=\"state\">Approved</span>") && shown().contains("<b>0/3</b><span>steps done</span>"), "{}", shown());
 
             let context = crate::agent::context(&as_user, &target.to_string()).unwrap().text();
             assert!(context.contains("artifact, a task pending"), "{context}");
@@ -5064,7 +5211,7 @@ mod tests {
             let target = artifact(&as_user, json!({"text": plan("Ship"), "steps": steps})).unwrap();
             let data = as_user.storage.get().unwrap();
             let path = write(&dir, &data[&target], &data, None).unwrap();
-            assert!(std::fs::read_to_string(&path).unwrap().contains("<span class=\"state\">Draft, 1 step</span>"));
+            assert!(std::fs::read_to_string(&path).unwrap().contains("<span class=\"state\">Draft</span>"));
             apply(&as_user, json!({"op": "edit", "item": target, "append": "\nAnd a line more."})).unwrap();
             let page = std::fs::read_to_string(&path).unwrap();
             assert!(page.contains("And a line more.") && page.contains("data-version=\"2\""), "an edit through any path rewrites it: {page}");
