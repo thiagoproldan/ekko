@@ -1772,28 +1772,36 @@ const SCRIPT: &str = r##"(function () {
   var items = parts.map(function (part) {
     return { kind: "Section", badge: "\u00a7", label: part.dataset.part, target: part.id, search: ("section " + part.dataset.part).toLowerCase() };
   });
+  // Each finds by the names the list shows it under too (task 1361): a
+  // step by its place, "05", "5" or "step 5"; a note or a comment by its
+  // number, alone or after its kind, "1321" or "question 1321".
   document.querySelectorAll(".step").forEach(function (step) {
     var key = step.id.slice(5), title = step.querySelector(".title").textContent, more = step.querySelector(".more");
-    items.push({ kind: "Step \u00b7 " + step.dataset.state, badge: step.querySelector(".num").textContent, label: title, step: key,
-      search: ("step steps " + key + " " + title + " " + step.querySelector(".meta").textContent + " " + (more ? more.textContent : "")).toLowerCase() });
+    var badge = step.querySelector(".num").textContent, place = String(Number(badge));
+    items.push({ kind: "Step \u00b7 " + step.dataset.state, badge: badge, label: title, step: key, names: [badge, place, "step " + place, "step " + badge],
+      search: ("step steps " + badge + " " + key + " " + title + " " + step.querySelector(".meta").textContent + " " + (more ? more.textContent : "")).toLowerCase() });
   });
   document.querySelectorAll(".note").forEach(function (note) {
-    var kind = note.dataset.kind, title = note.querySelector("h3").textContent, answer = note.querySelector(".answer");
+    var kind = note.dataset.kind, number = note.id.slice(5), title = note.querySelector("h3").textContent, answer = note.querySelector(".answer");
     var text = Array.prototype.map.call(note.querySelectorAll(".text"), function (part) { return part.textContent; }).join(" ");
-    items.push({ kind: kind + " " + note.id.slice(5), badge: kind.charAt(0), label: title, target: note.id,
-      search: ("note notes " + kind + " " + kind + "s " + title + " " + (answer ? answer.textContent : "") + " " + text).toLowerCase() });
+    items.push({ kind: kind + " " + number, badge: kind.charAt(0), label: title, target: note.id, names: [number, (kind + " " + number).toLowerCase(), "note " + number],
+      search: ("note notes " + kind + " " + kind + "s " + number + " " + title + " " + (answer ? answer.textContent : "") + " " + text).toLowerCase() });
   });
   // The comments, by their theme, state, words and text (task 1213).
   document.querySelectorAll("#comments .entry").forEach(function (entry) {
     var theme = entry.querySelector(".theme").textContent, text = entry.querySelector(".text").textContent, said = entry.querySelector(".said, .suggests");
-    items.push({ kind: "Comment " + entry.dataset.id + " \u00b7 " + theme, badge: theme.charAt(0), label: text, target: entry.id, comment: Number(entry.dataset.id),
-      search: ("comment comments " + theme + " " + entry.dataset.state + " " + text + " " + (said ? said.textContent : "")).toLowerCase() });
+    items.push({ kind: "Comment " + entry.dataset.id + " \u00b7 " + theme, badge: theme.charAt(0), label: text, target: entry.id, comment: Number(entry.dataset.id), names: [entry.dataset.id, "comment " + entry.dataset.id],
+      search: ("comment comments " + entry.dataset.id + " " + theme + " " + entry.dataset.state + " " + text + " " + (said ? said.textContent : "")).toLowerCase() });
   });
   function find(text) {
     var only = text.charAt(0) === ">", words = (only ? text.slice(1) : text).toLowerCase().split(/\s+/).filter(Boolean);
     var hit = function (item) { return words.every(function (word) { return item.search.indexOf(word) >= 0; }); };
     var found = commands().filter(hit);
-    return only ? found : found.concat(items.filter(hit));
+    if (only) return found;
+    // What the words name comes first, then what they are found in.
+    var typed = words.join(" "), named = function (item) { return !!item.names && item.names.indexOf(typed) >= 0; };
+    var hits = items.filter(hit);
+    return found.concat(hits.filter(named), hits.filter(function (item) { return !named(item); }));
   }
   // The suggestions the pill cycles through, each with what it looks for:
   // one that would find nothing on this page is not offered.
@@ -2102,10 +2110,12 @@ const SCRIPT: &str = r##"(function () {
     typed();
     if (document.activeElement !== field) field.focus({ preventScroll: true });
     // Picked again a frame later, as AKQA does, past what the press that
-    // focused it does to the selection.
+    // focused it does to the selection; not once a key has changed it in
+    // that frame, or the next key would replace what was typed (task 1363).
     if (!writing()) {
       input.select();
-      requestAnimationFrame(function () { if (document.activeElement === input && expanded) input.select(); });
+      var picked = input.value;
+      requestAnimationFrame(function () { if (document.activeElement === input && expanded && input.value === picked) input.select(); });
     }
     if (!was || fill) render(); else size();
   }
