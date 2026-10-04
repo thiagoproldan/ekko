@@ -3626,7 +3626,7 @@ body:not([data-writes]) .writes-only { display: none !important; }
 .prose .callout code { background: var(--bg); }
 .prose strong { font-weight: 700; }
 .prose a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-:where(.prose) section :is(h1, h2):not(.opener) { margin: 40px 0 16px; font: 400 28px/34px var(--sans); letter-spacing: -0.016em; color: var(--fg-strong); }
+:where(.prose [data-plan]) :is(h1, h2):not(.opener) { margin: 40px 0 16px; font: 400 28px/34px var(--sans); letter-spacing: -0.016em; color: var(--fg-strong); }
 :where(.prose) h3 { margin: 32px 0 12px; font: 600 22px/28px var(--sans); letter-spacing: -0.016em; color: var(--fg-strong); }
 :where(.prose) :is(h4, h5, h6) { margin: 24px 0 8px; font: 600 18px/24px var(--sans); color: var(--fg-strong); }
 :where(.prose) pre { margin: 24px 0; padding: 16px 20px; overflow-x: auto; border-radius: 16px; background: var(--chip); font: 400 14px/22px var(--mono); }
@@ -3938,7 +3938,7 @@ button.step-head { cursor: pointer; }
 /* A plain document: black on white whatever the theme or the scene, each
    scene as tall as what it holds, and nothing the page moves. */
 @media print {
-  :root, :root[data-theme], :root[data-mode], :root[data-theme][data-mode] { --page: #fff; --bg: #fff; --fg: #191919; --fg-strong: #000; --fg-2: #555; --fg-3: #8a8a8a; --rule: #e9e9e9; --chip: #f5f5f5; --raise: #f5f5f5; --card: #fff; --node: #fff; --node-line: #e2e2e2; --accent: #1a8917; color-scheme: light; }
+  :root, :root[data-theme], :root[data-mode], :root[data-theme][data-mode] { --page: #fff; --bg: #fff; --fg: #191919; --fg-strong: #000; --fg-2: #555; --fg-3: #8a8a8a; --rule: #e9e9e9; --chip: #f5f5f5; --raise: #f5f5f5; --card: #fff; --node: #fff; --node-line: #e2e2e2; --accent: #1a8917; color-scheme: light; transition: none; }
   .toc, .bar, .mark, .arrows, .select-tools, .pop, .prose .pin, #comments .filters, .callout .writes-only { display: none; }
   .scene { padding: 24px 0; }
   .hero { min-height: 0; }
