@@ -469,7 +469,8 @@ pub fn approval_asked<'a>(item: &Item, all: &'a ItemMap) -> Option<&'a Item> {
 /// sentence as a statement, each other section opened by its heading in
 /// capitals, then the steps, the map their `after` draws, the notes and how
 /// the text changed; Medium's section bars at the right edge, and AKQA's
-/// bar at the bottom, which finds a section, step or note (note 1149).
+/// bar at the bottom, which finds a section, step or note (note 1149) and
+/// runs the page's commands, with Review beside it (task 1337).
 pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, String) {
     let artifact = item.artifact.as_deref();
     let standing = Standing::of(item, all);
@@ -496,15 +497,17 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     let mut parts: Vec<(String, String)> = Vec::new();
 
     let mut body = String::new();
+
+    // Where it stands, in Medium's author column beside the text, with the
+    // board it is on and whom the page writes as. The page has no top bar
+    // (task 1337): what it held is run from the pill at the bottom.
     let _ = write!(
         body,
-        "<header class=\"top\"><span class=\"wordmark\">ekko</span><span class=\"where\">{} \u{b7} artifact {}<span id=\"who\"></span></span><span class=\"spacer\"></span><button class=\"link\" id=\"theme\" type=\"button\">Dark</button><button class=\"review writes-only\" type=\"button\" data-review>Review<span class=\"count\"></span></button><button class=\"solid\" type=\"button\" data-copy=\"{command}\">Copy command</button></header>",
-        esc(&board),
-        item.id
+        "<main class=\"page\"><aside class=\"standing\"><div class=\"standing-inner\"><div class=\"mark\">{}</div><p class=\"name\">Artifact {}</p><p class=\"where\">{}<span id=\"who\"></span></p><p class=\"about\">",
+        item.id,
+        item.id,
+        esc(&capitalized(&board))
     );
-
-    // Where it stands, in Medium's author column beside the text.
-    let _ = write!(body, "<main class=\"page\"><aside class=\"standing\"><div class=\"standing-inner\"><div class=\"mark\">{}</div><p class=\"name\">Artifact {}</p><p class=\"about\">", item.id, item.id);
     if let Some(standing) = &standing {
         let _ = write!(body, "{}.", esc(&capitalized(&standing.words())));
     }
@@ -557,7 +560,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     let approval = standing.as_ref().and_then(|standing| standing.waiting);
     if let Some(question) = approval {
         let answer = format!(
-            "It asks you to approve this plan: answer it in ekko's menu<span class=\"writes-only\">, with Review at the top</span>, or with <code>ekko --answer {question}</code> in a terminal."
+            "It asks you to approve this plan: answer it in ekko's menu<span class=\"writes-only\">, with <button class=\"inline\" type=\"button\" data-review>Review</button> on this page</span>, or with <code>ekko --answer {question}</code> in a terminal."
         );
         callout(&mut body, &format!("Waiting on you: question {question}"), &answer);
     }
@@ -761,7 +764,9 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     for (id, name) in &parts {
         let _ = write!(body, "<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{}</span></a></li>", esc(name));
     }
-    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-surface\"><div class=\"bar-fold list-fold\" inert><div class=\"fold-in\"><div class=\"bar-list\" role=\"listbox\" aria-label=\"Suggestions\"></div></div></div><div class=\"bar-fold quote-fold\" inert><div class=\"fold-in\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-suggest\" type=\"button\" aria-pressed=\"false\" title=\"Suggest the words to put in their place\">Suggest</button><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-themes\" role=\"radiogroup\" aria-label=\"Theme\"></div><div class=\"bar-tell\"></div><div class=\"bar-why\"></div></div></div><div class=\"bar-hairline\" aria-hidden=\"true\"></div><div class=\"bar-line\"><div class=\"bar-field\"><span class=\"bar-cursor\" aria-hidden=\"true\"></span><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea></div><button class=\"bar-send\" type=\"button\" aria-label=\"Send the comment\" hidden>\u{2191}</button><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\" aria-expanded=\"false\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\" inert><div class=\"fold-in\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
+    body.push_str("</ol></div></nav>");
+    let _ = write!(body, "<div class=\"bar\" id=\"bar\" data-command=\"{command}\">");
+    body.push_str("<div class=\"bar-surface\"><div class=\"bar-fold list-fold\" inert><div class=\"fold-in\"><div class=\"bar-list\" role=\"listbox\" aria-label=\"Suggestions\"></div></div></div><div class=\"bar-fold quote-fold\" inert><div class=\"fold-in\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-suggest\" type=\"button\" aria-pressed=\"false\" title=\"Suggest the words to put in their place\">Suggest</button><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-themes\" role=\"radiogroup\" aria-label=\"Theme\"></div><div class=\"bar-tell\"></div><div class=\"bar-why\"></div></div></div><div class=\"bar-hairline\" aria-hidden=\"true\"></div><div class=\"bar-line\"><div class=\"bar-field\"><span class=\"bar-cursor\" aria-hidden=\"true\"></span><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea></div><button class=\"bar-send\" type=\"button\" aria-label=\"Send the comment\" hidden>\u{2191}</button><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\" aria-expanded=\"false\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\" inert><div class=\"fold-in\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
     let (plan_parts, ours): (Vec<_>, Vec<_>) = parts.iter().partition(|(id, _)| id.starts_with("plan-"));
     if let Some((id, _)) = plan_parts.first() {
         let _ = write!(body, "<a href=\"#{id}\">Plan</a>");
@@ -769,7 +774,10 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     for (id, name) in ours {
         let _ = write!(body, "<a href=\"#{id}\">{name}</a>");
     }
-    body.push_str("</nav></div></div></div></div>");
+    // The commands the menu offers besides the parts, which the script
+    // writes, and Review, a round button beside the pill (task 1337).
+    body.push_str("</nav><div class=\"bar-acts\" role=\"group\" aria-label=\"Commands\"></div></div></div></div>");
+    body.push_str("<button class=\"bar-side writes-only\" type=\"button\" data-review aria-label=\"Review\" title=\"Review (R)\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 3.75c4.83 0 8.75 3.25 8.75 7.25S16.83 18.25 12 18.25c-.95 0-1.86-.12-2.72-.36L5.2 19.9l1.07-3.47C4.48 15.11 3.25 13.16 3.25 11c0-4 3.92-7.25 8.75-7.25z\"/><path d=\"M8.6 11.1l2.25 2.25 4.6-4.6\"/></svg><span class=\"count\"></span></button></div>");
 
     // The page before its version and after it: the version is the hash of
     // the two, so a change to anything the page holds, its style and script
@@ -1610,33 +1618,22 @@ fn fnv_from(hash: u64, bytes: &[u8]) -> u64 {
 /// the system's.
 const THEME: &str = r##"(function () { var theme = null; try { theme = localStorage.getItem("ekko-theme"); } catch (e) {} document.documentElement.dataset.theme = theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); })();"##;
 
-/// What the page does: its theme toggle and copy buttons, the steps that
-/// open in place, the map's arrows, Medium's section bars, AKQA's command
-/// bar, and the place a reader keeps across the reload a new version makes.
+/// What the page does: the steps that open in place, the map's arrows,
+/// Medium's section bars, AKQA's command bar with the page's commands and
+/// Review beside it, and the place a reader keeps across the reload a new
+/// version makes.
 const SCRIPT: &str = r##"(function () {
   "use strict";
   var root = document.documentElement;
   function smooth() { return matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"; }
 
-  // The theme: the one picked last, or the system's.
-  var toggle = document.getElementById("theme");
-  function showTheme() { toggle.textContent = root.dataset.theme === "dark" ? "Light" : "Dark"; }
-  toggle.addEventListener("click", function () {
+  // The theme: the one picked last, or the system's, switched by a command
+  // in the pill (task 1337).
+  function switchTheme() {
     root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
     try { localStorage.setItem("ekko-theme", root.dataset.theme); } catch (e) {}
-    showTheme();
-  });
-  showTheme();
-
-  document.querySelectorAll("[data-copy]").forEach(function (button) {
-    var label = button.innerHTML;
-    button.addEventListener("click", function () {
-      var copied = navigator.clipboard ? navigator.clipboard.writeText(button.dataset.copy) : Promise.reject();
-      copied.then(function () { button.textContent = "Copied"; }, function () { button.textContent = "Copy failed"; }).then(function () {
-        setTimeout(function () { button.innerHTML = label; }, 1200);
-      });
-    });
-  });
+  }
+  function otherTheme() { return root.dataset.theme === "dark" ? "Light theme" : "Dark theme"; }
 
   // Steps open in place; a step on the map leads to its place in the list.
   function setOpen(step, open) {
@@ -1713,9 +1710,10 @@ const SCRIPT: &str = r##"(function () {
 
   // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
   // into a panel, which finds a part, a step, a note or a comment of the
-  // page. The surface's width and radius, its folds and its menu's lines
-  // move as AKQA's do, by the springs and tweens Motion runs there.
-  var bar = document.getElementById("bar"), surface = bar.querySelector(".bar-surface");
+  // page, and runs the page's commands. The surface's width and radius, its
+  // folds and its menu's lines move as AKQA's do, by the springs and tweens
+  // Motion runs there. Beside it, Review is a round button of its glass.
+  var bar = document.getElementById("bar"), surface = bar.querySelector(".bar-surface"), side = bar.querySelector(".bar-side");
   var input = bar.querySelector("input"), hint = bar.querySelector(".bar-hint"), list = bar.querySelector(".bar-list");
   var listFold = bar.querySelector(".list-fold"), navFold = bar.querySelector(".nav-fold"), menu = bar.querySelector(".bar-menu");
   var quoteFold = bar.querySelector(".quote-fold"), quoteText = bar.querySelector(".bar-quote-text"), why = bar.querySelector(".bar-why");
@@ -1737,6 +1735,28 @@ const SCRIPT: &str = r##"(function () {
   // Whether the comment being edited is a suggestion.
   function editsSuggestion() { return !!editing && typeof editing.replacement === "string"; }
   function writing() { return !!(quoting || reviewing); }
+  // The page's commands (task 1337), which a top bar held before: listed
+  // first among what the words find, as GitHub's command palette suggests
+  // them, or alone after ">", as in its command mode. The review's are the
+  // person's alone; the menu offers those marked `menu` too.
+  function writes() { return "writes" in document.body.dataset; }
+  var COMMANDS = [
+    { label: "Review", words: "review send pending comments verdict", writes: true, run: function () { review(); } },
+    { label: "Approve", words: "approve plan review", writes: true, when: function () { return !!(asked && asked.approve); }, run: function () { review("approve"); } },
+    { label: "Request changes", words: "request changes review", writes: true, run: function () { review("changes"); } },
+    { label: otherTheme, words: "theme dark light mode switch", menu: true, run: function () { switchTheme(); close(true); acts(); } },
+    { label: function () { return "Copy " + bar.dataset.command; }, short: "Copy command", words: "copy command terminal", menu: true, run: function () {
+      close(true);
+      var copied = navigator.clipboard ? navigator.clipboard.writeText(bar.dataset.command) : Promise.reject();
+      copied.then(function () { say("Copied " + bar.dataset.command); }, function () { say("Not copied: the browser refused"); });
+    } }
+  ];
+  function commands() {
+    return COMMANDS.filter(function (command) { return (!command.writes || writes()) && (!command.when || command.when()); }).map(function (command) {
+      var label = typeof command.label === "function" ? command.label() : command.label;
+      return { kind: "Command", badge: "\u203a", label: label, short: command.short || label, menu: command.menu, run: command.run, search: (label + " " + command.words).toLowerCase() };
+    });
+  }
   var items = parts.map(function (part) {
     return { kind: "Section", badge: "\u00a7", label: part.dataset.part, target: part.id, search: ("section " + part.dataset.part).toLowerCase() };
   });
@@ -1758,8 +1778,10 @@ const SCRIPT: &str = r##"(function () {
       search: ("comment comments " + theme + " " + entry.dataset.state + " " + text + " " + (said ? said.textContent : "")).toLowerCase() });
   });
   function find(text) {
-    var words = text.toLowerCase().split(/\s+/).filter(Boolean);
-    return items.filter(function (item) { return words.every(function (word) { return item.search.indexOf(word) >= 0; }); });
+    var only = text.charAt(0) === ">", words = (only ? text.slice(1) : text).toLowerCase().split(/\s+/).filter(Boolean);
+    var hit = function (item) { return words.every(function (word) { return item.search.indexOf(word) >= 0; }); };
+    var found = commands().filter(hit);
+    return only ? found : found.concat(items.filter(hit));
   }
   // The suggestions the pill cycles through, each with what it looks for:
   // one that would find nothing on this page is not offered.
@@ -1867,11 +1889,22 @@ const SCRIPT: &str = r##"(function () {
     this.apply(this.value);
     return true;
   };
+  // Where it is heading at once, with no motion.
+  Motion.prototype.set = function (value) {
+    this.run = null;
+    this.value = this.target = value;
+    this.apply(value);
+  };
 
   // The pill's width and the panel's, AKQA's on a desktop and its phone's
-  // margins on a narrow window.
+  // margins on a narrow window; and, with Review beside it (12px off, as
+  // its style sets), how far left the pill moves where the window cannot
+  // hold the two with the pill centred: the two together are centred then,
+  // within the same margins.
+  function aside() { return side && side.getClientRects().length ? side.offsetWidth + 12 : 0; }
   function widths() {
-    return { wide: innerWidth < 720 ? innerWidth - 24 : 600, slim: Math.min(320, innerWidth - 46) };
+    var room = aside(), slim = Math.min(320, innerWidth - 46 - room);
+    return { wide: innerWidth < 720 ? innerWidth - 24 : 600, slim: slim, shift: -Math.min(room / 2, Math.max(0, (innerWidth + slim) / 2 + room - (innerWidth - 23))) };
   }
   var lines = menu.querySelectorAll("span"), turn = { y: 3.5, r: 0 };
   function cross() {
@@ -1881,6 +1914,7 @@ const SCRIPT: &str = r##"(function () {
   // A field written in while the pill still widens wraps at the width it
   // has then: once wide, it is measured again.
   var width = new Motion(widths().slim, function (v) { surface.style.width = v + "px"; }, function () { if (writing()) grow(); });
+  var shift = new Motion(0, function (v) { bar.style.transform = "translateX(calc(-50% + " + v + "px))"; });
   var radius = new Motion(100, function (v) { surface.style.borderRadius = v + "px"; });
   var lineY = new Motion(3.5, function (v) { turn.y = v; cross(); });
   var lineR = new Motion(0, function (v) { turn.r = v; cross(); });
@@ -1901,6 +1935,7 @@ const SCRIPT: &str = r##"(function () {
     var w = widths(), delay = bar.contains(document.activeElement) ? 0.08 : 0;
     Array.prototype.forEach.call(bar.querySelectorAll(".fold-in"), function (inner) { inner.style.width = w.wide + "px"; });
     width.to(expanded ? w.wide : w.slim, SURFACE);
+    shift.to(expanded ? 0 : w.shift, SURFACE);
     radius.to(expanded ? 20 : 100, SURFACE);
     lineY.to(expanded ? 0 : 3.5, LINES);
     lineR.to(expanded ? 45 : 0, LINES);
@@ -1922,7 +1957,7 @@ const SCRIPT: &str = r##"(function () {
   // the next starts to leave 3.2 s after the last did, while the bar is
   // shut and empty. Each word but the last ends in a no-break space, which
   // the end of its inline block keeps where it drops a space.
-  var cycle = 0, leaving = 0;
+  var cycle = 0, leaving = 0, saying = false;
   function words(text, enter) {
     hint.textContent = "";
     text.split(" ").forEach(function (word, i, all) {
@@ -1942,6 +1977,7 @@ const SCRIPT: &str = r##"(function () {
   function advance() {
     clearTimeout(cycle);
     clearTimeout(leaving);
+    saying = false;
     shown = (shown + 1) % hints.length;
     var spans = hint.children, last = spans[spans.length - 1];
     var next = function () { requestAnimationFrame(function () { if (leaving) { leaving = 0; words(hints[shown][0], true); } }); };
@@ -1960,11 +1996,33 @@ const SCRIPT: &str = r##"(function () {
   // next comes soon after, and the cycle goes on.
   function hold() {
     clearTimeout(cycle);
-    if (leaving) { clearTimeout(leaving); leaving = 0; words(hints[shown][0], false); }
+    if (leaving || saying) { clearTimeout(leaving); leaving = 0; saying = false; words(hints[shown][0], false); }
   }
   function resume(after) {
     clearTimeout(cycle);
     if (idle()) cycle = setTimeout(advance, after);
+  }
+  // What a command did, said in the pill where the suggestions show, until
+  // the next suggestion takes its place.
+  function say(text) {
+    hold();
+    words(text, true);
+    saying = true;
+    cycle = setTimeout(advance, 2400);
+  }
+  // The commands the menu offers besides the parts, as chips of their own.
+  var actsRow = bar.querySelector(".bar-acts");
+  function acts() {
+    actsRow.textContent = "";
+    commands().filter(function (command) { return command.menu; }).forEach(function (command) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "bar-act";
+      chip.textContent = command.short;
+      chip.addEventListener("mousedown", function (event) { event.preventDefault(); });
+      chip.addEventListener("click", function () { command.run(); });
+      actsRow.appendChild(chip);
+    });
   }
   function typed() { bar.classList.toggle("typed", !!input.value); }
 
@@ -1999,7 +2057,8 @@ const SCRIPT: &str = r##"(function () {
       button.innerHTML = '<span class="badge"></span><span class="what"><span class="kind"></span><span class="label"></span></span>';
       var badge = button.querySelector(".badge");
       badge.textContent = item.badge;
-      badge.style.backgroundImage = tint(item.label);
+      if (item.run) button.classList.add("command");
+      else badge.style.backgroundImage = tint(item.label);
       button.querySelector(".kind").textContent = item.kind;
       button.querySelector(".label").textContent = item.label;
       // The input keeps the focus, as in AKQA's list.
@@ -2052,6 +2111,13 @@ const SCRIPT: &str = r##"(function () {
     resume(450);
   }
   function go(item) {
+    // A command runs from the panel, which it shuts or turns into its own.
+    if (item.run) {
+      input.value = "";
+      typed();
+      item.run();
+      return;
+    }
     close(true);
     if (item.comment && window.ekkoOpenComment) ekkoOpenComment(item.comment);
     else if (item.step) openStep(item.step);
@@ -2502,16 +2568,36 @@ const SCRIPT: &str = r##"(function () {
     // A comment being written stays open while other words are picked.
     if (expanded && !writing() && !bar.contains(event.target)) close(false);
   });
+  // "/" opens the pill, and R the review where the page writes.
   addEventListener("keydown", function (event) {
-    if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+    if ((event.key !== "/" && event.key !== "r") || event.ctrlKey || event.metaKey || event.altKey) return;
     var active = document.activeElement;
     if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
+    if (event.key === "r") {
+      if (!writes() || reviewing) return;
+      event.preventDefault();
+      review();
+      return;
+    }
     event.preventDefault();
     if (writing()) open(false); else input.focus();
   });
   addEventListener("resize", size);
+  // Review shows once the server says the page writes as the person, just
+  // after the page is drawn: the pill makes room for it at once, and the
+  // menu offers the person's commands.
+  new MutationObserver(function () {
+    var w = widths();
+    if (!expanded) {
+      width.set(w.slim);
+      shift.set(w.shift);
+    }
+    acts();
+    size();
+  }).observe(document.body, { attributes: true, attributeFilter: ["data-writes"] });
   words(hints[shown][0], false);
   typed();
+  acts();
   size();
   resume(3200);
 
@@ -2648,11 +2734,12 @@ const SCRIPT: &str = r##"(function () {
   // server words it (`feedback::suggested`).
   function suggestedText(c) { return c.replacement ? "Replace " + c.quote.exact + " with " + c.replacement : "Delete: " + c.quote.exact; }
   // The person's comments still pending, which a review sends (task 1106),
-  // counted on Review at the top.
+  // counted on Review beside the pill.
   window.ekkoPending = function () { return comments.filter(function (note) { return note.mine && stateOf(note) === "pending"; }); };
   Array.prototype.forEach.call(document.querySelectorAll("[data-review] .count"), function (count) {
     var pending = ekkoPending().length;
     count.textContent = pending ? String(pending) : "";
+    count.parentElement.setAttribute("aria-label", pending ? "Review, " + (pending === 1 ? "1 pending comment" : pending + " pending comments") : "Review");
   });
   window.ekkoThemes = {
     list: THEMES,
@@ -2861,7 +2948,7 @@ const SCRIPT: &str = r##"(function () {
   pop.setAttribute("role", "dialog");
   document.body.appendChild(pop);
   var popIds = null, popFrom = null;
-  function command() { var copy = document.querySelector("[data-copy]"); return copy ? copy.dataset.copy : "ekko artifact"; }
+  function command() { var bar = document.getElementById("bar"); return bar && bar.dataset.command ? bar.dataset.command : "ekko artifact"; }
   // What the server answered: whether it wrote, and why not.
   function answered(answer) {
     return answer.text().then(function (body) {
@@ -3400,25 +3487,17 @@ a { color: inherit; }
 button { font: inherit; color: inherit; }
 [hidden] { display: none !important; }
 
-/* ---- the top bar: Medium's, 56px and a rule ---------------------------- */
-.top { display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 24px; border-bottom: 1px solid var(--rule); }
-.wordmark { font: 700 28px/1 var(--serif); letter-spacing: -0.04em; color: var(--fg-strong); }
-.where { font: 400 14px/20px var(--sans); color: var(--fg-2); }
-.top .spacer { flex: 1; }
-.top .link { padding: 0; border: 0; background: none; font: 400 14px/20px var(--sans); color: var(--fg-2); cursor: pointer; }
-.top .link:hover { color: var(--fg); }
-.top .solid { padding: 8px 16px; border: 0; border-radius: 999px; background: var(--fg); color: var(--bg); font: 400 14px/20px var(--sans); cursor: pointer; }
-.top .review { display: inline-flex; align-items: center; gap: 8px; padding: 7px 15px; border: 1px solid var(--fg); border-radius: 999px; background: none; color: var(--fg); font: 400 14px/20px var(--sans); cursor: pointer; }
-.top .review .count { box-sizing: border-box; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--fg); color: var(--bg); font: 600 12px/20px var(--sans); text-align: center; }
-.top .review .count:empty { display: none; }
+/* What only the person's page offers: Review, the person's commands. */
 body:not([data-writes]) .writes-only { display: none !important; }
 
 /* ---- the page: Medium's column, where it stands beside it -------------- */
-.page { position: relative; max-width: var(--column); margin: 0 auto; padding: 32px 24px 240px; box-sizing: content-box; }
-.standing { position: absolute; top: 32px; bottom: 0; left: -232px; width: 160px; }
+/* No bar above it (task 1337): what one held is run from the pill. */
+.page { position: relative; max-width: var(--column); margin: 0 auto; padding: 64px 24px 240px; box-sizing: content-box; }
+.standing { position: absolute; top: 64px; bottom: 0; left: -232px; width: 160px; }
 .standing-inner { position: sticky; top: 32px; }
 .standing .mark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--chip); font: 600 13px/1 var(--sans); color: var(--fg); }
 .standing .name { margin: 16px 0 0; font: 500 16px/20px var(--sans); color: var(--fg-strong); }
+.standing .where { margin: 4px 0 0; font: 400 14px/20px var(--sans); color: var(--fg-2); }
 .standing .about { margin: 12px 0 0; font: 400 14px/20px var(--sans); color: var(--fg-2); }
 .segments { display: flex; gap: 1px; margin: 16px 0 0; }
 .segments span { flex: 1 1 0; min-width: 1px; height: 6px; border-radius: 1px; background: var(--fg); opacity: 0.15; }
@@ -3436,6 +3515,7 @@ h1 { margin: 24px 0 0; font: 700 42px/52px var(--sans); letter-spacing: -0.011em
 .callout { margin: 40px 0 0; padding: 20px 24px; border-radius: 8px; background: var(--chip); font: 400 16px/24px var(--sans); color: var(--fg); }
 .callout + .callout { margin-top: 16px; }
 .callout b { display: block; margin: 0 0 4px; font-weight: 600; color: var(--fg-strong); }
+.callout button.inline { padding: 0; border: 0; background: none; font: inherit; color: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 
 /* ---- the plan: AKQA's openers and statement, Medium's text ------------- */
 .prose .statement { margin: 56px 0 0; font: 400 32px/40px var(--serif); letter-spacing: -0.01em; color: var(--fg-strong); }
@@ -3604,6 +3684,25 @@ button.step-head { cursor: pointer; }
 .bar-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 16px; }
 .bar-nav a { display: inline-flex; flex: none; align-items: center; padding: 6px 14px; border: 1px solid transparent; border-radius: 999px; background: var(--bar-fill); font: 400 13px/19.5px var(--sans); letter-spacing: -0.025em; color: var(--bar-ink-nav); text-decoration: none; }
 .bar-nav a:hover, .bar-nav a[aria-current] { background: var(--bar-fill-on); }
+/* The commands (task 1337): in the menu, chips drawn as lines below the
+   parts' filled ones; in the list, a badge of the bar's own fill. */
+.bar-acts { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 16px; }
+.bar-acts:empty { display: none; }
+.bar-act { display: inline-flex; flex: none; align-items: center; padding: 5px 13px; border: 1px solid var(--bar-line); border-radius: 999px; background: none; font: 400 13px/19.5px var(--sans); letter-spacing: -0.025em; color: var(--bar-ink-nav); cursor: pointer; }
+.bar-act:hover { background: var(--bar-fill); }
+.bar-list .item.command .badge { background: var(--bar-fill-on); font-size: 20px; color: var(--bar-ink); }
+/* Review, a round button beside the pill of its glass, size and ring, the
+   person's pending comments counted on its edge. It opens the panel, and
+   steps into it while the panel is open. */
+.bar-side { position: absolute; bottom: 0; left: calc(100% + 12px); display: grid; place-items: center; box-sizing: border-box; width: 56px; height: 56px; padding: 0; border: 0; border-radius: 50%; background-color: rgba(0, 0, 0, var(--bar-black)); background-image: linear-gradient(rgba(255, 255, 255, var(--bar-white)), rgba(255, 255, 255, var(--bar-white))); box-shadow: 0 8px 40px 0 rgba(0, 0, 0, 0.05); color: var(--bar-ink); -webkit-backdrop-filter: blur(var(--bar-blur)); backdrop-filter: blur(var(--bar-blur)); cursor: pointer; transition: opacity 0.25s, transform 0.45s cubic-bezier(0.2, 0.65, 0.3, 1), background-color 0.3s, background-image 0.3s, color 0.3s; }
+.bar-side::before { content: ""; position: absolute; inset: 0; box-sizing: border-box; padding: 1px; border-radius: inherit; background: var(--bar-rim); opacity: 0.82; pointer-events: none; -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
+.bar-side:hover { background-color: rgba(0, 0, 0, calc(var(--bar-black) + 0.04)); }
+.bar-side:active { transform: scale(0.97); }
+.bar-side:focus-visible { outline: 1px solid var(--bar-ink-muted); outline-offset: 2px; }
+.bar-side svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.bar-side .count { position: absolute; top: -3px; right: -3px; box-sizing: border-box; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--bar-ink); font: 600 12px/20px var(--sans); color: var(--page); text-align: center; }
+.bar-side .count:empty { display: none; }
+.bar.open .bar-side { opacity: 0; transform: translateX(-16px) scale(0.86); pointer-events: none; }
 
 /* Comments (task 1213, decision 1214), an ebook's notes: the words tinted
    in their theme, darker where comments of one theme stack and banded where
@@ -3666,6 +3765,7 @@ button.step-head { cursor: pointer; }
 .bar-suggest { flex: none; height: 22px; padding: 0 10px; border: 0; border-radius: 999px; background: var(--bar-fill); font: 500 12px/22px var(--sans); color: var(--bar-ink-muted); cursor: pointer; }
 .bar-suggest[aria-pressed="true"] { background: var(--bar-fill-on); color: var(--bar-ink); box-shadow: inset 0 0 0 1.5px var(--ink, var(--bar-ink)); }
 .bar.suggesting .bar-quote-text { text-decoration: line-through; }
+.bar.reviewing .bar-suggest { display: none; }
 .bar-themes { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 12px 10px; }
 .bar-themes:empty { display: none; }
 .bar-theme, .bar-theme-name { box-sizing: border-box; height: 26px; padding: 0 10px 0 24px; border: 0; border-radius: 999px; background: var(--bar-fill) radial-gradient(circle at 13px 50%, var(--ink) 0 4px, transparent 5px) no-repeat; font: 400 12px/26px var(--sans); color: var(--bar-ink-muted); cursor: pointer; }
@@ -3721,11 +3821,11 @@ button.step-head { cursor: pointer; }
   .toc { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .bar-hint span, .toc-card, .toc-bars, .toc-bars span { transition: none; }
+  .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side { transition: none; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in { animation: none; }
 }
 @media print {
-  .top .link, .top .solid, .top .review, .toc, .bar, .arrows, .select-tools, .pop, .prose .pin, #comments .filters { display: none; }
+  .toc, .bar, .arrows, .select-tools, .pop, .prose .pin, #comments .filters, .callout .writes-only { display: none; }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
 }
@@ -3884,7 +3984,7 @@ mod tests {
         let all: ItemMap = BTreeMap::from([(1, item.clone())]);
         let (html, version) = page(&item, &all, Some(Path::new("/projects/site")));
         assert!(html.contains("<h1>Ship &lt;it&gt;</h1>") && html.contains("<title>Ship &lt;it&gt; \u{b7} artifact 1</title>"), "{html}");
-        assert!(html.contains("<span class=\"where\">project site \u{b7} artifact 1<span id=\"who\"></span></span>"), "{html}");
+        assert!(html.contains("<p class=\"name\">Artifact 1</p><p class=\"where\">Project site<span id=\"who\"></span></p>"), "{html}");
         assert!(html.contains("<p class=\"statement\">A <strong>bold</strong> goal.</p>"), "{html}");
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;") && !html.contains("<script>alert"), "raw HTML in a plan is shown, not run: {html}");
         assert!(html.contains("<span class=\"title\">First &lt;step&gt;</span>") && html.contains("data-state=\"to approve\""), "{html}");
@@ -4060,7 +4160,9 @@ mod tests {
         note.attached_to = item.uid.clone();
         let all: ItemMap = BTreeMap::from([(1, item.clone()), (2, note)]);
         let (html, _) = page(&item, &all, None);
-        assert_eq!(html.matches(" data-copy=").count(), 1, "the command is offered once, at the top: {html}");
+        assert_eq!(html.matches(" data-command=\"ekko artifact 1\"").count(), 1, "the command is offered once, by the pill: {html}");
+        assert!(!html.contains("<header") && !html.contains("id=\"theme\""), "no bar above the page: its commands are the pill's (task 1337)");
+        assert!(html.contains("<p class=\"where\">The default board<span id=\"who\"></span></p>"), "the board, and whom it writes as, beside the text: {html}");
         let legend = html.split("id=\"map\"").nth(1).and_then(|map| map.split_once("<div class=\"legend\">")).map(|(before, after)| (before.contains("class=\"strip\""), after.split("</div>").next().unwrap_or("")));
         assert_eq!(legend.map(|(late, _)| late), Some(false), "the map has a legend above its strip: {html}");
         for state in ["dot proposed\"></span>to approve", "dot open\"></span>pending", "dot progress\"></span>in progress", "dot done\"></span>done", "an arrow: what a step waits on"] {
@@ -4352,7 +4454,7 @@ mod tests {
                 html.split("<div class=\"callout\">").skip(1).map(|rest| rest.split("</div>").next().unwrap_or_default().to_string()).collect::<Vec<_>>()
             };
             let waiting = format!(
-                "<b>Waiting on you: question {first}</b>It asks you to approve this plan: answer it in ekko's menu<span class=\"writes-only\">, with Review at the top</span>, or with <code>ekko --answer {first}</code> in a terminal."
+                "<b>Waiting on you: question {first}</b>It asks you to approve this plan: answer it in ekko's menu<span class=\"writes-only\">, with <button class=\"inline\" type=\"button\" data-review>Review</button> on this page</span>, or with <code>ekko --answer {first}</code> in a terminal."
             );
             assert_eq!(callouts(), [waiting], "the approval asked, once, though the question is attached to the artifact too");
             let shown = || {
@@ -4564,7 +4666,7 @@ mod tests {
             let (html, _) = page(&data[&target], &data, None);
             assert!(html.contains(&format!("<div class=\"kind\">Review {changes} ")), "a review in Notes");
             assert!(html.contains(&format!("<p class=\"verdict\" data-verdict=\"changes\">Changes requested on version 1, sending comments {first}, {second}; it answered question {asked}.</p>")), "{html}");
-            assert!(html.contains("<button class=\"review writes-only\" type=\"button\" data-review>Review<span class=\"count\"></span></button>"));
+            assert!(html.contains("<button class=\"bar-side writes-only\" type=\"button\" data-review aria-label=\"Review\" title=\"Review (R)\">") && html.contains("</svg><span class=\"count\"></span></button></div>"), "Review, beside the pill");
 
             assert!(review(&as_user, "comment", "  ", 1).unwrap_err().to_string().contains("nothing to send"), "nothing pending, nothing said");
             let (commented, _) = review(&as_user, "comment", "Looks closer.", 1).unwrap();
