@@ -661,12 +661,14 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
                 let _ = write!(body, "<div class=\"step-head\">{head}</div></li>");
                 continue;
             }
+            // Its text is Markdown, as the plan's is, and said by the same
+            // rules (task 1360).
             let _ = write!(body, "<button class=\"step-head\" type=\"button\" aria-expanded=\"false\">{head}</button><div class=\"more\">");
             if !step.rest.is_empty() {
-                let _ = write!(body, "<p>{}</p>", esc(step.rest));
+                body.push_str(&markdown(step.rest));
             }
             if let Some(done_when) = &step.step.done_when {
-                let _ = write!(body, "<p class=\"when\"><b>Done when</b> {}</p>", esc(done_when));
+                let _ = write!(body, "<p class=\"when\"><b>Done when</b> {}</p>", inline(done_when));
             }
             body.push_str("</div></li>");
         }
@@ -680,7 +682,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         parts.push(("map".to_string(), "Map".to_string()));
         let _ = write!(
             body,
-            "<section class=\"part\" id=\"map\" data-part=\"Map\"><h2 class=\"opener\">Map</h2><p>What each step waits on, from the first on the left. A step leads to its place in the list.</p><div class=\"legend\"><span><span class=\"dot proposed\"></span>to approve</span><span><span class=\"dot open\"></span>pending</span><span><span class=\"dot progress\"></span>in progress</span><span><span class=\"dot done\"></span>done</span><span>an arrow: what a step waits on</span></div><div class=\"bleed\"><div class=\"strip\">{}</div><div class=\"arrows\" hidden><button type=\"button\" data-by=\"-480\" aria-label=\"Back\">\u{2039}</button><button type=\"button\" data-by=\"480\" aria-label=\"On\">\u{203a}</button></div></div></section>",
+            "<section class=\"part\" id=\"map\" data-part=\"Map\"><h2 class=\"opener\">Map</h2><p>What each step waits on, from the first on the left. A step leads to its place in the list.</p><div class=\"legend\"><span><span class=\"dot proposed\"></span>to approve</span><span><span class=\"dot pending\"></span>pending</span><span><span class=\"dot progress\"></span>in progress</span><span><span class=\"dot done\"></span>done</span><span>an arrow: what a step waits on</span></div><div class=\"bleed\"><div class=\"strip\">{}</div><div class=\"arrows\" hidden><button type=\"button\" data-by=\"-480\" aria-label=\"Back\">\u{2039}</button><button type=\"button\" data-by=\"480\" aria-label=\"On\">\u{203a}</button></div></div></section>",
             map(&steps)
         );
     }
@@ -1460,6 +1462,14 @@ fn markdown(text: &str) -> String {
     out
 }
 
+/// One line of the plan's Markdown as inline HTML, by the rules of
+/// `events`: a paragraph's insides, or the text's own words, escaped, when
+/// it is anything but one paragraph.
+fn inline(text: &str) -> String {
+    let html = markdown(text);
+    html.strip_prefix("<p>").and_then(|rest| rest.strip_suffix("</p>\n")).filter(|inside| !inside.contains("<p>")).map_or_else(|| esc(text), str::to_string)
+}
+
 /// The Goal as the page opens it: its first sentence as the statement, in
 /// large serif, then the rest as it is written.
 fn goal(text: &str) -> String {
@@ -1590,12 +1600,14 @@ fn js_string(text: &str) -> String {
     text.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect()
 }
 
+/// The class a step's state is styled by. Never "open", the class that
+/// unfolds a step (task 1362).
 fn state_class(state: &str) -> &'static str {
     match state {
         "done" => "done",
         "cancelled" => "cancelled",
         "in progress" => "progress",
-        _ => "open",
+        _ => "pending",
     }
 }
 
@@ -4165,7 +4177,7 @@ mod tests {
         assert!(html.contains("<p class=\"where\">The default board<span id=\"who\"></span></p>"), "the board, and whom it writes as, beside the text: {html}");
         let legend = html.split("id=\"map\"").nth(1).and_then(|map| map.split_once("<div class=\"legend\">")).map(|(before, after)| (before.contains("class=\"strip\""), after.split("</div>").next().unwrap_or("")));
         assert_eq!(legend.map(|(late, _)| late), Some(false), "the map has a legend above its strip: {html}");
-        for state in ["dot proposed\"></span>to approve", "dot open\"></span>pending", "dot progress\"></span>in progress", "dot done\"></span>done", "an arrow: what a step waits on"] {
+        for state in ["dot proposed\"></span>to approve", "dot pending\"></span>pending", "dot progress\"></span>in progress", "dot done\"></span>done", "an arrow: what a step waits on"] {
             assert!(legend.is_some_and(|(_, text)| text.contains(state)), "{state}: {legend:?}");
         }
         let parts = [
@@ -4253,7 +4265,7 @@ mod tests {
         let all: ItemMap = BTreeMap::from([(1, item.clone()), (2, done)]);
         let (html, _) = page(&item, &all, None);
         assert!(
-            html.contains("<li class=\"step done\" id=\"step-a\" data-state=\"done\"><button class=\"step-head\" type=\"button\" aria-expanded=\"false\"><span class=\"num\">01</span><span class=\"title\">First</span><span class=\"meta\"><span class=\"dot done\"></span>done \u{b7} task 2</span></button><div class=\"more\"><p>Why it comes first.</p></div></li>"),
+            html.contains("<li class=\"step done\" id=\"step-a\" data-state=\"done\"><button class=\"step-head\" type=\"button\" aria-expanded=\"false\"><span class=\"num\">01</span><span class=\"title\">First</span><span class=\"meta\"><span class=\"dot done\"></span>done \u{b7} task 2</span></button><div class=\"more\"><p>Why it comes first.</p>\n</div></li>"),
             "{html}"
         );
         assert!(html.contains("<span class=\"num\">02</span><span class=\"title\">Second</span><span class=\"meta\"><span class=\"dot proposed\"></span>to approve \u{b7} after a</span></button><div class=\"more\"><p class=\"when\"><b>Done when</b> It ships.</p></div>"), "{html}");
@@ -4261,6 +4273,37 @@ mod tests {
         let (html, _) = page(&bare, &BTreeMap::from([(1, bare.clone())]), None);
         assert!(html.contains("<li class=\"step proposed\" id=\"step-c\" data-state=\"to approve\"><div class=\"step-head\">"), "nothing more to show, nothing to open: {html}");
         assert!(!html.contains("<div class=\"more\">"), "{html}");
+    }
+
+    #[test]
+    fn a_pending_step_renders_folded_like_any_other() {
+        let mut made = steps(&[], &[spec("a", Some("First\nWhy it comes first."), &[])]).unwrap();
+        let pending = Item::new_task(2, "First".into(), vec![], 1);
+        made[0].task = pending.uid.clone();
+        let item = artifact_item(1, &plan("Ship"), made);
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone()), (2, pending)]), None);
+        assert!(html.contains("<li class=\"step pending\" id=\"step-a\" data-state=\"pending\"><button class=\"step-head\" type=\"button\" aria-expanded=\"false\">"), "{html}");
+        assert!(html.contains("<span class=\"dot pending\"></span>pending \u{b7} task 2"), "{html}");
+        // "open" is the class that unfolds a step: no state may be named so.
+        for state in ["pending", "in progress", "done", "cancelled", "waiting", "paused", "anything else"] {
+            assert_ne!(state_class(state), "open", "{state}");
+        }
+    }
+
+    #[test]
+    fn a_step_says_its_text_by_the_plans_markdown_rules() {
+        let mut made = steps(&[], &[spec("a", Some("First\nReads the `Rests on:` line, *once*.\n\n- <b>raw</b> stays words\n- [a link](javascript:alert(1)) its words"), &[])]).unwrap();
+        made[0].done_when = Some("Tests for `each` anchor.".to_string());
+        let item = artifact_item(1, &plan("Ship"), made);
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+        let more = html.split("<div class=\"more\">").nth(1).and_then(|more| more.split("</div>").next()).unwrap_or_default();
+        assert_eq!(
+            more,
+            "<p>Reads the <code>Rests on:</code> line, <em>once</em>.</p>\n<ul>\n<li>&lt;b&gt;raw&lt;/b&gt; stays words</li>\n<li>a link its words</li>\n</ul>\n<p class=\"when\"><b>Done when</b> Tests for <code>each</code> anchor.</p>",
+            "{html}"
+        );
+        assert_eq!(inline("- a list\n- of two"), "- a list\n- of two", "what is not one paragraph is its words");
+        assert_eq!(inline("a <i>tag</i> & more"), "a &lt;i&gt;tag&lt;/i&gt; &amp; more");
     }
 
     #[test]
