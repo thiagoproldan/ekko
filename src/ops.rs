@@ -239,7 +239,8 @@ impl Inquiry {
 }
 
 /// What the MCP tool `artifact` writes (task 1019): a new artifact, from its
-/// plan, or the steps of one there.
+/// plan, or the steps of one there, and the answers to the user's feedback
+/// from its page (task 1107).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactSpec {
@@ -258,13 +259,51 @@ pub struct ArtifactSpec {
     pub priority: Option<i64>,
     #[serde(default)]
     pub phase: Option<String>,
+    /// The user's comments whose suggestions to apply to the plan.
+    #[serde(default)]
+    pub apply: Vec<Ref>,
+    /// Replies to the user's comments.
+    #[serde(default)]
+    pub reply: Vec<ReplyTo>,
+    /// The user's comments and reviews this session settled.
+    #[serde(default)]
+    pub resolve: Vec<Ref>,
 }
 
 impl ArtifactSpec {
     /// Whether it names an artifact and writes nothing: a read.
     pub fn reads(&self) -> bool {
-        self.artifact.is_some() && self.text.is_none() && self.steps.is_none() && self.boards.is_empty() && self.priority.is_none() && self.phase.is_none()
+        self.artifact.is_some()
+            && self.text.is_none()
+            && self.steps.is_none()
+            && self.boards.is_empty()
+            && self.priority.is_none()
+            && self.phase.is_none()
+            && !self.answers()
     }
+
+    /// Whether it answers the user's feedback on the artifact's page.
+    fn answers(&self) -> bool {
+        !self.apply.is_empty() || !self.reply.is_empty() || !self.resolve.is_empty()
+    }
+}
+
+/// A session's reply to one of the user's comments on an artifact's page.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplyTo {
+    pub to: Ref,
+    pub text: String,
+}
+
+/// What the artifact tool did with the user's feedback (task 1107): the
+/// comments it applied, each with the plan's version that took it, the
+/// replies it wrote, and the comments and reviews it resolved.
+#[derive(Debug, Default)]
+pub struct Answered {
+    pub applied: Vec<(u32, u32)>,
+    pub replies: Vec<u32>,
+    pub resolved: Vec<u32>,
 }
 
 /// A cue proposed through ask: for `gotcha`, refuse the calls of `command`
@@ -637,8 +676,7 @@ impl<'a> Draft<'a> {
             return Err(invalid("a comment is written pending: a review or Send now sends it, and the session resolves it"));
         }
         let text = match (text.trim(), &comment.quote, &comment.replacement) {
-            ("", Some(quote), Some(replacement)) if replacement.is_empty() => format!("Delete: {}", quote.exact),
-            ("", Some(quote), Some(replacement)) => format!("Replace {} with {replacement}", quote.exact),
+            ("", Some(quote), Some(replacement)) => crate::feedback::suggested(quote, replacement),
             (text, _, _) => text.to_string(),
         };
         let spec = Create {
@@ -676,8 +714,11 @@ impl<'a> Draft<'a> {
     }
 
     /// Changes the person's comment `uid` on the artifact `on` (task 1213):
-    /// its text, its theme or both; what is `None` stays as it is.
-    pub fn edit_comment(&mut self, on: &Ref, uid: &str, text: Option<&str>, theme: Option<&str>, color: Option<&str>) -> Result<u32, EkkoError> {
+    /// its text, its theme, and the words a suggestion puts in place of its
+    /// quote (task 1107), which a suggestion applied already keeps; what is
+    /// `None` stays as it is. A suggestion's text that only said what it
+    /// suggests says the new words.
+    pub fn edit_comment(&mut self, on: &Ref, uid: &str, text: Option<&str>, theme: Option<&str>, color: Option<&str>, replacement: Option<&str>) -> Result<u32, EkkoError> {
         let id = self.own_comment(on, uid)?;
         if let Some(why) = crate::artifact::theme_refused(theme, color) {
             return Err(invalid(why));
@@ -689,10 +730,25 @@ impl<'a> Draft<'a> {
             crate::ekko::fits("description", text)?;
         }
         let note = self.item(id);
+        if let Some(put) = replacement {
+            let comment = note.comment.as_deref().expect("own_comment found a comment");
+            let (Some(quote), Some(was)) = (comment.quote.as_ref(), comment.replacement.as_deref()) else {
+                return Err(invalid(format!("comment {id} suggests nothing, so it has no words to change")));
+            };
+            if let Some(version) = comment.applied {
+                return Err(invalid(format!("comment {id} was applied in version {version}: its words are in the plan")));
+            }
+            if text.is_none() && note.description == crate::feedback::suggested(quote, was) {
+                note.description = crate::feedback::suggested(quote, put);
+            }
+        }
         if let Some(text) = text {
             note.description = text.to_string();
         }
         let comment = note.comment.as_mut().expect("own_comment found a comment");
+        if let Some(put) = replacement {
+            comment.replacement = Some(put.to_string());
+        }
         if let Some(theme) = theme {
             comment.theme = Some(theme.to_string());
         }
@@ -821,6 +877,212 @@ impl<'a> Draft<'a> {
         let comments = pending.into_iter().map(|(_, _, uid)| uid).collect();
         self.item(note).review = Some(Box::new(Review { verdict: verdict.to_string(), version, comments, answered, resolved: None, unknown: Default::default() }));
         Ok(note)
+    }
+
+    /// Answers the user's feedback on the artifact `id` from its page (task
+    /// 1107), as the artifact tool's `spec` says: applies the suggestions of
+    /// `apply`, writes the replies of `reply`, then resolves `resolve`.
+    pub fn answer_feedback(&mut self, id: u32, spec: &ArtifactSpec) -> Result<Answered, EkkoError> {
+        let mut answered = Answered::default();
+        if !spec.apply.is_empty() {
+            answered.applied = self.apply_suggestions(id, &spec.apply)?;
+        }
+        for reply in &spec.reply {
+            answered.replies.push(self.reply(id, &reply.to, &reply.text)?);
+        }
+        if !spec.resolve.is_empty() {
+            answered.resolved = self.resolve_feedback(id, &spec.resolve)?;
+        }
+        Ok(answered)
+    }
+
+    /// The note `of`, a comment or a review on the artifact `on` (task
+    /// 1107): refused when it is anything else, or in the trash.
+    fn feedback_on(&self, on: u32, of: &Ref) -> Result<u32, EkkoError> {
+        let id = self.resolve(of)?;
+        let note = &self.data[&id];
+        let attached = note.trashed.is_none() && note.attached_to.is_some() && note.attached_to == self.data[&on].uid;
+        if !attached || (note.comment.is_none() && note.review.is_none()) {
+            return Err(invalid(format!("{id} is no comment or review on artifact {on}")));
+        }
+        Ok(id)
+    }
+
+    /// The person's comment `uid` on the artifact `on` applied from its page
+    /// (task 1107), as `apply_suggestions` applies it.
+    pub fn apply_suggestion(&mut self, on: &Ref, uid: &str) -> Result<u32, EkkoError> {
+        let id = self.resolve(on)?;
+        let applied = self.apply_suggestions(id, &[Ref::Text(uid.to_string())])?;
+        Ok(applied[0].0)
+    }
+
+    /// Applies the suggestions of the user's comments `items` on the
+    /// artifact `id` (task 1107, decision 1267): each puts its replacement
+    /// where its words are, as the page finds them, in one edit of the plan,
+    /// which makes the next version; each comment is marked applied in that
+    /// version, and resolved, as GitLab resolves a thread whose suggestion
+    /// is applied. Refused, writing nothing, for a comment that suggests
+    /// nothing, is pending or applied already; for one whose words changed
+    /// or are gone, as GitHub refuses an outdated suggestion; and for one
+    /// whose words the Markdown does not hold as they show, with code,
+    /// emphasis or a link running through them.
+    fn apply_suggestions(&mut self, id: u32, items: &[Ref]) -> Result<Vec<(u32, u32)>, EkkoError> {
+        let item = &self.data[&id];
+        let Some(plan) = item.artifact.as_deref().filter(|_| item.trashed.is_none()) else {
+            return Err(invalid(format!("{id} is not an artifact")));
+        };
+        if !State::of(item).is_some_and(State::is_open) {
+            return Err(invalid(format!("artifact {id} is {}: a suggestion applies to a plan still worked", State::of(item).map_or("closed", State::word))));
+        }
+        // The version the write makes, as `artifact::keep_versions` counts.
+        let version = self.before.get(&id).and_then(|was| was.artifact.as_deref()).map_or(plan.version, |was| was.version) + 1;
+        let mut description = item.description.clone();
+        let mut applied: Vec<(u32, u32)> = Vec::new();
+        for reference in items {
+            let note = self.feedback_on(id, reference)?;
+            if applied.iter().any(|(done, _)| *done == note) {
+                continue;
+            }
+            let found = &self.data[&note];
+            let users = found.created_by.as_ref().is_none_or(|by| by.pid.is_none());
+            let comment = found.comment.as_deref().filter(|comment| users && comment.reply_to.is_none());
+            let Some((comment, quote, replacement)) = comment.and_then(|comment| Some((comment, comment.quote.as_ref()?, comment.replacement.as_deref()?))) else {
+                return Err(invalid(format!("{note} suggests no change to the plan: edit changes it, and resolve settles the comment")));
+            };
+            if comment.sent.is_none() {
+                return Err(invalid(format!("comment {note} is pending: the user has not sent it")));
+            }
+            if let Some(version) = comment.applied {
+                return Err(invalid(format!("comment {note} was applied in version {version} already")));
+            }
+            let shown = crate::feedback::Shown::of(&description);
+            let span = match shown.find(quote) {
+                crate::feedback::Found::Here(span) => span,
+                crate::feedback::Found::Changed(span) => {
+                    return Err(invalid(format!(
+                        "comment {note} is outdated: its words changed to {:?}, so its suggestion is not applied; edit changes the plan",
+                        shown.words(&span)
+                    )))
+                }
+                crate::feedback::Found::Gone => {
+                    return Err(invalid(format!("comment {note} is outdated: the plan no longer holds its words, so its suggestion is not applied")))
+                }
+            };
+            let Some(bytes) = shown.written(&description, &span) else {
+                return Err(invalid(format!(
+                    "comment {note}'s words {:?} are not written in the plan as they show, with Markdown running through them: edit changes the plan",
+                    quote.exact
+                )));
+            };
+            // A deletion takes a space beside the words with them, as a word
+            // processor's smart cut does: the one before when white space,
+            // a line's end or punctuation follows, else the one after at a
+            // line's start. No two spaces are left together, nor one before
+            // a comma or at either end of a line.
+            let (mut start, mut end) = (bytes.start, bytes.end);
+            if replacement.is_empty() {
+                let next = description[end..].chars().next();
+                if description[..start].ends_with(' ') && next.is_none_or(|next| next.is_whitespace() || ".,;:!?)".contains(next)) {
+                    start -= 1;
+                } else if description[..start].ends_with('\n') && next == Some(' ') {
+                    end += 1;
+                }
+            }
+            description.replace_range(start..end, replacement);
+            applied.push((note, version));
+        }
+        if description == self.data[&id].description {
+            return Err(invalid("applying changes nothing: the plan already says what it suggests"));
+        }
+        crate::ekko::fits("description", &description)?;
+        crate::ekko::retitled(&self.data[&id].description, &description)?;
+        self.item(id).description = description;
+        let now = chrono::Local::now().timestamp_millis();
+        for (note, version) in &applied {
+            if let Some(comment) = self.item(*note).comment.as_mut() {
+                comment.applied = Some(*version);
+                comment.resolved.get_or_insert(now);
+            }
+        }
+        Ok(applied)
+    }
+
+    /// A reply to the user's comment `to` on the artifact `id` (task 1107):
+    /// a note attached to the artifact, as the comment is, sent as it is
+    /// written, which the page shows under the comment. A reply to a reply
+    /// answers the comment that one answers, so a thread stays one comment
+    /// and its replies, as on GitHub.
+    fn reply(&mut self, id: u32, to: &Ref, text: &str) -> Result<u32, EkkoError> {
+        let note = self.feedback_on(id, to)?;
+        let found = &self.data[&note];
+        let Some(comment) = found.comment.as_deref() else {
+            return Err(invalid(format!(
+                "{note} is a review, and a reply answers a comment: the plan's next version answers a review, or a note attached to the artifact"
+            )));
+        };
+        if comment.sent.is_none() {
+            return Err(invalid(format!("comment {note} is pending: the user has not sent it")));
+        }
+        let thread = comment.reply_to.clone().or_else(|| found.uid.clone());
+        let version = self.data[&id].artifact.as_deref().map_or(1, |plan| plan.version);
+        let spec = Create {
+            kind: None,
+            text: text.to_string(),
+            boards: Vec::new(),
+            priority: None,
+            due: None,
+            with: None,
+            phase: None,
+            blocked_by: Vec::new(),
+            attached_to: Some(Ref::Id(id)),
+            supersedes: None,
+            starred: false,
+        };
+        let reply = self.create(&spec)?;
+        self.item(reply).comment = Some(Box::new(crate::item::Comment {
+            version,
+            quote: None,
+            replacement: None,
+            step: None,
+            reply_to: thread,
+            sent: Some(chrono::Local::now().timestamp_millis()),
+            resolved: None,
+            applied: None,
+            theme: None,
+            color: None,
+            unknown: Default::default(),
+        }));
+        Ok(reply)
+    }
+
+    /// Resolves the user's comments and reviews `items` on the artifact `id`
+    /// (task 1107), which then wait on no session. One resolved already
+    /// stays as it was.
+    fn resolve_feedback(&mut self, id: u32, items: &[Ref]) -> Result<Vec<u32>, EkkoError> {
+        let now = chrono::Local::now().timestamp_millis();
+        let mut resolved = Vec::new();
+        for reference in items {
+            let note = self.feedback_on(id, reference)?;
+            if let Some(comment) = self.data[&note].comment.as_deref() {
+                if let Some(to) = comment.reply_to.as_deref() {
+                    let thread = self.data.values().find(|item| item.uid.as_deref() == Some(to)).map_or_else(|| "it answers".to_string(), |item| item.id.to_string());
+                    return Err(invalid(format!("{note} is a reply: resolve the comment {thread}")));
+                }
+                if comment.sent.is_none() {
+                    return Err(invalid(format!("comment {note} is pending: the user has not sent it")));
+                }
+            }
+            let item = self.item(note);
+            if let Some(review) = item.review.as_mut() {
+                review.resolved.get_or_insert(now);
+            } else if let Some(comment) = item.comment.as_mut() {
+                comment.resolved.get_or_insert(now);
+            }
+            if !resolved.contains(&note) {
+                resolved.push(note);
+            }
+        }
+        Ok(resolved)
     }
 
     fn item(&mut self, id: u32) -> &mut Item {
@@ -1099,6 +1361,9 @@ impl<'a> Draft<'a> {
     /// the plan (`crate::artifact::keep_versions`).
     pub fn artifact(&mut self, spec: &ArtifactSpec) -> Result<u32, EkkoError> {
         let Some(target) = &spec.artifact else {
+            if spec.answers() {
+                return Err(invalid("apply, reply and resolve answer the feedback on an artifact's page: name the artifact"));
+            }
             let text = spec.text.as_deref().map(str::trim).unwrap_or_default();
             if let Some(why) = crate::artifact::unplanned(text) {
                 return Err(invalid(why));
@@ -1131,9 +1396,12 @@ impl<'a> Draft<'a> {
         let Some(plan) = self.data[&id].artifact.as_deref() else {
             return Err(invalid(format!("{id} is not an artifact: the artifact tool creates one from a plan")));
         };
-        let steps = crate::artifact::steps(&plan.steps, spec.steps.as_deref().unwrap_or_default()).map_err(invalid)?;
-        if let Some(plan) = self.item(id).artifact.as_mut() {
-            plan.steps = steps;
+        // Steps not given stay as they are: the call answers feedback alone.
+        if let Some(given) = spec.steps.as_deref() {
+            let steps = crate::artifact::steps(&plan.steps, given).map_err(invalid)?;
+            if let Some(plan) = self.item(id).artifact.as_mut() {
+                plan.steps = steps;
+            }
         }
         Ok(id)
     }
@@ -3167,6 +3435,7 @@ mod tests {
             reply_to: None,
             sent: None,
             resolved: None,
+            applied: None,
             theme: theme.map(str::to_string),
             color: color.map(str::to_string),
             unknown: Default::default(),
@@ -3185,13 +3454,13 @@ mod tests {
         let uid = |id: u32| board.storage.get().unwrap()[&id].uid.clone().unwrap();
 
         let mut draft = Draft::open(&person).unwrap();
-        assert!(draft.edit_comment(&Ref::Id(first), &uid(theirs), Some("Mine now"), None, None).is_err(), "a session's comment is the session's");
+        assert!(draft.edit_comment(&Ref::Id(first), &uid(theirs), Some("Mine now"), None, None, None).is_err(), "a session's comment is the session's");
         assert!(draft.trash_comment(&Ref::Id(first), &uid(theirs)).is_err(), "a session's comment is the session's");
-        assert!(draft.edit_comment(&Ref::Id(second), &uid(mine), Some("Elsewhere"), None, None).is_err(), "a comment on another artifact");
-        assert!(draft.edit_comment(&Ref::Id(first), &uid(first), Some("The plan"), None, None).is_err(), "the artifact is no comment");
-        assert!(draft.edit_comment(&Ref::Id(first), &uid(mine), Some("Which facts?"), Some("Dúvida"), Some("teal")).is_err(), "an unknown color");
-        assert!(draft.edit_comment(&Ref::Id(first), &uid(mine), Some("  "), None, None).is_err(), "a comment keeps words");
-        draft.edit_comment(&Ref::Id(first), &uid(mine), Some("Which facts?"), Some("Dúvida"), Some("pink")).unwrap();
+        assert!(draft.edit_comment(&Ref::Id(second), &uid(mine), Some("Elsewhere"), None, None, None).is_err(), "a comment on another artifact");
+        assert!(draft.edit_comment(&Ref::Id(first), &uid(first), Some("The plan"), None, None, None).is_err(), "the artifact is no comment");
+        assert!(draft.edit_comment(&Ref::Id(first), &uid(mine), Some("Which facts?"), Some("Dúvida"), Some("teal"), None).is_err(), "an unknown color");
+        assert!(draft.edit_comment(&Ref::Id(first), &uid(mine), Some("  "), None, None, None).is_err(), "a comment keeps words");
+        draft.edit_comment(&Ref::Id(first), &uid(mine), Some("Which facts?"), Some("Dúvida"), Some("pink"), None).unwrap();
         draft.commit(false).unwrap();
         let data = board.storage.get().unwrap();
         let kept = data[&mine].comment.as_deref().unwrap();
@@ -3203,7 +3472,262 @@ mod tests {
         draft.commit(false).unwrap();
         assert!(board.storage.get().unwrap()[&mine].trashed.is_some(), "in the trash, kept 30 days");
         let mut draft = Draft::open(&person).unwrap();
-        assert!(draft.edit_comment(&Ref::Id(first), &uid(mine), Some("Back"), None, None).is_err(), "a comment in the trash is not changed");
+        assert!(draft.edit_comment(&Ref::Id(first), &uid(mine), Some("Back"), None, None, None).is_err(), "a comment in the trash is not changed");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session applies the user's sent suggestions (task 1107, decision
+    /// 1267): one edit puts each replacement where its words are, the plan
+    /// moves to its next version, keeping the text it had, and each comment
+    /// is marked applied in that version and resolved; a deletion takes a
+    /// space with its words. Refused, writing nothing: a suggestion applied
+    /// already, a pending one, a comment that suggests nothing, one whose
+    /// words Markdown runs through, whose words changed or are gone, a
+    /// reply, a comment on another artifact, and a closed artifact.
+    #[test]
+    fn a_session_applies_the_users_sent_suggestions() {
+        let (me, _, _) = crate::holder::test_sessions();
+        let (board, dir) = board("apply");
+        let person = Ekko::new(Storage::new(&dir).unwrap()).acting_as(Actor::person());
+        let session = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me);
+        let plan = "Ship\n\n## Goal\nWhy it matters to the user.\n## What is known\nRun `ekko serve` before the page opens.\n## Design\nIt stops until an idle hour passes, then it ends.\n## Risks and open questions\nNone that we know of yet.";
+        let spec: ArtifactSpec = serde_json::from_value(json!({"text": plan, "steps": [{"key": "one", "text": "First"}]})).unwrap();
+        let mut draft = Draft::open(&session).unwrap();
+        let (first, second) = (draft.artifact(&spec).unwrap(), draft.artifact(&spec).unwrap());
+        draft.commit(false).unwrap();
+        let on = Ref::Id(first);
+        let mut draft = Draft::open(&person).unwrap();
+        let idle = draft.comment(&on, "", comment_on("until an idle hour", "It stops ", " passes, then it ends. None that", Some("after an idle hour"))).unwrap();
+        let known = draft.comment(&on, "Is it?", comment_on("that we know of", "None ", " yet.", Some(""))).unwrap();
+        let code = draft.comment(&on, "", comment_on("Run ekko serve before", "the user. ", " the page opens.", Some("Start the server before"))).unwrap();
+        let why = draft.comment(&on, "Which user?", comment_on("the user", "Why it matters to ", ". Run ekko serve before", None)).unwrap();
+        let opens = draft.comment(&on, "", comment_on("before the page opens", "Run ekko serve ", ". It stops until an idle hour pa", Some("as the page opens"))).unwrap();
+        let matters = draft.comment(&on, "", comment_on("it matters", "Why ", " to the user. Run ekko serve be", Some("it counts"))).unwrap();
+        let ends = draft.comment(&on, "", comment_on("then it ends", "idle hour passes, ", ". None that we know of yet.", Some("then it stops"))).unwrap();
+        let other = draft.comment(&Ref::Id(second), "", comment_on("until an idle hour", "It stops ", " passes", Some("after an hour"))).unwrap();
+        let uid = |id: u32, draft: &Draft| draft.data[&id].uid.clone().unwrap();
+        for id in [idle, known, code, why, opens, matters, ends, other] {
+            let artifact = if id == other { Ref::Id(second) } else { Ref::Id(first) };
+            let note = uid(id, &draft);
+            draft.send_comment(&artifact, &note).unwrap();
+        }
+        let pending = draft.comment(&on, "", comment_on("It stops", "", " until an idle hour", Some("It halts"))).unwrap();
+        draft.commit(false).unwrap();
+
+        let apply = |items: &[u32]| -> Result<Answered, EkkoError> {
+            let spec: ArtifactSpec = serde_json::from_value(json!({"artifact": first, "apply": items})).unwrap();
+            let mut draft = Draft::open(&session)?;
+            let id = draft.artifact(&spec)?;
+            let answered = draft.answer_feedback(id, &spec)?;
+            draft.commit(false)?;
+            Ok(answered)
+        };
+        // The session changes the words two suggestions are on, and replies.
+        let mut draft = Draft::open(&session).unwrap();
+        let text = plan.replace("before the page opens", "before a page opens").replace("Why it matters", "Why it counts");
+        draft.edit(&Edit { item: Ref::Id(first), text: Some(text.clone()), replace: None, append: None, if_updated_at: None }).unwrap();
+        let answer = draft.reply(first, &Ref::Id(idle), "Taken.").unwrap();
+        draft.commit(false).unwrap();
+        assert!(refused(apply(&[opens])).contains("its words changed to \"before a page opens\""));
+        assert!(refused(apply(&[matters])).contains("no longer holds its words"));
+        assert!(refused(apply(&[answer])).contains("suggests no change"), "a reply is no suggestion");
+
+        let answered = apply(&[idle, known, idle]).unwrap();
+        assert_eq!(answered.applied, vec![(idle, 3), (known, 3)], "each once, in the version the write makes");
+        let data = board.storage.get().unwrap();
+        let artifact = data[&first].artifact.as_deref().unwrap();
+        assert_eq!(artifact.version, 3, "one write, one version");
+        assert_eq!(artifact.earlier.last().map(|earlier| earlier.text.as_str()), Some(text.as_str()), "the text it replaced is kept");
+        assert!(data[&first].description.contains("It stops after an idle hour passes, then it ends."), "{}", data[&first].description);
+        assert!(data[&first].description.ends_with("\nNone yet."), "a deletion takes a space with it: {}", data[&first].description);
+        for id in [idle, known] {
+            let comment = data[&id].comment.as_deref().unwrap();
+            assert_eq!(comment.applied, Some(3));
+            assert!(comment.resolved.is_some(), "applied is resolved, as GitLab resolves the thread");
+        }
+
+        assert!(refused(apply(&[idle])).contains("applied in version 3 already"));
+        assert!(refused(apply(&[pending])).contains("is pending"));
+        assert!(refused(apply(&[why])).contains("suggests no change"));
+        assert!(refused(apply(&[code])).contains("not written in the plan as they show"));
+        assert!(refused(apply(&[other])).contains(&format!("no comment or review on artifact {first}")));
+        assert!(refused(apply(&[ends, code])).contains("not written in the plan as they show"), "all or nothing");
+        assert!(board.storage.get().unwrap()[&ends].comment.as_deref().unwrap().applied.is_none(), "a refused call wrote nothing");
+        apply(&[ends]).unwrap();
+        assert!(board.storage.get().unwrap()[&first].description.contains("passes, then it stops."));
+
+        let mut draft = Draft::open(&session).unwrap();
+        draft.set_state(&[Ref::Id(second)], "cancelled").unwrap();
+        draft.commit(false).unwrap();
+        let spec: ArtifactSpec = serde_json::from_value(json!({"artifact": second, "apply": [other]})).unwrap();
+        let mut draft = Draft::open(&session).unwrap();
+        let id = draft.artifact(&spec).unwrap();
+        assert!(refused(draft.answer_feedback(id, &spec)).contains("is cancelled"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The person changes the words a suggestion of theirs puts in place of
+    /// its quote (task 1107): a text that only said what it suggested says
+    /// the new words, their own text stays; a comment that suggests nothing
+    /// has no words to change, and an applied one keeps them.
+    #[test]
+    fn the_person_changes_the_words_of_a_suggestion() {
+        let (me, _, _) = crate::holder::test_sessions();
+        let (board, dir) = board("suggestion");
+        let person = Ekko::new(Storage::new(&dir).unwrap()).acting_as(Actor::person());
+        let session = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me);
+        let plan = "Ship\n\n## Goal\nIt stops until an idle hour.\n## What is known\nA.\n## Design\nB.\n## Risks and open questions\nC.";
+        let spec: ArtifactSpec = serde_json::from_value(json!({"text": plan, "steps": [{"key": "one", "text": "First"}]})).unwrap();
+        let mut draft = Draft::open(&session).unwrap();
+        let first = draft.artifact(&spec).unwrap();
+        draft.commit(false).unwrap();
+        let on = Ref::Id(first);
+        let mut draft = Draft::open(&person).unwrap();
+        let told = draft.comment(&on, "", comment_on("until an idle hour", "It stops ", ".", Some("after an hour"))).unwrap();
+        let own = draft.comment(&on, "Too long?", comment_on("idle hour", "until an ", ".", Some("hour"))).unwrap();
+        let plain = draft.comment(&on, "Why?", comment_on("It stops", "", " until", None)).unwrap();
+        let uid = |id: u32, draft: &Draft| draft.data[&id].uid.clone().unwrap();
+        let (told_uid, own_uid, plain_uid) = (uid(told, &draft), uid(own, &draft), uid(plain, &draft));
+        draft.edit_comment(&on, &told_uid, None, None, None, Some("after one hour")).unwrap();
+        draft.edit_comment(&on, &own_uid, None, None, None, Some("an hour")).unwrap();
+        assert!(refused(draft.edit_comment(&on, &plain_uid, None, None, None, Some("It halts"))).contains("suggests nothing"));
+        draft.commit(false).unwrap();
+        let data = board.storage.get().unwrap();
+        assert_eq!((data[&told].description.as_str(), data[&told].comment.as_deref().unwrap().replacement.as_deref()), ("Replace until an idle hour with after one hour", Some("after one hour")));
+        assert_eq!((data[&own].description.as_str(), data[&own].comment.as_deref().unwrap().replacement.as_deref()), ("Too long?", Some("an hour")));
+
+        let mut draft = Draft::open(&person).unwrap();
+        draft.send_comment(&on, &told_uid).unwrap();
+        draft.apply_suggestion(&on, &told_uid).unwrap();
+        draft.commit(false).unwrap();
+        let mut draft = Draft::open(&person).unwrap();
+        assert!(refused(draft.edit_comment(&on, &told_uid, None, None, None, Some("never"))).contains("was applied in version 2"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A suggested deletion takes a space with its words, as a word
+    /// processor's smart cut does: the one before when white space, a
+    /// line's end or punctuation follows, the one after at a line's start.
+    #[test]
+    fn a_deletion_takes_a_space_with_its_words() {
+        let (me, _, _) = crate::holder::test_sessions();
+        for (said, words, left) in [
+            ("None that we know of yet.", "that we know of", "None yet."),
+            ("None yet, as far as we know.", "as far as we know", "None yet,."),
+            ("It ends here", "here", "It ends"),
+            ("Here it ends.", "Here", "it ends."),
+        ] {
+            let (board, dir) = board("deletion");
+            let person = Ekko::new(Storage::new(&dir).unwrap()).acting_as(Actor::person());
+            let session = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me.clone());
+            let plan = format!("Ship\n\n## Goal\n{said}\n## What is known\nA.\n## Design\nB.\n## Risks and open questions\nC.");
+            let spec: ArtifactSpec = serde_json::from_value(json!({"text": plan, "steps": [{"key": "one", "text": "First"}]})).unwrap();
+            let mut draft = Draft::open(&session).unwrap();
+            let first = draft.artifact(&spec).unwrap();
+            draft.commit(false).unwrap();
+            let mut draft = Draft::open(&person).unwrap();
+            let note = draft.comment(&Ref::Id(first), "", comment_on(words, "", "", Some(""))).unwrap();
+            let uid = draft.data[&note].uid.clone().unwrap();
+            draft.send_comment(&Ref::Id(first), &uid).unwrap();
+            draft.commit(false).unwrap();
+            let mut draft = Draft::open(&session).unwrap();
+            draft.apply_suggestions(first, &[Ref::Id(note)]).unwrap();
+            draft.commit(false).unwrap();
+            assert!(board.storage.get().unwrap()[&first].description.contains(&format!("## Goal\n{left}\n")), "{said:?} less {words:?}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// A session replies to the user's comments and resolves their feedback
+    /// (task 1107): a reply is a note on the artifact, sent, in the thread of
+    /// the comment it answers, which a reply to a reply joins; resolving
+    /// settles a review or a comment, and a second time leaves it as it was.
+    /// Refused: a reply to a review or to a pending comment, resolving a
+    /// reply or a pending comment, and answers that name no artifact. A call
+    /// that answers feedback alone leaves the steps as they are.
+    #[test]
+    fn a_session_replies_to_the_users_comments_and_resolves_their_feedback() {
+        let (me, _, _) = crate::holder::test_sessions();
+        let (board, dir) = board("reply");
+        let person = Ekko::new(Storage::new(&dir).unwrap()).acting_as(Actor::person());
+        let session = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me);
+        let plan = "Ship\n\n## Goal\nWhy.\n## What is known\nFacts.\n## Design\nHow.\n## Risks and open questions\nNone.";
+        let spec: ArtifactSpec = serde_json::from_value(json!({"text": plan, "steps": [{"key": "one", "text": "First"}]})).unwrap();
+        let mut draft = Draft::open(&session).unwrap();
+        let first = draft.artifact(&spec).unwrap();
+        draft.commit(false).unwrap();
+        let mut draft = Draft::open(&person).unwrap();
+        let facts = draft.comment(&Ref::Id(first), "Which facts?", comment_on("Facts.", "Why. ", " How.", None)).unwrap();
+        let review = draft.review(&Ref::Id(first), Review::COMMENT, "Look again.", 1).unwrap();
+        let pending = draft.comment(&Ref::Id(first), "Not yet.", comment_on("How.", "Facts. ", " None.", None)).unwrap();
+        draft.commit(false).unwrap();
+        let standing = |data: &ItemMap| crate::artifact::Standing::of(&data[&first], data).map(|standing| (standing.reviews, standing.comments));
+        assert_eq!(standing(&board.storage.get().unwrap()), Some((1, 1)));
+
+        let answer = |spec: Value| -> Result<Answered, EkkoError> {
+            let spec: ArtifactSpec = serde_json::from_value(spec).unwrap();
+            let mut draft = Draft::open(&session)?;
+            let id = draft.artifact(&spec)?;
+            let answered = draft.answer_feedback(id, &spec)?;
+            draft.commit(false)?;
+            Ok(answered)
+        };
+        let replied = answer(json!({"artifact": first, "reply": [{"to": facts, "text": "The ones measured."}]})).unwrap();
+        let [reply] = replied.replies[..] else { panic!("one reply: {replied:?}") };
+        let again = answer(json!({"artifact": first, "reply": [{"to": reply, "text": "On this machine."}]})).unwrap().replies[0];
+        let data = board.storage.get().unwrap();
+        let thread = data[&facts].uid.clone();
+        for id in [reply, again] {
+            let comment = data[&id].comment.as_deref().unwrap();
+            assert_eq!((data[&id].attached_to.clone(), comment.reply_to.clone(), comment.version), (data[&first].uid.clone(), thread.clone(), 1));
+            assert!(comment.sent.is_some() && data[&id].created_by.as_ref().is_some_and(|by| by.pid.is_some()), "sent, and the session's");
+            assert!(!crate::artifact::feedback(&data[&id]), "a session's reply waits on no session");
+        }
+        assert_eq!(data[&again].description, "On this machine.");
+        assert!(refused(answer(json!({"artifact": first, "reply": [{"to": review, "text": "Done."}]}))).contains("is a review"));
+        assert!(refused(answer(json!({"artifact": first, "reply": [{"to": pending, "text": "Early."}]}))).contains("is pending"));
+
+        assert!(refused(answer(json!({"artifact": first, "resolve": [reply]}))).contains(&format!("is a reply: resolve the comment {facts}")));
+        assert!(refused(answer(json!({"artifact": first, "resolve": [pending]}))).contains("is pending"));
+        assert!(refused(answer(json!({"resolve": [facts]}))).contains("name the artifact"));
+        let resolved = answer(json!({"artifact": first, "resolve": [review, facts, review]})).unwrap();
+        assert_eq!(resolved.resolved, vec![review, facts]);
+        let data = board.storage.get().unwrap();
+        assert_eq!(standing(&data), Some((0, 0)), "nothing waits on a session");
+        let at = data[&facts].comment.as_deref().unwrap().resolved;
+        assert!(at.is_some() && data[&review].review.as_deref().unwrap().resolved.is_some());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        answer(json!({"artifact": first, "resolve": [facts]})).unwrap();
+        assert_eq!(board.storage.get().unwrap()[&facts].comment.as_deref().unwrap().resolved, at, "resolved once, when it was");
+        assert_eq!(board.storage.get().unwrap()[&first].artifact.as_deref().unwrap().steps.len(), 1, "the steps stay as they were");
+        let reads = |spec: Value| serde_json::from_value::<ArtifactSpec>(spec).unwrap().reads();
+        assert!(reads(json!({"artifact": first})) && !reads(json!({"artifact": first, "resolve": [facts]})));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A comment of the person's on `exact`, made on version 1 of the plan,
+    /// suggesting `replacement` when one is given.
+    fn comment_on(exact: &str, prefix: &str, suffix: &str, replacement: Option<&str>) -> crate::item::Comment {
+        crate::item::Comment {
+            version: 1,
+            quote: Some(crate::item::Quote { exact: exact.into(), prefix: prefix.into(), suffix: suffix.into(), section: String::new(), unknown: Default::default() }),
+            replacement: replacement.map(str::to_string),
+            step: None,
+            reply_to: None,
+            sent: None,
+            resolved: None,
+            applied: None,
+            theme: None,
+            color: None,
+            unknown: Default::default(),
+        }
+    }
+
+    /// The refusal `result` carries, for its message.
+    fn refused<T: std::fmt::Debug>(result: Result<T, EkkoError>) -> String {
+        match result {
+            Err(EkkoError::InvalidInput(why)) => why,
+            other => panic!("not refused: {other:?}"),
+        }
     }
 }

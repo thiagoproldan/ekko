@@ -630,6 +630,7 @@ fn route(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
         ("POST", "/api/comment/edit") => comment(shared, request, socket, "edit"),
         ("POST", "/api/comment/delete") => comment(shared, request, socket, "delete"),
         ("POST", "/api/comment/send") => comment(shared, request, socket, "send"),
+        ("POST", "/api/comment/apply") => comment(shared, request, socket, "apply"),
         ("POST", "/api/review") => review(shared, request, socket),
         ("GET", path) => match query.split('&').find_map(|pair| pair.strip_prefix("token=")) {
             Some(token) if path.starts_with("/default/") || path.starts_with("/project/") => opened(shared, path, token),
@@ -639,16 +640,17 @@ fn route(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
     }
 }
 
-/// `POST /api/comment`, `/api/comment/edit`, `/api/comment/delete` and
-/// `/api/comment/send`: the person's comments on an artifact's page (tasks
-/// 1105, 1213 and 1106), as JSON naming the page's path. A new comment
-/// carries its text and the comment itself, with the plan's version it was
-/// made on and what it is about; an edit names a comment by uid with the
-/// text, theme or color it takes; a deletion names one alone, and puts it in
-/// the trash; Send now names one alone, and sends it outside a review. Each
-/// is written as the person on the artifact's board, and refused when the
-/// plan moved on, no longer holds the words, or the comment is not the
-/// person's.
+/// `POST /api/comment`, `/api/comment/edit`, `/api/comment/delete`,
+/// `/api/comment/send` and `/api/comment/apply`: the person's comments on an
+/// artifact's page (tasks 1105, 1213, 1106 and 1107), as JSON naming the
+/// page's path. A new comment carries its text and the comment itself, with
+/// the plan's version it was made on and what it is about; an edit names a
+/// comment by uid with the text, theme or color it takes; a deletion names
+/// one alone, and puts it in the trash; Send now names one alone, and sends
+/// it outside a review; Apply names a sent suggestion alone, and applies it
+/// to the plan. Each is written as the person on the artifact's board, and
+/// refused when the plan moved on, no longer holds the words, or the
+/// comment is not the person's.
 fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -> Answer {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -664,6 +666,8 @@ fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -
         theme: Option<String>,
         #[serde(default)]
         color: Option<String>,
+        #[serde(default)]
+        replacement: Option<String>,
     }
     let person = match writer(shared, request, socket) {
         Ok(person) => person,
@@ -676,17 +680,18 @@ fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -
     let Some((project, uid)) = board_of(&posted.page) else {
         return json(404, serde_json::json!({"why": format!("{} is no artifact's page", posted.page)}));
     };
-    let alone = posted.uid.is_some() && posted.comment.is_none() && posted.text.is_none() && posted.theme.is_none() && posted.color.is_none();
+    let alone = posted.uid.is_some() && posted.comment.is_none() && posted.text.is_none() && posted.theme.is_none() && posted.color.is_none() && posted.replacement.is_none();
     let fields = match how {
-        "new" => posted.comment.is_some() && posted.uid.is_none() && posted.theme.is_none() && posted.color.is_none(),
+        "new" => posted.comment.is_some() && posted.uid.is_none() && posted.theme.is_none() && posted.color.is_none() && posted.replacement.is_none(),
         "edit" => posted.uid.is_some() && posted.comment.is_none(),
         _ => alone,
     };
     if !fields {
         let wants = match how {
             "new" => "a new comment takes page, text and comment",
-            "edit" => "an edit takes page, uid, and any of text, theme and color",
+            "edit" => "an edit takes page, uid, and any of text, theme, color and a suggestion's replacement",
             "send" => "Send now takes page and uid",
+            "apply" => "Apply takes page and uid",
             _ => "a deletion takes page and uid",
         };
         return json(400, serde_json::json!({ "why": wants }));
@@ -695,8 +700,9 @@ fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -
         let on = crate::ops::Ref::Text(uid.clone());
         match (how, posted.comment, posted.uid.as_deref()) {
             ("new", Some(comment), _) => draft.comment(&on, posted.text.as_deref().unwrap_or_default(), comment),
-            ("edit", _, Some(note)) => draft.edit_comment(&on, note, posted.text.as_deref(), posted.theme.as_deref(), posted.color.as_deref()),
+            ("edit", _, Some(note)) => draft.edit_comment(&on, note, posted.text.as_deref(), posted.theme.as_deref(), posted.color.as_deref(), posted.replacement.as_deref()),
             ("send", _, Some(note)) => draft.send_comment(&on, note),
+            ("apply", _, Some(note)) => draft.apply_suggestion(&on, note),
             (_, _, Some(note)) => draft.trash_comment(&on, note),
             _ => unreachable!("the fields were checked"),
         }
@@ -707,6 +713,7 @@ fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -
                 "new" => "note",
                 "edit" => "edited note",
                 "send" => "sent note",
+                "apply" => "applied note",
                 _ => "trashed note",
             };
             log(&shared.home, &format!("POST /api/comment: {did} {id} on {uid}, by the user, {person}"));

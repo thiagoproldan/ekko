@@ -7,6 +7,7 @@ mod dialog;
 mod directory;
 mod docs;
 mod ekko;
+mod feedback;
 mod guard;
 mod holder;
 mod item;

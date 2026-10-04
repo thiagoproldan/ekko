@@ -315,6 +315,10 @@ pub struct Planned {
     pub approved_version: Option<u32>,
     pub standing: String,
     pub steps: Vec<PlannedStep>,
+    /// Its id while feedback from its page waits on a session, which
+    /// context points to the artifact tool's read of (task 1107).
+    #[serde(skip)]
+    pub feedback: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -356,13 +360,17 @@ impl Planned {
                 }
             })
             .collect();
-        Some(Planned { version: artifact.version, approved_version: artifact.approved_version, standing: standing.words(), steps })
+        let feedback = (standing.reviews + standing.comments > 0).then_some(item.id);
+        Some(Planned { version: artifact.version, approved_version: artifact.approved_version, standing: standing.words(), steps, feedback })
     }
 
     /// The lines context prints under the artifact's own.
     pub fn lines(&self) -> Vec<String> {
         let approved = self.approved_version.map(|version| format!(", version {version} approved")).unwrap_or_default();
         let mut lines = vec![format!("plan version {}{approved}: {}", self.version, self.standing)];
+        if let Some(id) = self.feedback {
+            lines.push(format!("feedback open: the artifact tool reads it whole with artifact {id}, and its apply, reply and resolve answer it"));
+        }
         for step in &self.steps {
             let after = if step.after.is_empty() { String::new() } else { format!(" (after {})", step.after.join(", ")) };
             let task = match step.task {
@@ -753,7 +761,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     for (id, name) in &parts {
         let _ = write!(body, "<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{}</span></a></li>", esc(name));
     }
-    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-surface\"><div class=\"bar-fold list-fold\" inert><div class=\"fold-in\"><div class=\"bar-list\" role=\"listbox\" aria-label=\"Suggestions\"></div></div></div><div class=\"bar-fold quote-fold\" inert><div class=\"fold-in\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-themes\" role=\"radiogroup\" aria-label=\"Theme\"></div><div class=\"bar-tell\"></div><div class=\"bar-why\"></div></div></div><div class=\"bar-hairline\" aria-hidden=\"true\"></div><div class=\"bar-line\"><div class=\"bar-field\"><span class=\"bar-cursor\" aria-hidden=\"true\"></span><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea></div><button class=\"bar-send\" type=\"button\" aria-label=\"Send the comment\" hidden>\u{2191}</button><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\" aria-expanded=\"false\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\" inert><div class=\"fold-in\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
+    body.push_str("</ol></div></nav><div class=\"bar\" id=\"bar\"><div class=\"bar-surface\"><div class=\"bar-fold list-fold\" inert><div class=\"fold-in\"><div class=\"bar-list\" role=\"listbox\" aria-label=\"Suggestions\"></div></div></div><div class=\"bar-fold quote-fold\" inert><div class=\"fold-in\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-suggest\" type=\"button\" aria-pressed=\"false\" title=\"Suggest the words to put in their place\">Suggest</button><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-themes\" role=\"radiogroup\" aria-label=\"Theme\"></div><div class=\"bar-tell\"></div><div class=\"bar-why\"></div></div></div><div class=\"bar-hairline\" aria-hidden=\"true\"></div><div class=\"bar-line\"><div class=\"bar-field\"><span class=\"bar-cursor\" aria-hidden=\"true\"></span><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea></div><button class=\"bar-send\" type=\"button\" aria-label=\"Send the comment\" hidden>\u{2191}</button><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\" aria-expanded=\"false\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\" inert><div class=\"fold-in\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
     let (plan_parts, ours): (Vec<_>, Vec<_>) = parts.iter().partition(|(id, _)| id.starts_with("plan-"));
     if let Some((id, _)) = plan_parts.first() {
         let _ = write!(body, "<a href=\"#{id}\">Plan</a>");
@@ -840,12 +848,14 @@ fn theme_of(comment: &crate::item::Comment) -> (&'static str, String) {
 }
 
 /// The state a comment is in: pending until a review or Send now sends it,
-/// then sent, and resolved once a session settles it.
+/// then sent, and resolved once a session settles it, or applied once its
+/// suggestion is (task 1107).
 fn comment_state(comment: &crate::item::Comment) -> &'static str {
-    match (comment.resolved, comment.sent) {
-        (Some(_), _) => "resolved",
-        (None, Some(_)) => "sent",
-        (None, None) => "pending",
+    match (comment.applied, comment.resolved, comment.sent) {
+        (Some(_), ..) => "applied",
+        (None, Some(_), _) => "resolved",
+        (None, None, Some(_)) => "sent",
+        (None, None, None) => "pending",
     }
 }
 
@@ -863,10 +873,24 @@ fn comment_entry(body: &mut String, note: &Item, replies: &[&&Item]) {
         esc(&when(note.timestamp)),
         id = note.id
     );
-    if let Some(quote) = &comment.quote {
-        let _ = write!(body, "<blockquote class=\"said\">{}</blockquote>", esc(&quote.exact));
+    let mut told = "";
+    match (&comment.quote, &comment.replacement) {
+        // A suggestion: its words struck through, and the ones it puts in
+        // their place (task 1107); what it says, when the person wrote
+        // nothing else, is the same and is not shown again.
+        (Some(quote), Some(replacement)) => {
+            let put = if replacement.is_empty() { String::new() } else { format!("<ins>{}</ins>", esc(replacement)) };
+            let _ = write!(body, "<div class=\"suggests\"><del>{}</del>{put}</div>", esc(&quote.exact));
+            if note.description == crate::feedback::suggested(quote, replacement) {
+                told = " told";
+            }
+        }
+        (Some(quote), None) => {
+            let _ = write!(body, "<blockquote class=\"said\">{}</blockquote>", esc(&quote.exact));
+        }
+        _ => {}
     }
-    let _ = write!(body, "<div class=\"text\">{}</div>", esc(&note.description));
+    let _ = write!(body, "<div class=\"text{told}\">{}</div>", esc(&note.description));
     for reply in replies {
         let by = written_by(reply).map(|by| format!("{} \u{b7} ", esc(&by))).unwrap_or_default();
         let _ = write!(
@@ -1015,24 +1039,33 @@ fn unique(taken: &mut Vec<String>, id: &str) -> String {
 /// heading with the Markdown under it, and what comes before the first under
 /// an empty heading.
 fn sections(plan: &str) -> Vec<(String, String)> {
-    let mut sections = vec![(String::new(), String::new())];
+    section_ranges(plan).into_iter().map(|(heading, range)| (heading, plan[range].lines().map(|line| format!("{line}\n")).collect())).collect()
+}
+
+/// `sections`, each with the bytes of `plan` its Markdown is, its heading's
+/// line left out: where a suggestion from the page applies (task 1107).
+pub(crate) fn section_ranges(plan: &str) -> Vec<(String, std::ops::Range<usize>)> {
+    let mut sections = vec![(String::new(), 0..0)];
     let mut fenced = false;
-    for line in plan.lines() {
-        let trimmed = line.trim_start();
+    let mut at = 0;
+    for line in plan.split_inclusive('\n') {
+        let end = at + line.len();
+        let bare = line.strip_suffix('\n').map_or(line, |line| line.strip_suffix('\r').unwrap_or(line));
+        let trimmed = bare.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             fenced = !fenced;
         }
-        match line.strip_prefix("## ") {
-            Some(heading) if !fenced => sections.push((heading.trim().to_string(), String::new())),
+        match bare.strip_prefix("## ") {
+            Some(heading) if !fenced => sections.push((heading.trim().to_string(), end..end)),
             _ => {
-                if let Some((_, text)) = sections.last_mut() {
-                    text.push_str(line);
-                    text.push('\n');
+                if let Some((_, range)) = sections.last_mut() {
+                    range.end = end;
                 }
             }
         }
+        at = end;
     }
-    sections.retain(|(heading, text)| !heading.is_empty() || !text.trim().is_empty());
+    sections.retain(|(heading, range)| !heading.is_empty() || !plan[range.clone()].trim().is_empty());
     sections
 }
 
@@ -1337,6 +1370,13 @@ fn replace(path: &Path, content: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&temp, path)
 }
 
+/// The Markdown a plan is written in: CommonMark, with GitHub's tables,
+/// strikethrough and task lists.
+pub(crate) fn markdown_options() -> pulldown_cmark::Options {
+    use pulldown_cmark::Options;
+    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+}
+
 /// The plan's Markdown as the events the page renders, each run of text
 /// one event. Raw HTML in it is text, not run: the page is the board's, and
 /// a script a plan carried would run there. For the same reason a link
@@ -1344,8 +1384,8 @@ fn replace(path: &Path, content: &[u8]) -> std::io::Result<()> {
 /// otherwise. An image is a link to its source, never loaded, since the
 /// page loads nothing a plan names (task 1097).
 fn events(text: &str) -> Vec<pulldown_cmark::Event<'_>> {
-    use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, TextMergeStream};
-    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    use pulldown_cmark::{Event, LinkType, Parser, Tag, TagEnd, TextMergeStream};
+    let options = markdown_options();
     let mut events = Vec::new();
     // Each link and image open here, innermost last: whether it kept its
     // tag, and a kept image's source, which names it when it has no words.
@@ -1517,7 +1557,7 @@ fn sentence_end(text: &str, line_ends: bool) -> Option<usize> {
 /// Whether a link to `url` keeps its address on the page: one to the web,
 /// to mail, or to a place on the page itself. Any other -- javascript:,
 /// data:, a file -- would run or load something from the page.
-fn linkable(url: &str) -> bool {
+pub(crate) fn linkable(url: &str) -> bool {
     let url = url.to_ascii_lowercase();
     ["http://", "https://", "mailto:", "#"].iter().any(|start| url.starts_with(start))
 }
@@ -1690,6 +1730,12 @@ const SCRIPT: &str = r##"(function () {
   // A review being written (task 1106): its verdict, and whether Approve
   // was pressed once, its tasks listed for the second press to confirm.
   var reviewing = null, confirming = false, tell = bar.querySelector(".bar-tell"), drop = bar.querySelector(".bar-quote-drop");
+  // Whether the comment suggests words in place of the quoted ones (task
+  // 1107), and the field's other text: what was typed as the comment while
+  // it suggests, the words it suggests while it does not, null until then.
+  var suggest = bar.querySelector(".bar-suggest"), suggesting = false, said = "", put = null;
+  // Whether the comment being edited is a suggestion.
+  function editsSuggestion() { return !!editing && typeof editing.replacement === "string"; }
   function writing() { return !!(quoting || reviewing); }
   var items = parts.map(function (part) {
     return { kind: "Section", badge: "\u00a7", label: part.dataset.part, target: part.id, search: ("section " + part.dataset.part).toLowerCase() };
@@ -1707,7 +1753,7 @@ const SCRIPT: &str = r##"(function () {
   });
   // The comments, by their theme, state, words and text (task 1213).
   document.querySelectorAll("#comments .entry").forEach(function (entry) {
-    var theme = entry.querySelector(".theme").textContent, text = entry.querySelector(".text").textContent, said = entry.querySelector(".said");
+    var theme = entry.querySelector(".theme").textContent, text = entry.querySelector(".text").textContent, said = entry.querySelector(".said, .suggests");
     items.push({ kind: "Comment " + entry.dataset.id + " \u00b7 " + theme, badge: theme.charAt(0), label: text, target: entry.id, comment: Number(entry.dataset.id),
       search: ("comment comments " + theme + " " + entry.dataset.state + " " + text + " " + (said ? said.textContent : "")).toLowerCase() });
   });
@@ -2104,6 +2150,8 @@ const SCRIPT: &str = r##"(function () {
     quoting = words;
     editing = edited || null;
     renaming = false;
+    unsuggest();
+    suggest.hidden = !!editing && !editsSuggestion();
     quoteText.textContent = words.exact;
     why.textContent = "";
     input.hidden = true;
@@ -2123,12 +2171,48 @@ const SCRIPT: &str = r##"(function () {
   window.ekkoEdit = function (target) {
     quote(target.quote || { exact: "" }, target.color, target);
     note.value = target.text;
+    // A suggestion opens on its words, and its text, when it said only
+    // what it suggests, is not offered to edit.
+    if (editsSuggestion()) {
+      note.value = target.told ? "" : target.text;
+      put = target.replacement;
+      suggestion(true);
+    }
     grow();
   };
+  // A suggestion, as GitHub's suggestion block starts from the lines
+  // selected: the field holds the quoted words, which the person changes
+  // into the words to put in their place; emptied, it suggests deleting
+  // them (task 1107, decision 1267).
+  function suggestion(on) {
+    if (on === suggesting || !quoting || (editing && !editsSuggestion())) return;
+    suggesting = on;
+    var other = note.value;
+    note.value = on ? (put === null ? quoting.exact : put) : said;
+    if (on) said = other; else put = other;
+    suggest.setAttribute("aria-pressed", on ? "true" : "false");
+    bar.classList.toggle("suggesting", on);
+    note.placeholder = on ? "Nothing here deletes the words" : "Comment on these words";
+    note.setAttribute("aria-label", on ? "The words to put in place of the quoted ones" : "Comment on the quoted words");
+    send.setAttribute("aria-label", on ? "Send the suggestion" : "Send the comment");
+    why.textContent = "";
+    grow();
+    note.focus();
+  }
+  function unsuggest() {
+    suggesting = false;
+    said = "";
+    put = null;
+    suggest.setAttribute("aria-pressed", "false");
+    bar.classList.remove("suggesting");
+    note.setAttribute("aria-label", "Comment on the quoted words");
+  }
+  suggest.addEventListener("click", function () { suggestion(!suggesting); });
   function unquote() {
     quoting = null;
     editing = null;
     renaming = false;
+    unsuggest();
     color = null;
     why.textContent = "";
     quoteText.textContent = "";
@@ -2148,7 +2232,7 @@ const SCRIPT: &str = r##"(function () {
   function grow() {
     note.style.height = "auto";
     if (!note.hidden && note.value) note.style.height = note.scrollHeight + "px";
-    send.disabled = sending || (!reviewing && !note.value.trim());
+    send.disabled = sending || (!reviewing && !suggesting && !editsSuggestion() && !note.value.trim());
     size();
   }
   function refused(text) {
@@ -2156,12 +2240,20 @@ const SCRIPT: &str = r##"(function () {
     size();
   }
   function comment() {
-    if (!note.value.trim()) return refused("Write the comment first.");
+    var flat = function (text) { return text.replace(/\s+/g, " ").trim(); };
+    // A suggestion's words, and its text, which may be empty: then the
+    // server says what it suggests.
+    var suggests = suggesting || editsSuggestion();
+    var text = suggesting ? said : note.value, words = suggesting ? note.value.trim() : (put === null ? editing && editing.replacement : put.trim());
+    if (!suggests && !text.trim()) return refused("Write the comment first.");
+    if (suggests && flat(words) === flat(quoting.exact)) return refused("Change the words first: these are the plan's.");
     var article = document.querySelector("article.prose"), name = themes().names()[color];
     var path = editing ? "/api/comment/edit" : "/api/comment";
+    var made = { version: Number(article.dataset.version), quote: quoting, theme: name, color: color };
+    if (suggests) made.replacement = words;
     var posted = editing
-      ? { page: location.pathname, uid: editing.uid, text: note.value, theme: name, color: color }
-      : { page: location.pathname, text: note.value, comment: { version: Number(article.dataset.version), quote: quoting, theme: name, color: color } };
+      ? { page: location.pathname, uid: editing.uid, text: text.trim() ? text : undefined, theme: name, color: color, replacement: suggests ? words : undefined }
+      : { page: location.pathname, text: text, comment: made };
     // Sent, it is no longer kept across a reload: the write itself makes
     // the new version that reloads the page.
     sending = true;
@@ -2434,7 +2526,7 @@ const SCRIPT: &str = r##"(function () {
     var kept = { y: scrollY, id: at ? at.id : "", offset: at ? at.getBoundingClientRect().top : 0,
       open: Array.prototype.map.call(document.querySelectorAll(".step.open"), function (step) { return step.id; }) };
     if (bar.classList.contains("open") && !quoting && !sending) kept.bar = input.value;
-    if (quoting && !sending) { kept.quote = quoting; kept.note = note.value; kept.color = color; kept.editing = editing; }
+    if (quoting && !sending) { kept.quote = quoting; kept.note = note.value; kept.color = color; kept.editing = editing; kept.suggesting = suggesting; kept.said = said; kept.put = put; }
     if (reviewing && !sending) kept.review = { verdict: reviewing.verdict, note: note.value };
     if (summary) kept.summary = summary;
     if (chosen !== "comment") kept.chosen = chosen;
@@ -2450,7 +2542,13 @@ const SCRIPT: &str = r##"(function () {
       try { history.scrollRestoration = "auto"; } catch (e) {}
       if (kept.quote && kept.editing) ekkoEdit(kept.editing);
       else if (kept.quote) quote(kept.quote, kept.color, null);
-      if (kept.quote) { note.value = kept.note || ""; grow(); }
+      if (kept.quote) {
+        if (!!kept.suggesting !== suggesting) suggestion(!!kept.suggesting);
+        said = kept.said || "";
+        put = kept.put === undefined ? null : kept.put;
+        note.value = kept.note || "";
+        grow();
+      }
       summary = kept.summary || "";
       chosen = kept.chosen || "comment";
       if (kept.review) { summary = kept.review.note || ""; review(kept.review.verdict); }
@@ -2534,7 +2632,18 @@ const SCRIPT: &str = r##"(function () {
     var c = note.comment || {};
     return c.theme || names()[colorOf(note)];
   }
-  function stateOf(note) { var c = note.comment || {}; return c.resolved ? "resolved" : c.sent ? "sent" : "pending"; }
+  function stateOf(note) { var c = note.comment || {}; return c.applied ? "applied" : c.resolved ? "resolved" : c.sent ? "sent" : "pending"; }
+  // What a suggestion does to the plan's words: those words struck through,
+  // and the ones it puts in their place (task 1107).
+  function suggested(c) {
+    var change = element("div", "suggests");
+    change.appendChild(element("del", "", c.quote.exact));
+    if (c.replacement) change.appendChild(element("ins", "", c.replacement));
+    return change;
+  }
+  // What a suggestion says when the person wrote nothing else, as the
+  // server words it (`feedback::suggested`).
+  function suggestedText(c) { return c.replacement ? "Replace " + c.quote.exact + " with " + c.replacement : "Delete: " + c.quote.exact; }
   // The person's comments still pending, which a review sends (task 1106),
   // counted on Review at the top.
   window.ekkoPending = function () { return comments.filter(function (note) { return note.mine && stateOf(note) === "pending"; }); };
@@ -2772,12 +2881,14 @@ const SCRIPT: &str = r##"(function () {
     if (note.found && note.found.changed) head.appendChild(element("span", "state changed", "words changed"));
     if (same) head.appendChild(element("span", "same-words", "same words"));
     box.appendChild(head);
-    if (c.quote && !same && (several || (note.found && note.found.changed))) {
+    var suggests = c.quote && typeof c.replacement === "string";
+    if (c.quote && !same && !suggests && (several || (note.found && note.found.changed))) {
       var said = element("div", "said" + (note.found && note.found.changed ? " was" : ""), c.quote.exact);
       if (note.found && note.found.changed) said.setAttribute("aria-label", "It was on: " + c.quote.exact);
       box.appendChild(said);
     }
-    box.appendChild(element("div", "text", note.text));
+    if (suggests) box.appendChild(suggested(c));
+    box.appendChild(element("div", "text" + (suggests && note.text === suggestedText(c) ? " told" : ""), note.text));
     (replies[note.uid] || []).forEach(function (reply) {
       var answer = element("div", "pop-reply");
       answer.appendChild(element("div", "meta", (reply.by || "") + " · " + reply.when));
@@ -2795,7 +2906,7 @@ const SCRIPT: &str = r##"(function () {
       edit.type = remove.type = "button";
       edit.addEventListener("click", function () {
         shut(false);
-        if (window.ekkoEdit) ekkoEdit({ id: note.id, uid: note.uid, text: note.text, quote: c.quote, color: color });
+        if (window.ekkoEdit) ekkoEdit({ id: note.id, uid: note.uid, text: note.text, quote: c.quote, color: color, replacement: c.replacement, told: suggests && note.text === suggestedText(c) });
       });
       remove.addEventListener("click", function () {
         actions.textContent = "";
@@ -2821,6 +2932,29 @@ const SCRIPT: &str = r##"(function () {
         actions.appendChild(no);
         yes.focus();
       });
+      // A sent suggestion whose words are still where it was made applies
+      // to the plan, as GitHub's Apply suggestion does: the next version
+      // puts its words there (task 1107).
+      if (suggests && stateOf(note) === "sent" && note.found && !note.found.changed) {
+        var apply = element("button", "", "Apply");
+        apply.type = "button";
+        apply.title = "Put these words in the plan, in its next version";
+        apply.addEventListener("click", function () {
+          apply.disabled = true;
+          fetch("/api/comment/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ page: location.pathname, uid: note.uid }) })
+            .then(answered)
+            .then(function (got) {
+              if (!got.ok) throw new Error(got.why);
+              actions.textContent = "";
+              actions.appendChild(element("span", "ask", "Applied."));
+            })
+            .catch(function (error) {
+              apply.disabled = false;
+              actions.appendChild(element("span", "why", "Not applied: " + ekkoUnreached(error)));
+            });
+        });
+        actions.appendChild(apply);
+      }
       // A pending comment sent alone, outside a review, as GitHub's single
       // comment goes (task 1106).
       if (stateOf(note) === "pending") {
@@ -3526,6 +3660,9 @@ button.step-head { cursor: pointer; }
 .bar-quote { display: flex; align-items: flex-start; gap: 8px; margin: 12px 12px 8px; padding: 8px 10px; border-left: 3px solid var(--ink, var(--bar-ink-muted)); border-radius: 4px; background: var(--bar-fill); font: 400 13px/18px var(--sans); color: var(--bar-ink-muted); }
 .bar-quote-text { flex: 1; display: -webkit-box; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .bar-quote-drop { flex: none; padding: 0 4px; border: 0; background: none; font: 400 16px/18px var(--sans); color: var(--bar-ink-muted); cursor: pointer; }
+.bar-suggest { flex: none; height: 22px; padding: 0 10px; border: 0; border-radius: 999px; background: var(--bar-fill); font: 500 12px/22px var(--sans); color: var(--bar-ink-muted); cursor: pointer; }
+.bar-suggest[aria-pressed="true"] { background: var(--bar-fill-on); color: var(--bar-ink); box-shadow: inset 0 0 0 1.5px var(--ink, var(--bar-ink)); }
+.bar.suggesting .bar-quote-text { text-decoration: line-through; }
 .bar-themes { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 12px 10px; }
 .bar-themes:empty { display: none; }
 .bar-theme, .bar-theme-name { box-sizing: border-box; height: 26px; padding: 0 10px 0 24px; border: 0; border-radius: 999px; background: var(--bar-fill) radial-gradient(circle at 13px 50%, var(--ink) 0 4px, transparent 5px) no-repeat; font: 400 12px/26px var(--sans); color: var(--bar-ink-muted); cursor: pointer; }
@@ -3560,6 +3697,10 @@ button.step-head { cursor: pointer; }
 .prose li.entry::before { content: ""; position: absolute; top: 18px; bottom: 18px; left: 0; width: 3px; border-radius: 2px; background: var(--ink, var(--ink-yellow)); }
 .entry-head { width: 100%; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; }
 .prose .entry .said { display: -webkit-box; overflow: hidden; margin: 8px 0 0; padding: 0 0 0 12px; border-left: 2px solid var(--rule); font: italic 400 16px/24px var(--serif); color: var(--fg-2); -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.suggests { margin: 8px 0 0; font: 400 15px/22px var(--serif); overflow-wrap: anywhere; }
+.suggests del { color: var(--fg-2); text-decoration: line-through; }
+.suggests ins { margin: 0 0 0 6px; padding: 0 3px; border-radius: 3px; background: color-mix(in srgb, var(--ink-green) 18%, transparent); color: var(--fg); text-decoration: none; }
+.pop .text.told, .prose .entry .text.told { display: none; }
 .prose .entry .text { font: 400 16px/24px var(--sans); }
 .prose .entry .reply { margin: 12px 0 0; padding: 0 0 0 12px; border-left: 2px solid var(--rule); }
 .prose .entry .reply .meta { font-size: 12px; color: var(--fg-2); }
@@ -3853,6 +3994,7 @@ mod tests {
                 reply_to,
                 sent: None,
                 resolved: None,
+                applied: None,
                 theme: theme.map(str::to_string),
                 color: color.map(str::to_string),
                 unknown: BTreeMap::new(),
@@ -4372,6 +4514,7 @@ mod tests {
                 reply_to: None,
                 sent,
                 resolved: None,
+                applied: None,
                 theme: None,
                 color: None,
                 unknown: Default::default(),
@@ -4489,7 +4632,7 @@ mod tests {
             let on = Ref::Id(target);
             let comment = |text: &str| {
                 let quote = crate::item::Quote { exact: "Text.".into(), prefix: String::new(), suffix: String::new(), section: String::new(), unknown: Default::default() };
-                let pending = crate::item::Comment { version: 1, quote: Some(quote), replacement: None, step: None, reply_to: None, sent: None, resolved: None, theme: None, color: None, unknown: Default::default() };
+                let pending = crate::item::Comment { version: 1, quote: Some(quote), replacement: None, step: None, reply_to: None, sent: None, resolved: None, applied: None, theme: None, color: None, unknown: Default::default() };
                 let mut draft = Draft::open(&as_user).unwrap();
                 let id = draft.comment(&on, text, pending).unwrap();
                 draft.commit(false).unwrap();

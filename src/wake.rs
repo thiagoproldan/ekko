@@ -153,27 +153,9 @@ pub fn untold(ekko: &Ekko, me: &Actor, told: &Told, since: u64, holding: bool) -
         }
         let on = format!("artifact {} ({})", artifact.id, agent::clip(crate::ekko::title(&artifact.description), TITLED));
         if let Some(review) = note.review.as_deref() {
-            let ids: Vec<u32> = review.comments.iter().filter_map(|comment| by_uid.get(comment.as_str())).map(|comment| comment.id).collect();
-            let verdict = match review.verdict.as_str() {
-                crate::item::Review::APPROVE => format!("approved version {}", review.version),
-                crate::item::Review::CHANGES => format!("changes requested on version {}", review.version),
-                _ => format!("commented on version {}", review.version),
-            };
-            let answering = answered
-                .and_then(|question| Some((question.id, question.question.as_ref()?.answer.as_ref()?)))
-                .map(|(id, answer)| format!(", answering question {id} with \"{}\"", crate::menu::picked(&answer.text)))
-                .unwrap_or_default();
-            let sending = match ids.as_slice() {
-                [] => String::new(),
-                [one] => format!(", sending comment {one}"),
-                many => format!(", sending comments {}", many.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")),
-            };
-            let says = if note.description == crate::artifact::review_said(&review.verdict, review.version, &ids) {
-                String::new()
-            } else {
-                format!(" It says: {}", agent::clip(&note.description, QUOTED))
-            };
-            lines.push(format!("Review {} from the user, on {on}: {verdict}{answering}{sending}.{says}", note.id));
+            let (told, own) = crate::feedback::review_told(note, review, |uid| by_uid.get(uid).copied());
+            let says = if own { format!(" It says: {}", agent::clip(&note.description, QUOTED)) } else { String::new() };
+            lines.push(format!("Review {} from the user, on {on}: {told}{says}", note.id));
         } else if let Some(comment) = note.comment.as_deref() {
             let at = match (&comment.quote, &comment.step) {
                 (Some(quote), _) => format!(", on \"{}\"", agent::clip(&quote.exact, TITLED)),

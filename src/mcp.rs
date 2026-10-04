@@ -1329,11 +1329,9 @@ fn write(
     Ok(reply.to_string())
 }
 
-/// wait: records that this session waits on an item, or, with cancel, that
-/// it no longer does. An item already where the wait would end, or already
-/// waited on by this session for the same, writes nothing and says so.
 /// The MCP tool `artifact` (task 1019): writes an artifact and its page, or
-/// reads it as context does, with where its page is.
+/// reads it as context does, with the user's feedback from its page and
+/// where that page is; and answers the feedback (task 1107).
 fn artifact(ekko: &Ekko, spec: &ops::ArtifactSpec, home: &Path, location: &directory::Location) -> Result<String, ToolError> {
     // The file is written either way, and every write keeps it current; the
     // page given is the server's where one serves it (task 1102), with why
@@ -1353,6 +1351,7 @@ fn artifact(ekko: &Ekko, spec: &ops::ArtifactSpec, home: &Path, location: &direc
             return Err(invalid(format!("{} is not an artifact: the artifact tool creates one from a plan", item.id)));
         }
         let mut text = read[0].text();
+        text.push_str(&crate::feedback::read(item, &all, ekko.actor.as_ref()));
         match page(item, &all) {
             Ok((page, None)) => text.push_str(&format!("Its page: {page}\n")),
             Ok((page, Some(why))) => text.push_str(&format!("Its page: {page}, the file, which no server serves: {why}\n")),
@@ -1362,10 +1361,21 @@ fn artifact(ekko: &Ekko, spec: &ops::ArtifactSpec, home: &Path, location: &direc
     }
     let mut draft = Draft::open(ekko)?;
     let id = draft.artifact(spec).map_err(|error| refusal(&error, &draft.names()))?;
+    let answered = draft.answer_feedback(id, spec).map_err(|error| refusal(&error, &draft.names()))?;
     let names = draft.names();
     let committed = draft.commit(false).map_err(|error| refusal(&error, &names))?;
     let item = &committed.data[&id];
-    let mut reply = json!({"ok": true, "items": [ops::written(&committed.data, id)]});
+    let items: Vec<Value> = std::iter::once(id).chain(answered.replies.iter().copied()).map(|id| ops::written(&committed.data, id)).collect();
+    let mut reply = json!({"ok": true, "items": items});
+    if !answered.applied.is_empty() {
+        reply["applied"] = answered.applied.iter().map(|(comment, version)| json!({"comment": comment, "version": version})).collect();
+    }
+    if !answered.replies.is_empty() {
+        reply["replies"] = json!(answered.replies);
+    }
+    if !answered.resolved.is_empty() {
+        reply["resolved"] = json!(answered.resolved);
+    }
     if let Some(standing) = crate::artifact::Standing::of(item, &committed.data) {
         reply["standing"] = json!(standing.words());
     }
@@ -1393,6 +1403,9 @@ fn ops_ref_text(reference: &ops::Ref) -> String {
     }
 }
 
+/// wait: records that this session waits on an item, or, with cancel, that
+/// it no longer does. An item already where the wait would end, or already
+/// waited on by this session for the same, writes nothing and says so.
 fn wait(ekko: &Ekko, spec: &ops::WaitOn) -> Result<String, ToolError> {
     let mut draft = Draft::open(ekko)?;
     let waited = if spec.cancel {
@@ -1809,6 +1822,7 @@ fn tool_definitions(linked: &[String]) -> Value {
         }),
         &["key"],
     );
+    let reply_to = object(json!({"to": item, "text": {"type": "string"}}), &["to", "text"]);
 
     let mut tools = json!([
         {
@@ -1987,14 +2001,17 @@ fn tool_definitions(linked: &[String]) -> Value {
         },
         {
             "name": "artifact",
-            "description": "The plan for one goal, which lives across sessions -- not Claude Code's Artifact tool, which publishes to claude.ai. An artifact is a task whose text is the plan: its title, then ## Goal, ## What is known, ## Design and ## Risks and open questions, each on a line of its own, with steps in order. Without artifact it creates one from text and steps; with artifact and steps it writes those over the plan's steps; with artifact alone it reads it. Its text changes with edit, each change a new version. Decisions and questions about it attach to it. The user reads it on a page ekko keeps current, whose address the reply gives; ask with approve puts the plan to them, and their answer, in ekko's menu or a review on the page, makes tasks of the steps not approved yet, which block the artifact.",
+            "description": "The plan for one goal, which lives across sessions -- not Claude Code's Artifact tool, which publishes to claude.ai. An artifact is a task whose text is the plan: its title, then ## Goal, ## What is known, ## Design and ## Risks and open questions, each on a line of its own, with steps in order. Without artifact it creates one from text and steps; with artifact and steps it writes those over the plan's steps; with artifact alone it reads it, with the user's reviews and comments from its page, which apply, reply and resolve answer. Its text changes with edit, each change a new version. Decisions and questions about it attach to it. The user reads it on a page ekko keeps current, whose address the reply gives; ask with approve puts the plan to them, and their answer, in ekko's menu or a review on the page, makes tasks of the steps not approved yet, which block the artifact.",
             "inputSchema": object(json!({
                 "artifact": item,
                 "text": {"type": "string", "description": "To create one: the plan."},
                 "steps": {"type": "array", "items": step, "description": "Every step, in order, written over those there. An approved step stays as it is: give its key alone."},
                 "boards": {"type": "array", "items": {"type": "string"}},
                 "priority": {"type": "integer", "minimum": 1, "maximum": 3},
-                "phase": {"type": "string", "description": "A declared phase of the project."}
+                "phase": {"type": "string", "description": "A declared phase of the project."},
+                "apply": {"type": "array", "items": item, "description": "The user's sent comments whose suggestions to apply, their words still there: one edit of the plan, its next version, each comment resolved."},
+                "reply": {"type": "array", "items": reply_to, "description": "Replies to the user's comments, each shown under its comment on the page."},
+                "resolve": {"type": "array", "items": item, "description": "The user's comments and reviews settled, which then wait on no session."}
             }), &[]),
             "annotations": write,
         }

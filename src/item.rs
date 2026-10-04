@@ -552,6 +552,11 @@ pub struct Comment {
     /// When it was resolved, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<i64>,
+    /// The plan's version that took what it suggests, applied by a session
+    /// with the artifact tool or by the person with Apply on the page (task
+    /// 1107).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<u32>,
     /// Its theme, by the name the person called it when they wrote it, so a
     /// reader learns what they meant (task 1213).
     #[serde(default, skip_serializing_if = "Option::is_none")]

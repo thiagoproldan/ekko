@@ -801,3 +801,92 @@ fn feedback_from_the_page_is_told_in_the_next_reply_of_the_session_working_the_a
     let prime = session.call(8, "prime", json!({}));
     assert!(prime.contains("1 review and 3 comments to resolve"), "{prime}");
 }
+
+/// A session answers the user's feedback from the page with the artifact
+/// tool alone (task 1107): its read gives a suggestion sent alone and a
+/// review with the comment it sent; one call applies the suggestion, which
+/// makes the plan's next version, replies to the comment and resolves the
+/// rest, and the next read finds nothing open. The person applies a
+/// suggestion of theirs from the page too, once; under Claude Code, Apply
+/// is refused and writes nothing.
+#[test]
+fn a_session_answers_the_feedback_from_the_page_with_the_artifact_tool() {
+    let home = Home::new();
+    let written = artifact(&home);
+    let (port, path) = split(written["page"].as_str().unwrap());
+    let token = runtime(&home)["token"].as_str().unwrap().to_string();
+    let post = |to: &str, body: Value, as_claude: bool| -> (String, Value) {
+        let body = body.to_string();
+        let request = format!(
+            "POST {to} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: ekko_{port}={token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = fs::remove_file(home.join(if as_claude { "answer-claude" } else { "answer-person" }));
+        let answer = from_bash(&home, port, &request, as_claude);
+        let status = answer.split(' ').nth(1).unwrap_or_default().to_string();
+        (status, serde_json::from_str(answer.split_once("\r\n\r\n").map_or("", |(_, body)| body)).unwrap_or_default())
+    };
+    let say = |exact: &str, prefix: &str, suffix: &str, text: &str, replacement: Option<&str>, version: u32| {
+        let mut comment = json!({"version": version, "quote": {"exact": exact, "prefix": prefix, "suffix": suffix, "section": ""}});
+        if let Some(replacement) = replacement {
+            comment["replacement"] = json!(replacement);
+        }
+        let (status, made) = post("/api/comment", json!({"page": path, "text": text, "comment": comment}), false);
+        assert_eq!(status, "200", "{made}");
+        made
+    };
+    let board = || -> Value { serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap() };
+
+    let facts = say("Facts", "Why. ", ", in code and bold. How. None.", "", Some("Numbers"), 1);
+    assert_eq!(post("/api/comment/send", json!({"page": path, "uid": facts["uid"]}), false).0, "200");
+    let how = say("How.", "in code and bold. ", " None.", "Which way?", None, 1);
+    let (status, review) = post("/api/review", json!({"page": path, "verdict": "changes", "version": 1, "text": "Look again."}), false);
+    assert_eq!(status, "200", "{review}");
+    let (status, refused) = post("/api/comment/apply", json!({"page": path, "uid": facts["uid"]}), true);
+    assert_eq!(status, "403", "{refused}");
+    assert_eq!(board()["1"]["artifact"]["version"], 1, "a refused Apply wrote nothing");
+
+    let mut session = Session::start(&home);
+    let read = session.call(2, "artifact", json!({"artifact": 1}));
+    let (facts_id, how_id, review_id) = (&facts["id"], &how["id"], &review["id"]);
+    for line in [
+        "Feedback from its page, the open first: answer it with the artifact tool's apply, reply and resolve, then ask with approve puts the plan to the user again.\n".to_string(),
+        format!("Comment {facts_id} from the user, sent alone, on \"Facts\", current, suggesting \"Numbers\" in their place\n"),
+        format!("Review {review_id} from the user: changes requested on version 1, sending comment {how_id}. It says: Look again.\n"),
+        format!("- Comment {how_id} on \"How.\", current: Which way?\n"),
+    ] {
+        assert!(read.contains(&line), "{line:?} in {read}");
+    }
+    let pointer = "feedback open: the artifact tool reads it whole with artifact 1, and its apply, reply and resolve answer it\n";
+    let context = session.call(6, "context", json!({"item": 1}));
+    assert!(context.contains(pointer), "context points to the read: {context}");
+    assert!(context.contains(&format!("{facts_id}. [suggestion, sent] ")), "{context}");
+    let answered = session.call(3, "artifact", json!({"artifact": 1, "apply": [facts_id], "reply": [{"to": how_id, "text": "This way."}], "resolve": [review_id, how_id]}));
+    let answered: Value = serde_json::from_str(&answered).unwrap_or_else(|_| panic!("{answered}"));
+    assert_eq!(answered["applied"], json!([{"comment": facts_id, "version": 2}]), "{answered}");
+    assert_eq!(answered["resolved"], json!([review_id, how_id]), "{answered}");
+    let reply = answered["replies"][0].clone();
+    let data = board();
+    assert!(data["1"]["description"].as_str().unwrap().contains("Numbers, in `code` and **bold**."), "{}", data["1"]["description"]);
+    assert_eq!((&data["1"]["artifact"]["version"], &data[reply.to_string()]["comment"]["replyTo"]), (&json!(2), &how["uid"]));
+    assert!(!session.call(4, "prime", json!({})).contains("to resolve"), "nothing waits on a session");
+    let read = session.call(5, "artifact", json!({"artifact": 1}));
+    let settled = format!("Feedback from its page: none open.\nSettled: review {review_id}; comments {facts_id} (applied in version 2), {how_id}.\n");
+    assert!(read.contains(&settled), "{read}");
+    let context = session.call(7, "context", json!({"item": 1}));
+    assert!(!context.contains("feedback open"), "nothing left to point to: {context}");
+
+    let why = say("Why.", "", " Numbers, in code and bold. How.", "", Some("Because."), 2);
+    assert_eq!(post("/api/comment/send", json!({"page": path, "uid": why["uid"]}), false).0, "200");
+    let read = session.call(8, "artifact", json!({"artifact": 1}));
+    let alone = "Feedback from its page, the open first: answer it with the artifact tool's apply, reply and resolve.\n";
+    assert!(read.contains(alone), "no review asks for changes, so nothing says to ask again: {read}");
+    let (status, applied) = post("/api/comment/apply", json!({"page": path, "uid": why["uid"]}), false);
+    assert_eq!(status, "200", "{applied}");
+    let data = board();
+    assert!(data["1"]["description"].as_str().unwrap().contains("## Goal\nBecause.\n"), "{}", data["1"]["description"]);
+    assert_eq!((&data["1"]["artifact"]["version"], &data[why["id"].to_string()]["comment"]["applied"]), (&json!(3), &json!(3)));
+    let (status, again) = post("/api/comment/apply", json!({"page": path, "uid": why["uid"]}), false);
+    assert_eq!(status, "409", "{again}");
+    assert!(again["why"].as_str().unwrap().contains("applied in version 3 already"), "{again}");
+}

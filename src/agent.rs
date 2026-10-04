@@ -455,13 +455,20 @@ pub struct NoteRef {
     /// On a gotcha: whether its cue is on.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cue: bool,
+    /// On a comment or a review from an artifact's page: where it stands,
+    /// as `feedback::mark` says it (task 1107).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
 }
 
 impl NoteRef {
     /// What a listing puts before a typed note's text -- "[gotcha] ", or
     /// "[decision, superseded by 9] ", "[question] ", "[handoff, replaced by
-    /// 12] " -- and nothing before an ordinary one.
+    /// 12] ", "[comment, sent] " -- and nothing before an ordinary one.
     fn mark(&self) -> String {
+        if let Some(feedback) = &self.feedback {
+            return format!("[{feedback}] ");
+        }
         if let Some(answered) = self.answered {
             return if answered { "[answered] " } else { "[question] " }.to_string();
         }
@@ -575,6 +582,7 @@ impl<'a> Reader<'a> {
             answered: note.question.as_ref().map(|question| question.answer.is_some()),
             waiting: note.wait.as_ref().map(|wait| wait.over.is_none()),
             cue: crate::guard::cue_of(note).is_some(),
+            feedback: crate::feedback::mark(note, |uid| self.uid(uid)),
         }
     }
 

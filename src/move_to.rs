@@ -361,7 +361,7 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
         found.push(("has its cue from", question));
     }
     if let Some(comment) = comment.as_deref() {
-        let Comment { reply_to, version: _, quote: _, replacement: _, step: _, sent: _, resolved: _, theme: _, color: _, unknown: _ } = comment;
+        let Comment { reply_to, version: _, quote: _, replacement: _, step: _, sent: _, resolved: _, applied: _, theme: _, color: _, unknown: _ } = comment;
         found.extend(reply_to.as_deref().map(|uid| ("answers", uid)));
     }
     if let Some(review) = review.as_deref() {
@@ -447,7 +447,7 @@ fn arriving(item: &Item, id: u32) -> Item {
         })
     });
     let comment = comment.as_deref().map(|comment| {
-        let Comment { version, quote, replacement, step, reply_to, sent, resolved, theme, color, unknown } = comment;
+        let Comment { version, quote, replacement, step, reply_to, sent, resolved, applied, theme, color, unknown } = comment;
         Box::new(Comment {
             version: *version,
             quote: quote.clone(),
@@ -456,6 +456,7 @@ fn arriving(item: &Item, id: u32) -> Item {
             reply_to: reply_to.clone(),
             sent: *sent,
             resolved: *resolved,
+            applied: *applied,
             theme: theme.clone(),
             color: color.clone(),
             unknown: unknown.clone(),
