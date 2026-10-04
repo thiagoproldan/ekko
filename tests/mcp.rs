@@ -1314,7 +1314,7 @@ fn an_artifact_is_written_with_its_page_and_read_back() {
     let uid = written["items"][0]["uid"].as_str().unwrap();
     assert!(page.starts_with("http://127.0.0.1:") && page.ends_with(&format!("/default/{uid}.html")), "{written}");
     let file = home.join(".ekko").join("artifacts").join(format!("{uid}.html"));
-    assert!(fs::read_to_string(file).unwrap().contains("<h1>Ship the page</h1>"));
+    assert!(fs::read_to_string(file).unwrap().contains("<h1 class=\"words\"><span class=\"w\">Ship</span> <span class=\"w\">the</span> <span class=\"w\">page</span></h1>"));
     let read = text(&replies["4"]);
     assert!(read.contains("artifact, a task pending") && read.contains("plan version 1: draft, 1 step"), "{read}");
     assert!(read.contains(&format!("Its page: {page}")), "{read}");

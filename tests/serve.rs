@@ -173,13 +173,13 @@ fn ekko_artifact_opens_the_page_from_a_server_it_started_and_a_second_call_reuse
 
     let (code, page) = get(port, &path, &format!("127.0.0.1:{port}"));
     assert_eq!(code, 200, "{page}");
-    assert!(page.contains("<h1>Ship the page</h1>"), "{page}");
+    assert!(page.contains("<h1 class=\"words\"><span class=\"w\">Ship</span> <span class=\"w\">the</span> <span class=\"w\">page</span></h1>"), "{page}");
     assert!(page.contains(&format!("script.src = \"{uid}.js?t=\"")), "the page polls the script beside it");
     let (code, script) = get(port, &format!("/default/{uid}.js?t=1"), &format!("localhost:{port}"));
     assert_eq!(code, 200);
     let file = home.join(".ekko").join("artifacts");
     assert_eq!(script, fs::read_to_string(file.join(format!("{uid}.js"))).unwrap(), "the version the file page has");
-    assert!(fs::read_to_string(file.join(format!("{uid}.html"))).unwrap().contains("<h1>Ship the page</h1>"));
+    assert!(fs::read_to_string(file.join(format!("{uid}.html"))).unwrap().contains("<h1 class=\"words\"><span class=\"w\">Ship</span> <span class=\"w\">the</span> <span class=\"w\">page</span></h1>"));
     // The fonts the page names come from the server, the very ones written
     // beside the file page (task 1152).
     let fonts: Vec<&str> = page.split("url(\"fonts/").skip(1).filter_map(|rest| rest.split('"').next()).collect();

@@ -462,15 +462,16 @@ pub fn approval_asked<'a>(item: &Item, all: &'a ItemMap) -> Option<&'a Item> {
 }
 
 /// The page of artifact `item` on the board `all`, whose project folder is
-/// `folder`, and the version it carries. Its look is mockup D, which the
-/// user approved (task 1092, decision 1151): the plan read as an article,
-/// Medium's in the light theme and AKQA's case study in the dark (note
-/// 1148), with where it stands in a column beside it; the Goal's first
-/// sentence as a statement, each other section opened by its heading in
-/// capitals, then the steps, the map their `after` draws, the notes and how
-/// the text changed; Medium's section bars at the right edge, and AKQA's
-/// bar at the bottom, which finds a section, step or note (note 1149) and
-/// runs the page's commands, with Review beside it (task 1337).
+/// `folder`, and the version it carries. Its look is akqa.com's (decision
+/// 1355, plan 1364): scenes told as one scrolls, each in a mode, light or
+/// dark, the page takes as it reaches the window's middle. The first opens
+/// with where the plan stands and its title; then the plan, the Goal's
+/// first sentence as a statement and each other section opened by its
+/// heading in capitals; then the steps, the map their `after` draws, the
+/// notes and how the text changed. Medium's section bars at the right edge
+/// name the scenes, AKQA's mark stays at the top, and AKQA's bar at the
+/// bottom finds a section, step or note (note 1149) and runs the page's
+/// commands, with Review beside it (task 1337).
 pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, String) {
     let artifact = item.artifact.as_deref();
     let standing = Standing::of(item, all);
@@ -491,72 +492,31 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     let done = steps.iter().filter(|step| step.class == "done").count();
     let version = artifact.map_or(0, |artifact| artifact.version);
     let command = format!("ekko artifact {}", item.id);
-    let phase = standing.as_ref().map(phase);
     let by = written_by(item);
     // The page's parts, by id and name, as the section bars and the bar list them.
     let mut parts: Vec<(String, String)> = Vec::new();
 
     let mut body = String::new();
 
-    // Where it stands, in Medium's author column beside the text, with the
-    // board it is on and whom the page writes as. The page has no top bar
-    // (task 1337): what it held is run from the pill at the bottom.
+    // The page as AKQA builds one (task 1367): scenes the window's width,
+    // each in its mode, light or dark, which the page takes as the scene
+    // reaches the window's middle. No column beside the text and no head
+    // above it: the first scene opens with where the plan stands, and
+    // History says who wrote it and where it is. Nor a top bar (task 1337):
+    // what it held is run from the pill at the bottom.
     let _ = write!(
         body,
-        "<main class=\"page\"><aside class=\"standing\"><div class=\"standing-inner\"><div class=\"mark\">{}</div><p class=\"name\">Artifact {}</p><p class=\"where\">{}<span id=\"who\"></span></p><p class=\"about\">",
-        item.id,
-        item.id,
-        esc(&capitalized(&board))
+        "<main class=\"page\"><article class=\"prose\" data-version=\"{version}\"><section class=\"scene hero\" id=\"top\" data-mode=\"light\"><p class=\"kicker\"><span>Artifact {}</span>",
+        item.id
     );
-    if let Some(standing) = &standing {
-        let _ = write!(body, "{}.", esc(&capitalized(&standing.words())));
-    }
-    if let Some(by) = &by {
-        let _ = write!(body, " Written by {}.", esc(by));
-    }
-    body.push_str("</p>");
-    if !steps.is_empty() {
-        body.push_str("<div class=\"segments\">");
-        for (at, step) in steps.iter().enumerate() {
-            let _ = write!(body, "<span class=\"{}\" title=\"{:02} {}: {}\"></span>", step.class, at + 1, esc(&step.step.key), esc(&step.state));
-        }
-        body.push_str("</div>");
-    }
-    body.push_str("</div></aside>");
-
-    // The head of the text: tags, title, byline and actions, then what waits
-    // on the user and what the user should know first.
-    let _ = write!(body, "<article class=\"prose\" data-version=\"{version}\"><ul class=\"tags\"><li>Artifact</li>");
-    if let Some(phase) = phase {
-        let _ = write!(body, "<li>{phase}</li>");
-    }
-    let progress = if tasks > 0 { format!("{done} of {tasks} done") } else { plural(steps.len(), "step") };
-    let _ = write!(body, "<li>{progress}</li>");
     if let Some(priority) = item.priority.filter(|priority| *priority > 1) {
-        let _ = write!(body, "<li>Priority {priority}</li>");
+        let _ = write!(body, "<span>Priority {priority}</span>");
     }
-    if !notes.is_empty() {
-        let _ = write!(body, "<li>{}</li>", plural(notes.len(), "note"));
+    if let Some(standing) = &standing {
+        let waiting = if standing.waiting.is_some() { " waiting" } else { "" };
+        let _ = write!(body, "<span class=\"state{waiting}\">{}</span>", esc(&capitalized(&standing.words())));
     }
-    if !comments.is_empty() {
-        let _ = write!(body, "<li><a href=\"#comments\">{}</a></li>", plural(comments.len(), "comment"));
-    }
-    let _ = write!(body, "<li>Version {version}</li></ul><h1>{}</h1><div class=\"byline\">", esc(title));
-    if let Some(by) = &by {
-        let _ = write!(body, "<span class=\"who\">Written by {}</span>", esc(by));
-    }
-    if let Some(phase) = phase {
-        let _ = write!(body, "<span class=\"state\">{phase}</span>");
-    }
-    let _ = write!(
-        body,
-        "<span>{} min read</span><span>\u{b7}</span><span>Updated {}</span></div><div class=\"actions\"><span>{}</span><span>{}</span>{}<span>v{version}</span></div>",
-        reading_minutes(plan),
-        esc(&when(item.updated_at.unwrap_or(item.timestamp))),
-        plural(steps.len(), "step"),
-        plural(notes.len(), "note"),
-        if comments.is_empty() { String::new() } else { format!("<span>{}</span>", plural(comments.len(), "comment")) }
-    );
+    let _ = write!(body, "</p><h1 class=\"words\">{}</h1>", word_spans(title));
     let approval = standing.as_ref().and_then(|standing| standing.waiting);
     if let Some(question) = approval {
         let answer = format!(
@@ -577,27 +537,36 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         callout(&mut body, &capitalized(away), &format!("This artifact is {away}."));
     }
 
-    // The plan: the Goal's first sentence as its statement, each other
-    // section opened by its heading, what comes before the first as it is.
+    // The plan, a scene to a section: the Goal's first sentence as its
+    // statement, each other section opened by its heading; what comes
+    // before the first leads it, in the first scene.
     let mut ids = Vec::new();
-    let cut = sections(plan);
-    if cut.is_empty() {
+    let mut cut = sections(plan).into_iter().peekable();
+    if cut.peek().is_none() {
         body.push_str("<p>The plan has no text yet.</p>");
     }
+    if let Some((_, text)) = cut.next_if(|(heading, _)| heading.is_empty()) {
+        let _ = write!(body, "<section class=\"lead\" data-plan>{}</section>", markdown(&text));
+    }
+    body.push_str("</section>");
     let mut goal_shown = false;
-    for (heading, text) in &cut {
-        if heading.is_empty() {
-            let _ = write!(body, "<section class=\"lead\" data-plan>{}</section>", markdown(text));
-            continue;
-        }
-        let id = unique(&mut ids, &format!("plan-{}", slug(heading)));
+    for (heading, text) in cut {
+        let id = unique(&mut ids, &format!("plan-{}", slug(&heading)));
         if heading == "Goal" && !goal_shown {
             goal_shown = true;
-            let _ = write!(body, "<section class=\"goal\" id=\"{id}\" data-part=\"Goal\" data-plan>{}</section>", goal(text));
+            let _ = write!(body, "<section class=\"scene goal\" id=\"{id}\" data-part=\"Goal\" data-mode=\"{}\" data-plan>{}</section>", mode(&id), goal(&text));
         } else {
-            let _ = write!(body, "<section class=\"part\" id=\"{id}\" data-part=\"{}\" data-plan><h2 class=\"opener\">{}</h2>{}</section>", esc(heading), esc(heading), markdown(text));
+            let (first, second) = two_tones(&heading);
+            let _ = write!(
+                body,
+                "<section class=\"scene part\" id=\"{id}\" data-part=\"{}\" data-mode=\"{}\" data-plan>{}{}</section>",
+                esc(&heading),
+                mode(&id),
+                opener(&first, second.as_deref()),
+                markdown(&text)
+            );
         }
-        parts.push((id, heading.clone()));
+        parts.push((id, heading));
     }
     // Comments (task 1213), the notebook of an ebook: each comment's words
     // are colored in the text by the script, which also sorts these entries
@@ -605,7 +574,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     // them the words' aria-details. A reply goes under what it answers.
     if !comments.is_empty() {
         parts.push(("comments".to_string(), "Comments".to_string()));
-        body.push_str("<section class=\"part\" id=\"comments\" data-part=\"Comments\"><h2 class=\"opener\">Comments</h2><div class=\"filters\" role=\"toolbar\" aria-label=\"Which comments show\"></div><ol class=\"comments\">");
+        let _ = write!(body, "<section class=\"scene part\" id=\"comments\" data-part=\"Comments\" data-mode=\"{}\">{}<div class=\"filters\" role=\"toolbar\" aria-label=\"Which comments show\"></div><ol class=\"comments\">", mode("comments"), opener("Comments", None));
         let known: Vec<&str> = comments.iter().filter_map(|note| note.uid.as_deref()).collect();
         let answers = |note: &Item| note.comment.as_ref().and_then(|comment| comment.reply_to.as_deref()).filter(|to| known.contains(to)).map(str::to_string);
         for note in comments.iter().filter(|note| answers(note).is_none()) {
@@ -637,7 +606,12 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     // Steps: AKQA's numbered items, each with its task, opening in place to
     // the rest of its text and when it is done.
     parts.push(("steps".to_string(), "Steps".to_string()));
-    body.push_str("<section class=\"part\" id=\"steps\" data-part=\"Steps\"><h2 class=\"opener\">Steps</h2>");
+    let progress = match (tasks, steps.len()) {
+        (0, 0) => None,
+        (0, count) => Some(plural(count, "step")),
+        (tasks, _) => Some(format!("{done} of {tasks} done")),
+    };
+    let _ = write!(body, "<section class=\"scene part\" id=\"steps\" data-part=\"Steps\" data-mode=\"{}\">{}", mode("steps"), opener("Steps", progress.as_deref()));
     if steps.is_empty() {
         body.push_str("<p>No steps yet: the artifact tool writes them.</p>");
     } else {
@@ -676,13 +650,15 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     }
     body.push_str("</section>");
 
-    // Map: the steps as the graph their `after` draws, on a strip wider
-    // than the column, with arrows while it is wider than the window.
+    // Map: the steps as the graph their `after` draws, on a strip the
+    // window's width, with arrows while it is wider than the window.
     if !steps.is_empty() {
         parts.push(("map".to_string(), "Map".to_string()));
         let _ = write!(
             body,
-            "<section class=\"part\" id=\"map\" data-part=\"Map\"><h2 class=\"opener\">Map</h2><p>What each step waits on, from the first on the left. A step leads to its place in the list.</p><div class=\"legend\"><span><span class=\"dot proposed\"></span>to approve</span><span><span class=\"dot pending\"></span>pending</span><span><span class=\"dot progress\"></span>in progress</span><span><span class=\"dot done\"></span>done</span><span>an arrow: what a step waits on</span></div><div class=\"bleed\"><div class=\"strip\">{}</div><div class=\"arrows\" hidden><button type=\"button\" data-by=\"-480\" aria-label=\"Back\">\u{2039}</button><button type=\"button\" data-by=\"480\" aria-label=\"On\">\u{203a}</button></div></div></section>",
+            "<section class=\"scene part\" id=\"map\" data-part=\"Map\" data-mode=\"{}\">{}<p>What each step waits on, from the first on the left. A step leads to its place in the list.</p><div class=\"legend\"><span><span class=\"dot proposed\"></span>to approve</span><span><span class=\"dot pending\"></span>pending</span><span><span class=\"dot progress\"></span>in progress</span><span><span class=\"dot done\"></span>done</span><span>an arrow: what a step waits on</span></div><div class=\"bleed\"><div class=\"strip\">{}</div><div class=\"arrows\" hidden><button type=\"button\" data-by=\"-480\" aria-label=\"Back\">\u{2039}</button><button type=\"button\" data-by=\"480\" aria-label=\"On\">\u{203a}</button></div></div></section>",
+            mode("map"),
+            opener("Map", Some("what waits on what")),
             map(&steps)
         );
     }
@@ -690,7 +666,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     // Notes: the questions, decisions and notes attached, newest first.
     if !notes.is_empty() {
         parts.push(("notes".to_string(), "Notes".to_string()));
-        body.push_str("<section class=\"part\" id=\"notes\" data-part=\"Notes\"><h2 class=\"opener\">Notes</h2>");
+        let _ = write!(body, "<section class=\"scene part\" id=\"notes\" data-part=\"Notes\" data-mode=\"{}\">{}", mode("notes"), opener("Notes", None));
         for note in &notes {
             let (head, rest) = note_text(&note.description);
             let kind = note_kind(note);
@@ -723,10 +699,16 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         body.push_str("</section>");
     }
 
-    // History: the version against the one approved, and each earlier text
-    // against the one that replaced it.
+    // History: who wrote the plan and when, the board it is on and whom
+    // the page writes as; the version against the one approved, and each
+    // earlier text against the one that replaced it.
     parts.push(("history".to_string(), "History".to_string()));
-    body.push_str("<section class=\"part\" id=\"history\" data-part=\"History\"><h2 class=\"opener\">History</h2>");
+    let versions = if version > 1 { format!("{version} versions") } else { "the first version".to_string() };
+    let _ = write!(body, "<section class=\"scene part\" id=\"history\" data-part=\"History\" data-mode=\"{}\">{}<p class=\"about\">", mode("history"), opener("History", Some(&versions)));
+    if let Some(by) = &by {
+        let _ = write!(body, "Written by {} \u{b7} ", esc(by));
+    }
+    let _ = write!(body, "Updated {}</p><p class=\"about\">{}<span id=\"who\"></span></p>", esc(&when(item.updated_at.unwrap_or(item.timestamp))), esc(&capitalized(&board)));
     if let Some(artifact) = artifact {
         let approved = match artifact.approved_version {
             Some(approved) if approved == version => format!("Version {version} is the current one, and the one you approved."),
@@ -759,14 +741,16 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         FONT_LICENSE.0
     );
 
-    // Medium's section bars, and AKQA's bar.
+    // Medium's section bars, naming the scenes, AKQA's mark at the top,
+    // and AKQA's bar.
+    let scenes: Vec<(&str, &str)> = std::iter::once(("top", "Overview")).chain(parts.iter().map(|(id, name)| (id.as_str(), name.as_str()))).collect();
     body.push_str("<nav class=\"toc\" aria-label=\"Sections\"><button class=\"toc-bars\" type=\"button\" aria-label=\"Sections\">");
-    body.push_str(&"<span></span>".repeat(parts.len()));
+    body.push_str(&"<span></span>".repeat(scenes.len()));
     body.push_str("</button><div class=\"toc-card\"><ol>");
-    for (id, name) in &parts {
+    for (id, name) in &scenes {
         let _ = write!(body, "<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{}</span></a></li>", esc(name));
     }
-    body.push_str("</ol></div></nav>");
+    let _ = write!(body, "</ol></div></nav><div class=\"mark\" aria-hidden=\"true\">ekko <b>\u{b7}</b> artifact {}</div>", item.id);
     let _ = write!(body, "<div class=\"bar\" id=\"bar\" data-command=\"{command}\">");
     body.push_str("<div class=\"bar-surface\"><div class=\"bar-fold list-fold\" inert><div class=\"fold-in\"><div class=\"bar-list\" role=\"listbox\" aria-label=\"Suggestions\"></div></div></div><div class=\"bar-fold quote-fold\" inert><div class=\"fold-in\"><div class=\"bar-quote\"><span class=\"bar-quote-text\"></span><button class=\"bar-suggest\" type=\"button\" aria-pressed=\"false\" title=\"Suggest the words to put in their place\">Suggest</button><button class=\"bar-quote-drop\" type=\"button\" aria-label=\"Drop the quote\">\u{d7}</button></div><div class=\"bar-themes\" role=\"radiogroup\" aria-label=\"Theme\"></div><div class=\"bar-tell\"></div><div class=\"bar-why\"></div></div></div><div class=\"bar-hairline\" aria-hidden=\"true\"></div><div class=\"bar-line\"><div class=\"bar-field\"><span class=\"bar-cursor\" aria-hidden=\"true\"></span><span class=\"bar-hint\" aria-hidden=\"true\"></span><input aria-label=\"Jump to a section, step or note\" autocomplete=\"off\" spellcheck=\"false\"><textarea class=\"bar-note\" rows=\"1\" aria-label=\"Comment on the quoted words\" placeholder=\"Comment on these words\" hidden></textarea></div><button class=\"bar-send\" type=\"button\" aria-label=\"Send the comment\" hidden>\u{2191}</button><button class=\"bar-menu\" type=\"button\" aria-label=\"Open menu\" aria-expanded=\"false\"><span></span><span></span></button></div><div class=\"bar-fold nav-fold\" inert><div class=\"fold-in\"><nav class=\"bar-nav\" aria-label=\"Parts\">");
     let (plan_parts, ours): (Vec<_>, Vec<_>) = parts.iter().partition(|(id, _)| id.starts_with("plan-"));
@@ -957,30 +941,46 @@ fn review_words(review: &Review, all: &ItemMap) -> String {
     words
 }
 
-/// Where an artifact stands, in the word its tag and its byline give.
-fn phase(standing: &Standing) -> &'static str {
-    match standing.state {
-        State::Done => "Done",
-        State::Cancelled => "Cancelled",
-        _ if standing.waiting.is_some() => "Waiting on you",
-        _ if standing.tasks == 0 => "Draft",
-        _ => "Approved",
-    }
-}
-
 /// `text` with its first letter a capital.
 fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-/// The words a minute Medium's reading time counts (265).
-const READING_PACE: usize = 265;
+/// The mode a scene puts the page in as it reaches the window's middle
+/// (task 1367): dark for the Goal and the map, as AKQA's home turns black
+/// under its statement, light for the rest.
+fn mode(id: &str) -> &'static str {
+    if id == "plan-goal" || id == "map" { "dark" } else { "light" }
+}
 
-/// How many minutes the plan takes to read, at `READING_PACE`, rounded, and
-/// at least one.
-fn reading_minutes(plan: &str) -> usize {
-    ((plan.split_whitespace().count() + READING_PACE / 2) / READING_PACE).max(1)
+/// `text`'s words, escaped, each a span the page's reveal brings in after
+/// the one before, as AKQA's headings come, 35 ms apart.
+fn word_spans(text: &str) -> String {
+    text.split_whitespace().map(|word| format!("<span class=\"w\">{}</span>", esc(word))).collect::<Vec<_>>().join(" ")
+}
+
+/// A scene's opener as AKQA sets one: in capitals, word by word, `second`
+/// on a line of its own in grey. The page's, not the plan's words, even
+/// where it opens a section of the plan: chrome, which the comments' words
+/// skip.
+fn opener(first: &str, second: Option<&str>) -> String {
+    let second = second.map(|second| format!(" <span class=\"l2\">{}</span>", word_spans(second))).unwrap_or_default();
+    format!("<h2 class=\"opener words\" data-chrome><span class=\"l1\">{}</span>{second}</h2>", word_spans(first))
+}
+
+/// A heading of the plan as an opener's two lines: from its "and" on, or
+/// else the last third of a heading of three words or more, goes grey.
+fn two_tones(heading: &str) -> (String, Option<String>) {
+    if let Some((first, rest)) = heading.split_once(" and ") {
+        return (first.to_string(), Some(format!("and {rest}")));
+    }
+    let words: Vec<&str> = heading.split_whitespace().collect();
+    if words.len() < 3 {
+        return (heading.to_string(), None);
+    }
+    let cut = words.len() - words.len().div_ceil(3);
+    (words[..cut].join(" "), Some(words[cut..].join(" ")))
 }
 
 /// A box above the plan for what the user should know first: `head`, and
@@ -1627,8 +1627,10 @@ fn fnv_from(hash: u64, bytes: &[u8]) -> u64 {
 }
 
 /// Sets the page's theme before it draws: the one the user picked last, or
-/// the system's.
-const THEME: &str = r##"(function () { var theme = null; try { theme = localStorage.getItem("ekko-theme"); } catch (e) {} document.documentElement.dataset.theme = theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); })();"##;
+/// the system's. And marks the page moving where its script can watch what
+/// comes into view, which AKQA's reveals bring in (task 1367): the style
+/// hides nothing on a page that cannot bring it back.
+const THEME: &str = r##"(function () { var root = document.documentElement, theme = null; try { theme = localStorage.getItem("ekko-theme"); } catch (e) {} root.dataset.theme = theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); if ("IntersectionObserver" in window) root.dataset.motion = ""; })();"##;
 
 /// What the page does: the steps that open in place, the map's arrows,
 /// Medium's section bars, AKQA's command bar with the page's commands and
@@ -1638,6 +1640,24 @@ const SCRIPT: &str = r##"(function () {
   "use strict";
   var root = document.documentElement;
   function smooth() { return matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"; }
+
+  // AKQA's reveals (task 1367, note 1357): what a scene holds comes into
+  // view from a blur and below, once, and a heading word by word, 35 ms
+  // apart. The head's script marked the page moving where this one can
+  // watch what comes into view, and only then does the style hide it.
+  if ("motion" in root.dataset) {
+    var revealer = new IntersectionObserver(function (seen) {
+      seen.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add("in");
+        revealer.unobserve(entry.target);
+      });
+    }, { rootMargin: "0px 0px -8% 0px" });
+    document.querySelectorAll(".scene > *, .words").forEach(function (node) { revealer.observe(node); });
+    document.querySelectorAll(".words").forEach(function (heading) {
+      heading.querySelectorAll(".w").forEach(function (word, i) { word.style.setProperty("--i", i); });
+    });
+  }
 
   // The theme: the one picked last, or the system's, switched by a command
   // in the pill (task 1337).
@@ -1684,10 +1704,16 @@ const SCRIPT: &str = r##"(function () {
     fit();
   }
 
-  // Medium's section bars: the part being read, and a card naming them all.
+  // The scenes (task 1367), AKQA's sections. The one holding the window's
+  // middle puts the page in its mode, light or dark, which the registered
+  // colours crossfade to as AKQA's do; Medium's section bars mark it, with
+  // a card naming them all, and the pill's menu marks its part. AKQA's mark
+  // at the top shows once the first scene has gone by.
+  var scenes = Array.prototype.slice.call(document.querySelectorAll(".scene"));
   var parts = Array.prototype.slice.call(document.querySelectorAll("[data-part]"));
   var bars = Array.prototype.slice.call(document.querySelectorAll(".toc-bars span"));
   var rows = Array.prototype.slice.call(document.querySelectorAll(".toc a"));
+  var mark = document.querySelector(".mark");
   function jump(id) {
     var target = document.getElementById(id);
     if (target) target.scrollIntoView({ behavior: smooth(), block: "start" });
@@ -1698,14 +1724,17 @@ const SCRIPT: &str = r##"(function () {
   var current = -1;
   function follow() {
     var at = 0;
-    parts.forEach(function (part, i) { if (part.getBoundingClientRect().top < innerHeight * 0.4) at = i; });
+    scenes.forEach(function (scene, i) { if (scene.getBoundingClientRect().top < innerHeight / 2) at = i; });
+    if (!scenes[at]) return;
+    root.dataset.mode = scenes[at].dataset.mode;
+    if (mark) mark.classList.toggle("on", at > 0);
     if (at === current) return;
     current = at;
     bars.forEach(function (bar, i) { bar.classList.toggle("on", i === at); });
     rows.forEach(function (row, i) { row.classList.toggle("on", i === at); });
     // The pill's menu marks it too, as AKQA's marks the page it is on: the
     // plan's parts all under Plan.
-    var id = parts[at] ? parts[at].id : "";
+    var id = scenes[at].id;
     document.querySelectorAll(".bar-nav a").forEach(function (a) {
       var to = a.getAttribute("href").slice(1);
       if (to === id || (to.indexOf("plan-") === 0 && id.indexOf("plan-") === 0)) a.setAttribute("aria-current", "true");
@@ -1713,11 +1742,13 @@ const SCRIPT: &str = r##"(function () {
     });
   }
   var following = false;
-  addEventListener("scroll", function () {
+  function moved() {
     if (following) return;
     following = true;
     requestAnimationFrame(function () { following = false; follow(); });
-  }, { passive: true });
+  }
+  addEventListener("scroll", moved, { passive: true });
+  addEventListener("resize", moved);
   follow();
 
   // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
@@ -2782,12 +2813,13 @@ const SCRIPT: &str = r##"(function () {
   // The plan's words as shown_words has them on the server: each run of
   // white space one space, every block apart from the next; and for each
   // character, the text node and offset it came from, the space between
-  // two blocks marked as no character of either.
+  // two blocks marked as no character of either. What the page adds to the
+  // plan's parts, their openers too, is chrome, and no words of the plan.
   function words() {
     var text = "", at = [], last = null, space = true;
     plan.forEach(function (root) {
       var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: function (node) {
-        return node.parentElement.closest(".opener") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+        return node.parentElement.closest("[data-chrome]") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
       } });
       for (var node = walker.nextNode(); node; node = walker.nextNode()) {
         var block = node.parentElement.closest(BLOCK);
@@ -3391,27 +3423,63 @@ const SCRIPT: &str = r##"(function () {
   });
 })();"##;
 
-/// The look of mockup D (decision 1151): Medium's article in the light
-/// theme and AKQA's case study in the dark, both measured in note 1148; the
-/// command bar is AKQA's and the section bars Medium's, measured in note
-/// 1149. Sizes are the references' own, in px. The fonts come before it,
-/// from `font_faces`.
+/// The look of akqa.com (decision 1355, plan 1364), measured in note 1357:
+/// its palette, light and dark, which a scene's mode crossfades in 1125 ms,
+/// its openers in capitals and its reveals. The command bar is AKQA's too
+/// (task 1223), and the section bars Medium's (note 1149). Sizes are the
+/// references' own, in px. The fonts come before it, from `font_faces`.
 const STYLE: &str = r##"
+/* The colours a scene's mode changes, registered so they crossfade as
+   AKQA's do when a dark scene comes in (task 1367): the page's in 1125 ms,
+   the bar's glass and ink in 0.3 s, as AKQA's change. */
+@property --page { syntax: "<color>"; inherits: true; initial-value: #fff; }
+@property --bg { syntax: "<color>"; inherits: true; initial-value: #fff; }
+@property --fg { syntax: "<color>"; inherits: true; initial-value: #191919; }
+@property --fg-strong { syntax: "<color>"; inherits: true; initial-value: #000; }
+@property --fg-2 { syntax: "<color>"; inherits: true; initial-value: #555; }
+@property --fg-3 { syntax: "<color>"; inherits: true; initial-value: #8a8a8a; }
+@property --dim { syntax: "<color>"; inherits: true; initial-value: rgba(0, 0, 0, 0.16); }
+@property --rule { syntax: "<color>"; inherits: true; initial-value: #e9e9e9; }
+@property --chip { syntax: "<color>"; inherits: true; initial-value: #f5f5f5; }
+@property --raise { syntax: "<color>"; inherits: true; initial-value: #f5f5f5; }
+@property --card { syntax: "<color>"; inherits: true; initial-value: #fff; }
+@property --node { syntax: "<color>"; inherits: true; initial-value: #fff; }
+@property --node-line { syntax: "<color>"; inherits: true; initial-value: #e2e2e2; }
+@property --bars-bg { syntax: "<color>"; inherits: true; initial-value: rgba(255, 255, 255, 0.38); }
+@property --bar-black { syntax: "<number>"; inherits: true; initial-value: 0.06; }
+@property --bar-white { syntax: "<number>"; inherits: true; initial-value: 0.58; }
+@property --bar-ink { syntax: "<color>"; inherits: true; initial-value: #000; }
+@property --bar-ink-strong { syntax: "<color>"; inherits: true; initial-value: #191919; }
+@property --bar-ink-idle { syntax: "<color>"; inherits: true; initial-value: #323232; }
+@property --bar-ink-muted { syntax: "<color>"; inherits: true; initial-value: rgba(0, 0, 0, 0.66); }
+@property --bar-ink-nav { syntax: "<color>"; inherits: true; initial-value: #393939; }
+@property --bar-fill { syntax: "<color>"; inherits: true; initial-value: rgba(0, 0, 0, 0.04); }
+@property --bar-fill-on { syntax: "<color>"; inherits: true; initial-value: rgba(0, 0, 0, 0.16); }
+@property --bar-line { syntax: "<color>"; inherits: true; initial-value: rgba(0, 0, 0, 0.08); }
+
 :root {
   --serif: "Ekko Serif", Georgia, Cambria, "Times New Roman", Times, serif;
   --sans: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
-  --column: 680px;
-  /* Medium's article. */
+  /* AKQA's frame: its curve, its gutters, its widest content, and the
+     measure of a paragraph. */
+  --curve: cubic-bezier(0.2, 0.65, 0.3, 1);
+  --gutter: clamp(20px, 4.4vw, 64px);
+  --wide: 1312px;
+  --measure: 720px;
+  /* AKQA's home: white, black ink, grey for what comes second. */
   --page: #fff;
   --bg: #fff;
-  --fg: #242424;
+  --fg: #191919;
   --fg-strong: #000;
-  --fg-2: #6b6b6b;
-  --rule: #f2f2f2;
-  --chip: #f2f2f2;
+  --fg-2: #555;
+  --fg-3: #8a8a8a;
+  --dim: rgba(0, 0, 0, 0.16);
+  --rule: #e9e9e9;
+  --chip: #f5f5f5;
+  --raise: #f5f5f5;
   --node: #fff;
-  --node-line: #e6e6e6;
+  --node-line: #e2e2e2;
   --accent: #1a8917;
   --card: #fff;
   --card-shadow: 0 0 4px rgba(36, 36, 36, 0.05), 0 2px 8px rgba(36, 36, 36, 0.15);
@@ -3452,19 +3520,24 @@ const STYLE: &str = r##"
   --ink-purple: #7c4ddb;
   --ink-orange: #e86f00;
   color-scheme: light;
+  transition: --page 1125ms ease, --bg 1125ms ease, --fg 1125ms ease, --fg-strong 1125ms ease, --fg-2 1125ms ease, --fg-3 1125ms ease, --dim 1125ms ease, --rule 1125ms ease, --chip 1125ms ease, --raise 1125ms ease, --card 1125ms ease, --node 1125ms ease, --node-line 1125ms ease, --bars-bg 0.3s ease, --bar-black 0.3s ease, --bar-white 0.3s ease, --bar-ink 0.3s ease, --bar-ink-strong 0.3s ease, --bar-ink-idle 0.3s ease, --bar-ink-muted 0.3s ease, --bar-ink-nav 0.3s ease, --bar-fill 0.3s ease, --bar-fill-on 0.3s ease, --bar-line 0.3s ease;
 }
 
-/* AKQA's case study. */
-:root[data-theme="dark"] {
+/* AKQA's case study: the dark theme, and a dark scene on the light page,
+   as AKQA's home turns black under its statement. */
+:root[data-theme="dark"], :root[data-mode="dark"] {
   --page: #000;
   --bg: #191919;
   --fg: #d9d9d9;
   --fg-strong: #fff;
-  --fg-2: #bbb;
-  --rule: rgba(255, 255, 255, 0.32);
+  --fg-2: #ababab;
+  --fg-3: #7b7b7b;
+  --dim: rgba(255, 255, 255, 0.2);
+  --rule: #434343;
   --chip: #262626;
+  --raise: #262626;
   --node: #262626;
-  --node-line: rgba(255, 255, 255, 0.16);
+  --node-line: #434343;
   --accent: #fff;
   --card: #262626;
   --card-shadow: 0 8px 40px rgba(0, 0, 0, 0.25);
@@ -3500,8 +3573,10 @@ const STYLE: &str = r##"
   --ink-green: #46c878;
   --ink-purple: #aa78ff;
   --ink-orange: #ff9628;
-  color-scheme: dark;
 }
+:root[data-theme="dark"] { color-scheme: dark; }
+/* In the dark theme a dark scene goes to black, the case study's deepest. */
+:root[data-theme="dark"][data-mode="dark"] { --bg: #000; --chip: #191919; --raise: #191919; --card: #191919; --node: #191919; }
 
 html { background: var(--page); }
 body { margin: 0; overflow-x: clip; background: var(--bg); color: var(--fg); font: 400 16px/24px var(--sans); -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
@@ -3512,59 +3587,56 @@ button { font: inherit; color: inherit; }
 /* What only the person's page offers: Review, the person's commands. */
 body:not([data-writes]) .writes-only { display: none !important; }
 
-/* ---- the page: Medium's column, where it stands beside it -------------- */
-/* No bar above it (task 1337): what one held is run from the pill. */
-.page { position: relative; max-width: var(--column); margin: 0 auto; padding: 64px 24px 240px; box-sizing: content-box; }
-.standing { position: absolute; top: 64px; bottom: 0; left: -232px; width: 160px; }
-.standing-inner { position: sticky; top: 32px; }
-.standing .mark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--chip); font: 600 13px/1 var(--sans); color: var(--fg); }
-.standing .name { margin: 16px 0 0; font: 500 16px/20px var(--sans); color: var(--fg-strong); }
-.standing .where { margin: 4px 0 0; font: 400 14px/20px var(--sans); color: var(--fg-2); }
-.standing .about { margin: 12px 0 0; font: 400 14px/20px var(--sans); color: var(--fg-2); }
-.segments { display: flex; gap: 1px; margin: 16px 0 0; }
-.segments span { flex: 1 1 0; min-width: 1px; height: 6px; border-radius: 1px; background: var(--fg); opacity: 0.15; }
-.segments .done { opacity: 1; }
-.segments .progress { opacity: 1; background: var(--accent); }
+/* ---- the frame: scenes the window's width, in AKQA's gutters ---------- */
+/* No column beside the text, no head above it and no bar (tasks 1337,
+   1367): what they held opens the first scene, heads History, or is run
+   from the pill. A scene's content lines up on AKQA's widest line, and a
+   paragraph keeps to the measure. */
+.page { padding: 0 0 240px; }
+.scene { position: relative; box-sizing: border-box; padding: clamp(96px, 14vh, 160px) max(var(--gutter), calc((100% - var(--wide)) / 2)); }
+.scene > * { max-width: var(--measure); }
+.scene > :is(h1, .opener, .bleed) { max-width: none; }
 
-.prose .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.prose .tags li { margin: 0; padding: 4px 12px; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--rule); font: 400 13px/20px var(--sans); letter-spacing: normal; color: var(--fg); }
-h1 { margin: 24px 0 0; font: 700 42px/52px var(--sans); letter-spacing: -0.011em; color: var(--fg); }
-.byline { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 32px 0 0; font: 400 14px/20px var(--sans); color: var(--fg-2); }
-.byline .who { color: var(--fg); }
-.byline .state { padding: 7px 15px; border: 1px solid var(--fg); border-radius: 999px; color: var(--fg); }
-.actions { display: flex; align-items: center; gap: 24px; margin: 32px 0 0; padding: 10px 8px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font: 400 13px/20px var(--sans); color: var(--fg-2); }
-
-.callout { margin: 40px 0 0; padding: 20px 24px; border-radius: 8px; background: var(--chip); font: 400 16px/24px var(--sans); color: var(--fg); }
+/* ---- the first scene: where the plan stands, and its title ------------ */
+.hero { display: flex; flex-direction: column; justify-content: center; min-height: 100vh; padding-top: 96px; padding-bottom: 168px; }
+.prose .kicker { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin: 0 0 clamp(24px, 4vh, 48px); font: 400 14px/20px var(--sans); color: var(--fg-2); }
+.kicker .state { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 14px; border-radius: 999px; background: var(--raise); color: var(--fg-strong); }
+.kicker .state::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.kicker .state.waiting { background: var(--fg-strong); color: var(--bg); }
+.kicker .state.waiting::before { animation: breathe 1.6s ease-in-out infinite; }
+@keyframes breathe { 50% { opacity: 0.25; } }
+.hero h1 { margin: 0; font: 400 clamp(40px, 7.2vw, 104px)/0.92 var(--sans); letter-spacing: -0.04em; text-transform: uppercase; overflow-wrap: anywhere; color: var(--fg-strong); }
+.callout { margin: 32px 0 0; padding: 20px 24px; border-radius: 16px; background: var(--chip); font: 400 16px/24px var(--sans); color: var(--fg); }
 .callout + .callout { margin-top: 16px; }
 .callout b { display: block; margin: 0 0 4px; font-weight: 600; color: var(--fg-strong); }
 .callout button.inline { padding: 0; border: 0; background: none; font: inherit; color: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.hero .lead { margin-top: 40px; }
 
-/* ---- the plan: AKQA's openers and statement, Medium's text ------------- */
-.prose .statement { margin: 56px 0 0; font: 400 32px/40px var(--serif); letter-spacing: -0.01em; color: var(--fg-strong); }
-.goal, .part { scroll-margin-top: 24px; }
-section.part::before { content: ""; display: block; height: 1px; margin: 80px calc(50% - 50vw + 24px); background: var(--rule); }
-.opener { margin: 0 0 40px; font: 400 56px/0.873 var(--sans); letter-spacing: -0.027em; text-transform: uppercase; overflow-wrap: anywhere; color: var(--fg-strong); }
-.prose p, .prose li { font: 400 20px/32px var(--serif); letter-spacing: -0.003em; color: var(--fg); }
-.prose p { margin: 2.14em 0 -0.46em; }
-.prose .opener + p, .prose .statement + p { margin-top: 0.94em; }
-.prose ul, .prose ol { margin: 1.4em 0 -0.46em; padding-left: 30px; }
-.prose li { margin: 1.14em 0 -0.46em; padding-left: 0.3em; }
-.prose li p { margin: 0; }
-.prose code { padding: 2px 4px; border-radius: 3px; background: var(--chip); font: 400 0.75em/1 var(--mono); }
+/* ---- openers, as AKQA's: capitals, weight 400, tight, line two grey --- */
+.opener { margin: 0 0 clamp(40px, 6vh, 72px); font: 400 clamp(40px, 6vw, 88px)/0.92 var(--sans); letter-spacing: -0.035em; text-transform: uppercase; overflow-wrap: anywhere; color: var(--fg-strong); }
+.opener .l1, .opener .l2 { display: block; }
+.opener .l2 { color: var(--fg-3); }
+
+/* ---- the plan: the Goal's statement in AKQA's serif, the text in its sans */
+.prose .statement { max-width: 1100px; margin: 0 0 40px; font: 400 clamp(28px, 3.4vw, 50px)/1.16 var(--serif); letter-spacing: -0.015em; color: var(--fg-strong); }
+:where(.prose) :is(p, li) { margin: 0 0 16px; font: 400 16px/24px var(--sans); color: var(--fg); }
+:where(.prose) :is(ul, ol) { margin: 8px 0 16px; padding-left: 20px; }
+:where(.prose) li li, :where(.prose) li p { margin: 6px 0; }
+.prose code { padding: 1px 5px; border-radius: 4px; background: var(--chip); font: 400 0.82em/1 var(--mono); color: var(--fg-strong); }
 .prose .callout code { background: var(--bg); }
 .prose strong { font-weight: 700; }
 .prose a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-.prose section :is(h1, h2):not(.opener) { margin: 1.6em 0 -0.3em; font: 700 28px/34px var(--sans); letter-spacing: -0.016em; color: var(--fg-strong); }
-.prose h3 { margin: 1.72em 0 -0.28em; font: 600 24px/30px var(--sans); letter-spacing: -0.016em; color: var(--fg-strong); }
-.prose :is(h4, h5, h6) { margin: 1.6em 0 -0.3em; font: 600 20px/26px var(--sans); color: var(--fg-strong); }
-.prose pre { margin: 2em 0 -0.46em; padding: 16px 20px; overflow-x: auto; border-radius: 4px; background: var(--chip); font: 400 14px/22px var(--mono); }
+:where(.prose) section :is(h1, h2):not(.opener) { margin: 40px 0 16px; font: 400 28px/34px var(--sans); letter-spacing: -0.016em; color: var(--fg-strong); }
+:where(.prose) h3 { margin: 32px 0 12px; font: 600 22px/28px var(--sans); letter-spacing: -0.016em; color: var(--fg-strong); }
+:where(.prose) :is(h4, h5, h6) { margin: 24px 0 8px; font: 600 18px/24px var(--sans); color: var(--fg-strong); }
+:where(.prose) pre { margin: 24px 0; padding: 16px 20px; overflow-x: auto; border-radius: 16px; background: var(--chip); font: 400 14px/22px var(--mono); }
 .prose pre code { padding: 0; background: none; font: inherit; }
-.prose blockquote { margin: 2em 0 -0.46em; padding-left: 20px; border-left: 3px solid var(--fg); }
-.prose blockquote p { margin-top: 0; font-style: italic; }
-.prose table { width: 100%; margin: 2em 0 -0.46em; border-collapse: collapse; font: 400 15px/22px var(--sans); }
+:where(.prose) blockquote { margin: 24px 0; padding-left: 20px; border-left: 2px solid var(--fg-strong); }
+:where(.prose) blockquote p { font-style: italic; }
+:where(.prose) table { width: 100%; margin: 24px 0; border-collapse: collapse; font: 400 15px/22px var(--sans); }
 .prose th, .prose td { padding: 8px 10px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
 .prose th { font-weight: 600; color: var(--fg-strong); }
-.prose hr { height: 1px; margin: 2.5em 0 -0.46em; border: 0; background: var(--rule); }
+:where(.prose) hr { height: 1px; margin: 32px 0; border: 0; background: var(--rule); }
 
 /* ---- steps: AKQA's numbered items -------------------------------------- */
 .prose .steps { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
@@ -3586,9 +3658,9 @@ button.step-head { cursor: pointer; }
 .prose .step .more .when { color: var(--fg-2); }
 .step .more .when b { font-weight: 600; color: var(--fg); }
 
-/* ---- the map: AKQA's strip, wider than the column ---------------------- */
+/* ---- the map: AKQA's strip, the window's width ------------------------ */
 .bleed { position: relative; margin: 0 calc(50% - 50vw); }
-.strip { overflow-x: auto; padding: 8px 24px 24px; scrollbar-width: none; }
+.strip { overflow-x: auto; padding: 8px max(var(--gutter), calc((100% - var(--wide)) / 2)) 24px; scrollbar-width: none; }
 .strip::-webkit-scrollbar { display: none; }
 .map { position: relative; }
 .map svg { position: absolute; inset: 0; overflow: visible; }
@@ -3602,7 +3674,7 @@ button.step-head { cursor: pointer; }
 .map .node.cancelled .t, .map .node.gone .t { color: var(--fg-2); text-decoration: line-through; }
 .map .s { position: absolute; right: 14px; bottom: 10px; left: 14px; display: flex; justify-content: space-between; font: 400 11px/16px var(--sans); color: var(--fg-2); }
 .map .s .dot { width: 6px; height: 6px; margin-right: 6px; vertical-align: 1px; }
-.arrows { display: flex; justify-content: flex-end; gap: 8px; max-width: var(--column); margin: 8px auto 0; padding: 0 24px; }
+.arrows { display: flex; justify-content: flex-end; gap: 8px; max-width: var(--wide); margin: 8px auto 0; padding: 0 var(--gutter); }
 .arrows button { display: grid; place-items: center; width: 40px; height: 40px; padding: 0 0 2px; border: 1px solid var(--rule); border-radius: 50%; background: var(--bg); font: 400 24px/1 var(--sans); color: var(--fg-strong); cursor: pointer; }
 .arrows button:hover:not(:disabled) { background: var(--chip); }
 .arrows button:disabled { opacity: 0.3; cursor: default; }
@@ -3627,7 +3699,29 @@ button.step-head { cursor: pointer; }
 .diff .hunk { font-style: italic; }
 .diff .add { background: var(--add); }
 .diff .del { background: var(--del); }
-.foot { margin: 120px 0 0; font: 400 13px/20px var(--sans); color: var(--fg-2); }
+.prose .about { margin: 0 0 8px; font: 400 15px/24px var(--sans); color: var(--fg-2); }
+.prose .about + :not(.about) { margin-top: 32px; }
+.foot { box-sizing: border-box; max-width: calc(var(--wide) + 2 * var(--gutter)); margin: 0 auto; padding: 48px var(--gutter) 0; font: 400 13px/20px var(--sans); color: var(--fg-2); }
+
+/* ---- AKQA's mark at the top centre ------------------------------------- */
+/* As AKQA's logo stays: it comes in once the first scene has gone by, in
+   the bar's glass, since the text runs under it. */
+.mark { position: fixed; top: 16px; left: 50%; z-index: 25; padding: 8px 16px; border-radius: 999px; background-color: rgba(0, 0, 0, var(--bar-black)); background-image: linear-gradient(rgba(255, 255, 255, var(--bar-white)), rgba(255, 255, 255, var(--bar-white))); -webkit-backdrop-filter: blur(var(--bar-blur)); backdrop-filter: blur(var(--bar-blur)); font: 400 13px/16px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; color: var(--bar-ink); opacity: 0; pointer-events: none; transform: translateX(-50%); transition: opacity 0.5s ease; }
+.mark.on { opacity: 1; }
+.mark b { font-weight: 400; color: var(--bar-ink-muted); }
+
+/* ---- AKQA's reveals (note 1357) ---------------------------------------- */
+/* What a scene holds comes in from a 6 px blur and 24 px below, in 800 ms,
+   once, as it comes into view; a heading word by word, 35 ms apart. Hidden
+   only on a page whose script can bring it back, which THEME marks, on a
+   screen, with motion allowed: under reduced motion all of it is still,
+   and print is a plain document. */
+@media screen and (prefers-reduced-motion: no-preference) {
+  :root[data-motion] .scene > :not(.words) { transition: opacity 0.8s var(--curve), filter 0.8s var(--curve), transform 0.8s var(--curve); }
+  :root[data-motion] .scene > :not(.words, .in) { opacity: 0; filter: blur(6px); transform: translateY(24px); }
+  :root[data-motion] .words .w { display: inline-block; transition: opacity 0.45s var(--curve) calc(var(--i, 0) * 35ms), filter 0.45s var(--curve) calc(var(--i, 0) * 35ms); }
+  :root[data-motion] .words:not(.in) .w { opacity: 0; filter: blur(8px); }
+}
 
 /* ---- Medium's section bars, at the right edge -------------------------- */
 .toc { position: fixed; top: 50%; right: 16px; z-index: 20; transform: translateY(-50%); }
@@ -3643,8 +3737,8 @@ button.step-head { cursor: pointer; }
 .toc a .t { overflow: hidden; text-overflow: ellipsis; }
 .toc a .d { flex: none; width: 4px; height: 4px; border-radius: 50%; }
 .toc a:hover { color: var(--fg); }
-.toc a.on { color: var(--accent); }
-.toc a.on .d { background: var(--accent); }
+.toc a.on { color: var(--fg-strong); }
+.toc a.on .d { background: var(--fg-strong); }
 
 /* ---- AKQA's bar: a pill at the bottom, a panel once clicked ------------ */
 /* As measured on akqa.com (task 1223): the bar fixed 60px above the
@@ -3833,21 +3927,21 @@ button.step-head { cursor: pointer; }
 
 /* The column at the left needs 232px beside the text, and the window
    1176px for that; a narrower one puts it above the text. */
-@media (max-width: 1175px) {
-  .standing { position: static; width: auto; margin: 0 0 32px; }
-  .standing-inner { position: static; }
-}
 @media (max-width: 720px) {
-  .opener { font-size: 40px; }
-  h1 { font-size: 32px; line-height: 40px; }
   .toc { display: none; }
 }
+/* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
-  .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side { transition: none; }
-  .bar-surface::before, .bar-cursor, .bar-list .item.in { animation: none; }
+  :root, .mark, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side { transition: none; }
+  .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
 }
+/* A plain document: black on white whatever the theme or the scene, each
+   scene as tall as what it holds, and nothing the page moves. */
 @media print {
-  .toc, .bar, .arrows, .select-tools, .pop, .prose .pin, #comments .filters, .callout .writes-only { display: none; }
+  :root, :root[data-theme], :root[data-mode], :root[data-theme][data-mode] { --page: #fff; --bg: #fff; --fg: #191919; --fg-strong: #000; --fg-2: #555; --fg-3: #8a8a8a; --rule: #e9e9e9; --chip: #f5f5f5; --raise: #f5f5f5; --card: #fff; --node: #fff; --node-line: #e2e2e2; --accent: #1a8917; color-scheme: light; }
+  .toc, .bar, .mark, .arrows, .select-tools, .pop, .prose .pin, #comments .filters, .callout .writes-only { display: none; }
+  .scene { padding: 24px 0; }
+  .hero { min-height: 0; }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
 }
@@ -4005,12 +4099,12 @@ mod tests {
         let item = artifact_item(1, &text, made);
         let all: ItemMap = BTreeMap::from([(1, item.clone())]);
         let (html, version) = page(&item, &all, Some(Path::new("/projects/site")));
-        assert!(html.contains("<h1>Ship &lt;it&gt;</h1>") && html.contains("<title>Ship &lt;it&gt; \u{b7} artifact 1</title>"), "{html}");
-        assert!(html.contains("<p class=\"name\">Artifact 1</p><p class=\"where\">Project site<span id=\"who\"></span></p>"), "{html}");
+        assert!(html.contains("<h1 class=\"words\"><span class=\"w\">Ship</span> <span class=\"w\">&lt;it&gt;</span></h1>") && html.contains("<title>Ship &lt;it&gt; \u{b7} artifact 1</title>"), "{html}");
+        assert!(html.contains("<p class=\"about\">Project site<span id=\"who\"></span></p>"), "{html}");
         assert!(html.contains("<p class=\"statement\">A <strong>bold</strong> goal.</p>"), "{html}");
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;") && !html.contains("<script>alert"), "raw HTML in a plan is shown, not run: {html}");
         assert!(html.contains("<span class=\"title\">First &lt;step&gt;</span>") && html.contains("data-state=\"to approve\""), "{html}");
-        assert!(html.contains("<p class=\"about\">Draft, 1 step.</p>") && html.contains("<ul class=\"tags\"><li>Artifact</li><li>Draft</li><li>1 step</li><li>Version 1</li></ul>"), "{html}");
+        assert!(html.contains("<p class=\"kicker\"><span>Artifact 1</span><span class=\"state\">Draft, 1 step</span></p>"), "{html}");
         assert_eq!(version.len(), 16);
         let (again, same) = page(&item, &all, Some(Path::new("/projects/site")));
         assert_eq!((again, same), (html.clone(), version.clone()), "the same board writes the same page");
@@ -4148,7 +4242,7 @@ mod tests {
         assert!(themed.contains("data-color=\"blue\"") && themed.contains("<span class=\"theme\">Dúvida</span>") && themed.contains("role=\"comment\""), "{themed}");
         assert!(themed.contains("<div class=\"reply\" id=\"comment-4\" role=\"comment\">"), "the reply is under what it answers: {themed}");
         assert!(entry(4).is_none(), "a reply is no entry of its own");
-        assert!(html.contains("<li><a href=\"#comments\">3 comments</a></li>") && html.contains("<li>1 note</li>"), "{html}");
+        assert!(html.contains("<li><a href=\"#comments\"><span class=\"d\"></span><span class=\"t\">Comments</span></a></li>"), "the index leads to them: {html}");
         assert!(!html.contains("class=\"margin\""), "no card is beside the text");
     }
 
@@ -4184,7 +4278,7 @@ mod tests {
         let (html, _) = page(&item, &all, None);
         assert_eq!(html.matches(" data-command=\"ekko artifact 1\"").count(), 1, "the command is offered once, by the pill: {html}");
         assert!(!html.contains("<header") && !html.contains("id=\"theme\""), "no bar above the page: its commands are the pill's (task 1337)");
-        assert!(html.contains("<p class=\"where\">The default board<span id=\"who\"></span></p>"), "the board, and whom it writes as, beside the text: {html}");
+        assert!(html.contains("<p class=\"about\">The default board<span id=\"who\"></span></p>"), "the board, and whom it writes as, at History's head: {html}");
         let legend = html.split("id=\"map\"").nth(1).and_then(|map| map.split_once("<div class=\"legend\">")).map(|(before, after)| (before.contains("class=\"strip\""), after.split("</div>").next().unwrap_or("")));
         assert_eq!(legend.map(|(late, _)| late), Some(false), "the map has a legend above its strip: {html}");
         for state in ["dot proposed\"></span>to approve", "dot pending\"></span>pending", "dot progress\"></span>in progress", "dot done\"></span>done", "an arrow: what a step waits on"] {
@@ -4204,24 +4298,133 @@ mod tests {
         for (id, name) in parts {
             from += html[from..].find(&format!("id=\"{id}\" data-part=\"{name}\"")).unwrap_or_else(|| panic!("{id}, in this order: {html}"));
         }
-        let rows: String = parts.iter().map(|(id, name)| format!("<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{name}</span></a></li>")).collect();
-        assert!(html.contains(&format!("<div class=\"toc-card\"><ol>{rows}</ol></div>")), "the section bars name each part, in the same order: {html}");
-        assert!(html.contains(&format!("aria-label=\"Sections\">{}</button>", "<span></span>".repeat(parts.len()))), "a bar per part: {html}");
+        let rows: String = std::iter::once(&("top", "Overview")).chain(&parts).map(|(id, name)| format!("<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{name}</span></a></li>")).collect();
+        assert!(html.contains(&format!("<div class=\"toc-card\"><ol>{rows}</ol></div>")), "the section bars name the first scene and each part, in the same order: {html}");
+        assert!(html.contains(&format!("aria-label=\"Sections\">{}</button>", "<span></span>".repeat(parts.len() + 1))), "a bar each: {html}");
         let nav = "<a href=\"#plan-goal\">Plan</a><a href=\"#steps\">Steps</a><a href=\"#map\">Map</a><a href=\"#notes\">Notes</a><a href=\"#history\">History</a>";
         assert!(html.contains(&format!("aria-label=\"Parts\">{nav}</nav>")), "the bar's menu: {html}");
-        assert!(html.contains("<h2 class=\"opener\">What is known</h2>") && !html.contains("<h2 class=\"opener\">Goal</h2>"), "the Goal opens with its statement: {html}");
+        assert!(html.contains("data-part=\"What is known\" data-mode=\"light\" data-plan><h2 class=\"opener words\" data-chrome>") && html.contains("data-part=\"Goal\" data-mode=\"dark\" data-plan><p class=\"statement\">"), "the Goal opens with its statement: {html}");
         assert!(html.contains("<h3>Keep the page light.</h3>") && html.contains("<p class=\"text\">It reloads often.\nAnd it reads well.</p>"), "a note's first sentence is its title: {html}");
         assert!(html.contains("<div class=\"note\" id=\"note-2\" data-kind=\"Note\"><div class=\"kind\">Note 2 \u{b7} "), "{html}");
-        assert_eq!((reading_minutes("word"), reading_minutes(&"word ".repeat(397)), reading_minutes(&"word ".repeat(398))), (1, 1, 2), "Medium's 265 words a minute, rounded");
         assert!(html.contains("Version 2 \u{2192} 3") && html.contains("<div class=\"del\">- Text.</div><div class=\"add\">+ The new design.</div>"), "{html}");
         assert!(html.contains("<p class=\"history\">Version 3 is the current one; none is approved yet.</p>"), "{html}");
         assert!(html.contains("<path class=\"edge\""), "b waits on a: {html}");
 
         let bare = artifact_item(1, &plan("Ship"), Vec::new());
         let (html, _) = page(&bare, &BTreeMap::from([(1, bare.clone())]), None);
-        assert!(html.contains("id=\"steps\" data-part=\"Steps\"><h2 class=\"opener\">Steps</h2><p>No steps yet: the artifact tool writes them.</p>"), "{html}");
+        assert!(html.contains("id=\"steps\" data-part=\"Steps\" data-mode=\"light\"><h2 class=\"opener words\" data-chrome><span class=\"l1\"><span class=\"w\">Steps</span></span></h2><p>No steps yet: the artifact tool writes them.</p>"), "{html}");
         assert!(!html.contains("data-part=\"Map\"") && !html.contains("data-part=\"Notes\""), "no map without steps, no notes without one: {html}");
         assert!(!html.contains("href=\"#map\"") && !html.contains("href=\"#notes\""), "nor do the bars name them: {html}");
+    }
+
+    /// The words a part of the page shows, as the comments read them in the
+    /// page's script: its text but what `data-chrome` marks, each block
+    /// apart from the next (BLOCK in SCRIPT), runs of white space one space.
+    fn page_words(html: &str) -> String {
+        const BLOCKS: [&str; 15] = ["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "td", "th", "blockquote", "section", "dt", "dd"];
+        let mut words = String::new();
+        let mut rest = html;
+        // The element left out, by its tag, and how deep it nests in itself.
+        let mut chrome: Option<(String, usize)> = None;
+        while let Some(at) = rest.find('<') {
+            if chrome.is_none() {
+                words.push_str(&rest[..at]);
+            }
+            let end = rest[at..].find('>').map_or(rest.len(), |end| at + end + 1);
+            let tag = &rest[at + 1..end - 1];
+            let closing = tag.starts_with('/');
+            let name: String = tag.trim_start_matches('/').chars().take_while(char::is_ascii_alphanumeric).collect();
+            let void = tag.ends_with('/') || ["br", "hr", "img", "input"].contains(&name.as_str());
+            if let Some((open, depth)) = chrome.as_mut() {
+                if *open == name && !void {
+                    *depth = if closing { *depth - 1 } else { *depth + 1 };
+                }
+                if *depth == 0 {
+                    chrome = None;
+                }
+            } else if !closing && !void && tag.contains(" data-chrome") {
+                chrome = Some((name.clone(), 1));
+            }
+            if BLOCKS.contains(&name.as_str()) {
+                words.push(' ');
+            }
+            rest = &rest[end..];
+        }
+        words.push_str(rest);
+        collapsed(&words.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&"))
+    }
+
+    #[test]
+    fn the_page_is_a_run_of_scenes_each_in_its_mode_and_the_index_names_them() {
+        let made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"])]).unwrap();
+        let text = plan("Ship the page")
+            .replace("Ship the page\n\n", "Ship the page\n\nA lead, *before* the goal.\n\n")
+            .replace("## Goal\nText.", "## Goal\nShip the page. Then `measure` it.")
+            .replace("## What is known\nText.", "## What is known\nFound so far:\n\n- one **thing**\n  - inside it\n- two & <three>\n\n| a | b |\n|---|---|\n| c | d |")
+            .replace("## Design\nText.", "## Design\n### Its parts\n\n```\ncode here\n```\n\n> Quoted, [linked](https://example.com).");
+        let mut item = artifact_item(7, &text, made);
+        item.priority = Some(3);
+        let mut note = Item::new_note(2, "Keep it light.".to_string(), vec!["My Board".to_string()]);
+        note.attached_to = item.uid.clone();
+        let all: ItemMap = BTreeMap::from([(7, item.clone()), (2, note)]);
+        let (html, _) = page(&item, &all, Some(Path::new("/projects/site")));
+
+        // The column beside the text and the head above it are gone: what
+        // they said opens the first scene, and heads History.
+        for gone in ["class=\"standing\"", "class=\"tags\"", "class=\"byline\"", "class=\"actions\"", " min read"] {
+            assert!(!html.contains(gone), "{gone}: {html}");
+        }
+        assert!(html.contains("<p class=\"kicker\"><span>Artifact 7</span><span>Priority 3</span><span class=\"state\">Draft, 2 steps</span></p>"), "{html}");
+        assert!(html.contains("<p class=\"about\">Project site<span id=\"who\"></span></p>"), "the board, and whom the page writes as: {html}");
+
+        // Scenes, in the page's order, each in its mode; the index names
+        // them all, a bar each.
+        let scenes: Vec<(String, String)> = html
+            .split("<section class=\"scene")
+            .skip(1)
+            .map(|scene| {
+                let tag = scene.split('>').next().unwrap_or_default();
+                let attr = |name: &str| tag.split_once(&format!(" {name}=\"")).and_then(|(_, rest)| rest.split('"').next()).unwrap_or_default().to_string();
+                (attr("id"), attr("data-mode"))
+            })
+            .collect();
+        let want = [
+            ("top", "light", "Overview"),
+            ("plan-goal", "dark", "Goal"),
+            ("plan-what-is-known", "light", "What is known"),
+            ("plan-design", "light", "Design"),
+            ("plan-risks-and-open-questions", "light", "Risks and open questions"),
+            ("steps", "light", "Steps"),
+            ("map", "dark", "Map"),
+            ("notes", "light", "Notes"),
+            ("history", "light", "History"),
+        ];
+        assert_eq!(scenes, want.map(|(id, mode, _)| (id.to_string(), mode.to_string())), "{html}");
+        let rows: String = want.iter().map(|(id, _, name)| format!("<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{name}</span></a></li>")).collect();
+        assert!(html.contains(&format!("<div class=\"toc-card\"><ol>{rows}</ol></div>")), "{html}");
+        assert!(html.contains(&format!("aria-label=\"Sections\">{}</button>", "<span></span>".repeat(want.len()))), "{html}");
+        assert!(html.contains("<div class=\"mark\" aria-hidden=\"true\">ekko <b>\u{b7}</b> artifact 7</div>"), "{html}");
+        assert!(html.contains("<h2 class=\"opener words\" data-chrome><span class=\"l1\"><span class=\"w\">What</span> <span class=\"w\">is</span></span> <span class=\"l2\"><span class=\"w\">known</span></span></h2>"), "AKQA's opener, its second line grey: {html}");
+
+        // In the plan's parts the page's words are the plan's: what the page
+        // adds there is chrome, which the comments' words skip.
+        let said: Vec<String> = section_ranges(text.split_once('\n').unwrap().1).into_iter().map(|(_, range)| shown_words(&text.split_once('\n').unwrap().1[range])).collect();
+        let shown: Vec<String> = html
+            .split("<section ")
+            .skip(1)
+            .filter(|section| section.split('>').next().is_some_and(|tag| tag.contains(" data-plan")))
+            .map(|section| page_words(&format!("<section {}", section.split("</section>").next().unwrap_or_default())))
+            .collect();
+        assert_eq!(shown, said, "{html}");
+        assert!(SCRIPT.contains("closest(\"[data-chrome]\")"), "the comments' words skip chrome");
+
+        // Reveals hide only where the script can bring them back, on a
+        // screen, with motion allowed: still under reduced motion, plain in
+        // print.
+        assert!(THEME.contains("root.dataset.motion = \"\""), "the head marks a page that can reveal");
+        let (_, moving) = STYLE.split_once("@media screen and (prefers-reduced-motion: no-preference) {").expect("reveals in a block of their own");
+        assert!(moving.split("\n}\n").next().is_some_and(|block| block.contains(":root[data-motion] .scene >") && block.contains("blur(6px)")), "{moving}");
+        assert_eq!(STYLE.matches(":root[data-motion]").count(), moving.split("\n}\n").next().unwrap_or_default().matches(":root[data-motion]").count(), "nothing hides outside it");
     }
 
     #[test]
@@ -4261,7 +4464,7 @@ mod tests {
         for id in ["plan-steps", "plan-steps-2", "steps"] {
             assert_eq!(html.matches(&format!(" id=\"{id}\" data-part=\"Steps\"")).count(), 1, "{id}: {html}");
         }
-        assert!(html.contains("<section class=\"part\" id=\"plan-goal-2\" data-part=\"Goal\" data-plan><h2 class=\"opener\">Goal</h2><p>Once more.</p>"), "only the first Goal opens the plan: {html}");
+        assert!(html.contains("<section class=\"scene part\" id=\"plan-goal-2\" data-part=\"Goal\" data-mode=\"light\" data-plan><h2 class=\"opener words\" data-chrome><span class=\"l1\"><span class=\"w\">Goal</span></span></h2><p>Once more.</p>"), "only the first Goal opens the plan: {html}");
     }
 
     #[test]
@@ -4399,7 +4602,7 @@ mod tests {
 
         all.get_mut(&1).unwrap().description = plan("Ship today");
         refresh(&dir, &all, None);
-        assert!(std::fs::read_to_string(&path).unwrap().contains("<h1>Ship today</h1>"));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("<h1 class=\"words\"><span class=\"w\">Ship</span> <span class=\"w\">today</span></h1>"));
         assert_ne!(std::fs::read_to_string(dir.join(PAGES).join(format!("{uid}.js"))).unwrap(), script);
         let listed = |dir: PathBuf| -> Vec<String> { std::fs::read_dir(dir).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect() };
         let mut left = listed(dir.join(PAGES));
@@ -4514,7 +4717,7 @@ mod tests {
                 let data = board();
                 page(&data[&target], &data, None).0
             };
-            assert!(shown().contains("<li>Artifact</li><li>Waiting on you</li>") && shown().contains("<span class=\"who\">Written by a session, "), "{}", shown());
+            assert!(shown().contains(&format!("<span class=\"state waiting\">Waiting on you: question {first}")) && shown().contains("<p class=\"about\">Written by a session, "), "{}", shown());
             answer(&as_user, first, "Ainda não").unwrap();
             assert_eq!(callouts(), Vec::<String>::new(), "answered, it waits no more");
             assert_eq!(made(), 0, "the second answer");
@@ -4547,7 +4750,7 @@ mod tests {
             assert_eq!(blockers, [&field, &tool, &page].map(|task| task.uid.clone().unwrap()), "the tasks block the artifact");
             assert!(field.id < tool.id && tool.id < page.id, "made in the plan's order");
             assert_eq!(Standing::of(&data[&target], &data).unwrap().words(), "approved, 0 of 3 done");
-            assert!(shown().contains("<li>Artifact</li><li>Approved</li><li>0 of 3 done</li>"), "{}", shown());
+            assert!(shown().contains("<span class=\"state\">Approved, 0 of 3 done</span>"), "{}", shown());
 
             let context = crate::agent::context(&as_user, &target.to_string()).unwrap().text();
             assert!(context.contains("artifact, a task pending"), "{context}");
@@ -4861,10 +5064,10 @@ mod tests {
             let target = artifact(&as_user, json!({"text": plan("Ship"), "steps": steps})).unwrap();
             let data = as_user.storage.get().unwrap();
             let path = write(&dir, &data[&target], &data, None).unwrap();
-            assert!(std::fs::read_to_string(&path).unwrap().contains("Draft, 1 step."));
+            assert!(std::fs::read_to_string(&path).unwrap().contains("<span class=\"state\">Draft, 1 step</span>"));
             apply(&as_user, json!({"op": "edit", "item": target, "append": "\nAnd a line more."})).unwrap();
             let page = std::fs::read_to_string(&path).unwrap();
-            assert!(page.contains("And a line more.") && page.contains("<li>Version 2</li>"), "an edit through any path rewrites it: {page}");
+            assert!(page.contains("And a line more.") && page.contains("data-version=\"2\""), "an edit through any path rewrites it: {page}");
             apply(&as_user, json!({"op": "create", "text": "Unrelated"})).unwrap();
             assert_eq!(std::fs::read_to_string(&path).unwrap(), page, "a write that changes nothing it shows leaves it");
             std::fs::remove_dir_all(&home).ok();
