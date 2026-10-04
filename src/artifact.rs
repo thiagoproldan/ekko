@@ -580,7 +580,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         let id = unique(&mut ids, &format!("plan-{}", slug(&heading)));
         if heading == "Goal" && !goal_shown {
             goal_shown = true;
-            let _ = write!(body, "<section class=\"scene goal\" id=\"{id}\" data-part=\"Goal\" data-mode=\"{}\" data-plan>{}</section>", mode(&id), goal(&text));
+            let _ = write!(body, "<section class=\"scene goal\" id=\"{id}\" data-part=\"Goal\" data-mode=\"{}\" data-plan>{}</section>", mode(&id), goal_scene(&text));
         } else {
             let (first, second) = two_tones(&heading);
             let _ = write!(
@@ -1530,18 +1530,77 @@ fn inline(text: &str) -> String {
     html.strip_prefix("<p>").and_then(|rest| rest.strip_suffix("</p>\n")).filter(|inside| !inside.contains("<p>")).map_or_else(|| esc(text), str::to_string)
 }
 
-/// The Goal as the page opens it: its first sentence as the statement, in
-/// large serif, then the rest as it is written.
-fn goal(text: &str) -> String {
-    let mut out = String::new();
+/// The Goal cut as the page opens it: its first sentence, the statement,
+/// as inline HTML, when the Goal opens with a paragraph, and the rest as it
+/// is written.
+fn goal_split(text: &str) -> (Option<String>, String) {
+    let (mut statement, mut rest) = (String::new(), String::new());
     match first_sentence(events(text)) {
-        Ok((sentence, rest)) => {
-            out.push_str("<p class=\"statement\">");
-            pulldown_cmark::html::push_html(&mut out, sentence.into_iter());
-            out.push_str("</p>\n");
-            pulldown_cmark::html::push_html(&mut out, rest.into_iter());
+        Ok((sentence, after)) => {
+            pulldown_cmark::html::push_html(&mut statement, sentence.into_iter());
+            pulldown_cmark::html::push_html(&mut rest, after.into_iter());
+            (Some(statement), rest)
         }
-        Err(events) => pulldown_cmark::html::push_html(&mut out, events.into_iter()),
+        Err(events) => {
+            pulldown_cmark::html::push_html(&mut rest, events.into_iter());
+            (None, rest)
+        }
+    }
+}
+
+/// The Goal as its scene holds it (task 1369): the statement in large
+/// serif, each word a span the scroll lights, held in place with the rest
+/// of the Goal after it; its label and the hairline that says how far the
+/// statement is lit are the page's, chrome.
+fn goal_scene(text: &str) -> String {
+    let (statement, rest) = goal_split(text);
+    let mut out = String::from("<div class=\"held\"><div class=\"label\" data-chrome>Goal</div>");
+    if let Some(statement) = statement {
+        let _ = write!(out, "<p class=\"statement\">{}</p>", lit_words(&statement));
+    }
+    let _ = write!(out, "<div class=\"goal-rest\">{rest}</div><div class=\"progress\" data-chrome aria-hidden=\"true\"><i></i></div></div>");
+    out
+}
+
+/// `html`'s words, outside its tags and its code, each a span the Goal's
+/// scroll lights; a code span is lit whole, as one word.
+fn lit_words(html: &str) -> String {
+    let mut out = String::new();
+    let mut code = 0usize;
+    let mut rest = html;
+    while !rest.is_empty() {
+        if rest.starts_with('<') {
+            let end = rest.find('>').map_or(rest.len(), |at| at + 1);
+            let tag = &rest[..end];
+            if tag.starts_with("<code") {
+                code += 1;
+            } else if tag.starts_with("</code") {
+                code = code.saturating_sub(1);
+            }
+            out.push_str(tag);
+            rest = &rest[end..];
+            continue;
+        }
+        let end = rest.find('<').unwrap_or(rest.len());
+        let text = &rest[..end];
+        if code > 0 {
+            out.push_str(text);
+        } else {
+            let mut word = String::new();
+            for c in text.chars().chain(std::iter::once(' ')) {
+                if !c.is_whitespace() {
+                    word.push(c);
+                    continue;
+                }
+                if !word.is_empty() {
+                    let _ = write!(out, "<span class=\"w\">{word}</span>");
+                    word.clear();
+                }
+                out.push(c);
+            }
+            out.pop();
+        }
+        rest = &rest[end..];
     }
     out
 }
@@ -1814,6 +1873,41 @@ const SCRIPT: &str = r##"(function () {
   addEventListener("scroll", moved, { passive: true });
   addEventListener("resize", moved);
   follow();
+
+  // The Goal (task 1369): its statement held in the window while the
+  // scroll lights its words one after another, the rest of the Goal coming
+  // after them and a hairline saying how far. The scene is as tall as its
+  // words need, which STYLE reads from --tall; under reduced motion, as tall
+  // as its text, all of it lit. A function of its own, so its names are its
+  // own.
+  (function () {
+    var goal = document.querySelector(".scene.goal");
+    if (!goal || !("motion" in root.dataset)) return;
+    var units = Array.prototype.slice.call(goal.querySelectorAll(".statement .w, .statement code"));
+    var rest = goal.querySelector(".goal-rest"), line = goal.querySelector(".progress i");
+    var still = matchMedia("(prefers-reduced-motion: reduce)");
+    if (units.length) goal.style.setProperty("--tall", (1.3 + units.length / 36).toFixed(3));
+    var light = function () {
+      var p = 1;
+      if (!still.matches) {
+        var room = goal.offsetHeight - innerHeight;
+        p = room > 0 ? Math.min(1, Math.max(0, -goal.getBoundingClientRect().top / room)) : 1;
+      }
+      var lit = Math.ceil(Math.min(1, p / 0.72) * units.length);
+      units.forEach(function (unit, i) { unit.classList.toggle("lit", i < lit); });
+      if (rest) rest.classList.toggle("in", p > 0.76 || !units.length);
+      if (line) line.style.transform = "scaleX(" + p.toFixed(3) + ")";
+    };
+    var lighting = false;
+    addEventListener("scroll", function () {
+      if (lighting) return;
+      lighting = true;
+      requestAnimationFrame(function () { lighting = false; light(); });
+    }, { passive: true });
+    addEventListener("resize", light);
+    if (still.addEventListener) still.addEventListener("change", light);
+    light();
+  })();
 
   // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
   // into a panel, which finds a part, a step, a note or a comment of the
@@ -3659,7 +3753,7 @@ body:not([data-writes]) .writes-only { display: none !important; }
 .page { padding: 0 0 240px; }
 .scene { position: relative; box-sizing: border-box; padding: clamp(96px, 14vh, 160px) max(var(--gutter), calc((100% - var(--wide)) / 2)); }
 .scene > * { max-width: var(--measure); }
-.scene > :is(h1, .opener, .bleed, .facts, .waits) { max-width: none; }
+.scene > :is(h1, .opener, .bleed, .facts, .waits, .held) { max-width: none; }
 
 /* ---- the first scene: where the plan stands, and its title ------------ */
 .hero { display: flex; flex-direction: column; justify-content: center; min-height: 100vh; padding-top: 96px; padding-bottom: 168px; }
@@ -3722,6 +3816,18 @@ body:not([data-writes]) .writes-only { display: none !important; }
 .prose th, .prose td { padding: 8px 10px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
 .prose th { font-weight: 600; color: var(--fg-strong); }
 :where(.prose) hr { height: 1px; margin: 32px 0; border: 0; background: var(--rule); }
+
+/* ---- the Goal: its statement held while the scroll lights its words --- */
+/* As tall as the script makes it, the room the scroll takes to light the
+   statement, which the holder keeps in the window meanwhile (task 1369). */
+.scene.goal { padding-top: 0; padding-bottom: 0; }
+.goal .held { position: sticky; top: 0; display: flex; flex-direction: column; justify-content: center; box-sizing: border-box; min-height: 100vh; max-width: 1100px; padding: 96px 0; }
+.goal .label { margin: 0 0 20px; font: 400 13px/16px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); }
+.prose .goal .statement { margin: 0; }
+.goal-rest { max-width: 640px; margin-top: 40px; }
+:where(.goal-rest) :is(p, li) { font-size: 18px; line-height: 28px; }
+.goal .progress { position: absolute; right: 0; bottom: 28px; left: 0; height: 1px; background: var(--rule); }
+.goal .progress i { display: block; height: 100%; background: var(--fg-strong); transform: scaleX(0); transform-origin: 0 50%; }
 
 /* ---- steps: AKQA's numbered items -------------------------------------- */
 .prose .steps { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
@@ -3802,10 +3908,22 @@ button.step-head { cursor: pointer; }
    screen, with motion allowed: under reduced motion all of it is still,
    and print is a plain document. */
 @media screen and (prefers-reduced-motion: no-preference) {
-  :root[data-motion] .scene > :not(.words) { transition: opacity 0.8s var(--curve), filter 0.8s var(--curve), transform 0.8s var(--curve); }
-  :root[data-motion] .scene > :not(.words, .in) { opacity: 0; filter: blur(6px); transform: translateY(24px); }
+  :root[data-motion] .scene > :not(.words, .held) { transition: opacity 0.8s var(--curve), filter 0.8s var(--curve), transform 0.8s var(--curve); }
+  :root[data-motion] .scene > :not(.words, .held, .in) { opacity: 0; filter: blur(6px); transform: translateY(24px); }
   :root[data-motion] .words .w { display: inline-block; transition: opacity 0.45s var(--curve) calc(var(--i, 0) * 35ms), filter 0.45s var(--curve) calc(var(--i, 0) * 35ms); }
   :root[data-motion] .words:not(.in) .w { opacity: 0; filter: blur(8px); }
+  /* The Goal's words wait dim for the scroll to light them, and the rest
+     of the Goal for the statement to be lit. */
+  :root[data-motion] .goal .statement :is(.w, code) { color: var(--dim); transition: color 0.25s ease; }
+  :root[data-motion] .goal .statement :is(.w, code).lit { color: var(--fg-strong); }
+  :root[data-motion] .goal-rest { transition: opacity 0.8s var(--curve), transform 0.8s var(--curve); }
+  :root[data-motion] .goal-rest:not(.in) { opacity: 0; transform: translateY(24px); }
+  /* And the Goal is as tall as that takes: the window's height and a
+     thirty-sixth of it more per word, the --tall its script sets. In lvh:
+     a phone's URL bar, coming and going, resizes the window but not lvh,
+     so the words stay under the reader's thumb. Without --tall the height
+     is invalid at computed-value time, so auto. */
+  :root[data-motion] .scene.goal { height: calc(var(--tall) * 100lvh); }
 }
 
 /* ---- Medium's section bars, at the right edge -------------------------- */
@@ -4018,6 +4136,7 @@ button.step-head { cursor: pointer; }
 /* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
   :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side { transition: none; }
+  .goal .held { position: static; min-height: 0; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
 }
 /* A plain document: black on white whatever the theme or the scene, each
@@ -4026,7 +4145,9 @@ button.step-head { cursor: pointer; }
   :root, :root[data-theme], :root[data-mode], :root[data-theme][data-mode] { --page: #fff; --bg: #fff; --fg: #191919; --fg-strong: #000; --fg-2: #555; --fg-3: #8a8a8a; --rule: #e9e9e9; --chip: #f5f5f5; --raise: #f5f5f5; --card: #fff; --node: #fff; --node-line: #e2e2e2; --accent: #1a8917; color-scheme: light; transition: none; }
   .toc, .bar, .mark, .arrows, .select-tools, .pop, .prose .pin, #comments .filters, .callout .writes-only { display: none; }
   .scene { padding: 24px 0; }
-  .hero { min-height: 0; }
+  .hero, .goal .held { min-height: 0; }
+  .goal .held { position: static; padding: 0; }
+  .goal .progress { display: none; }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
 }
@@ -4186,7 +4307,7 @@ mod tests {
         let (html, version) = page(&item, &all, Some(Path::new("/projects/site")));
         assert!(html.contains("<h1 class=\"words\"><span class=\"w\">Ship</span> <span class=\"w\">&lt;it&gt;</span></h1>") && html.contains("<title>Ship &lt;it&gt; \u{b7} artifact 1</title>"), "{html}");
         assert!(html.contains("<p class=\"about\">Project site<span id=\"who\"></span></p>"), "{html}");
-        assert!(html.contains("<p class=\"statement\">A <strong>bold</strong> goal.</p>"), "{html}");
+        assert!(html.contains("<p class=\"statement\"><span class=\"w\">A</span> <strong><span class=\"w\">bold</span></strong> <span class=\"w\">goal.</span></p>"), "{html}");
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;") && !html.contains("<script>alert"), "raw HTML in a plan is shown, not run: {html}");
         assert!(html.contains("<span class=\"title\">First &lt;step&gt;</span>") && html.contains("data-state=\"to approve\""), "{html}");
         assert!(html.contains("<p class=\"kicker\"><span>Artifact 1</span><span class=\"state\">Draft</span></p>"), "{html}");
@@ -4388,7 +4509,7 @@ mod tests {
         assert!(html.contains(&format!("aria-label=\"Sections\">{}</button>", "<span></span>".repeat(parts.len() + 1))), "a bar each: {html}");
         let nav = "<a href=\"#plan-goal\">Plan</a><a href=\"#steps\">Steps</a><a href=\"#map\">Map</a><a href=\"#notes\">Notes</a><a href=\"#history\">History</a>";
         assert!(html.contains(&format!("aria-label=\"Parts\">{nav}</nav>")), "the bar's menu: {html}");
-        assert!(html.contains("data-part=\"What is known\" data-mode=\"light\" data-plan><h2 class=\"opener words\" data-chrome>") && html.contains("data-part=\"Goal\" data-mode=\"dark\" data-plan><p class=\"statement\">"), "the Goal opens with its statement: {html}");
+        assert!(html.contains("data-part=\"What is known\" data-mode=\"light\" data-plan><h2 class=\"opener words\" data-chrome>") && html.contains("data-part=\"Goal\" data-mode=\"dark\" data-plan><div class=\"held\"><div class=\"label\" data-chrome>Goal</div><p class=\"statement\">"), "the Goal opens with its statement: {html}");
         assert!(html.contains("<h3>Keep the page light.</h3>") && html.contains("<p class=\"text\">It reloads often.\nAnd it reads well.</p>"), "a note's first sentence is its title: {html}");
         assert!(html.contains("<div class=\"note\" id=\"note-2\" data-kind=\"Note\"><div class=\"kind\">Note 2 \u{b7} "), "{html}");
         assert!(html.contains("Version 2 \u{2192} 3") && html.contains("<div class=\"del\">- Text.</div><div class=\"add\">+ The new design.</div>"), "{html}");
@@ -4529,11 +4650,25 @@ mod tests {
             ("<b>Raw</b> first. Then.", "&lt;b&gt;Raw&lt;/b&gt; first.", "<p>Then.</p>\n"),
             ("Ship it. And *this* too.\nMore.", "Ship it.", "<p>And <em>this</em> too.\nMore.</p>\n"),
         ] {
-            assert_eq!(goal(text), format!("<p class=\"statement\">{statement}</p>\n{rest}"), "{text}");
+            assert_eq!(goal_split(text), (Some(statement.to_string()), rest.to_string()), "{text}");
         }
-        assert_eq!(goal("- A list first.\n"), "<ul>\n<li>A list first.</li>\n</ul>\n", "no statement unless it opens with a paragraph");
-        assert_eq!(goal("### A heading. First\n\nThen.\n"), "<h3>A heading. First</h3>\n<p>Then.</p>\n");
-        assert_eq!(goal(""), "");
+        assert_eq!(goal_split("- A list first.\n"), (None, "<ul>\n<li>A list first.</li>\n</ul>\n".to_string()), "no statement unless it opens with a paragraph");
+        assert_eq!(goal_split("### A heading. First\n\nThen.\n"), (None, "<h3>A heading. First</h3>\n<p>Then.</p>\n".to_string()));
+        assert_eq!(goal_split(""), (None, String::new()));
+    }
+
+    #[test]
+    fn the_goal_scene_holds_its_statement_word_by_word() {
+        assert_eq!(
+            lit_words("Ship <strong>the page</strong> with <code>a b</code>, now &amp; then."),
+            "<span class=\"w\">Ship</span> <strong><span class=\"w\">the</span> <span class=\"w\">page</span></strong> <span class=\"w\">with</span> <code>a b</code><span class=\"w\">,</span> <span class=\"w\">now</span> <span class=\"w\">&amp;</span> <span class=\"w\">then.</span>",
+            "a word a span, code one, the tags kept"
+        );
+        assert_eq!(
+            goal_scene("Ship the page. Then measure it."),
+            "<div class=\"held\"><div class=\"label\" data-chrome>Goal</div><p class=\"statement\"><span class=\"w\">Ship</span> <span class=\"w\">the</span> <span class=\"w\">page.</span></p><div class=\"goal-rest\"><p>Then measure it.</p>\n</div><div class=\"progress\" data-chrome aria-hidden=\"true\"><i></i></div></div>"
+        );
+        assert!(!goal_scene("- A list first.\n").contains("statement"), "no statement to light");
     }
 
     #[test]
