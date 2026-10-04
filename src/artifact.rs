@@ -2435,8 +2435,11 @@ const SCRIPT: &str = r##"(function () {
       .then(window.ekkoAnswered || function (answer) { return { ok: answer.ok, why: "the server answered " + answer.status }; })
       .then(function (got) {
         if (!got.ok) throw new Error(got.why);
-        close(false);
+        // Put away before the bar shuts: its blur lets a version that came
+        // meanwhile reload the page, which would keep what was sent for the
+        // next review (task 1343).
         unreview(true);
+        close(false);
       })
       .catch(function (error) {
         confirming = false;
