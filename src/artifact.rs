@@ -768,16 +768,28 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         body.push_str(&scene);
     }
 
-    // History: who wrote the plan and when, the board it is on and whom
-    // the page writes as; the version against the one approved, and each
-    // earlier text against the one that replaced it.
+    // History (task 1376): who wrote the plan and when, the board it is on
+    // and whom the page writes as, in a line at its head; the version
+    // against the one approved; then the texts the plan kept on a line and
+    // the changes between them, one at a time.
     parts.push(("history".to_string(), "History".to_string()));
     let versions = if version > 1 { format!("{version} versions") } else { "the first version".to_string() };
-    let _ = write!(body, "<section class=\"scene part\" id=\"history\" data-part=\"History\" data-mode=\"{}\">{}<p class=\"about\">", mode("history"), opener("History", Some(&versions)));
-    if let Some(by) = &by {
-        let _ = write!(body, "Written by {} \u{b7} ", esc(by));
+    let mut about = Vec::new();
+    if artifact.is_some() {
+        about.push(format!("Version {version}"));
     }
-    let _ = write!(body, "Updated {}</p><p class=\"about\">{}<span id=\"who\"></span></p>", esc(&when(item.updated_at.unwrap_or(item.timestamp))), esc(&capitalized(&board)));
+    about.push(format!("updated {}", esc(&when(item.updated_at.unwrap_or(item.timestamp)))));
+    if let Some(by) = &by {
+        about.push(format!("written by {}", esc(by)));
+    }
+    about.push(esc(&board));
+    let _ = write!(
+        body,
+        "<section class=\"scene part changes\" id=\"history\" data-part=\"History\" data-mode=\"{}\">{}<p class=\"about\">{}<span id=\"who\"></span></p>",
+        mode("history"),
+        opener("History", Some(&versions)),
+        capitalized(&about.join(" \u{b7} "))
+    );
     if let Some(artifact) = artifact {
         let approved = match artifact.approved_version {
             Some(approved) if approved == version => format!("Version {version} is the current one, and the one you approved."),
@@ -789,18 +801,8 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         earlier.sort_by_key(|earlier| earlier.version);
         if earlier.is_empty() {
             body.push_str("<p class=\"history\">One text so far: nothing to compare. Each change to the plan's text keeps the one it replaced here.</p>");
-        }
-        for (at, old) in earlier.iter().enumerate().rev() {
-            let new = earlier.get(at + 1).map_or(item.description.as_str(), |next| next.text.as_str());
-            let _ = write!(
-                body,
-                "<div class=\"version\" id=\"version-{}\"><div class=\"kind\">Replaced {}</div><h3>Version {} \u{2192} {}</h3><div class=\"diff\">{}</div></div>",
-                old.version,
-                esc(&when(old.at)),
-                old.version,
-                old.version + 1,
-                diff_html(&old.text, new)
-            );
+        } else {
+            body.push_str(&texts_kept(item, &earlier, version));
         }
     }
     let _ = write!(
@@ -1087,6 +1089,58 @@ fn talk_scene(notes: &[&Item], comments: &[&Item], all: &ItemMap) -> Option<(&'s
     }
     out.push_str("</section>");
     Some((id, name, out))
+}
+
+/// The texts an artifact kept, `earlier` in order and then its own at
+/// `version`, as History lays them (task 1376): a point each on a line,
+/// oldest first, under its version and the date it was made, which the
+/// first one has only when it is version 1, the plan's own; then each
+/// change, a text against the next, its newest first. With two changes or
+/// more, a slider runs through them, oldest at its start, and the page
+/// shows one at a time: the newest, the others hidden until the slider or
+/// a point picks them. The points of the change shown are current.
+fn texts_kept(item: &Item, earlier: &[&Earlier], version: u32) -> String {
+    let count = earlier.len();
+    let mut out = String::from("<div class=\"versions\"><ol class=\"line\" aria-label=\"Versions kept\">");
+    for node in 0..=count {
+        let number = earlier.get(node).map_or(version, |old| old.version);
+        let made = match node {
+            0 => (number == 1).then_some(item.timestamp),
+            _ => Some(earlier[node - 1].at),
+        };
+        let _ = write!(
+            out,
+            "<li><button type=\"button\" data-node=\"{node}\" aria-current=\"{}\"><b>v{number}</b><span>{}</span></button></li>",
+            node + 1 >= count,
+            made.map(|at| esc(&when(at))).unwrap_or_default()
+        );
+    }
+    out.push_str("</ol>");
+    if count > 1 {
+        let last = earlier[count - 1].version;
+        let _ = write!(
+            out,
+            "<input class=\"scrub\" type=\"range\" min=\"1\" max=\"{count}\" step=\"1\" value=\"{count}\" style=\"--p: 100%\" aria-label=\"Which change shows\" aria-valuetext=\"Version {last} \u{2192} {}\">",
+            last + 1
+        );
+    }
+    out.push_str("</div><div class=\"changed\">");
+    for (at, old) in earlier.iter().enumerate().rev() {
+        let new = earlier.get(at + 1).map_or(item.description.as_str(), |next| next.text.as_str());
+        let _ = write!(
+            out,
+            "<div class=\"version\" id=\"version-{}\" data-change=\"{}\"{}><div class=\"kind\">Replaced {}</div><h3>Version {} \u{2192} {}</h3><div class=\"diff\">{}</div></div>",
+            old.version,
+            at + 1,
+            if at + 1 < count { " hidden" } else { "" },
+            esc(&when(old.at)),
+            old.version,
+            old.version + 1,
+            diff_html(&old.text, new)
+        );
+    }
+    out.push_str("</div>");
+    out
 }
 
 /// What a review from the page needs (task 1106): the version it is made
@@ -2929,6 +2983,50 @@ const SCRIPT: &str = r##"(function () {
       if (!panel) return null;
       pick(tabOf(panel), false);
       return target === panel ? scene : target;
+    });
+  })();
+
+  // History (task 1376): the slider and the points on the line pick the
+  // change shown, which comes in as AKQA's grouped sections arrive, in
+  // 420 ms from a blur and below; still under reduced motion. A jump to a
+  // change picks it.
+  (function () {
+    var scene = document.querySelector(".scene.changes");
+    var changes = scene ? Array.prototype.slice.call(scene.querySelectorAll(".changed > .version")) : [];
+    if (!changes.length) return;
+    var still = matchMedia("(prefers-reduced-motion: reduce)");
+    var points = Array.prototype.slice.call(scene.querySelectorAll(".line button"));
+    var scrub = scene.querySelector(".scrub");
+    var number = function (change) { return Number(change.dataset.change); };
+    var shown = changes.length;
+    var choose = function (n) {
+      n = Math.max(1, Math.min(changes.length, n));
+      points.forEach(function (point) {
+        var at = Number(point.dataset.node);
+        point.setAttribute("aria-current", String(at === n || at === n - 1));
+      });
+      var change = changes.filter(function (one) { return number(one) === n; })[0];
+      if (scrub) {
+        scrub.value = String(n);
+        scrub.style.setProperty("--p", (n - 1) / (changes.length - 1) * 100 + "%");
+        scrub.setAttribute("aria-valuetext", change.querySelector("h3").textContent);
+      }
+      if (n === shown) return;
+      shown = n;
+      changes.forEach(function (one) {
+        one.getAnimations().forEach(function (motion) { motion.cancel(); });
+        one.hidden = one !== change;
+      });
+      if (!still.matches && change.animate) change.animate([{ opacity: 0, transform: "translateY(24px)", filter: "blur(6px)" }, { opacity: 1, transform: "none", filter: "blur(0)" }], { duration: 420, easing: "cubic-bezier(0.2, 0.65, 0.3, 1)" });
+    };
+    if (scrub) scrub.addEventListener("input", function () { choose(Number(scrub.value)); });
+    points.forEach(function (point) {
+      point.addEventListener("click", function () { choose(Number(point.dataset.node)); });
+    });
+    surfacers.push(function (target) {
+      var change = target.closest && target.closest(".changed > .version");
+      if (change && scene.contains(change)) choose(number(change));
+      return null;
     });
   })();
 
@@ -5069,7 +5167,42 @@ button.step-head { cursor: pointer; }
 .prose .note .text { margin: 12px 0 0; font: 400 18px/28px var(--serif); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
 .note details { margin: 12px 0 0; }
 .note summary { font: 400 14px/20px var(--sans); color: var(--fg-2); cursor: pointer; }
-.prose .history { font: 400 20px/32px var(--serif); color: var(--fg-2); }
+/* ---- History: the texts kept on a line, a slider through the changes - */
+/* As AKQA's timelines (task 1376): a point a text, its version in serif
+   over the date it was made, the points of the change shown filled; under
+   them, with two changes or more, a slider whose start is the oldest. The
+   change shown alone on a screen; print shows each. A line of seven points
+   or more leaves the dates to the changes. */
+.prose .history { margin: 0 0 24px; font: 400 clamp(22px, 2vw, 28px)/1.3 var(--serif); color: var(--fg-strong); }
+.scene > :is(.versions, .changed) { max-width: 920px; }
+.prose .line { position: relative; display: flex; justify-content: space-between; margin: 40px 0 8px; padding: 0; list-style: none; }
+.line::before { content: ""; position: absolute; top: 6px; right: 6px; left: 6px; height: 1px; background: var(--rule); }
+.prose .line li { margin: 0; }
+.line button { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0; border: 0; background: none; font: 400 13px/16px var(--sans); white-space: nowrap; color: var(--fg-2); cursor: pointer; }
+.line li:first-child button { align-items: flex-start; }
+.line li:last-child button { align-items: flex-end; }
+.line button::before { content: ""; width: 13px; height: 13px; border-radius: 50%; background: var(--bg); box-shadow: inset 0 0 0 1px var(--fg-2); transition: background-color 0.3s ease, transform 0.45s var(--curve); }
+.line button[aria-current="true"] { color: var(--fg-strong); }
+.line button[aria-current="true"]::before { background: var(--fg-strong); box-shadow: none; transform: scale(1.25); }
+.line button b { font: 400 28px/1 var(--serif); }
+.line:has(li:nth-child(7)) button span { display: none; }
+:is(.line button, .scrub):focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 3px; }
+/* The slider thin, as AKQA's: a hairline, the part before the thumb in ink
+   (--p, which the script keeps; Firefox draws it as the progress). */
+.scrub { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 24px; margin: 16px 0 32px; background: none; cursor: pointer; }
+.scrub::-webkit-slider-runnable-track { height: 2px; border-radius: 1px; background: linear-gradient(to right, var(--fg-strong) var(--p, 100%), var(--rule) var(--p, 100%)); }
+.scrub::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; margin-top: -8px; border: 0; border-radius: 50%; background: var(--fg-strong); }
+.scrub::-moz-range-track { height: 2px; border-radius: 1px; background: var(--rule); }
+.scrub::-moz-range-progress { height: 2px; border-radius: 1px; background: var(--fg-strong); }
+.scrub::-moz-range-thumb { width: 18px; height: 18px; border: 0; border-radius: 50%; background: var(--fg-strong); }
+.changed .diff { border-radius: 16px; }
+@media screen {
+  .changed .version { padding: 24px 0 0; border: 0; }
+}
+@media (max-width: 600px) {
+  .line button span { display: none; }
+  .line button b { font-size: 22px; }
+}
 .diff { margin: 12px 0 0; overflow: hidden; border-radius: 4px; background: var(--chip); font: 400 13px/20px var(--mono); }
 .diff div { padding: 1px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .diff .ctx, .diff .hunk { color: var(--fg-2); }
@@ -5356,7 +5489,7 @@ dialog.side::backdrop { background: rgba(0, 0, 0, 0.32); }
 }
 /* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
-  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before, .prose .sheet, .toggle i, .toggle i::after, .seg::before, .row i { transition: none; }
+  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before, .prose .sheet, .toggle i, .toggle i::after, .seg::before, .row i, .line button::before { transition: none; }
   .numeral .out, .numeral .enter { animation: none; }
   .goal .held { position: static; min-height: 0; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
@@ -5392,6 +5525,8 @@ dialog.side::backdrop { background: rgba(0, 0, 0, 0.32); }
   .staged .steps .step[hidden] { display: block !important; }
   .talk .tabs, .talk .kinds, .talk .rows, dialog.side { display: none; }
   .talk .panel[hidden] { display: block !important; }
+  .scrub { display: none; }
+  .changed .version[hidden] { display: block !important; }
   .panels > .panel::before { content: attr(data-name); display: block; margin: 24px 0 8px; font: 600 18px/24px var(--sans); color: var(--fg-strong); }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
@@ -5551,7 +5686,7 @@ mod tests {
         let all: ItemMap = BTreeMap::from([(1, item.clone())]);
         let (html, version) = page(&item, &all, Some(Path::new("/projects/site")));
         assert!(html.contains("<h1 class=\"words\"><span class=\"w\">Ship</span> <span class=\"w\">&lt;it&gt;</span></h1>") && html.contains("<title>Ship &lt;it&gt; \u{b7} artifact 1</title>"), "{html}");
-        assert!(html.contains("<p class=\"about\">Project site<span id=\"who\"></span></p>"), "{html}");
+        assert!(html.contains(" \u{b7} project site<span id=\"who\"></span></p>"), "{html}");
         assert!(html.contains("<p class=\"statement\"><span class=\"w\">A</span> <strong><span class=\"w\">bold</span></strong> <span class=\"w\">goal.</span></p>"), "{html}");
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;") && !html.contains("<script>alert"), "raw HTML in a plan is shown, not run: {html}");
         assert!(html.contains("<span class=\"title\">First &lt;step&gt;</span>") && html.contains("data-state=\"to approve\""), "{html}");
@@ -5781,6 +5916,42 @@ mod tests {
         assert!(!html.contains("<dialog") && !html.contains("class=\"rows\"") && !html.contains("class=\"tabs\""), "no notes, no sheet: {html}");
     }
 
+    /// History lays the texts the plan kept on a line, oldest first, each
+    /// under the date it was made, and shows one change at a time, the
+    /// newest, with a slider from the oldest to it (task 1376). Versions
+    /// that changed only the steps kept no text, so the line can skip them;
+    /// one change has no slider, and none no line.
+    #[test]
+    fn the_history_lays_the_texts_kept_on_a_line() {
+        let day = |n: i64| n * 86_400_000;
+        let mut item = artifact_item(1, &plan("Ship"), Vec::new());
+        item.timestamp = day(1);
+        let text = |design: &str| plan("Ship").replace("## Design\nText.", &format!("## Design\n{design}"));
+        item.description = text("Third.");
+        let plan_now = item.artifact.as_mut().unwrap();
+        plan_now.version = 4;
+        plan_now.earlier = vec![Earlier { version: 1, at: day(2), text: text("First."), unknown: BTreeMap::new() }, Earlier { version: 3, at: day(4), text: text("Second."), unknown: BTreeMap::new() }];
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+        let scene = html.split("<section class=\"scene part changes\" id=\"history\"").nth(1).and_then(|rest| rest.split("</section>").next()).unwrap_or_default();
+        let line = format!(
+            "<div class=\"versions\"><ol class=\"line\" aria-label=\"Versions kept\"><li><button type=\"button\" data-node=\"0\" aria-current=\"false\"><b>v1</b><span>{}</span></button></li><li><button type=\"button\" data-node=\"1\" aria-current=\"true\"><b>v3</b><span>{}</span></button></li><li><button type=\"button\" data-node=\"2\" aria-current=\"true\"><b>v4</b><span>{}</span></button></li></ol><input class=\"scrub\" type=\"range\" min=\"1\" max=\"2\" step=\"1\" value=\"2\" style=\"--p: 100%\" aria-label=\"Which change shows\" aria-valuetext=\"Version 3 \u{2192} 4\"></div><div class=\"changed\"><div class=\"version\" id=\"version-3\" data-change=\"2\"><div class=\"kind\">Replaced {}</div><h3>Version 3 \u{2192} 4</h3>",
+            when(day(1)),
+            when(day(2)),
+            when(day(4)),
+            when(day(4))
+        );
+        assert!(scene.contains(&line), "the line, the slider and the newest change shown: {scene}");
+        let older = scene.split("<div class=\"version\" id=\"version-1\" data-change=\"1\" hidden><div class=\"kind\">").nth(1).unwrap_or_default();
+        assert!(older.contains("<h3>Version 1 \u{2192} 2</h3>") && older.contains("<div class=\"del\">- First.</div><div class=\"add\">+ Second.</div>"), "the oldest, hidden, against the text after it: {scene}");
+
+        item.artifact.as_mut().unwrap().earlier.remove(0);
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+        assert!(html.contains("<b>v3</b><span></span>") && !html.contains("class=\"scrub\"") && html.contains("<div class=\"version\" id=\"version-3\" data-change=\"1\"><div"), "one change: no date known for v3, no slider, the change shown: {html}");
+        item.artifact.as_mut().unwrap().earlier.clear();
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+        assert!(!html.contains("class=\"line\"") && html.contains("<p class=\"history\">One text so far: nothing to compare."), "{html}");
+    }
+
     /// Each color of THEMES has its tint and its ink in both looks, and the
     /// highlight that marks words being quoted: the rule over every theme,
     /// so a seventh color cannot ship half drawn.
@@ -5813,7 +5984,8 @@ mod tests {
         let (html, _) = page(&item, &all, None);
         assert_eq!(html.matches(" data-command=\"ekko artifact 1\"").count(), 1, "the command is offered once, by the pill: {html}");
         assert!(!html.contains("<header") && !html.contains("id=\"theme\""), "no bar above the page: its commands are the pill's (task 1337)");
-        assert!(html.contains("<p class=\"about\">The default board<span id=\"who\"></span></p>"), "the board, and whom it writes as, at History's head: {html}");
+        let about = format!("<p class=\"about\">Version 3 \u{b7} updated {} \u{b7} the default board<span id=\"who\"></span></p>", when(item.updated_at.unwrap_or(item.timestamp)));
+        assert!(html.contains(&about), "the version, when, the board and whom it writes as, at History's head: {html}");
         let legend = html.split("id=\"map\"").nth(1).and_then(|map| map.split_once("<div class=\"legend\">")).map(|(before, after)| (before.contains("class=\"strip\""), after.split("</div>").next().unwrap_or("")));
         assert_eq!(legend.map(|(late, _)| late), Some(false), "the map has a legend above its strip: {html}");
         for state in ["dot proposed\"></span>to approve", "dot pending\"></span>pending", "dot progress\"></span>in progress", "dot done\"></span>done", "an arrow: what a step waits on"] {
@@ -5910,7 +6082,7 @@ mod tests {
             assert!(!html.contains(gone), "{gone}: {html}");
         }
         assert!(html.contains("<p class=\"kicker\"><span>Artifact 7</span><span>Priority 3</span><span class=\"state\">Draft</span></p>"), "{html}");
-        assert!(html.contains("<p class=\"about\">Project site<span id=\"who\"></span></p>"), "the board, and whom the page writes as: {html}");
+        assert!(html.contains(" \u{b7} project site<span id=\"who\"></span></p>"), "the board, and whom the page writes as: {html}");
 
         // Scenes, in the page's order, each in its mode; the index names
         // them all, a bar each.
@@ -6511,7 +6683,7 @@ mod tests {
                 let data = board();
                 page(&data[&target], &data, None).0
             };
-            assert!(shown().contains("<span class=\"state waiting\">Waiting on you</span>") && shown().contains(&format!("<b>Waiting on you: question {first}</b>")) && shown().contains("<p class=\"about\">Written by a session, "), "{}", shown());
+            assert!(shown().contains("<span class=\"state waiting\">Waiting on you</span>") && shown().contains(&format!("<b>Waiting on you: question {first}</b>")) && shown().contains(" \u{b7} written by a session, "), "{}", shown());
             answer(&as_user, first, "Ainda não").unwrap();
             assert_eq!(callouts(), Vec::<String>::new(), "answered, it waits no more");
             assert_eq!(made(), 0, "the second answer");
