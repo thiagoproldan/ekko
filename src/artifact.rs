@@ -575,11 +575,12 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         let _ = write!(body, "<section class=\"lead\" data-plan>{}</section>", markdown(&text));
     }
     body.push_str("</section>");
-    let (mut goal_shown, mut known_shown, mut design_shown) = (false, false, false);
+    let (mut goal_shown, mut known_shown, mut design_shown, mut risks_shown) = (false, false, false, false);
     for (heading, text) in cut {
         let id = unique(&mut ids, &format!("plan-{}", slug(&heading)));
         let known = if heading == "What is known" && !known_shown { known_scene(&text, &id) } else { None };
         let design = if heading == "Design" && !design_shown { design_scene(&text) } else { None };
+        let risks = if heading == "Risks and open questions" && !risks_shown { risks_scene(&text) } else { None };
         if heading == "Goal" && !goal_shown {
             goal_shown = true;
             let _ = write!(body, "<section class=\"scene goal\" id=\"{id}\" data-part=\"Goal\" data-mode=\"{}\" data-plan>{}</section>", mode(&id), goal_scene(&text));
@@ -598,6 +599,16 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
             let _ = write!(
                 body,
                 "<section class=\"scene part known\" id=\"{id}\" data-part=\"{}\" data-mode=\"{}\" data-plan>{}{scene}</section>",
+                esc(&heading),
+                mode(&id),
+                opener(&first, second.as_deref())
+            );
+        } else if let Some(scene) = risks {
+            risks_shown = true;
+            let (first, second) = two_tones(&heading);
+            let _ = write!(
+                body,
+                "<section class=\"scene part risks\" id=\"{id}\" data-part=\"{}\" data-mode=\"{}\" data-plan>{}{scene}</section>",
                 esc(&heading),
                 mode(&id),
                 opener(&first, second.as_deref())
@@ -1695,8 +1706,7 @@ fn known_scene(text: &str, id: &str) -> Option<String> {
         if let Some(lead) = lead {
             pulldown_cmark::html::push_html(&mut out, lead.into_iter());
         }
-        let tag = if start.is_some() { "ol" } else { "ul" };
-        let first = start.filter(|first| *first != 1).map(|first| format!(" start=\"{first}\"")).unwrap_or_default();
+        let (tag, first) = list_tag(start);
         let _ = write!(out, "<{tag} class=\"track\"{first} tabindex=\"0\" aria-label=\"{}\">", esc(&heads[n - 1].0));
         let of = items.len();
         for (at, item) in items.into_iter().enumerate() {
@@ -1709,14 +1719,42 @@ fn known_scene(text: &str, id: &str) -> Option<String> {
         // track's start, of how many, and the way back and on.
         if n == heads.len() {
             let count = heads[0].1;
-            let alone = if count > 1 { "" } else { " disabled" };
-            let _ = write!(
-                out,
-                "<div class=\"controls\" data-chrome><span class=\"count\">01 / {count:02}</span><span class=\"grow\"></span><button class=\"round\" type=\"button\" data-by=\"-1\" aria-label=\"Back\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M14.5 5.5L8 12l6.5 6.5\"/></svg></button><button class=\"round\" type=\"button\" data-by=\"1\" aria-label=\"Next\"{alone}><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M9.5 5.5L16 12l-6.5 6.5\"/></svg></button></div>"
-            );
+            let _ = write!(out, "<div class=\"controls\" data-chrome><span class=\"count\">01 / {count:02}</span><span class=\"grow\"></span>{}</div>", arrows(count < 2));
         }
     }
     Some(out)
+}
+
+/// The way back and on under a track or a stack, as round buttons, set as
+/// at its start: Back disabled, and Next too when there is nothing after.
+fn arrows(alone: bool) -> String {
+    format!(
+        "<button class=\"round\" type=\"button\" data-by=\"-1\" aria-label=\"Back\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M14.5 5.5L8 12l6.5 6.5\"/></svg></button><button class=\"round\" type=\"button\" data-by=\"1\" aria-label=\"Next\"{}><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M9.5 5.5L16 12l-6.5 6.5\"/></svg></button>",
+        if alone { " disabled" } else { "" }
+    )
+}
+
+/// A list's tag as the plan wrote it, and the number an ordered one starts
+/// at, as an attribute, when it is not 1.
+fn list_tag(start: Option<u64>) -> (&'static str, String) {
+    let first = start.filter(|first| *first != 1).map(|first| format!(" start=\"{first}\"")).unwrap_or_default();
+    (if start.is_some() { "ol" } else { "ul" }, first)
+}
+
+/// A section cut around one of its lists: the blocks before it, the
+/// number it starts at and its items, as `list_items` gives them, and the
+/// blocks after it.
+type Around<'a> = (Vec<Vec<pulldown_cmark::Event<'a>>>, Option<u64>, Vec<Vec<pulldown_cmark::Event<'a>>>, Vec<Vec<pulldown_cmark::Event<'a>>>);
+
+/// `text` cut around its first list of `least` items or more; None without
+/// one.
+fn around_list(text: &str, least: usize) -> Option<Around<'_>> {
+    use pulldown_cmark::{Event, Tag};
+    let mut before = blocks(text);
+    let at = before.iter().position(|block| matches!(block.first(), Some(Event::Start(Tag::List(_)))) && list_items(block.clone()).1.len() >= least)?;
+    let after = before.split_off(at + 1);
+    let (start, items) = list_items(before.pop()?);
+    Some((before, start, items, after))
 }
 
 /// The Design as its scene holds it (task 1371): its first list of three
@@ -1726,25 +1764,7 @@ fn known_scene(text: &str, id: &str) -> Option<String> {
 /// written. The numeral, the count and the ticks are chrome. The scene and
 /// its number of points; None without such a list.
 fn design_scene(text: &str) -> Option<(String, usize)> {
-    use pulldown_cmark::{Event, Tag};
-    let points = |block: &Vec<Event>| {
-        let (mut depth, mut count) = (0usize, 0usize);
-        for event in block {
-            match event {
-                Event::Start(tag) => {
-                    count += usize::from(depth == 1 && matches!(tag, Tag::Item));
-                    depth += 1;
-                }
-                Event::End(_) => depth = depth.saturating_sub(1),
-                _ => {}
-            }
-        }
-        count
-    };
-    let mut before = blocks(text);
-    let at = before.iter().position(|block| matches!(block.first(), Some(Event::Start(Tag::List(_)))) && points(block) >= 3)?;
-    let after = before.split_off(at + 1);
-    let (start, items) = list_items(before.pop()?);
+    let (before, start, items, after) = around_list(text, 3)?;
     let mut out = String::new();
     for block in before {
         pulldown_cmark::html::push_html(&mut out, block.into_iter());
@@ -1754,8 +1774,7 @@ fn design_scene(text: &str) -> Option<(String, usize)> {
     for n in 1..=of {
         let _ = write!(out, "<button type=\"button\" aria-label=\"Point {n}\" aria-current=\"{}\"></button>", n == 1);
     }
-    let tag = if start.is_some() { "ol" } else { "ul" };
-    let first = start.filter(|first| *first != 1).map(|first| format!(" start=\"{first}\"")).unwrap_or_default();
+    let (tag, first) = list_tag(start);
     let _ = write!(out, "</div></div><{tag} class=\"points\"{first}>");
     for (n, item) in items.into_iter().enumerate() {
         out.push_str(if n == 0 { "<li class=\"point on\">" } else { "<li class=\"point\">" });
@@ -1767,6 +1786,62 @@ fn design_scene(text: &str) -> Option<(String, usize)> {
         pulldown_cmark::html::push_html(&mut out, block.into_iter());
     }
     Some((out, of))
+}
+
+/// The Risks as their scene holds them (task 1372): the first list of two
+/// items or more a stack of sheets, one in front and the next two showing
+/// under it, each saying whether it is a risk or an open question; under
+/// the stack how far along it is, a switch that lays every sheet out at
+/// once, and the way back and on. What comes before the list and after it
+/// stays as written. A sheet's distance from the one in front, --d, sets
+/// it back; those behind are inert until they come in front. The sheets'
+/// numbers and kinds and the controls are chrome. None without such a
+/// list.
+fn risks_scene(text: &str) -> Option<String> {
+    let (before, start, items, after) = around_list(text, 2)?;
+    let mut out = String::new();
+    for block in before {
+        pulldown_cmark::html::push_html(&mut out, block.into_iter());
+    }
+    let (tag, first) = list_tag(start);
+    let of = items.len();
+    let _ = write!(out, "<{tag} class=\"stack\"{first} tabindex=\"0\" aria-label=\"Risks and open questions\">");
+    for (at, item) in items.into_iter().enumerate() {
+        let (ask, kind) = if asks(&item) { (" ask", "Open question") } else { ("", "Risk") };
+        let behind = if at > 0 { " inert" } else { "" };
+        let _ = write!(out, "<li class=\"sheet{ask}\" style=\"--d: {at}\"{behind}><div class=\"num\" data-chrome><span>{:02} / {of:02}</span><span>{kind}</span></div><div class=\"body\">", at + 1);
+        pulldown_cmark::html::push_html(&mut out, with_lead(item).into_iter());
+        out.push_str("</div></li>");
+    }
+    let _ = write!(
+        out,
+        "</{tag}><div class=\"controls\" data-chrome><span class=\"count\">01 / {of:02}</span><span class=\"grow\"></span><button class=\"toggle\" type=\"button\" role=\"switch\" aria-checked=\"false\"><i aria-hidden=\"true\"></i><span>All at once</span></button>{}</div>",
+        arrows(false)
+    );
+    for block in after {
+        pulldown_cmark::html::push_html(&mut out, block.into_iter());
+    }
+    Some(out)
+}
+
+/// Whether an item of the Risks asks rather than warns: its text opens
+/// with the word Open, as "Open, for the user:" does, or its first
+/// sentence ends with a question mark.
+fn asks(item: &[pulldown_cmark::Event<'_>]) -> bool {
+    use pulldown_cmark::{Event, Tag, TagEnd};
+    let mut text = String::new();
+    for event in item {
+        match event {
+            Event::Text(words) | Event::Code(words) => text.push_str(words),
+            Event::SoftBreak | Event::HardBreak => text.push(' '),
+            Event::Start(Tag::Paragraph | Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. }) | Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link) => {}
+            Event::Start(_) | Event::End(_) => break,
+            _ => {}
+        }
+    }
+    let text = collapsed(&text);
+    let sentence = sentence_end(&text, true).map_or(text.as_str(), |end| &text[..end]);
+    text.split(|c: char| !c.is_alphanumeric()).next() == Some("Open") || sentence.trim_end_matches(['"', '\'', ')', ']', '\u{201d}', '\u{2019}']).ends_with('?')
 }
 
 /// A section's Markdown cut into its blocks, by the rules of `events`:
@@ -2390,6 +2465,64 @@ const SCRIPT: &str = r##"(function () {
     }, { passive: true });
     addEventListener("resize", follow);
     follow();
+  })();
+
+  // The Risks (task 1372): a stack of sheets, one in front, as a deck is
+  // dealt. Next and the arrow keys send the one in front away, Back brings
+  // it again, and a switch lays them all out at once: the stack leaves in
+  // 280 ms and comes back laid out in 420, as AKQA's grouped sections do.
+  // A click on a sheet does nothing, so a word double-clicked there is
+  // selected to comment on.
+  (function () {
+    var risks = document.querySelector(".scene.risks");
+    if (!risks) return;
+    var still = matchMedia("(prefers-reduced-motion: reduce)");
+    var stack = risks.querySelector(".stack"), sheets = Array.prototype.slice.call(stack.children);
+    var count = risks.querySelector(".controls .count"), all = risks.querySelector(".controls .toggle");
+    var back = risks.querySelector(".controls [data-by='-1']"), on = risks.querySelector(".controls [data-by='1']");
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    var at = 0;
+    var lay = function () {
+      var flat = stack.classList.contains("all"), had = document.activeElement;
+      sheets.forEach(function (sheet, n) {
+        sheet.style.setProperty("--d", String(n - at));
+        sheet.classList.toggle("gone", n < at);
+        sheet.inert = !flat && n !== at;
+      });
+      count.textContent = flat ? pad(sheets.length) + " in all" : pad(at + 1) + " / " + pad(sheets.length);
+      back.disabled = flat || at === 0;
+      on.disabled = flat || at === sheets.length - 1;
+      // A button gone out of use leaves the focus on the stack, where the
+      // arrow keys go on.
+      if (had && had.disabled) stack.focus({ preventScroll: true });
+    };
+    var move = function (by) {
+      var to = Math.max(0, Math.min(sheets.length - 1, at + by));
+      if (to === at) return;
+      at = to;
+      lay();
+    };
+    back.addEventListener("click", function () { move(-1); });
+    on.addEventListener("click", function () { move(1); });
+    stack.addEventListener("keydown", function (event) {
+      var by = { ArrowRight: 1, ArrowLeft: -1, Home: -at, End: sheets.length - 1 - at }[event.key];
+      if (by === undefined || stack.classList.contains("all")) return;
+      event.preventDefault();
+      move(by);
+    });
+    all.addEventListener("click", function () {
+      var flat = all.getAttribute("aria-checked") !== "true";
+      all.setAttribute("aria-checked", String(flat));
+      var swap = function () { stack.classList.toggle("all", flat); lay(); };
+      if (still.matches || !stack.animate) return swap();
+      var curve = "cubic-bezier(0.2, 0.65, 0.3, 1)";
+      var leave = stack.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(12px)" }], { duration: 280, easing: curve, fill: "forwards" });
+      leave.finished.then(function () {
+        swap();
+        stack.animate([{ opacity: 0, transform: "translateY(24px)", filter: "blur(6px)" }, { opacity: 1, transform: "none", filter: "blur(0)" }], { duration: 420, easing: curve });
+        leave.cancel();
+      });
+    });
   })();
 
   // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
@@ -4337,7 +4470,7 @@ body:not([data-writes]) .writes-only { display: none !important; }
 .card .more:hover { color: var(--fg-strong); }
 .prose .card.open { width: min(680px, 90vw); cursor: default; }
 .card.open .body { display: block; overflow: visible; -webkit-line-clamp: none; }
-.known .controls { display: flex; align-items: center; gap: 12px; margin: 8px 0 0; }
+:is(.known, .risks) .controls { display: flex; align-items: center; gap: 12px; margin: 8px 0 0; }
 .controls .count { min-width: 64px; font: 400 14px/20px var(--sans); font-variant-numeric: tabular-nums; color: var(--fg-2); }
 .controls .grow { flex: 1; }
 .round { display: inline-grid; place-items: center; flex: none; width: 48px; height: 48px; padding: 0; border: 0; border-radius: 50%; background: var(--raise); color: var(--fg-strong); cursor: pointer; transition: transform 0.45s var(--curve), opacity 0.3s ease; }
@@ -4381,6 +4514,39 @@ body:not([data-writes]) .writes-only { display: none !important; }
   .ticks { display: none; }
   .prose .points { padding: 24px 0; }
   .turning .point:not(.on) { opacity: 1; }
+}
+
+/* ---- the Risks: a stack of sheets, one in front (task 1372) ----------- */
+/* Every sheet in the stack's one cell, so the stack is as tall as its
+   tallest sheet and nothing under it moves as it turns. --d, a sheet's
+   distance from the one in front, sets it back by its bottom edge, the
+   next two showing under it and the rest out of sight; one sent away goes
+   off to the left, turning, above the rest, as a card dealt does. Their
+   z-index stays inside the stack, under the bar and the popovers. An open
+   question is the dark sheet. All at once, a grid. */
+.prose .stack { display: grid; isolation: isolate; margin: 0; padding: 0 0 36px; list-style: none; }
+.prose .sheet { grid-area: 1 / 1; z-index: calc(100 - var(--d, 0)); box-sizing: border-box; min-height: 240px; margin: 0; padding: 32px; border-radius: 24px; background: var(--card); box-shadow: 0 8px 40px rgba(0, 0, 0, 0.08), inset 0 0 0 1px var(--rule); font: 400 16px/24px var(--sans); transform: translateY(calc(var(--d, 0) * 18px)) scale(calc(1 - var(--d, 0) * 0.045)); transform-origin: 50% 100%; opacity: clamp(0, 3 - var(--d, 0), 1); transition: transform 0.6s var(--curve), opacity 0.45s var(--curve); }
+.prose .sheet.gone { transform: translate(-28%, 24px) rotate(-7deg); opacity: 0; }
+.sheet .num { display: flex; justify-content: space-between; gap: 16px; font: 400 13px/16px var(--sans); color: var(--fg-2); }
+.sheet .body { margin-top: 32px; overflow-wrap: anywhere; color: var(--fg); }
+.sheet .lead { display: block; margin-bottom: 12px; font: 400 24px/30px var(--serif); letter-spacing: -0.01em; color: var(--fg-strong); }
+.prose .sheet .body :is(p, li) { margin: 0 0 8px; font: inherit; color: inherit; }
+.prose .sheet .body :is(ul, ol) { margin: 8px 0 0; padding-left: 18px; }
+.prose .sheet.ask { background: var(--fg-strong); box-shadow: 0 8px 40px rgba(0, 0, 0, 0.12); }
+.sheet.ask :is(.num, .body, .lead) { color: var(--bg); }
+.scene.risks > .controls { max-width: var(--measure); }
+.scene > .stack.all, .scene.risks > .stack.all + .controls { max-width: none; }
+.prose .stack.all { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; padding: 0; }
+.prose .stack.all .sheet { grid-area: auto; z-index: auto; transform: none; opacity: 1; transition: none; }
+.toggle { display: inline-flex; align-items: center; gap: 10px; padding: 0; border: 0; background: none; font: 400 14px/20px var(--sans); color: var(--fg-2); cursor: pointer; }
+.toggle i { position: relative; width: 40px; height: 24px; border-radius: 12px; background: var(--raise); box-shadow: inset 0 0 0 1px var(--rule); transition: background-color 0.3s ease; }
+.toggle i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--fg-strong); transition: transform 0.45s var(--curve), background-color 0.3s ease; }
+.toggle[aria-checked="true"] i { background: var(--fg-strong); }
+.toggle[aria-checked="true"] i::after { background: var(--bg); transform: translateX(16px); }
+:is(.stack, .toggle):focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 3px; }
+@media (max-width: 600px) {
+  .prose .sheet { min-height: 200px; padding: 24px; }
+  .sheet .lead { font-size: 21px; line-height: 27px; }
 }
 
 /* ---- steps: AKQA's numbered items -------------------------------------- */
@@ -4689,7 +4855,7 @@ button.step-head { cursor: pointer; }
 }
 /* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
-  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before { transition: none; }
+  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before, .prose .sheet, .toggle i, .toggle i::after { transition: none; }
   .numeral .out, .numeral .enter { animation: none; }
   .goal .held { position: static; min-height: 0; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
@@ -4713,6 +4879,12 @@ button.step-head { cursor: pointer; }
   .story { display: block; }
   .prose .points { padding: 0 0 0 20px; list-style: revert; }
   .prose .point { padding: 0 0 12px; opacity: 1 !important; }
+  .risks .controls, .sheet .num span:first-child { display: none; }
+  .prose .stack { display: block; padding: 0 0 0 20px; list-style: revert; }
+  .prose .sheet { min-height: 0; margin: 0 0 12px; padding: 0; border-radius: 0; background: none !important; box-shadow: none !important; transform: none !important; opacity: 1 !important; }
+  .sheet.ask :is(.num, .body, .lead) { color: inherit; }
+  .sheet .body { margin: 0; }
+  .sheet .lead { display: inline; margin: 0; font: inherit; color: inherit; }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
 }
@@ -5324,6 +5496,46 @@ mod tests {
         let (tag, scene, ..) = design("1. One.\n2. Two.\n");
         assert_eq!(tag, "class=\"scene part\"", "{scene}");
         assert!(!scene.contains("class=\"story\""), "{scene}");
+    }
+
+    #[test]
+    fn the_risks_stack_their_sheets_one_in_front() {
+        let risks = |section: &str| {
+            let text = plan("Ship").replace("## Risks and open questions\nText.", &format!("## Risks and open questions\n{section}"));
+            let item = artifact_item(1, &text, Vec::new());
+            let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+            let scene = html.split(" id=\"plan-risks-and-open-questions\"").nth(1).and_then(|scene| scene.split("</section>").next()).unwrap_or_default().to_string();
+            let tag = html.split(" id=\"plan-risks-and-open-questions\"").next().and_then(|before| before.rsplit("<section ").next()).unwrap_or_default().to_string();
+            let body = text.split_once('\n').unwrap().1;
+            let said = section_ranges(body).into_iter().find(|(heading, _)| heading == "Risks and open questions").map(|(_, range)| shown_words(&body[range])).unwrap_or_default();
+            (tag, scene.clone(), page_words(&format!("<section{scene}</section>")), said)
+        };
+
+        let (tag, scene, shown, said) = risks("Two kinds.\n\n- The page is long. More words.\n- Open, for the user: the page or the menu. More.\n- Which way (a, b)?\n- **Slow** pages. Measured.\n  - inside it\n\nAfter them.\n");
+        assert_eq!(tag, "class=\"scene part risks\"", "{scene}");
+        assert!(scene.contains("<span class=\"l1\"><span class=\"w\">Risks</span></span> <span class=\"l2\"><span class=\"w\">and</span> <span class=\"w\">open</span> <span class=\"w\">questions</span></span></h2><p>Two kinds.</p>\n<ul class=\"stack\" tabindex=\"0\" aria-label=\"Risks and open questions\">"), "{scene}");
+        // The first sheet in front, each after it a step further back and
+        // inert; each says what it is, an open question by its first word
+        // or by the question its first sentence asks.
+        assert!(scene.contains("<li class=\"sheet\" style=\"--d: 0\"><div class=\"num\" data-chrome><span>01 / 04</span><span>Risk</span></div><div class=\"body\"><span class=\"lead\">The page is long.</span> More words.</div></li>"), "{scene}");
+        assert!(scene.contains("<li class=\"sheet ask\" style=\"--d: 1\" inert><div class=\"num\" data-chrome><span>02 / 04</span><span>Open question</span></div><div class=\"body\"><span class=\"lead\">Open, for the user:</span> the page or the menu. More.</div></li>"), "{scene}");
+        assert!(scene.contains("<li class=\"sheet ask\" style=\"--d: 2\" inert><div class=\"num\" data-chrome><span>03 / 04</span><span>Open question</span></div><div class=\"body\"><span class=\"lead\">Which way (a, b)?</span></div></li>"), "{scene}");
+        assert!(scene.contains("<li class=\"sheet\" style=\"--d: 3\" inert><div class=\"num\" data-chrome><span>04 / 04</span><span>Risk</span></div><div class=\"body\"><span class=\"lead named\"><strong>Slow</strong> pages.</span> Measured.\n<ul>\n<li>inside it</li>\n</ul>\n</div></li></ul>"), "{scene}");
+        // Under the stack: how far along, the switch, back and on.
+        assert!(
+            scene.ends_with("</ul><div class=\"controls\" data-chrome><span class=\"count\">01 / 04</span><span class=\"grow\"></span><button class=\"toggle\" type=\"button\" role=\"switch\" aria-checked=\"false\"><i aria-hidden=\"true\"></i><span>All at once</span></button><button class=\"round\" type=\"button\" data-by=\"-1\" aria-label=\"Back\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M14.5 5.5L8 12l6.5 6.5\"/></svg></button><button class=\"round\" type=\"button\" data-by=\"1\" aria-label=\"Next\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M9.5 5.5L16 12l-6.5 6.5\"/></svg></button></div><p>After them.</p>\n"),
+            "{scene}"
+        );
+        assert_eq!(shown, said, "the plan's words, in its order");
+
+        // A word that only starts with Open warns.
+        let (_, scene, ..) = risks("- Opening the page is slow.\n- Is it? Yes.\n");
+        assert!(scene.contains("<span>01 / 02</span><span>Risk</span>") && scene.contains("<span>02 / 02</span><span>Open question</span>"), "{scene}");
+
+        // One item is no stack: a plain scene.
+        let (tag, scene, ..) = risks("- Only one.\n");
+        assert_eq!(tag, "class=\"scene part\"", "{scene}");
+        assert!(!scene.contains("class=\"stack\""), "{scene}");
     }
 
     #[test]
