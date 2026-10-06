@@ -3432,14 +3432,26 @@ const SCRIPT: &str = r##"(function () {
   // makes: the last part, step or note begun above the window's top and how
   // far above, the steps open, and the bar's text while it is open.
   var keptAt = "ekko-kept " + location.pathname;
+  // Where an element begins on the page as laid out, leaving out what
+  // moves it: the 24 px a part not yet revealed sits lower would otherwise
+  // move the page by as much at each reload (task 1388).
+  function laidTop(element) {
+    var y = 0;
+    for (; element; element = element.offsetParent) y += element.offsetTop;
+    return y;
+  }
+  // Of what has a box only: one without, as the map's arrowhead or a tab
+  // not picked, says its top is 0 wherever the reader is (task 1388).
   function anchor() {
     var found = null;
-    document.querySelectorAll("main [id]").forEach(function (element) { if (element.getBoundingClientRect().top <= 1) found = element; });
+    document.querySelectorAll("main [id]").forEach(function (element) {
+      if (element instanceof HTMLElement && element.getClientRects().length && laidTop(element) - scrollY <= 1) found = element;
+    });
     return found;
   }
   window.ekkoKeep = function () {
     var at = anchor();
-    var kept = { y: scrollY, id: at ? at.id : "", offset: at ? at.getBoundingClientRect().top : 0,
+    var kept = { y: scrollY, id: at ? at.id : "", offset: at ? laidTop(at) - scrollY : 0,
       open: Array.prototype.map.call(document.querySelectorAll(".step.open"), function (step) { return step.id; }) };
     if (bar.classList.contains("open") && !quoting && !sending) kept.bar = input.value;
     if (quoting && !sending) { kept.quote = quoting; kept.note = note.value; kept.color = color; kept.editing = editing; kept.suggesting = suggesting; kept.said = said; kept.put = put; }
@@ -3454,7 +3466,7 @@ const SCRIPT: &str = r##"(function () {
     (kept.open || []).forEach(function (id) { var step = document.getElementById(id); if (step) setOpen(step, true); });
     var back = function () {
       var at = kept.id && document.getElementById(kept.id);
-      scrollTo(0, at ? scrollY + at.getBoundingClientRect().top - kept.offset : kept.y);
+      scrollTo(0, at ? laidTop(at) - kept.offset : kept.y);
       try { history.scrollRestoration = "auto"; } catch (e) {}
       if (kept.quote && kept.editing) ekkoEdit(kept.editing);
       else if (kept.quote) quote(kept.quote, kept.color, null);
