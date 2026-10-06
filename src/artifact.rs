@@ -575,13 +575,23 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         let _ = write!(body, "<section class=\"lead\" data-plan>{}</section>", markdown(&text));
     }
     body.push_str("</section>");
-    let (mut goal_shown, mut known_shown) = (false, false);
+    let (mut goal_shown, mut known_shown, mut design_shown) = (false, false, false);
     for (heading, text) in cut {
         let id = unique(&mut ids, &format!("plan-{}", slug(&heading)));
         let known = if heading == "What is known" && !known_shown { known_scene(&text, &id) } else { None };
+        let design = if heading == "Design" && !design_shown { design_scene(&text) } else { None };
         if heading == "Goal" && !goal_shown {
             goal_shown = true;
             let _ = write!(body, "<section class=\"scene goal\" id=\"{id}\" data-part=\"Goal\" data-mode=\"{}\" data-plan>{}</section>", mode(&id), goal_scene(&text));
+        } else if let Some((scene, points)) = design {
+            design_shown = true;
+            let _ = write!(
+                body,
+                "<section class=\"scene part design\" id=\"{id}\" data-part=\"{}\" data-mode=\"{}\" data-plan>{}{scene}</section>",
+                esc(&heading),
+                mode(&id),
+                opener(&heading, Some(&format!("{points} decisions")))
+            );
         } else if let Some(scene) = known {
             known_shown = true;
             let (first, second) = two_tones(&heading);
@@ -1636,26 +1646,10 @@ fn known_scene(text: &str, id: &str) -> Option<String> {
         Loose(Vec<Event<'a>>),
         Group(Option<Vec<Event<'a>>>, Option<u64>, Vec<Vec<Event<'a>>>),
     }
-    // The section's blocks, each from its start to its end.
-    let mut blocks: Vec<Vec<Event>> = Vec::new();
-    let mut depth = 0usize;
-    for event in events(text) {
-        if depth == 0 {
-            blocks.push(Vec::new());
-        }
-        match event {
-            Event::Start(_) => depth += 1,
-            Event::End(_) => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        if let Some(block) = blocks.last_mut() {
-            block.push(event);
-        }
-    }
     let list = |block: &Vec<Event>| matches!(block.first(), Some(Event::Start(Tag::List(_))));
     let mut pieces = Vec::new();
     let mut heads = Vec::new();
-    let mut blocks = blocks.into_iter().peekable();
+    let mut blocks = blocks(text).into_iter().peekable();
     while let Some(block) = blocks.next() {
         let (lead, items) = if list(&block) {
             (None, block)
@@ -1723,6 +1717,77 @@ fn known_scene(text: &str, id: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// The Design as its scene holds it (task 1371): its first list of three
+/// points or more told a point at a time, beside a numeral held in place
+/// that turns to the point at the window's middle, with how many there are
+/// and a tick for each; what comes before the list and after it as it is
+/// written. The numeral, the count and the ticks are chrome. The scene and
+/// its number of points; None without such a list.
+fn design_scene(text: &str) -> Option<(String, usize)> {
+    use pulldown_cmark::{Event, Tag};
+    let points = |block: &Vec<Event>| {
+        let (mut depth, mut count) = (0usize, 0usize);
+        for event in block {
+            match event {
+                Event::Start(tag) => {
+                    count += usize::from(depth == 1 && matches!(tag, Tag::Item));
+                    depth += 1;
+                }
+                Event::End(_) => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        count
+    };
+    let mut before = blocks(text);
+    let at = before.iter().position(|block| matches!(block.first(), Some(Event::Start(Tag::List(_)))) && points(block) >= 3)?;
+    let after = before.split_off(at + 1);
+    let (start, items) = list_items(before.pop()?);
+    let mut out = String::new();
+    for block in before {
+        pulldown_cmark::html::push_html(&mut out, block.into_iter());
+    }
+    let of = items.len();
+    let _ = write!(out, "<div class=\"story\"><div class=\"hold\" data-chrome><div class=\"numeral\" aria-hidden=\"true\"><span>01</span></div><div class=\"of\" aria-hidden=\"true\">of {of:02}</div><div class=\"ticks\" role=\"group\" aria-label=\"Points\">");
+    for n in 1..=of {
+        let _ = write!(out, "<button type=\"button\" aria-label=\"Point {n}\" aria-current=\"{}\"></button>", n == 1);
+    }
+    let tag = if start.is_some() { "ol" } else { "ul" };
+    let first = start.filter(|first| *first != 1).map(|first| format!(" start=\"{first}\"")).unwrap_or_default();
+    let _ = write!(out, "</div></div><{tag} class=\"points\"{first}>");
+    for (n, item) in items.into_iter().enumerate() {
+        out.push_str(if n == 0 { "<li class=\"point on\">" } else { "<li class=\"point\">" });
+        pulldown_cmark::html::push_html(&mut out, with_lead(item).into_iter());
+        out.push_str("</li>");
+    }
+    let _ = write!(out, "</{tag}></div>");
+    for block in after {
+        pulldown_cmark::html::push_html(&mut out, block.into_iter());
+    }
+    Some((out, of))
+}
+
+/// A section's Markdown cut into its blocks, by the rules of `events`:
+/// each block's events from its start to its end.
+fn blocks(text: &str) -> Vec<Vec<pulldown_cmark::Event<'_>>> {
+    use pulldown_cmark::Event;
+    let (mut blocks, mut depth): (Vec<Vec<Event>>, usize) = (Vec::new(), 0);
+    for event in events(text) {
+        if depth == 0 {
+            blocks.push(Vec::new());
+        }
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if let Some(block) = blocks.last_mut() {
+            block.push(event);
+        }
+    }
+    blocks
 }
 
 /// A list's events cut into the number it starts at, for an ordered one,
@@ -1798,7 +1863,8 @@ fn tab_name(lead: Option<&[pulldown_cmark::Event<'_>]>) -> String {
 /// characters. A sentence ends as `sentence_end` says, or at a colon past
 /// the first few words, as a finding names what it then details; outside
 /// any emphasis, link or code, and before any block in the item. The white
-/// space after it stays, so the card's words are the plan's.
+/// space after it stays, so the card's words are the plan's. A lead that
+/// opens with bold words is named by them.
 fn with_lead(mut item: Vec<pulldown_cmark::Event<'_>>) -> Vec<pulldown_cmark::Event<'_>> {
     use pulldown_cmark::{CowStr, Event, Tag, TagEnd};
     let inline = |event: Option<&Event>| matches!(event, Some(Event::Text(_) | Event::Code(_) | Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. })));
@@ -1829,10 +1895,11 @@ fn with_lead(mut item: Vec<pulldown_cmark::Event<'_>>) -> Vec<pulldown_cmark::Ev
         }
     }
     let Some((at, head, tail)) = cut else { return item };
+    let named = matches!(item.get(from), Some(Event::Start(Tag::Strong)));
     let rest = item.split_off(at + 1);
     item.pop();
     let mut out: Vec<Event> = item.drain(..from).collect();
-    out.push(Event::InlineHtml(CowStr::from("<span class=\"lead\">")));
+    out.push(Event::InlineHtml(CowStr::from(if named { "<span class=\"lead named\">" } else { "<span class=\"lead\">" })));
     out.append(&mut item);
     out.push(Event::Text(CowStr::from(head)));
     out.push(Event::InlineHtml(CowStr::from("</span>")));
@@ -2271,6 +2338,58 @@ const SCRIPT: &str = r##"(function () {
     if (still.addEventListener) still.addEventListener("change", slide);
     slide();
     update();
+  })();
+
+  // The Design (task 1371): its points told one at a time as one scrolls,
+  // beside a numeral held in place that turns to the point at the window's
+  // middle, as AKQA's grouped sections do: the old number leaves in 280 ms
+  // and the new one comes in 420 ms after it. That point is lit, the others
+  // grey; a tick leads to each.
+  (function () {
+    var design = document.querySelector(".scene.design");
+    if (!design) return;
+    var still = matchMedia("(prefers-reduced-motion: reduce)");
+    var points = Array.prototype.slice.call(design.querySelectorAll(".points > .point"));
+    var ticks = Array.prototype.slice.call(design.querySelectorAll(".ticks button"));
+    var numeral = design.querySelector(".numeral"), shown = 0;
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    var turn = function (n) {
+      if (n === shown) return;
+      shown = n;
+      points.forEach(function (point, i) { point.classList.toggle("on", i === n); });
+      ticks.forEach(function (tick, i) { tick.setAttribute("aria-current", String(i === n)); });
+      var next = document.createElement("span");
+      next.textContent = pad(n + 1);
+      if (still.matches) {
+        numeral.textContent = "";
+        numeral.appendChild(next);
+        return;
+      }
+      Array.prototype.forEach.call(numeral.children, function (old) {
+        old.className = "out";
+        setTimeout(function () { old.remove(); }, 320);
+      });
+      next.className = "enter";
+      numeral.appendChild(next);
+    };
+    // The point whose top is above the window's middle, the last of them.
+    var follow = function () {
+      var middle = innerHeight / 2, n = 0;
+      points.forEach(function (point, i) { if (point.getBoundingClientRect().top < middle) n = i; });
+      turn(n);
+    };
+    ticks.forEach(function (tick, i) {
+      tick.addEventListener("click", function () { points[i].scrollIntoView({ behavior: smooth(), block: "center" }); });
+    });
+    design.classList.add("turning");
+    var following = false;
+    addEventListener("scroll", function () {
+      if (following) return;
+      following = true;
+      requestAnimationFrame(function () { following = false; follow(); });
+    }, { passive: true });
+    addEventListener("resize", follow);
+    follow();
   })();
 
   // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
@@ -4228,6 +4347,42 @@ body:not([data-writes]) .writes-only { display: none !important; }
 .round svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 :is(.tab, .round, .card .more, .track):focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 3px; }
 
+/* ---- the Design: a numeral held beside its points (task 1371) -------- */
+/* As AKQA's grouped sections: the number of the point at the window's
+   middle, held in place and turning as the next comes up; that point lit
+   and the others grey, once the script follows them. A lead that opens
+   with bold words names its point: the rest of it is grey. */
+.scene > .story { max-width: none; }
+.story { display: grid; grid-template-columns: minmax(200px, 5fr) 7fr; gap: 0 clamp(32px, 5vw, 96px); }
+.hold { position: sticky; top: 0; display: flex; flex-direction: column; justify-content: center; height: 100vh; }
+.numeral { position: relative; height: clamp(120px, 15vw, 220px); overflow: hidden; font: 400 clamp(120px, 15vw, 220px)/1 var(--sans); letter-spacing: -0.06em; color: var(--fg-strong); }
+.numeral span { position: absolute; top: 0; left: 0; }
+.numeral .out { animation: turn-out 0.28s var(--curve) forwards; }
+.numeral .enter { animation: turn-in 0.42s var(--curve) 0.28s both; }
+@keyframes turn-out { to { opacity: 0; transform: translateY(-80px); } }
+@keyframes turn-in { from { opacity: 0; transform: translateY(80px); } }
+.hold .of { margin-top: 12px; font: 400 14px/20px var(--sans); color: var(--fg-2); }
+.ticks { display: flex; gap: 6px; margin-top: 20px; }
+.ticks button { width: 28px; height: 20px; padding: 0; border: 0; background: none; cursor: pointer; }
+.ticks button::before { content: ""; display: block; height: 2px; border-radius: 1px; background: var(--fg-strong); opacity: 0.18; transition: opacity 0.3s ease; }
+.ticks button[aria-current="true"]::before { opacity: 1; }
+.ticks button:focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 3px; }
+.prose .points { margin: 0; padding: 30vh 0 34vh; list-style: none; }
+.prose .point { margin: 0; padding: 0 0 96px; transition: opacity 0.5s var(--curve); }
+.turning .point:not(.on) { opacity: 0.22; }
+.point .lead { display: block; margin-bottom: 16px; font: 400 clamp(22px, 2.1vw, 30px)/1.25 var(--serif); letter-spacing: -0.012em; color: var(--fg-strong); }
+.point .lead.named { color: var(--fg-3); }
+.prose .point .lead strong { font-weight: inherit; color: var(--fg-strong); }
+/* Narrow, the numeral holds above the points, under the mark. */
+@media (max-width: 900px) {
+  .story { grid-template-columns: 1fr; }
+  .hold { z-index: 1; flex-direction: row; justify-content: flex-start; align-items: flex-end; gap: 16px; height: auto; padding: 60px 0 12px; background: var(--bg); }
+  .numeral { flex: none; width: 1.3em; height: 64px; font-size: 64px; }
+  .ticks { display: none; }
+  .prose .points { padding: 24px 0; }
+  .turning .point:not(.on) { opacity: 1; }
+}
+
 /* ---- steps: AKQA's numbered items -------------------------------------- */
 .prose .steps { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
 .prose .step { margin: 0; padding: 0; border-bottom: 1px solid var(--rule); scroll-margin: 96px 0; }
@@ -4534,7 +4689,8 @@ button.step-head { cursor: pointer; }
 }
 /* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
-  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round { transition: none; }
+  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before { transition: none; }
+  .numeral .out, .numeral .enter { animation: none; }
   .goal .held { position: static; min-height: 0; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
 }
@@ -4553,6 +4709,10 @@ button.step-head { cursor: pointer; }
   .prose .card { display: list-item; width: auto; min-height: 0; margin: 0 0 8px; padding: 0; border-radius: 0; background: none; }
   .card .body { display: block; margin: 0; overflow: visible; -webkit-line-clamp: none; }
   .card .lead { display: inline; margin: 0; font: inherit; color: inherit; }
+  .hold { display: none; }
+  .story { display: block; }
+  .prose .points { padding: 0 0 0 20px; list-style: revert; }
+  .prose .point { padding: 0 0 12px; opacity: 1 !important; }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
 }
@@ -5114,7 +5274,7 @@ mod tests {
         let (scene, shown, said) = known("- **First** finding, *a long one*. Then more.\n\n  Its second paragraph.\n  - inside it\n\nAfter the list.\n");
         assert!(!scene.contains("role=\"tab"), "{scene}");
         assert!(scene.contains("<div class=\"group\"><ul class=\"track\" tabindex=\"0\" aria-label=\"Findings\">"), "{scene}");
-        assert!(scene.contains("<div class=\"body\"><p><span class=\"lead\"><strong>First</strong> finding, <em>a long one</em>.</span> Then more.</p>\n<p>Its second paragraph.</p>\n<ul>\n<li>inside it</li>\n</ul>\n</div>"), "{scene}");
+        assert!(scene.contains("<div class=\"body\"><p><span class=\"lead named\"><strong>First</strong> finding, <em>a long one</em>.</span> Then more.</p>\n<p>Its second paragraph.</p>\n<ul>\n<li>inside it</li>\n</ul>\n</div>"), "{scene}");
         assert!(scene.contains("</div><div class=\"controls\" data-chrome><span class=\"count\">01 / 01</span>"), "the controls under the track: {scene}");
         assert!(scene.ends_with("</div><p>After the list.</p>\n"), "{scene}");
         assert_eq!(shown, said);
@@ -5131,6 +5291,39 @@ mod tests {
         // With no list there is nothing to put on a track.
         let (scene, ..) = known("Nothing listed.\n");
         assert!(scene.starts_with("\" id=\"plan-what-is-known\""), "a plain scene: {scene}");
+    }
+
+    #[test]
+    fn the_design_holds_a_numeral_beside_its_points() {
+        let design = |section: &str| {
+            let text = plan("Ship").replace("## Design\nText.", &format!("## Design\n{section}"));
+            let item = artifact_item(1, &text, Vec::new());
+            let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+            let scene = html.split(" id=\"plan-design\"").nth(1).and_then(|scene| scene.split("</section>").next()).unwrap_or_default().to_string();
+            let tag = html.split(" id=\"plan-design\"").next().and_then(|before| before.rsplit("<section ").next()).unwrap_or_default().to_string();
+            let body = text.split_once('\n').unwrap().1;
+            let said = section_ranges(body).into_iter().find(|(heading, _)| heading == "Design").map(|(_, range)| shown_words(&body[range])).unwrap_or_default();
+            (tag, scene.clone(), page_words(&format!("<section{scene}</section>")), said)
+        };
+
+        let (tag, scene, shown, said) = design("Three points.\n\n1. **One.** First, and more.\n2. The second: its words.\n3. Three\n   - inside it\n\nAfter them.\n");
+        assert_eq!(tag, "class=\"scene part design\"", "{scene}");
+        assert!(scene.contains("<h2 class=\"opener words\" data-chrome><span class=\"l1\"><span class=\"w\">Design</span></span> <span class=\"l2\"><span class=\"w\">3</span> <span class=\"w\">decisions</span></span></h2><p>Three points.</p>\n"), "the opener counts the points: {scene}");
+        // The numeral, how many and the ticks are chrome, held beside the
+        // points; the first point is the one lit.
+        assert!(
+            scene.contains("<div class=\"story\"><div class=\"hold\" data-chrome><div class=\"numeral\" aria-hidden=\"true\"><span>01</span></div><div class=\"of\" aria-hidden=\"true\">of 03</div><div class=\"ticks\" role=\"group\" aria-label=\"Points\"><button type=\"button\" aria-label=\"Point 1\" aria-current=\"true\"></button><button type=\"button\" aria-label=\"Point 2\" aria-current=\"false\"></button><button type=\"button\" aria-label=\"Point 3\" aria-current=\"false\"></button></div></div><ol class=\"points\">"),
+            "{scene}"
+        );
+        assert!(scene.contains("<li class=\"point on\"><span class=\"lead named\"><strong>One.</strong> First, and more.</span></li>"), "a lead opening in bold is named by it: {scene}");
+        assert!(scene.contains("<li class=\"point\"><span class=\"lead\">The second:</span> its words.</li>"), "{scene}");
+        assert!(scene.contains("<li class=\"point\">Three\n<ul>\n<li>inside it</li>\n</ul>\n</li></ol></div><p>After them.</p>\n"), "{scene}");
+        assert_eq!(shown, said, "the plan's words, in its order");
+
+        // Two points are no story to tell: a plain scene.
+        let (tag, scene, ..) = design("1. One.\n2. Two.\n");
+        assert_eq!(tag, "class=\"scene part\"", "{scene}");
+        assert!(!scene.contains("class=\"story\""), "{scene}");
     }
 
     #[test]
