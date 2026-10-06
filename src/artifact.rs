@@ -2381,13 +2381,21 @@ const SCRIPT: &str = r##"(function () {
   function smooth() { return matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"; }
   // AKQA's grouped sections (note 1357): what a switch changes leaves in
   // 280 ms and comes back changed in 420, from a blur and below; at once
-  // under reduced motion.
-  function regroup(element, change) {
-    if (matchMedia("(prefers-reduced-motion: reduce)").matches || !element.animate) return change();
+  // under reduced motion. Given keep, the switch under what it folds back,
+  // the window follows it so that it stays where it was pressed (task
+  // 1395): left alone, the window stayed and the Risks' switch went 906 px
+  // up, out of a 390 px phone's window.
+  function regroup(element, change, keep) {
+    var held = function () {
+      var top = keep ? keep.getBoundingClientRect().top : 0;
+      change();
+      if (keep) scrollBy(0, keep.getBoundingClientRect().top - top);
+    };
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches || !element.animate) return held();
     var curve = "cubic-bezier(0.2, 0.65, 0.3, 1)";
     var leave = element.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(12px)" }], { duration: 280, easing: curve, fill: "forwards" });
     var back = function () {
-      change();
+      held();
       element.animate([{ opacity: 0, transform: "translateY(24px)", filter: "blur(6px)" }, { opacity: 1, transform: "none", filter: "blur(0)" }], { duration: 420, easing: curve });
       leave.cancel();
     };
@@ -2826,7 +2834,7 @@ const SCRIPT: &str = r##"(function () {
     all.addEventListener("click", function () {
       var flat = all.getAttribute("aria-checked") !== "true";
       all.setAttribute("aria-checked", String(flat));
-      regroup(stack, function () { stack.classList.toggle("all", flat); lay(); });
+      regroup(stack, function () { stack.classList.toggle("all", flat); lay(); }, flat ? null : all);
     });
     // A jump to a sheet not in front deals the stack to it (task 1378); a
     // reload keeps the sheet in front and the switch.
@@ -2927,7 +2935,7 @@ const SCRIPT: &str = r##"(function () {
         stage.classList.toggle("all", list);
         unfold(list ? null : steps[at]);
         lay();
-      });
+      }, list ? null : all);
     });
     segs.forEach(function (seg, n) { seg.addEventListener("click", function () { put(n); }); });
     stage.addEventListener("click", function (event) {
