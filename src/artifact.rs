@@ -805,9 +805,33 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
             body.push_str(&texts_kept(item, &earlier, version));
         }
     }
+    body.push_str("</section>");
+
+    // What's next (task 1377), AKQA's closing scene, dark: the review asked
+    // for, else the next step, the first not done or cancelled, as the stage
+    // takes it; then the page's last moves, Review, the way to that step,
+    // the command and the way back to the top; the footer under them.
+    parts.push(("next".to_string(), "What's next".to_string()));
+    let next = steps.iter().position(|step| !matches!(step.class, "done" | "cancelled"));
+    let said = match (approval, next) {
+        (Some(_), _) => "This plan waits on your review: approve it, or ask for changes with comments on its words.".to_string(),
+        (None, Some(at)) => format!("Step {:02}, {}: {}", at + 1, esc(&steps[at].state), esc(steps[at].title)),
+        (None, None) if steps.is_empty() => "No steps yet: the artifact tool writes them.".to_string(),
+        (None, None) if steps.iter().all(|step| step.class == "done") => "Every step is done.".to_string(),
+        (None, None) => "Every step is done or cancelled.".to_string(),
+    };
     let _ = write!(
         body,
-        "</section><footer class=\"foot\">Written by ekko {} from the board. It reloads by itself when the board changes, and <code>{command}</code> writes it again. Set in Inter and in Ekko Serif, Adobe's Source Serif 4 cut for this page, under the <a href=\"{FONTS_DIR}/{}\">SIL Open Font License</a>.</footer></article></main>",
+        "<section class=\"scene part close\" id=\"next\" data-part=\"What's next\" data-mode=\"{}\">{}<p class=\"next\">{said}</p><div class=\"acts\"><button class=\"pill writes-only\" type=\"button\" data-review>Review</button>",
+        mode("next"),
+        opener("What's", Some("next?"))
+    );
+    if let (None, Some(at)) = (approval, next) {
+        let _ = write!(body, "<button class=\"pill\" type=\"button\" data-step=\"{}\">Go to step {:02}</button>", esc(&steps[at].step.key), at + 1);
+    }
+    let _ = write!(
+        body,
+        "<button class=\"pill\" type=\"button\" data-copy>Copy {command}</button><button class=\"pill\" type=\"button\" data-top>Back to the top <i aria-hidden=\"true\">\u{2191}</i></button></div><footer class=\"foot\">Written by ekko {} from the board. It reloads by itself when the board changes, and <code>{command}</code> writes it again. Set in Inter and in Ekko Serif, Adobe's Source Serif 4 cut for this page, under the <a href=\"{FONTS_DIR}/{}\">SIL Open Font License</a>.</footer></section></article></main>",
         env!("CARGO_PKG_VERSION"),
         FONT_LICENSE.0
     );
@@ -1193,10 +1217,11 @@ fn capitalized(text: &str) -> String {
 }
 
 /// The mode a scene puts the page in as it reaches the window's middle
-/// (task 1367): dark for the Goal and the map, as AKQA's home turns black
-/// under its statement, light for the rest.
+/// (task 1367): dark for the Goal, the map and What's next, as AKQA's home
+/// turns black under its statement and its pages end on black, light for
+/// the rest.
 fn mode(id: &str) -> &'static str {
-    if id == "plan-goal" || id == "map" { "dark" } else { "light" }
+    if ["plan-goal", "map", "next"].contains(&id) { "dark" } else { "light" }
 }
 
 /// `text`'s words, escaped, each a span the page's reveal brings in after
@@ -3027,6 +3052,28 @@ const SCRIPT: &str = r##"(function () {
       var change = target.closest && target.closest(".changed > .version");
       if (change && scene.contains(change)) choose(number(change));
       return null;
+    });
+  })();
+
+  // What's next (task 1377): the next step put on the stage, the command
+  // copied, as the menu's Copy does, the button saying so for a moment, and
+  // the way back to the top. Review is the pill's, as everywhere.
+  (function () {
+    var close = document.getElementById("next");
+    if (!close) return;
+    close.addEventListener("click", function (event) {
+      var button = event.target.closest("button");
+      if (!button) return;
+      if (button.dataset.step) return openStep(button.dataset.step);
+      if ("top" in button.dataset) return scrollTo({ top: 0, behavior: smooth() });
+      if (!("copy" in button.dataset)) return;
+      var command = document.getElementById("bar").dataset.command, label = button.dataset.label || (button.dataset.label = button.textContent);
+      var tell = function (text) {
+        button.textContent = text;
+        setTimeout(function () { button.textContent = label; }, 1600);
+      };
+      var copied = navigator.clipboard ? navigator.clipboard.writeText(command) : Promise.reject();
+      copied.then(function () { tell("Copied " + command); }, function () { tell("Not copied: the browser refused"); });
     });
   })();
 
@@ -5248,6 +5295,21 @@ dialog.side::backdrop { background: rgba(0, 0, 0, 0.32); }
 }
 .foot { box-sizing: border-box; max-width: calc(var(--wide) + 2 * var(--gutter)); margin: 0 auto; padding: 48px var(--gutter) 0; font: 400 13px/20px var(--sans); color: var(--fg-2); }
 
+/* ---- What's next: AKQA's closing scene (task 1377) ------------------- */
+/* Dark, the window's height, everything centred: the opener large, the
+   next move in serif under it, the page's last moves as pills, the footer
+   at the foot. Behind them two glows drift, as AKQA's closing colours do;
+   still under reduced motion, and gone in print. */
+.scene.close { display: flex; flex-direction: column; justify-content: center; min-height: 100vh; overflow: hidden; text-align: center; }
+.scene.close::before { content: ""; position: absolute; inset: -20%; background: radial-gradient(40% 50% at 30% 60%, rgba(255, 140, 60, 0.26), transparent 70%), radial-gradient(35% 45% at 70% 40%, rgba(120, 90, 255, 0.22), transparent 70%); filter: blur(40px); animation: drift 18s ease-in-out infinite alternate; pointer-events: none; }
+@keyframes drift { to { transform: translate(6%, -4%) scale(1.08); } }
+.scene.close > * { position: relative; margin-right: auto; margin-left: auto; }
+.close .opener { font-size: clamp(48px, 8vw, 120px); }
+.prose .close .next { max-width: 720px; margin: 0 auto; font: 400 clamp(20px, 1.8vw, 26px)/1.35 var(--serif); color: var(--fg-strong); }
+.close .acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; max-width: none; margin-top: 40px; }
+.close .acts i { font-style: normal; }
+.scene.close > .foot { max-width: 760px; margin-top: 96px; padding: 0; }
+
 /* ---- AKQA's mark at the top centre ------------------------------------- */
 /* As AKQA's logo stays: it comes in once the first scene has gone by, in
    the bar's glass, since the text runs under it. */
@@ -5490,7 +5552,7 @@ dialog.side::backdrop { background: rgba(0, 0, 0, 0.32); }
 /* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
   :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before, .prose .sheet, .toggle i, .toggle i::after, .seg::before, .row i, .line button::before { transition: none; }
-  .numeral .out, .numeral .enter { animation: none; }
+  .numeral .out, .numeral .enter, .scene.close::before { animation: none; }
   .goal .held { position: static; min-height: 0; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
 }
@@ -5527,6 +5589,9 @@ dialog.side::backdrop { background: rgba(0, 0, 0, 0.32); }
   .talk .panel[hidden] { display: block !important; }
   .scrub { display: none; }
   .changed .version[hidden] { display: block !important; }
+  .scene.close { min-height: 0; text-align: left; }
+  .scene.close::before, .close .acts { display: none; }
+  .scene.close > * { margin-left: 0; }
   .panels > .panel::before { content: attr(data-name); display: block; margin: 24px 0 8px; font: 600 18px/24px var(--sans); color: var(--fg-strong); }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
@@ -5892,7 +5957,7 @@ mod tests {
         assert!(!main.contains("<dialog") && after.matches("<dialog class=\"side prose\" aria-label=\"Note\"><div class=\"side-in\"><button class=\"round shut\" type=\"button\" aria-label=\"Close\">").count() == 1, "one sheet, after the page: {html}");
         let index = html.split("<div class=\"toc-card\"><ol>").nth(1).and_then(|rest| rest.split("</ol>").next()).unwrap_or_default();
         let names: Vec<&str> = index.split("<span class=\"t\">").skip(1).filter_map(|name| name.split('<').next()).collect();
-        assert_eq!(names, ["Overview", "Goal", "What is known", "Design", "Risks and open questions", "Steps", "Map", "Notes and comments", "History"], "the scene once in the index");
+        assert_eq!(names, ["Overview", "Goal", "What is known", "Design", "Risks and open questions", "Steps", "Map", "Notes and comments", "History", "What&#39;s next"], "the scene once in the index");
         assert!(html.contains(&format!("aria-label=\"Sections\">{}</button>", "<span></span>".repeat(names.len()))), "a bar each: {html}");
 
         // Alone, and of one kind.
@@ -5914,6 +5979,52 @@ mod tests {
         let scene = html.split("<section class=\"scene part talk\"").nth(1).and_then(|rest| rest.split("</section>").next()).unwrap_or_default();
         assert!(scene.starts_with(" id=\"comments\" data-part=\"Comments\" data-mode=\"light\"><h2 class=\"opener words\" data-chrome><span class=\"l1\"><span class=\"w\">Comments</span></span></h2><div class=\"filters\""), "{scene}");
         assert!(!html.contains("<dialog") && !html.contains("class=\"rows\"") && !html.contains("class=\"tabs\""), "no notes, no sheet: {html}");
+    }
+
+    /// What's next closes the page (task 1377), dark, after History: the
+    /// review asked for, else the next step, the first not done or
+    /// cancelled, with the way to it; Review, the command and the way to the
+    /// top always; the footer in it.
+    #[test]
+    fn the_close_says_what_comes_next() {
+        let mut made = steps(&[], &[spec("a", Some("First\nWhy."), &[]), spec("b", Some("Second <it>"), &["a"])]).unwrap();
+        let mut done = Item::new_task(2, "First".into(), vec![], 1);
+        State::Done.write(&mut done);
+        made[0].task = done.uid.clone();
+        let pending = Item::new_task(3, "Second".into(), vec![], 1);
+        made[1].task = pending.uid.clone();
+        let item = artifact_item(1, &plan("Ship"), made);
+        let mut all: ItemMap = BTreeMap::from([(1, item.clone()), (2, done), (3, pending)]);
+        let close = |all: &ItemMap| {
+            let (html, _) = page(&all[&1], all, None);
+            let scene = html.split("<section class=\"scene part close\" id=\"next\" data-part=\"What's next\" data-mode=\"dark\">").nth(1).and_then(|rest| rest.split("</section>").next()).map(str::to_string);
+            (html, scene.unwrap_or_default())
+        };
+        let (html, scene) = close(&all);
+        let acts = |middle: &str| {
+            format!(
+                "<div class=\"acts\"><button class=\"pill writes-only\" type=\"button\" data-review>Review</button>{middle}<button class=\"pill\" type=\"button\" data-copy>Copy ekko artifact 1</button><button class=\"pill\" type=\"button\" data-top>Back to the top <i aria-hidden=\"true\">\u{2191}</i></button></div><footer class=\"foot\">Written by ekko "
+            )
+        };
+        assert!(scene.starts_with("<h2 class=\"opener words\" data-chrome><span class=\"l1\"><span class=\"w\">What&#39;s</span></span> <span class=\"l2\"><span class=\"w\">next?</span></span></h2><p class=\"next\">Step 02, pending: Second &lt;it&gt;</p>"), "the next step, the first not done: {scene}");
+        assert!(scene.contains(&acts("<button class=\"pill\" type=\"button\" data-step=\"b\">Go to step 02</button>")) && scene.ends_with("</footer>"), "{scene}");
+        let order = ["id=\"history\"", "id=\"next\"", "</article></main>"].map(|mark| html.find(mark));
+        assert!(order.windows(2).all(|two| two[0].is_some() && two[0] < two[1]), "after History, the page's end: {order:?}");
+        assert!(html.contains("<li><a href=\"#next\"><span class=\"d\"></span><span class=\"t\">What&#39;s next</span></a></li></ol>"), "the index's last: {html}");
+
+        // An approval asked: the review, and no step to go to.
+        let mut asked = Item::new_note(4, "Approve the plan?".to_string(), vec!["My Board".to_string()]);
+        asked.attached_to = item.uid.clone();
+        asked.question = Some(serde_json::from_value(serde_json::json!({"rev": 1, "approve": {"artifact": item.uid, "version": 1, "steps": ["a", "b"]}})).unwrap());
+        all.insert(4, asked);
+        let (_, scene) = close(&all);
+        assert!(scene.contains("<p class=\"next\">This plan waits on your review: approve it, or ask for changes with comments on its words.</p>") && scene.contains(&acts("")), "{scene}");
+
+        // Every step done.
+        all.remove(&4);
+        State::Done.write(all.get_mut(&3).unwrap());
+        let (_, scene) = close(&all);
+        assert!(scene.contains("<p class=\"next\">Every step is done.</p>") && scene.contains(&acts("")), "{scene}");
     }
 
     /// History lays the texts the plan kept on a line, oldest first, each
@@ -6005,10 +6116,15 @@ mod tests {
         for (id, name) in parts {
             from += html[from..].find(&format!("id=\"{id}\" data-part=\"{name}\"")).unwrap_or_else(|| panic!("{id}, in this order: {html}"));
         }
-        let rows: String = std::iter::once(&("top", "Overview")).chain(&parts).map(|(id, name)| format!("<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{name}</span></a></li>")).collect();
+        assert!(html[from..].contains("id=\"next\" data-part=\"What's next\""), "What's next closes it: {html}");
+        let rows: String = std::iter::once(&("top", "Overview"))
+            .chain(&parts)
+            .chain(std::iter::once(&("next", "What&#39;s next")))
+            .map(|(id, name)| format!("<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{name}</span></a></li>"))
+            .collect();
         assert!(html.contains(&format!("<div class=\"toc-card\"><ol>{rows}</ol></div>")), "the section bars name the first scene and each part, in the same order: {html}");
-        assert!(html.contains(&format!("aria-label=\"Sections\">{}</button>", "<span></span>".repeat(parts.len() + 1))), "a bar each: {html}");
-        let nav = "<a href=\"#plan-goal\">Plan</a><a href=\"#steps\">Steps</a><a href=\"#map\">Map</a><a href=\"#notes\">Notes</a><a href=\"#history\">History</a>";
+        assert!(html.contains(&format!("aria-label=\"Sections\">{}</button>", "<span></span>".repeat(parts.len() + 2))), "a bar each: {html}");
+        let nav = "<a href=\"#plan-goal\">Plan</a><a href=\"#steps\">Steps</a><a href=\"#map\">Map</a><a href=\"#notes\">Notes</a><a href=\"#history\">History</a><a href=\"#next\">What's next</a>";
         assert!(html.contains(&format!("aria-label=\"Parts\">{nav}</nav>")), "the bar's menu: {html}");
         assert!(html.contains("data-part=\"What is known\" data-mode=\"light\" data-plan><h2 class=\"opener words\" data-chrome>") && html.contains("data-part=\"Goal\" data-mode=\"dark\" data-plan><div class=\"held\"><div class=\"label\" data-chrome>Goal</div><p class=\"statement\">"), "the Goal opens with its statement: {html}");
         assert!(html.contains("<h3>Keep the page light.</h3>") && html.contains("<p class=\"text\">It reloads often.\nAnd it reads well.</p>"), "a note's first sentence is its title: {html}");
@@ -6105,6 +6221,7 @@ mod tests {
             ("map", "dark", "Map"),
             ("notes", "light", "Notes"),
             ("history", "light", "History"),
+            ("next", "dark", "What&#39;s next"),
         ];
         assert_eq!(scenes, want.map(|(id, mode, _)| (id.to_string(), mode.to_string())), "{html}");
         let rows: String = want.iter().map(|(id, _, name)| format!("<li><a href=\"#{id}\"><span class=\"d\"></span><span class=\"t\">{name}</span></a></li>")).collect();
