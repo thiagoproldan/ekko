@@ -575,12 +575,23 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         let _ = write!(body, "<section class=\"lead\" data-plan>{}</section>", markdown(&text));
     }
     body.push_str("</section>");
-    let mut goal_shown = false;
+    let (mut goal_shown, mut known_shown) = (false, false);
     for (heading, text) in cut {
         let id = unique(&mut ids, &format!("plan-{}", slug(&heading)));
+        let known = if heading == "What is known" && !known_shown { known_scene(&text, &id) } else { None };
         if heading == "Goal" && !goal_shown {
             goal_shown = true;
             let _ = write!(body, "<section class=\"scene goal\" id=\"{id}\" data-part=\"Goal\" data-mode=\"{}\" data-plan>{}</section>", mode(&id), goal_scene(&text));
+        } else if let Some(scene) = known {
+            known_shown = true;
+            let (first, second) = two_tones(&heading);
+            let _ = write!(
+                body,
+                "<section class=\"scene part known\" id=\"{id}\" data-part=\"{}\" data-mode=\"{}\" data-plan>{}{scene}</section>",
+                esc(&heading),
+                mode(&id),
+                opener(&first, second.as_deref())
+            );
         } else {
             let (first, second) = two_tones(&heading);
             let _ = write!(
@@ -1608,6 +1619,230 @@ fn lit_words(html: &str) -> String {
 /// A text's events cut in two: a sentence's, and those after it.
 type Split<'a> = (Vec<pulldown_cmark::Event<'a>>, Vec<pulldown_cmark::Event<'a>>);
 
+/// The longest first sentence, in characters, a card sets large as its
+/// lead.
+const LEAD_LONGEST: usize = 220;
+
+/// What is known as its scene holds it (task 1370): each group, a
+/// paragraph and the list after it, behind a tab named by the paragraph's
+/// first words, and each item of the list a card on a track, its first
+/// sentence its lead, opening in place to the whole of it. The plan's
+/// elements keep their order, so its words stay where comments find them;
+/// the tabs, the cards' numbers and buttons and the track's controls are
+/// chrome. None when the section holds no list.
+fn known_scene(text: &str, id: &str) -> Option<String> {
+    use pulldown_cmark::{Event, Tag};
+    enum Piece<'a> {
+        Loose(Vec<Event<'a>>),
+        Group(Option<Vec<Event<'a>>>, Option<u64>, Vec<Vec<Event<'a>>>),
+    }
+    // The section's blocks, each from its start to its end.
+    let mut blocks: Vec<Vec<Event>> = Vec::new();
+    let mut depth = 0usize;
+    for event in events(text) {
+        if depth == 0 {
+            blocks.push(Vec::new());
+        }
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if let Some(block) = blocks.last_mut() {
+            block.push(event);
+        }
+    }
+    let list = |block: &Vec<Event>| matches!(block.first(), Some(Event::Start(Tag::List(_))));
+    let mut pieces = Vec::new();
+    let mut heads = Vec::new();
+    let mut blocks = blocks.into_iter().peekable();
+    while let Some(block) = blocks.next() {
+        let (lead, items) = if list(&block) {
+            (None, block)
+        } else if matches!(block.first(), Some(Event::Start(Tag::Paragraph))) && blocks.peek().is_some_and(list) {
+            (Some(block), blocks.next().unwrap_or_default())
+        } else {
+            pieces.push(Piece::Loose(block));
+            continue;
+        };
+        let (start, items) = list_items(items);
+        heads.push((tab_name(lead.as_deref()), items.len()));
+        pieces.push(Piece::Group(lead, start, items));
+    }
+    if heads.is_empty() {
+        return None;
+    }
+    let tabbed = heads.len() > 1;
+    let mut out = String::new();
+    let mut n = 0;
+    for piece in pieces {
+        let (lead, start, items) = match piece {
+            Piece::Loose(block) => {
+                pulldown_cmark::html::push_html(&mut out, block.into_iter());
+                continue;
+            }
+            Piece::Group(lead, start, items) => (lead, start, items),
+        };
+        n += 1;
+        if tabbed && n == 1 {
+            out.push_str("<div class=\"tabs\" role=\"tablist\" aria-label=\"What is known\" data-chrome>");
+            for (at, (name, count)) in heads.iter().enumerate() {
+                let (tab, chosen) = (at + 1, at == 0);
+                let away = if chosen { "" } else { " tabindex=\"-1\"" };
+                let _ = write!(out, "<button class=\"pill tab\" type=\"button\" role=\"tab\" id=\"{id}-tab-{tab}\" aria-controls=\"{id}-group-{tab}\" aria-selected=\"{chosen}\"{away}>{}<sup>{count}</sup></button>", esc(name));
+            }
+            out.push_str("</div>");
+        }
+        if tabbed {
+            let _ = write!(out, "<div class=\"group\" id=\"{id}-group-{n}\" role=\"tabpanel\" aria-labelledby=\"{id}-tab-{n}\"{}>", if n > 1 { " hidden" } else { "" });
+        } else {
+            out.push_str("<div class=\"group\">");
+        }
+        if let Some(lead) = lead {
+            pulldown_cmark::html::push_html(&mut out, lead.into_iter());
+        }
+        let tag = if start.is_some() { "ol" } else { "ul" };
+        let first = start.filter(|first| *first != 1).map(|first| format!(" start=\"{first}\"")).unwrap_or_default();
+        let _ = write!(out, "<{tag} class=\"track\"{first} tabindex=\"0\" aria-label=\"{}\">", esc(&heads[n - 1].0));
+        let of = items.len();
+        for (at, item) in items.into_iter().enumerate() {
+            let _ = write!(out, "<li class=\"card\"><span class=\"num\" data-chrome>{:02} / {of:02}</span><div class=\"body\">", at + 1);
+            pulldown_cmark::html::push_html(&mut out, with_lead(item).into_iter());
+            out.push_str("</div><button class=\"more\" type=\"button\" aria-expanded=\"false\" data-chrome><span>Read</span> <i aria-hidden=\"true\">\u{2198}</i></button></li>");
+        }
+        let _ = write!(out, "</{tag}></div>");
+        // The track's controls, under the last group's: the card at the
+        // track's start, of how many, and the way back and on.
+        if n == heads.len() {
+            let count = heads[0].1;
+            let alone = if count > 1 { "" } else { " disabled" };
+            let _ = write!(
+                out,
+                "<div class=\"controls\" data-chrome><span class=\"count\">01 / {count:02}</span><span class=\"grow\"></span><button class=\"round\" type=\"button\" data-by=\"-1\" aria-label=\"Back\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M14.5 5.5L8 12l6.5 6.5\"/></svg></button><button class=\"round\" type=\"button\" data-by=\"1\" aria-label=\"Next\"{alone}><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M9.5 5.5L16 12l-6.5 6.5\"/></svg></button></div>"
+            );
+        }
+    }
+    Some(out)
+}
+
+/// A list's events cut into the number it starts at, for an ordered one,
+/// and each item's events inside it.
+fn list_items(list: Vec<pulldown_cmark::Event<'_>>) -> (Option<u64>, Vec<Vec<pulldown_cmark::Event<'_>>>) {
+    use pulldown_cmark::{Event, Tag, TagEnd};
+    let (mut start, mut items, mut depth) = (None, Vec::new(), 0usize);
+    for event in list {
+        match &event {
+            Event::Start(Tag::List(first)) if depth == 0 => start = *first,
+            Event::Start(Tag::Item) if depth == 1 => items.push(Vec::new()),
+            Event::End(TagEnd::Item) if depth == 2 => {}
+            Event::End(TagEnd::List(_)) if depth == 1 => {}
+            _ => {
+                match event {
+                    Event::Start(_) => depth += 1,
+                    Event::End(_) => depth -= 1,
+                    _ => {}
+                }
+                if let Some(item) = items.last_mut() {
+                    item.push(event);
+                }
+                continue;
+            }
+        }
+        match event {
+            Event::Start(_) => depth += 1,
+            _ => depth -= 1,
+        }
+    }
+    (start, items)
+}
+
+/// A group of findings' name on its tab: the first words of the paragraph
+/// that leads it, up to a comma, a colon or a bracket, shortened at a word
+/// past 36 characters; Findings when no paragraph leads it.
+fn tab_name(lead: Option<&[pulldown_cmark::Event<'_>]>) -> String {
+    use pulldown_cmark::Event;
+    let words: String = lead
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Text(text) | Event::Code(text) => Some(text.as_ref()),
+            Event::SoftBreak | Event::HardBreak => Some(" "),
+            _ => None,
+        })
+        .collect();
+    let name = collapsed(words.split([',', ':', '(']).next().unwrap_or_default());
+    if name.is_empty() {
+        return "Findings".to_string();
+    }
+    if name.chars().count() <= 36 {
+        return name;
+    }
+    let mut short = String::new();
+    for word in name.split(' ') {
+        if short.chars().count() + word.chars().count() >= 34 {
+            break;
+        }
+        if !short.is_empty() {
+            short.push(' ');
+        }
+        short.push_str(word);
+    }
+    if short.is_empty() {
+        short = name.chars().take(34).collect();
+    }
+    format!("{short}\u{2026}")
+}
+
+/// A card's events with the first sentence of the text it opens with in a
+/// span, its lead, when that sentence ends within `LEAD_LONGEST`
+/// characters. A sentence ends as `sentence_end` says, or at a colon past
+/// the first few words, as a finding names what it then details; outside
+/// any emphasis, link or code, and before any block in the item. The white
+/// space after it stays, so the card's words are the plan's.
+fn with_lead(mut item: Vec<pulldown_cmark::Event<'_>>) -> Vec<pulldown_cmark::Event<'_>> {
+    use pulldown_cmark::{CowStr, Event, Tag, TagEnd};
+    let inline = |event: Option<&Event>| matches!(event, Some(Event::Text(_) | Event::Code(_) | Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. })));
+    // A loose item's text opens in its first paragraph.
+    let from = usize::from(matches!(item.first(), Some(Event::Start(Tag::Paragraph))));
+    let (mut depth, mut length, mut cut) = (0usize, 0usize, None);
+    for at in from..item.len() {
+        match &item[at] {
+            Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. }) => depth += 1,
+            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link) => depth = depth.saturating_sub(1),
+            Event::Start(_) | Event::End(_) => break,
+            Event::Text(text) if depth == 0 => {
+                let line_ends = !inline(item.get(at + 1));
+                let colon = text.char_indices().find(|&(index, mark)| mark == ':' && length + index > 8 && text[index + 1..].chars().next().map_or(line_ends, char::is_whitespace)).map(|(index, _)| index + 1);
+                if let Some(end) = [sentence_end(text, line_ends), colon].into_iter().flatten().min() {
+                    if length + text[..end].chars().count() <= LEAD_LONGEST {
+                        cut = Some((at, text[..end].to_string(), text[end..].to_string()));
+                    }
+                    break;
+                }
+                length += text.chars().count();
+            }
+            Event::Text(text) | Event::Code(text) => length += text.chars().count(),
+            _ => length += 1,
+        }
+        if length > LEAD_LONGEST {
+            break;
+        }
+    }
+    let Some((at, head, tail)) = cut else { return item };
+    let rest = item.split_off(at + 1);
+    item.pop();
+    let mut out: Vec<Event> = item.drain(..from).collect();
+    out.push(Event::InlineHtml(CowStr::from("<span class=\"lead\">")));
+    out.append(&mut item);
+    out.push(Event::Text(CowStr::from(head)));
+    out.push(Event::InlineHtml(CowStr::from("</span>")));
+    if !tail.is_empty() {
+        out.push(Event::Text(CowStr::from(tail)));
+    }
+    out.extend(rest);
+    out
+}
+
 /// The first sentence of `events`, when they open with a paragraph: its
 /// inline events, and the events after it, where what is left of the
 /// paragraph stays a paragraph. A sentence ends as `sentence_end` says, in
@@ -1907,6 +2142,135 @@ const SCRIPT: &str = r##"(function () {
     addEventListener("resize", light);
     if (still.addEventListener) still.addEventListener("change", light);
     light();
+  })();
+
+  // What is known (task 1370): a tab a group, a card a finding, the cards
+  // on a track that slides in with the scroll as the scene comes, as
+  // AKQA's carousels do (about 560 px). A card opens in place to the whole
+  // of it, by its button or a click on it, and Esc closes it; the arrow
+  // keys and the buttons under the track move it a card at a time.
+  (function () {
+    var known = document.querySelector(".scene.known");
+    if (!known) return;
+    var still = matchMedia("(prefers-reduced-motion: reduce)");
+    var tabs = Array.prototype.slice.call(known.querySelectorAll(".tab"));
+    var groups = Array.prototype.slice.call(known.querySelectorAll(".group"));
+    var count = known.querySelector(".controls .count"), arrows = known.querySelectorAll(".controls .round");
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    var shown = function () { return groups.filter(function (group) { return !group.hidden; })[0] || groups[0]; };
+    var cards = function (group) { return Array.prototype.slice.call(group.querySelectorAll(".track > .card")); };
+    var edge = function (track) { return track.getBoundingClientRect().left + parseFloat(getComputedStyle(track).paddingLeft); };
+    // The card nearest the track's start.
+    var at = function (group) {
+      var from = edge(group.querySelector(".track")), best = 0, gap = Infinity;
+      cards(group).forEach(function (card, n) {
+        var off = Math.abs(card.getBoundingClientRect().left - from);
+        if (off < gap) { gap = off; best = n; }
+      });
+      return best;
+    };
+    var show = function (group, n) {
+      var list = cards(group), track = group.querySelector(".track");
+      var card = list[Math.max(0, Math.min(list.length - 1, n))];
+      if (card) track.scrollBy({ left: card.getBoundingClientRect().left - edge(track), behavior: smooth() });
+    };
+    var update = function () {
+      var group = shown(), track = group.querySelector(".track");
+      if (!count || arrows.length < 2) return;
+      count.textContent = pad(at(group) + 1) + " / " + pad(cards(group).length);
+      arrows[0].disabled = track.scrollLeft <= 1;
+      arrows[1].disabled = track.scrollLeft + track.clientWidth >= track.scrollWidth - 2;
+    };
+    var open = function (card, wide) {
+      var more = card.querySelector(".more");
+      card.classList.toggle("open", wide);
+      more.setAttribute("aria-expanded", String(wide));
+      more.querySelector("span").textContent = wide ? "Close" : "Read";
+      more.querySelector("i").textContent = wide ? "\u2196" : "\u2198";
+      // Open, it grows wider; once it has, the track shows the whole of it.
+      if (wide) setTimeout(function () {
+        var track = card.parentNode, box = card.getBoundingClientRect(), frame = track.getBoundingClientRect();
+        if (box.right > frame.right || box.left < frame.left) track.scrollBy({ left: box.left - edge(track), behavior: smooth() });
+      }, still.matches ? 0 : 620);
+    };
+    var pick = function (tab, moved) {
+      tabs.forEach(function (other) {
+        var chosen = other === tab, group = document.getElementById(other.getAttribute("aria-controls"));
+        other.setAttribute("aria-selected", String(chosen));
+        other.tabIndex = chosen ? 0 : -1;
+        if (group) group.hidden = !chosen;
+      });
+      var group = shown();
+      group.classList.add("in");
+      group.querySelector(".track").scrollLeft = 0;
+      if (moved && !still.matches) cards(group).forEach(function (card, n) {
+        card.animate([{ opacity: 0, transform: "translateX(48px)", filter: "blur(4px)" }, { opacity: 1, transform: "none", filter: "blur(0)" }], { duration: 700, delay: n * 70, easing: "cubic-bezier(0.2, 0.65, 0.3, 1)", fill: "backwards" });
+      });
+      update();
+    };
+    tabs.forEach(function (tab) { tab.addEventListener("click", function () { pick(tab, true); }); });
+    known.addEventListener("keydown", function (event) {
+      var key = event.key, tab = event.target.closest(".tab"), card = event.target.closest(".card"), to;
+      if (tab) {
+        var n = tabs.indexOf(tab);
+        to = { ArrowRight: n + 1, ArrowLeft: n - 1, Home: 0, End: tabs.length - 1 }[key];
+        if (to === undefined) return;
+        event.preventDefault();
+        tab = tabs[(to + tabs.length) % tabs.length];
+        tab.focus();
+        pick(tab, true);
+      } else if (key === "Escape" && card && card.classList.contains("open")) {
+        event.preventDefault();
+        open(card, false);
+        card.querySelector(".more").focus();
+      } else if ((key === "ArrowRight" || key === "ArrowLeft") && event.target.closest(".track")) {
+        event.preventDefault();
+        var group = event.target.closest(".group"), list = cards(group);
+        to = Math.max(0, Math.min(list.length - 1, (card ? list.indexOf(card) : at(group)) + (key === "ArrowRight" ? 1 : -1)));
+        if (card) list[to].querySelector(".more").focus({ preventScroll: true });
+        show(group, to);
+      }
+    });
+    known.addEventListener("click", function (event) {
+      var card = event.target.closest(".card");
+      if (!card) return;
+      if (event.target.closest(".more")) return open(card, !card.classList.contains("open"));
+      // A link still goes where it points, a comment's words open the
+      // comment, and a drag over the words is a selection to comment on.
+      if (card.classList.contains("open") || event.target.closest("a, mark.c, .pin, input") || !getSelection().isCollapsed) return;
+      open(card, true);
+    });
+    Array.prototype.forEach.call(arrows, function (arrow) {
+      arrow.addEventListener("click", function () { var group = shown(); show(group, at(group) + Number(arrow.dataset.by)); });
+    });
+    groups.forEach(function (group) {
+      var moving = false;
+      group.querySelector(".track").addEventListener("scroll", function () {
+        if (moving) return;
+        moving = true;
+        requestAnimationFrame(function () { moving = false; update(); });
+      }, { passive: true });
+    });
+    // The track comes from the right as the scene comes up, linked to the
+    // scroll; still under reduced motion.
+    var slide = function () {
+      var x = 0;
+      if ("motion" in root.dataset && !still.matches) {
+        var p = Math.min(1, Math.max(0, (innerHeight - known.getBoundingClientRect().top) / (innerHeight * 0.85)));
+        x = Math.round(560 * Math.pow(1 - p, 2));
+      }
+      groups.forEach(function (group) { group.querySelector(".track").style.transform = x ? "translateX(" + x + "px)" : ""; });
+    };
+    var sliding = false;
+    addEventListener("scroll", function () {
+      if (sliding) return;
+      sliding = true;
+      requestAnimationFrame(function () { sliding = false; slide(); });
+    }, { passive: true });
+    addEventListener("resize", function () { slide(); update(); });
+    if (still.addEventListener) still.addEventListener("change", slide);
+    slide();
+    update();
   })();
 
   // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
@@ -3818,8 +4182,8 @@ body:not([data-writes]) .writes-only { display: none !important; }
 :where(.prose) hr { height: 1px; margin: 32px 0; border: 0; background: var(--rule); }
 
 /* ---- the Goal: its statement held while the scroll lights its words --- */
-/* As tall as the script makes it, the room the scroll takes to light the
-   statement, which the holder keeps in the window meanwhile (task 1369). */
+/* As tall as the room the scroll takes to light the statement (--tall, in
+   the reveals' block), the holder keeping it in the window (task 1369). */
 .scene.goal { padding-top: 0; padding-bottom: 0; }
 .goal .held { position: sticky; top: 0; display: flex; flex-direction: column; justify-content: center; box-sizing: border-box; min-height: 100vh; max-width: 1100px; padding: 96px 0; }
 .goal .label { margin: 0 0 20px; font: 400 13px/16px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); }
@@ -3828,6 +4192,37 @@ body:not([data-writes]) .writes-only { display: none !important; }
 :where(.goal-rest) :is(p, li) { font-size: 18px; line-height: 28px; }
 .goal .progress { position: absolute; right: 0; bottom: 28px; left: 0; height: 1px; background: var(--rule); }
 .goal .progress i { display: block; height: 100%; background: var(--fg-strong); transform: scaleX(0); transform-origin: 0 50%; }
+
+/* ---- What is known: a tab a group, a card a finding (task 1370) ------- */
+/* The cards ride a track the window's width, as AKQA's carousels do, the
+   first at the text's edge; one opens in place, wider, to the whole of it. */
+.known .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+.tab sup { font-size: 11px; line-height: 1; color: var(--fg-2); }
+.tab[aria-selected="true"] { background: var(--fg-strong); color: var(--bg); }
+.tab[aria-selected="true"] sup { color: inherit; opacity: 0.7; }
+.scene > :is(.group, .controls) { max-width: none; }
+.prose .group > p { max-width: var(--measure); margin: 0 0 32px; font: 400 15px/24px var(--sans); color: var(--fg-2); }
+.prose .track { display: flex; align-items: stretch; gap: 16px; margin: 0 calc(50% - 50vw); padding: 8px max(var(--gutter), calc((100vw - var(--wide)) / 2)) 24px; overflow-x: auto; list-style: none; scroll-snap-type: x mandatory; scroll-padding-inline: max(var(--gutter), calc((100vw - var(--wide)) / 2)); scrollbar-width: none; }
+.track::-webkit-scrollbar { display: none; }
+.prose .card { position: relative; flex: none; box-sizing: border-box; display: flex; flex-direction: column; width: min(380px, 82vw); min-height: 300px; margin: 0; padding: 24px; border-radius: 20px; background: var(--raise); font: 400 15px/22px var(--sans); scroll-snap-align: start; cursor: pointer; transition: width 0.6s var(--curve); }
+.card .num { font: 400 13px/16px var(--sans); color: var(--fg-2); }
+.card .body { display: -webkit-box; margin: 40px 0 20px; overflow: hidden; overflow-wrap: anywhere; color: var(--fg); -webkit-box-orient: vertical; -webkit-line-clamp: 7; }
+.card .lead { display: block; margin-bottom: 12px; font: 400 22px/28px var(--serif); letter-spacing: -0.01em; color: var(--fg-strong); }
+.prose .card .body :is(p, li) { margin: 0 0 8px; font: inherit; color: inherit; }
+.prose .card .body :is(ul, ol) { margin: 8px 0 0; padding-left: 18px; }
+.card .more { align-self: flex-start; margin-top: auto; padding: 0; border: 0; background: none; font: 400 15px/24px var(--sans); color: var(--fg-2); cursor: pointer; transition: color 0.15s ease; }
+.card .more:hover { color: var(--fg-strong); }
+.prose .card.open { width: min(680px, 90vw); cursor: default; }
+.card.open .body { display: block; overflow: visible; -webkit-line-clamp: none; }
+.known .controls { display: flex; align-items: center; gap: 12px; margin: 8px 0 0; }
+.controls .count { min-width: 64px; font: 400 14px/20px var(--sans); font-variant-numeric: tabular-nums; color: var(--fg-2); }
+.controls .grow { flex: 1; }
+.round { display: inline-grid; place-items: center; flex: none; width: 48px; height: 48px; padding: 0; border: 0; border-radius: 50%; background: var(--raise); color: var(--fg-strong); cursor: pointer; transition: transform 0.45s var(--curve), opacity 0.3s ease; }
+.round:hover:not(:disabled) { transform: scale(1.06); }
+.round:active:not(:disabled) { transform: scale(0.94); }
+.round:disabled { opacity: 0.3; cursor: default; }
+.round svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+:is(.tab, .round, .card .more, .track):focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 3px; }
 
 /* ---- steps: AKQA's numbered items -------------------------------------- */
 .prose .steps { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
@@ -4135,7 +4530,7 @@ button.step-head { cursor: pointer; }
 }
 /* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
-  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side { transition: none; }
+  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round { transition: none; }
   .goal .held { position: static; min-height: 0; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
 }
@@ -4148,6 +4543,12 @@ button.step-head { cursor: pointer; }
   .hero, .goal .held { min-height: 0; }
   .goal .held { position: static; padding: 0; }
   .goal .progress { display: none; }
+  .known .tabs, .known .controls, .card .num, .card .more { display: none; }
+  .known .group[hidden] { display: block; }
+  .prose .track { display: block; margin: 0 0 16px; padding: 0 0 0 20px; overflow: visible; list-style: disc; transform: none !important; }
+  .prose .card { display: list-item; width: auto; min-height: 0; margin: 0 0 8px; padding: 0; border-radius: 0; background: none; }
+  .card .body { display: block; margin: 0; overflow: visible; -webkit-line-clamp: none; }
+  .card .lead { display: inline; margin: 0; font: inherit; color: inherit; }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
 }
@@ -4669,6 +5070,63 @@ mod tests {
             "<div class=\"held\"><div class=\"label\" data-chrome>Goal</div><p class=\"statement\"><span class=\"w\">Ship</span> <span class=\"w\">the</span> <span class=\"w\">page.</span></p><div class=\"goal-rest\"><p>Then measure it.</p>\n</div><div class=\"progress\" data-chrome aria-hidden=\"true\"><i></i></div></div>"
         );
         assert!(!goal_scene("- A list first.\n").contains("statement"), "no statement to light");
+    }
+
+    #[test]
+    fn what_is_known_puts_each_group_behind_a_tab_and_each_finding_on_a_card() {
+        let known = |section: &str| {
+            let text = plan("Ship").replace("## What is known\nText.", &format!("## What is known\n{section}"));
+            let item = artifact_item(1, &text, Vec::new());
+            let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+            let scene = html.split("<section class=\"scene part").nth(1).and_then(|scene| scene.split("</section>").next()).unwrap_or_default().to_string();
+            // The words the scene shows, chrome left out, and the plan's.
+            let body = text.split_once('\n').unwrap().1;
+            let said = section_ranges(body).into_iter().find(|(heading, _)| heading == "What is known").map(|(_, range)| shown_words(&body[range])).unwrap_or_default();
+            let shown = page_words(&format!("<section class=\"scene part{scene}</section>"));
+            (scene, shown, said)
+        };
+
+        let (scene, shown, said) = known("On this machine, read today:\n- First finding. With more words.\n- A `code` one, with no stop\n\nFrom the web (read twice):\n1. Third. Last.\n");
+        assert!(scene.starts_with(" known\" id=\"plan-what-is-known\" data-part=\"What is known\" data-mode=\"light\" data-plan>"), "{scene}");
+        // A tab a group, named by its paragraph's first words and counting
+        // its findings; the first group shows.
+        assert!(
+            scene.contains("<div class=\"tabs\" role=\"tablist\" aria-label=\"What is known\" data-chrome><button class=\"pill tab\" type=\"button\" role=\"tab\" id=\"plan-what-is-known-tab-1\" aria-controls=\"plan-what-is-known-group-1\" aria-selected=\"true\">On this machine<sup>2</sup></button><button class=\"pill tab\" type=\"button\" role=\"tab\" id=\"plan-what-is-known-tab-2\" aria-controls=\"plan-what-is-known-group-2\" aria-selected=\"false\" tabindex=\"-1\">From the web<sup>1</sup></button></div>"),
+            "{scene}"
+        );
+        assert!(scene.contains("<div class=\"group\" id=\"plan-what-is-known-group-1\" role=\"tabpanel\" aria-labelledby=\"plan-what-is-known-tab-1\"><p>On this machine, read today:</p>\n<ul class=\"track\" tabindex=\"0\" aria-label=\"On this machine\">"), "{scene}");
+        assert!(scene.contains("<div class=\"group\" id=\"plan-what-is-known-group-2\" role=\"tabpanel\" aria-labelledby=\"plan-what-is-known-tab-2\" hidden><p>From the web (read twice):</p>\n<ol class=\"track\" tabindex=\"0\" aria-label=\"From the web\">"), "{scene}");
+        // A card a finding: its number and its button are chrome, and its
+        // first sentence is its lead, the space after it kept.
+        let read = "<button class=\"more\" type=\"button\" aria-expanded=\"false\" data-chrome><span>Read</span> <i aria-hidden=\"true\">\u{2198}</i></button>";
+        assert!(scene.contains(&format!("<li class=\"card\"><span class=\"num\" data-chrome>01 / 02</span><div class=\"body\"><span class=\"lead\">First finding.</span> With more words.</div>{read}</li>")), "{scene}");
+        assert!(scene.contains(&format!("<li class=\"card\"><span class=\"num\" data-chrome>02 / 02</span><div class=\"body\">A <code>code</code> one, with no stop</div>{read}</li>")), "no stop, no lead: {scene}");
+        assert!(scene.contains(&format!("<li class=\"card\"><span class=\"num\" data-chrome>01 / 01</span><div class=\"body\"><span class=\"lead\">Third.</span> Last.</div>{read}</li>")), "{scene}");
+        assert!(scene.ends_with("<div class=\"controls\" data-chrome><span class=\"count\">01 / 02</span><span class=\"grow\"></span><button class=\"round\" type=\"button\" data-by=\"-1\" aria-label=\"Back\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M14.5 5.5L8 12l6.5 6.5\"/></svg></button><button class=\"round\" type=\"button\" data-by=\"1\" aria-label=\"Next\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M9.5 5.5L16 12l-6.5 6.5\"/></svg></button></div>"), "{scene}");
+        assert_eq!(shown, said, "the plan's words, in its order");
+
+        // One group needs no tab; a loose list's paragraphs, a nested list
+        // and what follows the list stay as they are.
+        let (scene, shown, said) = known("- **First** finding, *a long one*. Then more.\n\n  Its second paragraph.\n  - inside it\n\nAfter the list.\n");
+        assert!(!scene.contains("role=\"tab"), "{scene}");
+        assert!(scene.contains("<div class=\"group\"><ul class=\"track\" tabindex=\"0\" aria-label=\"Findings\">"), "{scene}");
+        assert!(scene.contains("<div class=\"body\"><p><span class=\"lead\"><strong>First</strong> finding, <em>a long one</em>.</span> Then more.</p>\n<p>Its second paragraph.</p>\n<ul>\n<li>inside it</li>\n</ul>\n</div>"), "{scene}");
+        assert!(scene.contains("</div><div class=\"controls\" data-chrome><span class=\"count\">01 / 01</span>"), "the controls under the track: {scene}");
+        assert!(scene.ends_with("</div><p>After the list.</p>\n"), "{scene}");
+        assert_eq!(shown, said);
+
+        // A colon past the first few words ends a lead too.
+        let (scene, ..) = known("- There are 232 notes: 98 decisions. More.\n- Note: one. Two.\n");
+        assert!(scene.contains("<span class=\"lead\">There are 232 notes:</span> 98 decisions. More."), "{scene}");
+        assert!(scene.contains("<span class=\"lead\">Note: one.</span> Two."), "{scene}");
+
+        // A first sentence too long to set large is no lead.
+        let long = format!("- {} words. Then.\n", "many ".repeat(60));
+        assert!(!known(&long).0.contains("class=\"lead\""));
+
+        // With no list there is nothing to put on a track.
+        let (scene, ..) = known("Nothing listed.\n");
+        assert!(scene.starts_with("\" id=\"plan-what-is-known\""), "a plain scene: {scene}");
     }
 
     #[test]
