@@ -3642,7 +3642,10 @@ const SCRIPT: &str = r##"(function () {
   if (kept) {
     (kept.open || []).forEach(function (id) { var step = document.getElementById(id); if (step) setOpen(step, true); });
     var back = function () {
+      // An element the page hides now, as a step the stage no longer shows,
+      // has no top to go back by: the place is then the one kept (task 1391).
       var at = kept.id && document.getElementById(kept.id);
+      if (at && !at.getClientRects().length) at = null;
       scrollTo(0, at ? laidTop(at) - kept.offset : kept.y);
       try { history.scrollRestoration = "auto"; } catch (e) {}
       if (kept.quote && kept.editing) ekkoEdit(kept.editing);
