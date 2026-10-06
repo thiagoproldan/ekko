@@ -626,21 +626,6 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         }
         parts.push((id, heading));
     }
-    // Comments (task 1213), the notebook of an ebook: each comment's words
-    // are colored in the text by the script, which also sorts these entries
-    // into reading order, keeps the ones whose words are gone, and makes
-    // them the words' aria-details. A reply goes under what it answers.
-    if !comments.is_empty() {
-        parts.push(("comments".to_string(), "Comments".to_string()));
-        let _ = write!(body, "<section class=\"scene part\" id=\"comments\" data-part=\"Comments\" data-mode=\"{}\">{}<div class=\"filters\" role=\"toolbar\" aria-label=\"Which comments show\"></div><ol class=\"comments\">", mode("comments"), opener("Comments", None));
-        let known: Vec<&str> = comments.iter().filter_map(|note| note.uid.as_deref()).collect();
-        let answers = |note: &Item| note.comment.as_ref().and_then(|comment| comment.reply_to.as_deref()).filter(|to| known.contains(to)).map(str::to_string);
-        for note in comments.iter().filter(|note| answers(note).is_none()) {
-            let replies = comments.iter().filter(|reply| reply.uid.is_some() && answers(reply).as_deref() == note.uid.as_deref());
-            comment_entry(&mut body, note, &replies.collect::<Vec<_>>());
-        }
-        body.push_str("</ol></section>");
-    }
     // The comments as data the script anchors to their words, and the
     // themes it offers; both are written even with no comment yet, for the
     // first one.
@@ -777,40 +762,10 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         );
     }
 
-    // Notes: the questions, decisions and notes attached, newest first.
-    if !notes.is_empty() {
-        parts.push(("notes".to_string(), "Notes".to_string()));
-        let _ = write!(body, "<section class=\"scene part\" id=\"notes\" data-part=\"Notes\" data-mode=\"{}\">{}", mode("notes"), opener("Notes", None));
-        for note in &notes {
-            let (head, rest) = note_text(&note.description);
-            let kind = note_kind(note);
-            let open = if note.question.as_ref().is_some_and(|question| question.answer.is_none()) { " open" } else { "" };
-            let _ = write!(
-                body,
-                "<div class=\"note{open}\" id=\"note-{}\" data-kind=\"{kind}\"><div class=\"kind\">{kind} {} \u{b7} {}</div><h3>{}</h3>",
-                note.id,
-                note.id,
-                esc(&when(note.timestamp)),
-                esc(head)
-            );
-            if let Some(answer) = note.question.as_ref().and_then(|question| question.answer.as_ref()) {
-                let _ = write!(body, "<span class=\"answer\">\u{2713} {}</span>", esc(crate::menu::picked(&answer.text)));
-            }
-            if let Some(review) = note.review.as_deref() {
-                let _ = write!(body, "<p class=\"verdict\" data-verdict=\"{}\">{}</p>", esc(&review.verdict), esc(&review_words(review, all)));
-            }
-            match (rest.as_str(), note.question.is_some()) {
-                ("", _) => {}
-                (rest, true) => {
-                    let _ = write!(body, "<details><summary>What it explained and offered</summary><p class=\"text\">{}</p></details>", esc(rest));
-                }
-                (rest, false) => {
-                    let _ = write!(body, "<p class=\"text\">{}</p>", esc(rest));
-                }
-            }
-            body.push_str("</div>");
-        }
-        body.push_str("</section>");
+    // Notes and comments, one scene (task 1375).
+    if let Some((id, name, scene)) = talk_scene(&notes, &comments, all) {
+        parts.push((id.to_string(), name.to_string()));
+        body.push_str(&scene);
     }
 
     // History: who wrote the plan and when, the board it is on and whom
@@ -854,6 +809,11 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         env!("CARGO_PKG_VERSION"),
         FONT_LICENSE.0
     );
+    // The sheet a note opens in (task 1375), out of the scenes: a modal
+    // dialog, in the page's top layer, which the note is moved into.
+    if !notes.is_empty() {
+        body.push_str("<dialog class=\"side prose\" aria-label=\"Note\"><div class=\"side-in\"><button class=\"round shut\" type=\"button\" aria-label=\"Close\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M6.5 6.5l11 11M17.5 6.5l-11 11\"/></svg></button><div class=\"side-note\"></div></div></dialog>");
+    }
 
     // Medium's section bars, naming the scenes, AKQA's mark at the top,
     // and AKQA's bar.
@@ -872,7 +832,13 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         let _ = write!(body, "<a href=\"#{id}\">Plan</a>");
     }
     for (id, name) in ours {
-        let _ = write!(body, "<a href=\"#{id}\">{name}</a>");
+        // The scene of notes and comments is a part each in the menu, which
+        // leads to its tab.
+        if id == "notes-and-comments" {
+            body.push_str("<a href=\"#notes\">Notes</a><a href=\"#comments\">Comments</a>");
+        } else {
+            let _ = write!(body, "<a href=\"#{id}\">{name}</a>");
+        }
     }
     // The commands the menu offers besides the parts, which the script
     // writes, and Review, a round button beside the pill (task 1337).
@@ -1010,6 +976,117 @@ fn comment_entry(body: &mut String, note: &Item, replies: &[&&Item]) {
         );
     }
     body.push_str("</li>");
+}
+
+/// Notes and comments as one scene (task 1375), after the map: with both,
+/// a tab each, the notes picked first. The notes, newest first, are AKQA's
+/// latest news as rows: a small line with the kind, a title and an arrow,
+/// with pills for each kind when there are two kinds or more. A row opens
+/// its note in the sheet after the page. The notes themselves wait whole
+/// under the rows, out of sight on a screen, so the pill finds them and
+/// print shows them. Comments are the notebook of task 1213: the script
+/// colors each comment's words in the text, sorts the entries into reading
+/// order, keeps the ones whose words are gone, fills the filters, and makes
+/// the entries the words' aria-details; a reply goes under what it answers.
+/// The scene's id and name, and the scene; None when there is neither.
+fn talk_scene(notes: &[&Item], comments: &[&Item], all: &ItemMap) -> Option<(&'static str, &'static str, String)> {
+    let (id, name) = match (notes.is_empty(), comments.is_empty()) {
+        (true, true) => return None,
+        (false, true) => ("notes", "Notes"),
+        (true, false) => ("comments", "Comments"),
+        (false, false) => ("notes-and-comments", "Notes and comments"),
+    };
+    let both = !notes.is_empty() && !comments.is_empty();
+    let (first, second) = two_tones(name);
+    let mut out = format!("<section class=\"scene part talk\" id=\"{id}\" data-part=\"{name}\" data-mode=\"{}\">{}", mode(id), opener(&first, second.as_deref()));
+    if both {
+        let _ = write!(
+            out,
+            "<div class=\"tabs\" role=\"tablist\" aria-label=\"Notes and comments\"><button class=\"pill tab\" type=\"button\" role=\"tab\" id=\"notes-tab\" aria-controls=\"notes\" aria-selected=\"true\">Notes<sup>{}</sup></button><button class=\"pill tab\" type=\"button\" role=\"tab\" id=\"comments-tab\" aria-controls=\"comments\" aria-selected=\"false\" tabindex=\"-1\">Comments<sup>{}</sup></button></div><div class=\"panels\"><div class=\"panel\" id=\"notes\" role=\"tabpanel\" aria-labelledby=\"notes-tab\" data-name=\"Notes\">",
+            notes.len(),
+            comments.len()
+        );
+    }
+    if !notes.is_empty() {
+        let mut kinds: Vec<(String, usize)> = Vec::new();
+        for note in notes {
+            let kind = note_kind(note);
+            match kinds.iter_mut().find(|(seen, _)| *seen == kind) {
+                Some((_, count)) => *count += 1,
+                None => kinds.push((kind, 1)),
+            }
+        }
+        if kinds.len() > 1 {
+            let _ = write!(out, "<div class=\"kinds\" role=\"toolbar\" aria-label=\"Which notes show\"><button class=\"pill\" type=\"button\" aria-pressed=\"true\">All<sup>{}</sup></button>", notes.len());
+            for (kind, count) in &kinds {
+                let _ = write!(out, "<button class=\"pill\" type=\"button\" data-kind=\"{kind}\" aria-pressed=\"false\">{kind}s<sup>{count}</sup></button>");
+            }
+            out.push_str("</div>");
+        }
+        let open = |note: &Item| if note.question.as_ref().is_some_and(|question| question.answer.is_none()) { " open" } else { "" };
+        out.push_str("<ul class=\"rows\">");
+        for note in notes {
+            let kind = note_kind(note);
+            let _ = write!(
+                out,
+                "<li data-kind=\"{kind}\"><button class=\"row{}\" type=\"button\" data-note=\"{}\" aria-haspopup=\"dialog\"><small>{kind} {} \u{b7} {}</small><strong>{}</strong><i aria-hidden=\"true\">\u{2198}</i></button></li>",
+                open(note),
+                note.id,
+                note.id,
+                esc(&when(note.timestamp)),
+                esc(note_text(&note.description).0)
+            );
+        }
+        out.push_str("</ul><div class=\"whole\">");
+        for note in notes {
+            let (head, rest) = note_text(&note.description);
+            let kind = note_kind(note);
+            let _ = write!(
+                out,
+                "<div class=\"note{}\" id=\"note-{}\" data-kind=\"{kind}\"><div class=\"kind\">{kind} {} \u{b7} {}</div><h3>{}</h3>",
+                open(note),
+                note.id,
+                note.id,
+                esc(&when(note.timestamp)),
+                esc(head)
+            );
+            if let Some(answer) = note.question.as_ref().and_then(|question| question.answer.as_ref()) {
+                let _ = write!(out, "<span class=\"answer\">\u{2713} {}</span>", esc(crate::menu::picked(&answer.text)));
+            }
+            if let Some(review) = note.review.as_deref() {
+                let _ = write!(out, "<p class=\"verdict\" data-verdict=\"{}\">{}</p>", esc(&review.verdict), esc(&review_words(review, all)));
+            }
+            match (rest.as_str(), note.question.is_some()) {
+                ("", _) => {}
+                (rest, true) => {
+                    let _ = write!(out, "<details><summary>What it explained and offered</summary><p class=\"text\">{}</p></details>", esc(rest));
+                }
+                (rest, false) => {
+                    let _ = write!(out, "<p class=\"text\">{}</p>", esc(rest));
+                }
+            }
+            out.push_str("</div>");
+        }
+        out.push_str("</div>");
+    }
+    if both {
+        out.push_str("</div><div class=\"panel\" id=\"comments\" role=\"tabpanel\" aria-labelledby=\"comments-tab\" data-name=\"Comments\" hidden>");
+    }
+    if !comments.is_empty() {
+        out.push_str("<div class=\"filters\" role=\"toolbar\" aria-label=\"Which comments show\"></div><ol class=\"comments\">");
+        let known: Vec<&str> = comments.iter().filter_map(|note| note.uid.as_deref()).collect();
+        let answers = |note: &Item| note.comment.as_ref().and_then(|comment| comment.reply_to.as_deref()).filter(|to| known.contains(to)).map(str::to_string);
+        for note in comments.iter().filter(|note| answers(note).is_none()) {
+            let replies = comments.iter().filter(|reply| reply.uid.is_some() && answers(reply).as_deref() == note.uid.as_deref());
+            comment_entry(&mut out, note, &replies.collect::<Vec<_>>());
+        }
+        out.push_str("</ol>");
+    }
+    if both {
+        out.push_str("</div></div>");
+    }
+    out.push_str("</section>");
+    Some((id, name, out))
 }
 
 /// What a review from the page needs (task 1106): the version it is made
@@ -2288,9 +2365,19 @@ const SCRIPT: &str = r##"(function () {
   var bars = Array.prototype.slice.call(document.querySelectorAll(".toc-bars span"));
   var rows = Array.prototype.slice.call(document.querySelectorAll(".toc a"));
   var mark = document.querySelector(".mark");
+  // What a jump shows before it goes there (task 1375): a scene that hides
+  // some of what it holds shows the part asked for, and may name what to
+  // go to instead, as the scene of a note it opens in its sheet.
+  var surfacers = [];
+  function uncover(target) {
+    var to = target;
+    surfacers.forEach(function (show) { to = show(target) || to; });
+    return to;
+  }
+  window.ekkoSurface = uncover;
   function jump(id) {
     var target = document.getElementById(id);
-    if (target) target.scrollIntoView({ behavior: smooth(), block: "start" });
+    if (target) uncover(target).scrollIntoView({ behavior: smooth(), block: "start" });
   }
   rows.forEach(function (row) {
     row.addEventListener("click", function (event) { event.preventDefault(); jump(row.getAttribute("href").slice(1)); });
@@ -2310,13 +2397,17 @@ const SCRIPT: &str = r##"(function () {
     current = at;
     bars.forEach(function (bar, i) { bar.classList.toggle("on", i === at); });
     rows.forEach(function (row, i) { row.classList.toggle("on", i === at); });
-    // The pill's menu marks it too, as AKQA's marks the page it is on: the
-    // plan's parts all under Plan.
-    var id = scenes[at].id;
+    marks();
+  }
+  // The pill's menu marks it too, as AKQA's marks the page it is on: the
+  // plan's parts all under Plan, and of a scene's tabs the one picked.
+  function marks() {
+    var scene = scenes[current];
+    if (!scene) return;
     document.querySelectorAll(".bar-nav a").forEach(function (a) {
-      var to = a.getAttribute("href").slice(1);
-      if (to === id || (to.indexOf("plan-") === 0 && id.indexOf("plan-") === 0)) a.setAttribute("aria-current", "true");
-      else a.removeAttribute("aria-current");
+      var to = a.getAttribute("href").slice(1), target = document.getElementById(to);
+      var on = (to.indexOf("plan-") === 0 && scene.id.indexOf("plan-") === 0) || (!!target && scene.contains(target) && target.getClientRects().length > 0);
+      if (on) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current");
     });
   }
   var following = false;
@@ -2699,6 +2790,146 @@ const SCRIPT: &str = r##"(function () {
       var n = steps.indexOf(step);
       if (n >= 0) put(n);
     };
+  })();
+
+  // Notes and comments (task 1375): a tab each when both are there, the
+  // notes as rows a kind's pill filters, as AKQA's switches regroup. A row
+  // opens its note in a sheet from the right, a modal dialog: the page
+  // behind it is inert, so Tab stays in it, but for the browser's own
+  // controls, which a keyboard may still reach. Esc closes it, and so does
+  // a click outside it; the note goes back to its place, and the focus to
+  // its row. A jump to the notes, the comments or a note shows its tab, or
+  // its sheet, first.
+  (function () {
+    var scene = document.querySelector(".scene.talk");
+    if (!scene) return;
+    var still = matchMedia("(prefers-reduced-motion: reduce)");
+    var curve = "cubic-bezier(0.2, 0.65, 0.3, 1)";
+    var tabs = Array.prototype.slice.call(scene.querySelectorAll(".tab"));
+    var panels = scene.querySelector(".panels"), rows = scene.querySelector(".rows");
+    var kinds = Array.prototype.slice.call(scene.querySelectorAll(".kinds .pill"));
+    var tabOf = function (panel) { return tabs.filter(function (tab) { return tab.getAttribute("aria-controls") === panel.id; })[0]; };
+    var pick = function (tab, moved) {
+      if (!tab || tab.getAttribute("aria-selected") === "true") return;
+      var change = function () {
+        tabs.forEach(function (other) {
+          var chosen = other === tab;
+          other.setAttribute("aria-selected", String(chosen));
+          other.tabIndex = chosen ? 0 : -1;
+          document.getElementById(other.getAttribute("aria-controls")).hidden = !chosen;
+        });
+        marks();
+      };
+      if (moved) regroup(panels, change); else change();
+    };
+    tabs.forEach(function (tab) { tab.addEventListener("click", function () { pick(tab, true); }); });
+    if (tabs.length) tabs[0].parentNode.addEventListener("keydown", function (event) {
+      var n = tabs.indexOf(event.target), to = { ArrowRight: n + 1, ArrowLeft: n - 1, Home: 0, End: tabs.length - 1 }[event.key];
+      if (n < 0 || to === undefined) return;
+      event.preventDefault();
+      var tab = tabs[(to + tabs.length) % tabs.length];
+      tab.focus();
+      pick(tab, true);
+    });
+    // A kind picked shows its notes alone; picked again, or All, every one.
+    var chosen = null;
+    var lay = function () {
+      kinds.forEach(function (pill) { pill.setAttribute("aria-pressed", String((pill.dataset.kind || null) === chosen)); });
+      if (rows) Array.prototype.forEach.call(rows.children, function (row) { row.hidden = chosen !== null && row.dataset.kind !== chosen; });
+    };
+    kinds.forEach(function (pill) {
+      pill.addEventListener("click", function () {
+        var kind = pill.dataset.kind && pill.dataset.kind !== chosen ? pill.dataset.kind : null;
+        if (kind !== chosen) regroup(rows, function () { chosen = kind; lay(); });
+      });
+    });
+
+    // The sheet. Its motion is the script's, so it runs the same in either
+    // engine: in 560 ms as it opens, out in AKQA's 280 as it closes, the
+    // veil behind it fading; none under reduced motion.
+    var sheet = document.querySelector("dialog.side");
+    if (!sheet || !rows) return;
+    var place = sheet.querySelector(".side-note"), shut = sheet.querySelector(".shut");
+    var shown = null, home = null, from = null, moving = [], closing = false;
+    var rowOf = function (note) { return rows.querySelector(".row[data-note='" + note.id.slice(5) + "']"); };
+    var motion = function (frames, veil, how) {
+      if (still.matches || !sheet.animate) return;
+      moving.push(sheet.animate(frames, how));
+      try { moving.push(sheet.animate(veil, Object.assign({ pseudoElement: "::backdrop" }, how))); } catch (e) {}
+    };
+    var settle = function () {
+      moving.forEach(function (one) { one.cancel(); });
+      moving = [];
+    };
+    // Closed, by the script or the browser: the note back, the focus to
+    // the row it was opened from.
+    var closed = function () {
+      settle();
+      closing = false;
+      if (shown) home.parent.insertBefore(shown, home.next);
+      var back = from;
+      shown = home = from = null;
+      if (back && back.isConnected && document.activeElement !== back) back.focus({ preventScroll: true });
+    };
+    var open = function (note, row) {
+      if (!note) return;
+      if (sheet.open) { sheet.close(); closed(); }
+      settle();
+      home = { parent: note.parentNode, next: note.nextSibling };
+      shown = note;
+      from = row || rowOf(note);
+      place.appendChild(note);
+      var title = note.querySelector("h3");
+      sheet.setAttribute("aria-label", title ? title.textContent : "Note");
+      sheet.showModal();
+      shut.focus();
+      sheet.querySelector(".side-in").scrollTop = 0;
+      motion([{ transform: "translateX(100%)" }, { transform: "none" }], [{ opacity: 0 }, { opacity: 1 }], { duration: 560, easing: curve });
+    };
+    var close = function () {
+      if (!sheet.open || closing) return;
+      settle();
+      motion([{ transform: "none" }, { transform: "translateX(100%)" }], [{ opacity: 1 }, { opacity: 0 }], { duration: 280, easing: curve, fill: "forwards" });
+      if (!moving.length) { sheet.close(); return closed(); }
+      closing = true;
+      moving[0].finished.then(function () { sheet.close(); closed(); }, function () {});
+    };
+    rows.addEventListener("click", function (event) {
+      var row = event.target.closest(".row");
+      if (row) open(document.getElementById("note-" + row.dataset.note), row);
+    });
+    shut.addEventListener("click", close);
+    // Esc asks the sheet to close: it goes out as it came. A browser that
+    // will not let the page hold it, as one pressed again without a click
+    // between, closes it at once.
+    sheet.addEventListener("cancel", function (event) {
+      if (!event.cancelable) return;
+      event.preventDefault();
+      close();
+    });
+    sheet.addEventListener("close", function () { if (!sheet.open) closed(); });
+    // A click on the veil, begun there too: a selection in the note that
+    // ends outside it is no click outside.
+    var outside = false;
+    sheet.addEventListener("pointerdown", function (event) { outside = event.target === sheet; });
+    sheet.addEventListener("click", function (event) { if (event.target === sheet && outside) close(); });
+
+    // A jump shows what it goes to: a note in its sheet, the notes' tab or
+    // the comments' first.
+    surfacers.push(function (target) {
+      var note = target.closest && target.closest(".note");
+      if (note && (scene.contains(note) || sheet.contains(note))) {
+        pick(tabs[0], false);
+        var row = rowOf(note);
+        if (row && row.parentNode.hidden) { chosen = null; lay(); }
+        open(note, row);
+        return scene;
+      }
+      var panel = scene.contains(target) && target !== scene && target.closest(".panel");
+      if (!panel) return null;
+      pick(tabOf(panel), false);
+      return target === panel ? scene : target;
+    });
   })();
 
   // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
@@ -3571,9 +3802,10 @@ const SCRIPT: &str = r##"(function () {
     // A comment being written stays open while other words are picked.
     if (expanded && !writing() && !bar.contains(event.target)) close(false);
   });
-  // "/" opens the pill, and R the review where the page writes.
+  // "/" opens the pill, and R the review where the page writes; not while a
+  // note's sheet holds the page.
   addEventListener("keydown", function (event) {
-    if ((event.key !== "/" && event.key !== "r") || event.ctrlKey || event.metaKey || event.altKey) return;
+    if ((event.key !== "/" && event.key !== "r") || event.ctrlKey || event.metaKey || event.altKey || document.querySelector("dialog:modal")) return;
     var active = document.activeElement;
     if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
     if (event.key === "r") {
@@ -3642,9 +3874,12 @@ const SCRIPT: &str = r##"(function () {
   if (kept) {
     (kept.open || []).forEach(function (id) { var step = document.getElementById(id); if (step) setOpen(step, true); });
     var back = function () {
-      // An element the page hides now, as a step the stage no longer shows,
-      // has no top to go back by: the place is then the one kept (task 1391).
+      // An element the page hides now, as an entry of a tab not picked, is
+      // shown as a jump shows it (task 1375); one that stays hidden, as a
+      // step the stage no longer shows, has no top to go back by: the place
+      // is then the one kept (task 1391).
       var at = kept.id && document.getElementById(kept.id);
+      if (at && !at.getClientRects().length) uncover(at);
       if (at && !at.getClientRects().length) at = null;
       scrollTo(0, at ? laidTop(at) - kept.offset : kept.y);
       try { history.scrollRestoration = "auto"; } catch (e) {}
@@ -4173,6 +4408,7 @@ const SCRIPT: &str = r##"(function () {
   window.ekkoOpenComment = function (id) {
     var at = marksOf(id)[0] || document.getElementById("comment-" + id);
     if (!at) return;
+    if (!at.getClientRects().length && window.ekkoSurface) ekkoSurface(at);
     at.scrollIntoView({ block: "center" });
     open([id], at);
   };
@@ -4842,6 +5078,41 @@ button.step-head { cursor: pointer; }
 .diff .del { background: var(--del); }
 .prose .about { margin: 0 0 8px; font: 400 15px/24px var(--sans); color: var(--fg-2); }
 .prose .about + :not(.about) { margin-top: 32px; }
+
+/* ---- Notes and comments: one scene, a tab each (task 1375) ------------- */
+/* AKQA's latest news: the notes as rows in two columns, a small line with
+   the kind over a title in serif and an arrow that leans in as the pointer
+   comes; pills pick a kind. A row opens its note in a sheet from the right,
+   over a veil, the note whole: on a screen the page keeps the notes out of
+   sight for it, and print shows them. */
+.talk .tabs, .talk .kinds { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+.kinds .pill sup { font-size: 11px; line-height: 1; color: var(--fg-2); }
+.kinds .pill[aria-pressed="true"] { background: var(--fg-strong); color: var(--bg); }
+.kinds .pill[aria-pressed="true"] sup { color: inherit; opacity: 0.7; }
+.scene > :is(.panels, .rows) { max-width: none; }
+.panels > #comments { max-width: var(--measure); }
+.prose .rows { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 0 32px; margin: 24px 0 0; padding: 0; list-style: none; }
+.prose .rows li { margin: 0; }
+.row { display: grid; grid-template-columns: 1fr auto; align-content: start; gap: 4px 16px; box-sizing: border-box; width: 100%; height: 100%; padding: 20px 0; border: 0; border-top: 1px solid var(--rule); background: none; text-align: left; cursor: pointer; }
+.row small { font: 400 12px/16px var(--sans); letter-spacing: 0.04em; text-transform: uppercase; color: var(--fg-2); }
+.row.open small { color: var(--accent); }
+.row strong { grid-column: 1; font: 400 20px/26px var(--serif); color: var(--fg-strong); }
+.row i { grid-column: 2; grid-row: 1 / span 2; align-self: center; font: normal 400 20px/1 var(--sans); color: var(--fg-2); transition: transform 0.45s var(--curve), color 0.3s ease; }
+.row:hover i { color: var(--fg-strong); transform: translate(3px, 3px); }
+:is(.row, .kinds .pill):focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 3px; }
+@media screen {
+  .whole { display: none; }
+}
+dialog.side { position: fixed; inset: 0 0 0 auto; box-sizing: border-box; width: min(560px, 100vw); max-width: none; height: 100%; max-height: none; margin: 0; padding: 0; border: 0; overflow: visible; background: var(--bg); color: var(--fg); box-shadow: -24px 0 64px rgba(0, 0, 0, 0.18); }
+dialog.side::backdrop { background: rgba(0, 0, 0, 0.32); }
+.side-in { box-sizing: border-box; height: 100%; padding: 80px 40px 120px; overflow-y: auto; overscroll-behavior: contain; }
+.side .shut { position: absolute; top: 16px; right: 16px; }
+.side .shut:focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 3px; }
+.side.prose .note { padding: 0; border: 0; }
+.side.prose .note h3 { margin: 12px 0 0; font: 400 30px/36px var(--serif); letter-spacing: -0.015em; }
+@media (max-width: 600px) {
+  .side-in { padding: 72px 20px 120px; }
+}
 .foot { box-sizing: border-box; max-width: calc(var(--wide) + 2 * var(--gutter)); margin: 0 auto; padding: 48px var(--gutter) 0; font: 400 13px/20px var(--sans); color: var(--fg-2); }
 
 /* ---- AKQA's mark at the top centre ------------------------------------- */
@@ -5085,7 +5356,7 @@ button.step-head { cursor: pointer; }
 }
 /* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
-  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before, .prose .sheet, .toggle i, .toggle i::after, .seg::before { transition: none; }
+  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before, .prose .sheet, .toggle i, .toggle i::after, .seg::before, .row i { transition: none; }
   .numeral .out, .numeral .enter { animation: none; }
   .goal .held { position: static; min-height: 0; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
@@ -5119,6 +5390,9 @@ button.step-head { cursor: pointer; }
   .sheet .lead { display: inline; margin: 0; font: inherit; color: inherit; }
   .staged .segs, .staged .controls, .step .after { display: none; }
   .staged .steps .step[hidden] { display: block !important; }
+  .talk .tabs, .talk .kinds, .talk .rows, dialog.side { display: none; }
+  .talk .panel[hidden] { display: block !important; }
+  .panels > .panel::before { content: attr(data-name); display: block; margin: 24px 0 8px; font: 600 18px/24px var(--sans); color: var(--fg-strong); }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
 }
@@ -5419,8 +5693,92 @@ mod tests {
         assert!(themed.contains("data-color=\"blue\"") && themed.contains("<span class=\"theme\">Dúvida</span>") && themed.contains("role=\"comment\""), "{themed}");
         assert!(themed.contains("<div class=\"reply\" id=\"comment-4\" role=\"comment\">"), "the reply is under what it answers: {themed}");
         assert!(entry(4).is_none(), "a reply is no entry of its own");
-        assert!(html.contains("<li><a href=\"#comments\"><span class=\"d\"></span><span class=\"t\">Comments</span></a></li>"), "the index leads to them: {html}");
+        assert!(html.contains("<li><a href=\"#notes-and-comments\"><span class=\"d\"></span><span class=\"t\">Notes and comments</span></a></li>"), "the index leads to their scene: {html}");
+        assert!(html.contains("<a href=\"#notes\">Notes</a><a href=\"#comments\">Comments</a>"), "the pill's menu to their tab: {html}");
         assert!(!html.contains("class=\"margin\""), "no card is beside the text");
+    }
+
+    /// Notes and comments share a scene after the map (task 1375): a tab
+    /// each, the notes picked; the notes as rows, newest first, with a pill
+    /// a kind, and whole under them for the sheet and for print; the sheet
+    /// after the page, out of every scene. Alone, either is the scene, with
+    /// no tabs; notes of one kind have no pills.
+    #[test]
+    fn the_notes_and_comments_share_a_scene() {
+        use crate::item::Knowledge;
+        let made = steps(&[], &[spec("a", Some("First"), &[])]).unwrap();
+        let item = artifact_item(1, &plan("Ship"), made);
+        let note = |id: u32, text: &str, kind: Option<Knowledge>| {
+            let mut note = Item::new_note(id, text.to_string(), vec!["My Board".to_string()]);
+            note.attached_to = item.uid.clone();
+            note.knowledge = kind;
+            note.timestamp = i64::from(id) * 86_400_000;
+            note
+        };
+        let mut comment = note(5, "A comment", None);
+        comment.comment = Some(Box::new(crate::item::Comment {
+            version: 1,
+            quote: None,
+            replacement: None,
+            step: None,
+            reply_to: None,
+            sent: None,
+            resolved: None,
+            applied: None,
+            theme: None,
+            color: None,
+            unknown: BTreeMap::new(),
+        }));
+        let mut all: ItemMap = BTreeMap::from([
+            (1, item.clone()),
+            (2, note(2, "Keep it light. It reloads often.", Some(Knowledge::Decision))),
+            (3, note(3, "Mind the lock.", Some(Knowledge::Gotcha))),
+            (4, note(4, "Read this first.", Some(Knowledge::Decision))),
+            (5, comment),
+        ]);
+        let (html, _) = page(&item, &all, None);
+        assert_eq!(html.matches("class=\"scene part talk\"").count(), 1, "one scene: {html}");
+        let scene = html.split("<section class=\"scene part talk\"").nth(1).and_then(|rest| rest.split("</section>").next()).unwrap_or_default();
+        assert!(
+            scene.starts_with(" id=\"notes-and-comments\" data-part=\"Notes and comments\" data-mode=\"light\"><h2 class=\"opener words\" data-chrome><span class=\"l1\"><span class=\"w\">Notes</span></span> <span class=\"l2\"><span class=\"w\">and</span> <span class=\"w\">comments</span></span></h2><div class=\"tabs\" role=\"tablist\" aria-label=\"Notes and comments\"><button class=\"pill tab\" type=\"button\" role=\"tab\" id=\"notes-tab\" aria-controls=\"notes\" aria-selected=\"true\">Notes<sup>3</sup></button><button class=\"pill tab\" type=\"button\" role=\"tab\" id=\"comments-tab\" aria-controls=\"comments\" aria-selected=\"false\" tabindex=\"-1\">Comments<sup>1</sup></button></div><div class=\"panels\"><div class=\"panel\" id=\"notes\" role=\"tabpanel\" aria-labelledby=\"notes-tab\" data-name=\"Notes\"><div class=\"kinds\" role=\"toolbar\" aria-label=\"Which notes show\"><button class=\"pill\" type=\"button\" aria-pressed=\"true\">All<sup>3</sup></button><button class=\"pill\" type=\"button\" data-kind=\"Decision\" aria-pressed=\"false\">Decisions<sup>2</sup></button><button class=\"pill\" type=\"button\" data-kind=\"Gotcha\" aria-pressed=\"false\">Gotchas<sup>1</sup></button></div><ul class=\"rows\"><li data-kind=\"Decision\"><button class=\"row\" type=\"button\" data-note=\"4\" aria-haspopup=\"dialog\"><small>Decision 4 \u{b7} "
+            ),
+            "the opener, the tabs, the kinds and the newest note's row: {scene}"
+        );
+        assert!(scene.contains("</small><strong>Read this first.</strong><i aria-hidden=\"true\">\u{2198}</i></button></li>"), "{scene}");
+        let (rows, rest) = scene.split_once("</ul><div class=\"whole\">").expect("the notes whole after the rows");
+        let (whole, comments) = rest.split_once("</div></div><div class=\"panel\" id=\"comments\" role=\"tabpanel\" aria-labelledby=\"comments-tab\" data-name=\"Comments\" hidden><div class=\"filters\" role=\"toolbar\" aria-label=\"Which comments show\"></div><ol class=\"comments\">").expect("the comments' tab, not picked");
+        let order = |text: &str, marks: &[&str]| marks.iter().map(|mark| text.find(mark)).collect::<Option<Vec<usize>>>().is_some_and(|at| at.windows(2).all(|two| two[0] < two[1]));
+        assert!(order(rows, &["data-note=\"4\"", "data-note=\"3\"", "data-note=\"2\""]), "newest first: {rows}");
+        assert!(order(whole, &["<div class=\"note\" id=\"note-4\" data-kind=\"Decision\">", "<div class=\"note\" id=\"note-3\" data-kind=\"Gotcha\">", "<div class=\"note\" id=\"note-2\" data-kind=\"Decision\">"]), "{whole}");
+        assert!(whole.contains("<h3>Keep it light.</h3><p class=\"text\">It reloads often.</p>"), "each note whole: {whole}");
+        assert!(comments.starts_with("<li class=\"entry\" id=\"comment-5\"") && comments.ends_with("</ol></div></div>"), "{comments}");
+        assert!(order(&html, &["id=\"map\"", "id=\"notes-and-comments\"", "id=\"history\""]), "after the map, before History: {html}");
+        let (main, after) = html.split_once("</main>").unwrap_or_default();
+        assert!(!main.contains("<dialog") && after.matches("<dialog class=\"side prose\" aria-label=\"Note\"><div class=\"side-in\"><button class=\"round shut\" type=\"button\" aria-label=\"Close\">").count() == 1, "one sheet, after the page: {html}");
+        let index = html.split("<div class=\"toc-card\"><ol>").nth(1).and_then(|rest| rest.split("</ol>").next()).unwrap_or_default();
+        let names: Vec<&str> = index.split("<span class=\"t\">").skip(1).filter_map(|name| name.split('<').next()).collect();
+        assert_eq!(names, ["Overview", "Goal", "What is known", "Design", "Risks and open questions", "Steps", "Map", "Notes and comments", "History"], "the scene once in the index");
+        assert!(html.contains(&format!("aria-label=\"Sections\">{}</button>", "<span></span>".repeat(names.len()))), "a bar each: {html}");
+
+        // Alone, and of one kind.
+        all.remove(&5);
+        let (html, _) = page(&item, &all, None);
+        let scene = html.split("<section class=\"scene part talk\"").nth(1).and_then(|rest| rest.split("</section>").next()).unwrap_or_default();
+        assert!(scene.starts_with(" id=\"notes\" data-part=\"Notes\" data-mode=\"light\"><h2 class=\"opener words\" data-chrome><span class=\"l1\"><span class=\"w\">Notes</span></span></h2><div class=\"kinds\""), "{scene}");
+        assert!(!scene.contains("class=\"tabs\"") && !scene.contains("class=\"panel") && html.contains("<a href=\"#notes\">Notes</a><a href=\"#history\">"), "{scene}");
+        all.remove(&3);
+        let (html, _) = page(&item, &all, None);
+        assert!(!html.contains("class=\"kinds\"") && html.contains("<ul class=\"rows\"><li data-kind=\"Decision\">"), "one kind, no pills: {html}");
+        all.retain(|id, _| *id == 1);
+        all.insert(5, {
+            let mut comment = note(5, "A comment", None);
+            comment.comment = Some(Box::new(crate::item::Comment { version: 1, quote: None, replacement: None, step: None, reply_to: None, sent: None, resolved: None, applied: None, theme: None, color: None, unknown: BTreeMap::new() }));
+            comment
+        });
+        let (html, _) = page(&item, &all, None);
+        let scene = html.split("<section class=\"scene part talk\"").nth(1).and_then(|rest| rest.split("</section>").next()).unwrap_or_default();
+        assert!(scene.starts_with(" id=\"comments\" data-part=\"Comments\" data-mode=\"light\"><h2 class=\"opener words\" data-chrome><span class=\"l1\"><span class=\"w\">Comments</span></span></h2><div class=\"filters\""), "{scene}");
+        assert!(!html.contains("<dialog") && !html.contains("class=\"rows\"") && !html.contains("class=\"tabs\""), "no notes, no sheet: {html}");
     }
 
     /// Each color of THEMES has its tint and its ink in both looks, and the
