@@ -661,19 +661,40 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         script_data(&review_data(item, all, version))
     );
 
-    // Steps: AKQA's numbered items, each with its task, opening in place to
-    // the rest of its text and when it is done.
+    // Steps (task 1373): AKQA's ROLE carousel as a stage, one step on it at
+    // a time, whole: the first not done or cancelled, or else the first. A
+    // segment a step above it; under each the steps it waits on, as chips
+    // leading to them; under the stage how far along it is, a switch that
+    // shows the whole list, and the way back and on. In the list, as with
+    // one step alone, each step has its task and opens in place to the rest
+    // of its text and when it is done.
     parts.push(("steps".to_string(), "Steps".to_string()));
     let progress = match (tasks, steps.len()) {
         (0, 0) => None,
         (0, count) => Some(plural(count, "step")),
         (tasks, _) => Some(format!("{done} of {tasks} done")),
     };
-    let _ = write!(body, "<section class=\"scene part\" id=\"steps\" data-part=\"Steps\" data-mode=\"{}\">{}", mode("steps"), opener("Steps", progress.as_deref()));
+    let staged = (steps.len() > 1).then(|| steps.iter().position(|step| !matches!(step.class, "done" | "cancelled")).unwrap_or(0));
+    let _ = write!(
+        body,
+        "<section class=\"scene part{}\" id=\"steps\" data-part=\"Steps\" data-mode=\"{}\">{}",
+        if staged.is_some() { " staged" } else { "" },
+        mode("steps"),
+        opener("Steps", progress.as_deref())
+    );
     if steps.is_empty() {
         body.push_str("<p>No steps yet: the artifact tool writes them.</p>");
     } else {
-        body.push_str("<ol class=\"steps\">");
+        if let Some(on) = staged {
+            body.push_str("<div class=\"segs\" role=\"group\" aria-label=\"Steps\">");
+            for (at, step) in steps.iter().enumerate() {
+                let current = if at == on { " aria-current=\"step\"" } else { " tabindex=\"-1\"" };
+                let _ = write!(body, "<button class=\"seg {}\" type=\"button\"{current}><span>{:02} {}</span></button>", step.class, at + 1, esc(step.title));
+            }
+            body.push_str("</div><ol class=\"steps\" tabindex=\"0\" aria-label=\"Steps, one at a time\">");
+        } else {
+            body.push_str("<ol class=\"steps\">");
+        }
         for (at, step) in steps.iter().enumerate() {
             let mut meta = esc(&step.state);
             if let Some(id) = step.task {
@@ -688,14 +709,40 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
                 esc(step.title),
                 step.class
             );
-            let _ = write!(body, "<li class=\"step {}\" id=\"step-{}\" data-state=\"{}\">", step.class, esc(&step.step.key), esc(&step.state));
-            if step.rest.is_empty() && step.step.done_when.is_none() {
-                let _ = write!(body, "<div class=\"step-head\">{head}</div></li>");
+            // The step on the stage comes open; the others wait hidden.
+            let open = staged == Some(at);
+            let more = !step.rest.is_empty() || step.step.done_when.is_some();
+            let _ = write!(
+                body,
+                "<li class=\"step {}{}\" id=\"step-{}\" data-state=\"{}\"{}>",
+                step.class,
+                if open && more { " open" } else { "" },
+                esc(&step.step.key),
+                esc(&step.state),
+                if staged.is_some() && !open { " hidden" } else { "" }
+            );
+            if more {
+                let _ = write!(body, "<button class=\"step-head\" type=\"button\" aria-expanded=\"{}\">{head}</button>", open);
+            } else {
+                let _ = write!(body, "<div class=\"step-head\">{head}</div>");
+            }
+            let waits: Vec<String> = step
+                .step
+                .after
+                .iter()
+                .filter_map(|key| steps.iter().position(|other| other.step.key == *key).map(|place| (key, place)))
+                .map(|(key, place)| format!("<button class=\"pill chip\" type=\"button\" data-step=\"{}\"><i aria-hidden=\"true\">\u{2196}</i> after {:02} {}</button>", esc(key), place + 1, esc(key)))
+                .collect();
+            if staged.is_some() && !waits.is_empty() {
+                let _ = write!(body, "<div class=\"after\">{}</div>", waits.concat());
+            }
+            if !more {
+                body.push_str("</li>");
                 continue;
             }
             // Its text is Markdown, as the plan's is, and said by the same
             // rules (task 1360).
-            let _ = write!(body, "<button class=\"step-head\" type=\"button\" aria-expanded=\"false\">{head}</button><div class=\"more\">");
+            body.push_str("<div class=\"more\">");
             if !step.rest.is_empty() {
                 body.push_str(&markdown(step.rest));
             }
@@ -705,6 +752,15 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
             body.push_str("</div></li>");
         }
         body.push_str("</ol>");
+        if let Some(on) = staged {
+            let _ = write!(
+                body,
+                "<div class=\"controls\"><span class=\"count\">{:02} / {:02}</span><span class=\"grow\"></span><button class=\"toggle\" type=\"button\" role=\"switch\" aria-checked=\"false\"><i aria-hidden=\"true\"></i><span>All steps</span></button>{}</div>",
+                on + 1,
+                steps.len(),
+                arrows(on == 0, on + 1 == steps.len())
+            );
+        }
     }
     body.push_str("</section>");
 
@@ -1719,18 +1775,20 @@ fn known_scene(text: &str, id: &str) -> Option<String> {
         // track's start, of how many, and the way back and on.
         if n == heads.len() {
             let count = heads[0].1;
-            let _ = write!(out, "<div class=\"controls\" data-chrome><span class=\"count\">01 / {count:02}</span><span class=\"grow\"></span>{}</div>", arrows(count < 2));
+            let _ = write!(out, "<div class=\"controls\" data-chrome><span class=\"count\">01 / {count:02}</span><span class=\"grow\"></span>{}</div>", arrows(true, count < 2));
         }
     }
     Some(out)
 }
 
-/// The way back and on under a track or a stack, as round buttons, set as
-/// at its start: Back disabled, and Next too when there is nothing after.
-fn arrows(alone: bool) -> String {
+/// The way back and on under a track, a stack or the stage, as round
+/// buttons: Back disabled at the `first`, Next at the `last`.
+fn arrows(first: bool, last: bool) -> String {
+    let off = |end: bool| if end { " disabled" } else { "" };
     format!(
-        "<button class=\"round\" type=\"button\" data-by=\"-1\" aria-label=\"Back\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M14.5 5.5L8 12l6.5 6.5\"/></svg></button><button class=\"round\" type=\"button\" data-by=\"1\" aria-label=\"Next\"{}><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M9.5 5.5L16 12l-6.5 6.5\"/></svg></button>",
-        if alone { " disabled" } else { "" }
+        "<button class=\"round\" type=\"button\" data-by=\"-1\" aria-label=\"Back\"{}><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M14.5 5.5L8 12l6.5 6.5\"/></svg></button><button class=\"round\" type=\"button\" data-by=\"1\" aria-label=\"Next\"{}><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M9.5 5.5L16 12l-6.5 6.5\"/></svg></button>",
+        off(first),
+        off(last)
     )
 }
 
@@ -1816,7 +1874,7 @@ fn risks_scene(text: &str) -> Option<String> {
     let _ = write!(
         out,
         "</{tag}><div class=\"controls\" data-chrome><span class=\"count\">01 / {of:02}</span><span class=\"grow\"></span><button class=\"toggle\" type=\"button\" role=\"switch\" aria-checked=\"false\"><i aria-hidden=\"true\"></i><span>All at once</span></button>{}</div>",
-        arrows(false)
+        arrows(true, false)
     );
     for block in after {
         pulldown_cmark::html::push_html(&mut out, block.into_iter());
@@ -2136,6 +2194,20 @@ const SCRIPT: &str = r##"(function () {
   "use strict";
   var root = document.documentElement;
   function smooth() { return matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"; }
+  // AKQA's grouped sections (note 1357): what a switch changes leaves in
+  // 280 ms and comes back changed in 420, from a blur and below; at once
+  // under reduced motion.
+  function regroup(element, change) {
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches || !element.animate) return change();
+    var curve = "cubic-bezier(0.2, 0.65, 0.3, 1)";
+    var leave = element.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(12px)" }], { duration: 280, easing: curve, fill: "forwards" });
+    var back = function () {
+      change();
+      element.animate([{ opacity: 0, transform: "translateY(24px)", filter: "blur(6px)" }, { opacity: 1, transform: "none", filter: "blur(0)" }], { duration: 420, easing: curve });
+      leave.cancel();
+    };
+    leave.finished.then(back, back);
+  }
 
   // AKQA's reveals (task 1367, note 1357): what a scene holds comes into
   // view from a blur and below, once, and a heading word by word, 35 ms
@@ -2163,7 +2235,8 @@ const SCRIPT: &str = r##"(function () {
   }
   function otherTheme() { return root.dataset.theme === "dark" ? "Light theme" : "Dark theme"; }
 
-  // Steps open in place; a step on the map leads to its place in the list.
+  // Steps open in place; a step on the map or found in the pill leads to
+  // it, put on the stage where the steps have one (task 1373).
   function setOpen(step, open) {
     step.classList.toggle("open", open);
     var head = step.querySelector("button.step-head");
@@ -2172,11 +2245,16 @@ const SCRIPT: &str = r##"(function () {
   function openStep(key) {
     var step = document.getElementById("step-" + key);
     if (!step) return;
+    if (window.ekkoStage) ekkoStage(step);
     setOpen(step, true);
     step.scrollIntoView({ behavior: smooth(), block: "center" });
   }
   document.querySelectorAll("button.step-head").forEach(function (head) {
-    head.addEventListener("click", function () { setOpen(head.parentElement, !head.parentElement.classList.contains("open")); });
+    head.addEventListener("click", function () {
+      var step = head.parentElement;
+      step.classList.remove("by-stage");
+      setOpen(step, !step.classList.contains("open"));
+    });
   });
   document.querySelectorAll(".map .node").forEach(function (node) {
     node.addEventListener("click", function () { openStep(node.dataset.step); });
@@ -2476,7 +2554,6 @@ const SCRIPT: &str = r##"(function () {
   (function () {
     var risks = document.querySelector(".scene.risks");
     if (!risks) return;
-    var still = matchMedia("(prefers-reduced-motion: reduce)");
     var stack = risks.querySelector(".stack"), sheets = Array.prototype.slice.call(stack.children);
     var count = risks.querySelector(".controls .count"), all = risks.querySelector(".controls .toggle");
     var back = risks.querySelector(".controls [data-by='-1']"), on = risks.querySelector(".controls [data-by='1']");
@@ -2513,16 +2590,115 @@ const SCRIPT: &str = r##"(function () {
     all.addEventListener("click", function () {
       var flat = all.getAttribute("aria-checked") !== "true";
       all.setAttribute("aria-checked", String(flat));
-      var swap = function () { stack.classList.toggle("all", flat); lay(); };
-      if (still.matches || !stack.animate) return swap();
+      regroup(stack, function () { stack.classList.toggle("all", flat); lay(); });
+    });
+  })();
+
+  // The Steps (task 1373): one step on a stage at a time, as AKQA's ROLE
+  // carousel shows one role, coming in from the side one moves toward: the
+  // step leaving goes in 280 ms and the next comes in 420 ms after it.
+  // Back, Next, the arrow keys, a segment or a chip put a step on the
+  // stage, and so does a jump to it from the pill or the map; the switch
+  // shows the whole list.
+  (function () {
+    var scene = document.querySelector("#steps.staged");
+    if (!scene) return;
+    var still = matchMedia("(prefers-reduced-motion: reduce)");
+    var stage = scene.querySelector(".steps"), steps = Array.prototype.slice.call(stage.children);
+    var segs = Array.prototype.slice.call(scene.querySelectorAll(".segs .seg"));
+    var count = scene.querySelector(".controls .count"), all = scene.querySelector(".controls .toggle");
+    var back = scene.querySelector(".controls [data-by='-1']"), on = scene.querySelector(".controls [data-by='1']");
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    var at = Math.max(0, steps.findIndex(function (step) { return !step.hidden; }));
+    // The stage opens the step it shows, and folds it back when it moves on
+    // or the list shows, unless the reader opened it: the list stays as the
+    // reader left it. The step Rust put on the stage came open by it.
+    var unfold = function (step) {
+      steps.forEach(function (other) {
+        if (other === step || !other.classList.contains("by-stage")) return;
+        other.classList.remove("by-stage");
+        setOpen(other, false);
+      });
+      if (!step || step.classList.contains("open") || !step.querySelector("button.step-head")) return;
+      setOpen(step, true);
+      step.classList.add("by-stage");
+    };
+    if (steps[at].classList.contains("open")) steps[at].classList.add("by-stage");
+    var lay = function () {
+      var list = stage.classList.contains("all"), had = document.activeElement;
+      steps.forEach(function (step, n) { step.hidden = !list && n !== at && !step.classList.contains("leaving"); });
+      segs.forEach(function (seg, n) {
+        if (n === at) seg.setAttribute("aria-current", "step");
+        else seg.removeAttribute("aria-current");
+        seg.tabIndex = n === at ? 0 : -1;
+      });
+      count.textContent = list ? pad(steps.length) + " steps" : pad(at + 1) + " / " + pad(steps.length);
+      back.disabled = list || at === 0;
+      on.disabled = list || at === steps.length - 1;
+      if (had && had.disabled) stage.focus({ preventScroll: true });
+    };
+    var show = function (n) {
+      n = Math.max(0, Math.min(steps.length - 1, n));
+      if (n === at) return;
+      var from = steps[at], to = steps[n], toward = n > at ? 1 : -1;
+      at = n;
+      // What leaves the stage hands the focus back to it.
+      if (from.contains(document.activeElement)) stage.focus({ preventScroll: true });
+      steps.forEach(function (step) {
+        step.classList.remove("leaving");
+        step.getAnimations().forEach(function (motion) { motion.cancel(); });
+      });
+      unfold(to);
+      if (still.matches || !to.animate) return lay();
       var curve = "cubic-bezier(0.2, 0.65, 0.3, 1)";
-      var leave = stack.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(12px)" }], { duration: 280, easing: curve, fill: "forwards" });
-      leave.finished.then(function () {
-        swap();
-        stack.animate([{ opacity: 0, transform: "translateY(24px)", filter: "blur(6px)" }, { opacity: 1, transform: "none", filter: "blur(0)" }], { duration: 420, easing: curve });
-        leave.cancel();
+      from.classList.add("leaving");
+      lay();
+      var leave = from.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateX(" + -48 * toward + "px)" }], { duration: 280, easing: curve, fill: "forwards" });
+      leave.finished.then(function () { from.classList.remove("leaving"); leave.cancel(); lay(); }, function () {});
+      to.animate([{ opacity: 0, transform: "translateX(" + 48 * toward + "px)" }, { opacity: 1, transform: "none" }], { duration: 420, delay: 280, easing: curve, fill: "backwards" });
+    };
+    // On the stage, out of the list if it showed.
+    var put = function (n) {
+      if (!stage.classList.contains("all")) return show(n);
+      all.setAttribute("aria-checked", "false");
+      stage.classList.remove("all");
+      at = Math.max(0, Math.min(steps.length - 1, n));
+      unfold(steps[at]);
+      lay();
+    };
+    back.addEventListener("click", function () { show(at - 1); });
+    on.addEventListener("click", function () { show(at + 1); });
+    all.addEventListener("click", function () {
+      var list = all.getAttribute("aria-checked") !== "true";
+      all.setAttribute("aria-checked", String(list));
+      regroup(stage, function () {
+        stage.classList.toggle("all", list);
+        unfold(list ? null : steps[at]);
+        lay();
       });
     });
+    segs.forEach(function (seg, n) { seg.addEventListener("click", function () { put(n); }); });
+    stage.addEventListener("click", function (event) {
+      var chip = event.target.closest(".after .chip"), n = chip ? steps.indexOf(document.getElementById("step-" + chip.dataset.step)) : -1;
+      if (n >= 0) put(n);
+    });
+    // The arrow keys, Home and End, on the stage or on the segments, whose
+    // focus follows the step.
+    var keys = function (event, onSegment) {
+      var by = { ArrowRight: 1, ArrowLeft: -1, Home: -at, End: steps.length - 1 - at }[event.key];
+      if (by === undefined || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (!onSegment && stage.classList.contains("all")) return;
+      event.preventDefault();
+      put(at + by);
+      if (onSegment) segs[at].focus();
+    };
+    stage.addEventListener("keydown", function (event) { keys(event, false); });
+    scene.querySelector(".segs").addEventListener("keydown", function (event) { keys(event, true); });
+    // A jump to a step, from the pill or the map, puts it on the stage.
+    window.ekkoStage = function (step) {
+      var n = steps.indexOf(step);
+      if (n >= 0) put(n);
+    };
   })();
 
   // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
@@ -3440,8 +3616,9 @@ const SCRIPT: &str = r##"(function () {
     for (; element; element = element.offsetParent) y += element.offsetTop;
     return y;
   }
-  // Of what has a box only: one without, as the map's arrowhead or a tab
-  // not picked, says its top is 0 wherever the reader is (task 1388).
+  // Of what has a box only: one without, as the map's arrowhead, a tab not
+  // picked or a step off the stage, says its top is 0 wherever the reader
+  // is (task 1388).
   function anchor() {
     var found = null;
     document.querySelectorAll("main [id]").forEach(function (element) {
@@ -3452,7 +3629,7 @@ const SCRIPT: &str = r##"(function () {
   window.ekkoKeep = function () {
     var at = anchor();
     var kept = { y: scrollY, id: at ? at.id : "", offset: at ? laidTop(at) - scrollY : 0,
-      open: Array.prototype.map.call(document.querySelectorAll(".step.open"), function (step) { return step.id; }) };
+      open: Array.prototype.map.call(document.querySelectorAll(".step.open:not(.by-stage)"), function (step) { return step.id; }) };
     if (bar.classList.contains("open") && !quoting && !sending) kept.bar = input.value;
     if (quoting && !sending) { kept.quote = quoting; kept.note = note.value; kept.color = color; kept.editing = editing; kept.suggesting = suggesting; kept.said = said; kept.put = put; }
     if (reviewing && !sending) kept.review = { verdict: reviewing.verdict, note: note.value };
@@ -4482,7 +4659,7 @@ body:not([data-writes]) .writes-only { display: none !important; }
 .card .more:hover { color: var(--fg-strong); }
 .prose .card.open { width: min(680px, 90vw); cursor: default; }
 .card.open .body { display: block; overflow: visible; -webkit-line-clamp: none; }
-:is(.known, .risks) .controls { display: flex; align-items: center; gap: 12px; margin: 8px 0 0; }
+:is(.known, .risks, .staged) .controls { display: flex; align-items: center; gap: 12px; margin: 8px 0 0; }
 .controls .count { min-width: 64px; font: 400 14px/20px var(--sans); font-variant-numeric: tabular-nums; color: var(--fg-2); }
 .controls .grow { flex: 1; }
 .round { display: inline-grid; place-items: center; flex: none; width: 48px; height: 48px; padding: 0; border: 0; border-radius: 50%; background: var(--raise); color: var(--fg-strong); cursor: pointer; transition: transform 0.45s var(--curve), opacity 0.3s ease; }
@@ -4580,6 +4757,44 @@ button.step-head { cursor: pointer; }
 .prose .step .more p { margin: 0 0 12px; font: 400 16px/24px var(--sans); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
 .prose .step .more .when { color: var(--fg-2); }
 .step .more .when b { font-weight: 600; color: var(--fg); }
+
+/* ---- the Steps on a stage (task 1373) ---------------------------------- */
+/* AKQA's ROLE carousel: a segment a step above the stage, the done ones
+   darker and the one on the stage solid; that step whole, its number large
+   beside its title, the steps it waits on as chips. One leaving the stage
+   is out of the flow while it goes. The stage holds on a screen only:
+   print is the list, every step in it. */
+.scene.staged > :is(.segs, .steps) { max-width: none; }
+.staged .segs { display: flex; gap: 4px; margin: 0 0 40px; }
+.seg { position: relative; flex: 1; min-width: 0; height: 44px; padding: 14px 0 0; border: 0; background: none; text-align: left; cursor: pointer; }
+.seg::before { content: ""; position: absolute; top: 0; right: 0; left: 0; height: 2px; border-radius: 1px; background: var(--fg-strong); opacity: 0.14; transition: opacity 0.3s ease; }
+.seg.done::before { opacity: 0.55; }
+.seg[aria-current="step"]::before { opacity: 1; }
+.seg span { display: block; overflow: hidden; font: 400 12px/16px var(--sans); white-space: nowrap; text-overflow: ellipsis; color: var(--fg-2); }
+.seg[aria-current="step"] span { color: var(--fg-strong); }
+.step .after { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
+.after .chip { height: 32px; padding: 0 14px; font-size: 13px; line-height: 32px; }
+.staged .steps.all .after { display: none; }
+.staged .controls { margin-top: 32px; }
+:is(.seg, .staged .steps):focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 3px; }
+@media screen {
+  .staged .steps:not(.all) { position: relative; min-height: 340px; border: 0; }
+  .staged .steps:not(.all) .step { position: relative; min-height: 200px; padding: 0 0 0 clamp(150px, 24%, 320px); border: 0; }
+  .staged .steps:not(.all) .step.leaving { position: absolute; top: 0; right: 0; left: 0; pointer-events: none; }
+  .staged .steps:not(.all) .step-head { display: block; padding: 0; }
+  .staged .steps:not(.all) .step .num { position: absolute; top: 0; left: 0; font: 400 clamp(88px, 10vw, 160px)/0.85 var(--sans); letter-spacing: -0.06em; color: var(--fg-strong); }
+  .staged .steps:not(.all) .step .title { display: block; font: 400 clamp(26px, 2.6vw, 38px)/1.18 var(--serif); letter-spacing: -0.015em; }
+  .staged .steps:not(.all) .step .meta { margin-top: 16px; }
+  .staged .steps:not(.all) .step .more { max-width: 720px; padding: 24px 0 0; }
+  .prose .staged .steps:not(.all) .step .more p { font-size: 17px; line-height: 27px; }
+  .prose .staged .steps:not(.all) .step .more .when { padding: 16px 20px; border-radius: 16px; background: var(--raise); font-size: 15px; line-height: 23px; }
+}
+@media screen and (max-width: 720px) {
+  .staged .steps:not(.all) .step { padding: 84px 0 0; }
+  .staged .steps:not(.all) .step .num { font-size: 72px; }
+  .seg { height: 20px; }
+  .seg span { display: none; }
+}
 
 /* ---- the map: AKQA's strip, the window's width ------------------------ */
 .bleed { position: relative; margin: 0 calc(50% - 50vw); }
@@ -4867,13 +5082,15 @@ button.step-head { cursor: pointer; }
 }
 /* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
-  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before, .prose .sheet, .toggle i, .toggle i::after { transition: none; }
+  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before, .prose .sheet, .toggle i, .toggle i::after, .seg::before { transition: none; }
   .numeral .out, .numeral .enter { animation: none; }
   .goal .held { position: static; min-height: 0; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
 }
 /* A plain document: black on white whatever the theme or the scene, each
-   scene as tall as what it holds, and nothing the page moves. */
+   scene as tall as what it holds, and nothing the page moves. What a scene
+   hides on a screen shows, a tab not picked or a step off the stage: as
+   important as [hidden], and more particular (task 1389). */
 @media print {
   :root, :root[data-theme], :root[data-mode], :root[data-theme][data-mode] { --page: #fff; --bg: #fff; --fg: #191919; --fg-strong: #000; --fg-2: #555; --fg-3: #8a8a8a; --rule: #e9e9e9; --chip: #f5f5f5; --raise: #f5f5f5; --card: #fff; --node: #fff; --node-line: #e2e2e2; --accent: #1a8917; color-scheme: light; transition: none; }
   .toc, .bar, .mark, .arrows, .select-tools, .pop, .prose .pin, #comments .filters, .callout .writes-only { display: none; }
@@ -4882,7 +5099,7 @@ button.step-head { cursor: pointer; }
   .goal .held { position: static; padding: 0; }
   .goal .progress { display: none; }
   .known .tabs, .known .controls, .card .num, .card .more { display: none; }
-  .known .group[hidden] { display: block; }
+  .known .group[hidden] { display: block !important; }
   .prose .track { display: block; margin: 0 0 16px; padding: 0 0 0 20px; overflow: visible; list-style: disc; transform: none !important; }
   .prose .card { display: list-item; width: auto; min-height: 0; margin: 0 0 8px; padding: 0; border-radius: 0; background: none; }
   .card .body { display: block; margin: 0; overflow: visible; -webkit-line-clamp: none; }
@@ -4897,6 +5114,8 @@ button.step-head { cursor: pointer; }
   .sheet.ask :is(.num, .body, .lead) { color: inherit; }
   .sheet .body { margin: 0; }
   .sheet .lead { display: inline; margin: 0; font: inherit; color: inherit; }
+  .staged .segs, .staged .controls, .step .after { display: none; }
+  .staged .steps .step[hidden] { display: block !important; }
   .prose mark.c { background: none !important; text-decoration: underline; }
   .step .more { display: block; }
 }
@@ -5577,14 +5796,67 @@ mod tests {
         let all: ItemMap = BTreeMap::from([(1, item.clone()), (2, done)]);
         let (html, _) = page(&item, &all, None);
         assert!(
-            html.contains("<li class=\"step done\" id=\"step-a\" data-state=\"done\"><button class=\"step-head\" type=\"button\" aria-expanded=\"false\"><span class=\"num\">01</span><span class=\"title\">First</span><span class=\"meta\"><span class=\"dot done\"></span>done \u{b7} task 2</span></button><div class=\"more\"><p>Why it comes first.</p>\n</div></li>"),
+            html.contains("<li class=\"step done\" id=\"step-a\" data-state=\"done\" hidden><button class=\"step-head\" type=\"button\" aria-expanded=\"false\"><span class=\"num\">01</span><span class=\"title\">First</span><span class=\"meta\"><span class=\"dot done\"></span>done \u{b7} task 2</span></button><div class=\"more\"><p>Why it comes first.</p>\n</div></li>"),
             "{html}"
         );
-        assert!(html.contains("<span class=\"num\">02</span><span class=\"title\">Second</span><span class=\"meta\"><span class=\"dot proposed\"></span>to approve \u{b7} after a</span></button><div class=\"more\"><p class=\"when\"><b>Done when</b> It ships.</p></div>"), "{html}");
+        assert!(html.contains("<span class=\"num\">02</span><span class=\"title\">Second</span><span class=\"meta\"><span class=\"dot proposed\"></span>to approve \u{b7} after a</span></button><div class=\"after\">"), "{html}");
+        assert!(html.contains("</div><div class=\"more\"><p class=\"when\"><b>Done when</b> It ships.</p></div></li>"), "{html}");
         let bare = artifact_item(1, &plan("Ship"), steps(&[], &[spec("c", Some("Third"), &[])]).unwrap());
         let (html, _) = page(&bare, &BTreeMap::from([(1, bare.clone())]), None);
         assert!(html.contains("<li class=\"step proposed\" id=\"step-c\" data-state=\"to approve\"><div class=\"step-head\">"), "nothing more to show, nothing to open: {html}");
         assert!(!html.contains("<div class=\"more\">"), "{html}");
+    }
+
+    #[test]
+    fn the_steps_put_one_on_a_stage() {
+        let mut made = steps(&[], &[spec("a", Some("First\nWhy."), &[]), spec("b", Some("Second\nHow."), &["a"]), spec("c", Some("Third"), &["a", "b"])]).unwrap();
+        let mut done = Item::new_task(2, "First".into(), vec![], 1);
+        State::Done.write(&mut done);
+        made[0].task = done.uid.clone();
+        let pending = Item::new_task(3, "Second".into(), vec![], 1);
+        made[1].task = pending.uid.clone();
+        let item = artifact_item(1, &plan("Ship"), made);
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone()), (2, done), (3, pending)]), None);
+        let scene = html.split("<section class=\"scene part staged\" id=\"steps\"").nth(1).and_then(|scene| scene.split("</section>").next()).unwrap_or_default();
+        // A segment a step; the one on the stage, the first not done, is
+        // the current one and the way into the segments.
+        assert!(
+            scene.contains("<div class=\"segs\" role=\"group\" aria-label=\"Steps\"><button class=\"seg done\" type=\"button\" tabindex=\"-1\"><span>01 First</span></button><button class=\"seg pending\" type=\"button\" aria-current=\"step\"><span>02 Second</span></button><button class=\"seg proposed\" type=\"button\" tabindex=\"-1\"><span>03 Third</span></button></div><ol class=\"steps\" tabindex=\"0\" aria-label=\"Steps, one at a time\">"),
+            "{scene}"
+        );
+        // It alone shows, and open; the steps it waits on are chips that
+        // lead to them.
+        assert!(scene.contains("<li class=\"step done\" id=\"step-a\" data-state=\"done\" hidden><button class=\"step-head\" type=\"button\" aria-expanded=\"false\">"), "{scene}");
+        assert!(
+            scene.contains("<li class=\"step pending open\" id=\"step-b\" data-state=\"pending\"><button class=\"step-head\" type=\"button\" aria-expanded=\"true\"><span class=\"num\">02</span><span class=\"title\">Second</span><span class=\"meta\"><span class=\"dot pending\"></span>pending \u{b7} task 3 \u{b7} after a</span></button><div class=\"after\"><button class=\"pill chip\" type=\"button\" data-step=\"a\"><i aria-hidden=\"true\">\u{2196}</i> after 01 a</button></div><div class=\"more\"><p>How.</p>\n</div></li>"),
+            "{scene}"
+        );
+        assert!(
+            scene.contains("<li class=\"step proposed\" id=\"step-c\" data-state=\"to approve\" hidden><div class=\"step-head\"><span class=\"num\">03</span><span class=\"title\">Third</span><span class=\"meta\"><span class=\"dot proposed\"></span>to approve \u{b7} after a, b</span></div><div class=\"after\"><button class=\"pill chip\" type=\"button\" data-step=\"a\"><i aria-hidden=\"true\">\u{2196}</i> after 01 a</button><button class=\"pill chip\" type=\"button\" data-step=\"b\"><i aria-hidden=\"true\">\u{2196}</i> after 02 b</button></div></li></ol>"),
+            "{scene}"
+        );
+        // Under the stage: where it is, the switch to the list, back and on.
+        assert!(
+            scene.ends_with("</ol><div class=\"controls\"><span class=\"count\">02 / 03</span><span class=\"grow\"></span><button class=\"toggle\" type=\"button\" role=\"switch\" aria-checked=\"false\"><i aria-hidden=\"true\"></i><span>All steps</span></button><button class=\"round\" type=\"button\" data-by=\"-1\" aria-label=\"Back\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M14.5 5.5L8 12l6.5 6.5\"/></svg></button><button class=\"round\" type=\"button\" data-by=\"1\" aria-label=\"Next\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M9.5 5.5L16 12l-6.5 6.5\"/></svg></button></div>"),
+            "{scene}"
+        );
+
+        // Every step done: the first is on the stage, with no way back.
+        let mut made = steps(&[], &[spec("x", Some("X"), &[]), spec("y", Some("Y"), &[])]).unwrap();
+        let (mut one, mut two) = (Item::new_task(2, "X".into(), vec![], 1), Item::new_task(3, "Y".into(), vec![], 1));
+        State::Done.write(&mut one);
+        State::Done.write(&mut two);
+        made[0].task = one.uid.clone();
+        made[1].task = two.uid.clone();
+        let item = artifact_item(1, &plan("Ship"), made);
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone()), (2, one), (3, two)]), None);
+        assert!(html.contains("<button class=\"seg done\" type=\"button\" aria-current=\"step\"><span>01 X</span></button>") && html.contains("<span class=\"count\">01 / 02</span>"), "{html}");
+        assert!(html.contains("aria-label=\"Back\" disabled><svg") && !html.contains("aria-label=\"Next\" disabled>"), "{html}");
+
+        // One step is no stage.
+        let item = artifact_item(1, &plan("Ship"), steps(&[], &[spec("x", Some("X"), &[])]).unwrap());
+        let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
+        assert!(html.contains("<section class=\"scene part\" id=\"steps\"") && !html.contains("class=\"segs\""), "{html}");
     }
 
     #[test]
