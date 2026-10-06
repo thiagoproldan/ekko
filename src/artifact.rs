@@ -580,7 +580,7 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         let id = unique(&mut ids, &format!("plan-{}", slug(&heading)));
         let known = if heading == "What is known" && !known_shown { known_scene(&text, &id) } else { None };
         let design = if heading == "Design" && !design_shown { design_scene(&text) } else { None };
-        let risks = if heading == "Risks and open questions" && !risks_shown { risks_scene(&text) } else { None };
+        let risks = if heading == "Risks and open questions" && !risks_shown { risks_scene(&text, &id) } else { None };
         if heading == "Goal" && !goal_shown {
             goal_shown = true;
             let _ = write!(body, "<section class=\"scene goal\" id=\"{id}\" data-part=\"Goal\" data-mode=\"{}\" data-plan>{}</section>", mode(&id), goal_scene(&text));
@@ -1888,7 +1888,8 @@ const LEAD_LONGEST: usize = 220;
 /// sentence its lead, opening in place to the whole of it. The plan's
 /// elements keep their order, so its words stay where comments find them;
 /// the tabs, the cards' numbers and buttons and the track's controls are
-/// chrome. None when the section holds no list.
+/// chrome. A card's id says its group and its place, `<id>-card-2-3`, for
+/// a jump to it (task 1378). None when the section holds no list.
 fn known_scene(text: &str, id: &str) -> Option<String> {
     use pulldown_cmark::{Event, Tag};
     enum Piece<'a> {
@@ -1948,7 +1949,7 @@ fn known_scene(text: &str, id: &str) -> Option<String> {
         let _ = write!(out, "<{tag} class=\"track\"{first} tabindex=\"0\" aria-label=\"{}\">", esc(&heads[n - 1].0));
         let of = items.len();
         for (at, item) in items.into_iter().enumerate() {
-            let _ = write!(out, "<li class=\"card\"><span class=\"num\" data-chrome>{:02} / {of:02}</span><div class=\"body\">", at + 1);
+            let _ = write!(out, "<li class=\"card\" id=\"{id}-card-{n}-{}\"><span class=\"num\" data-chrome>{:02} / {of:02}</span><div class=\"body\">", at + 1, at + 1);
             pulldown_cmark::html::push_html(&mut out, with_lead(item).into_iter());
             out.push_str("</div><button class=\"more\" type=\"button\" aria-expanded=\"false\" data-chrome><span>Read</span> <i aria-hidden=\"true\">\u{2198}</i></button></li>");
         }
@@ -2035,9 +2036,10 @@ fn design_scene(text: &str) -> Option<(String, usize)> {
 /// once, and the way back and on. What comes before the list and after it
 /// stays as written. A sheet's distance from the one in front, --d, sets
 /// it back; those behind are inert until they come in front. The sheets'
-/// numbers and kinds and the controls are chrome. None without such a
+/// numbers and kinds and the controls are chrome. A sheet's id says its
+/// place, `<id>-risk-2`, for a jump to it (task 1378). None without such a
 /// list.
-fn risks_scene(text: &str) -> Option<String> {
+fn risks_scene(text: &str, id: &str) -> Option<String> {
     let (before, start, items, after) = around_list(text, 2)?;
     let mut out = String::new();
     for block in before {
@@ -2049,7 +2051,7 @@ fn risks_scene(text: &str) -> Option<String> {
     for (at, item) in items.into_iter().enumerate() {
         let (ask, kind) = if asks(&item) { (" ask", "Open question") } else { ("", "Risk") };
         let behind = if at > 0 { " inert" } else { "" };
-        let _ = write!(out, "<li class=\"sheet{ask}\" style=\"--d: {at}\"{behind}><div class=\"num\" data-chrome><span>{:02} / {of:02}</span><span>{kind}</span></div><div class=\"body\">", at + 1);
+        let _ = write!(out, "<li class=\"sheet{ask}\" id=\"{id}-risk-{}\" style=\"--d: {at}\"{behind}><div class=\"num\" data-chrome><span>{:02} / {of:02}</span><span>{kind}</span></div><div class=\"body\">", at + 1, at + 1);
         pulldown_cmark::html::push_html(&mut out, with_lead(item).into_iter());
         out.push_str("</div></li>");
     }
@@ -2692,6 +2694,39 @@ const SCRIPT: &str = r##"(function () {
     if (still.addEventListener) still.addEventListener("change", slide);
     slide();
     update();
+    // A jump to what a tab not picked holds picks the tab first, and one to
+    // a card brings it to the track's start, open (task 1378): the jump
+    // then goes to the tabs, or to the group where there are none, so the
+    // tab picked shows above the card. A reload keeps the tab, the cards
+    // open and where the track is.
+    var tabOf = function (group) { return tabs.filter(function (tab) { return tab.getAttribute("aria-controls") === group.id; })[0]; };
+    surfacers.push(function (target) {
+      var group = target.closest && target.closest(".group");
+      if (!group || !known.contains(group)) return null;
+      if (group.hidden) pick(tabOf(group), false);
+      var card = target.closest(".card");
+      if (!card) return null;
+      if (!card.classList.contains("open")) open(card, true);
+      var track = group.querySelector(".track");
+      track.scrollLeft += card.getBoundingClientRect().left - edge(track);
+      return known.querySelector(".tabs") || group;
+    });
+    keepers.known = {
+      keep: function () {
+        var group = shown();
+        return { tab: group.id, open: cards(group).filter(function (card) { return card.classList.contains("open"); }).map(function (card) { return card.id; }), left: group.querySelector(".track").scrollLeft };
+      },
+      back: function (was) {
+        var group = was.tab && document.getElementById(was.tab);
+        if (group && groups.indexOf(group) >= 0 && group.hidden) pick(tabOf(group), false);
+        (was.open || []).forEach(function (id) {
+          var card = document.getElementById(id);
+          if (card && shown().contains(card) && !card.classList.contains("open")) open(card, true);
+        });
+        shown().querySelector(".track").scrollLeft = was.left || 0;
+        update();
+      }
+    };
   })();
 
   // The Design (task 1371): its points told one at a time as one scrolls,
@@ -2793,6 +2828,22 @@ const SCRIPT: &str = r##"(function () {
       all.setAttribute("aria-checked", String(flat));
       regroup(stack, function () { stack.classList.toggle("all", flat); lay(); });
     });
+    // A jump to a sheet not in front deals the stack to it (task 1378); a
+    // reload keeps the sheet in front and the switch.
+    surfacers.push(function (target) {
+      var n = sheets.indexOf(target.closest && target.closest(".sheet"));
+      if (n >= 0 && n !== at && !stack.classList.contains("all")) move(n - at);
+      return null;
+    });
+    keepers.risks = {
+      keep: function () { return { at: at, all: stack.classList.contains("all") }; },
+      back: function (was) {
+        at = Math.max(0, Math.min(sheets.length - 1, was.at || 0));
+        all.setAttribute("aria-checked", String(!!was.all));
+        stack.classList.toggle("all", !!was.all);
+        lay();
+      }
+    };
   })();
 
   // The Steps (task 1373): one step on a stage at a time, as AKQA's ROLE
@@ -2895,10 +2946,28 @@ const SCRIPT: &str = r##"(function () {
     };
     stage.addEventListener("keydown", function (event) { keys(event, false); });
     scene.querySelector(".segs").addEventListener("keydown", function (event) { keys(event, true); });
-    // A jump to a step, from the pill or the map, puts it on the stage.
+    // A jump to a step, from the pill or the map, puts it on the stage, and
+    // so does any other jump to one off the stage (task 1378), as an
+    // address naming it. A reload keeps the step on the stage, or the list.
     window.ekkoStage = function (step) {
       var n = steps.indexOf(step);
       if (n >= 0) put(n);
+    };
+    surfacers.push(function (target) {
+      var step = target.closest && target.closest(".step");
+      if (step && step.hidden) ekkoStage(step);
+      return null;
+    });
+    keepers.stage = {
+      keep: function () { return { at: steps[at].id, list: stage.classList.contains("all") }; },
+      back: function (was) {
+        var n = steps.indexOf(document.getElementById(was.at));
+        if (n >= 0) at = n;
+        all.setAttribute("aria-checked", String(!!was.list));
+        stage.classList.toggle("all", !!was.list);
+        unfold(was.list ? null : steps[at]);
+        lay();
+      }
     };
   })();
 
@@ -3014,12 +3083,14 @@ const SCRIPT: &str = r##"(function () {
       }, { rootMargin: "0px 0px -28% 0px" });
       watch.observe(map);
     }
+    // The whole plan stays whole, which a new version may have given
+    // another stage (task 1378).
     keepers.map = {
-      keep: function () { return { shown: shown, played: played, playing: !!timer }; },
+      keep: function () { return { shown: shown, played: played, playing: !!timer, whole: shown === stages }; },
       back: function (was) {
         if (!was.played) return;
         played = true;
-        var n = Math.max(1, Math.min(stages, was.shown));
+        var n = was.whole ? stages : Math.max(1, Math.min(stages, was.shown));
         if (was.playing && n < stages) start(n); else set(n);
       }
     };
@@ -3076,6 +3147,20 @@ const SCRIPT: &str = r##"(function () {
         if (kind !== chosen) regroup(rows, function () { chosen = kind; lay(); });
       });
     });
+    // A reload keeps the tab, the kind picked and the note in the sheet
+    // (task 1378).
+    keepers.talk = {
+      keep: function () {
+        var tab = tabs.filter(function (one) { return one.getAttribute("aria-selected") === "true"; })[0];
+        return { tab: tab ? tab.id : null, kind: chosen, note: shown ? shown.id : null };
+      },
+      back: function (was) {
+        if (was.tab) pick(document.getElementById(was.tab), false);
+        if (was.kind !== undefined && was.kind !== chosen && kinds.some(function (pill) { return pill.dataset.kind === was.kind; })) { chosen = was.kind; lay(); }
+        var note = was.note && document.getElementById(was.note);
+        if (note && open) open(note, rowOf(note));
+      }
+    };
 
     // The sheet. Its motion is the script's, so it runs the same in either
     // engine: in 560 ms as it opens, out in AKQA's 280 as it closes, the
@@ -3207,6 +3292,12 @@ const SCRIPT: &str = r##"(function () {
       if (change && scene.contains(change)) choose(number(change));
       return null;
     });
+    // A reload keeps the change shown (task 1378), unless it was the newest:
+    // then the newest, which the new version may have made another.
+    keepers.history = {
+      keep: function () { return { shown: shown, newest: shown === changes.length }; },
+      back: function (was) { if (!was.newest && was.shown) choose(was.shown); }
+    };
   })();
 
   // What's next (task 1377): the next step put on the stage, the command
@@ -3297,6 +3388,14 @@ const SCRIPT: &str = r##"(function () {
     var text = Array.prototype.map.call(note.querySelectorAll(".text"), function (part) { return part.textContent; }).join(" ");
     items.push({ kind: kind + " " + number, badge: kind.charAt(0), label: title, target: note.id, names: [number, (kind + " " + number).toLowerCase(), "note " + number],
       search: ("note notes " + kind + " " + kind + "s " + number + " " + title + " " + (answer ? answer.textContent : "") + " " + text).toLowerCase() });
+  });
+  // The findings of What is known, by their tab's name and their words
+  // (task 1378): a jump to one picks its tab and opens it.
+  document.querySelectorAll(".scene.known .card").forEach(function (card) {
+    var group = card.closest(".group"), tab = group.id ? document.querySelector("[aria-controls='" + group.id + "']") : null;
+    var name = tab ? tab.firstChild.textContent : "", lead = card.querySelector(".lead"), body = card.querySelector(".body").textContent.replace(/\s+/g, " ").trim();
+    items.push({ kind: "Finding" + (name ? " · " + name : ""), badge: card.querySelector(".num").textContent.split("/")[0].trim(), label: lead ? lead.textContent : body, target: card.id,
+      search: ("finding findings " + name + " " + body).toLowerCase() });
   });
   // The comments, by their theme, state, words and text (task 1213).
   document.querySelectorAll("#comments .entry").forEach(function (entry) {
@@ -4201,6 +4300,22 @@ const SCRIPT: &str = r##"(function () {
     var settled = function () { document.fonts.ready.then(back); };
     if (document.readyState === "complete") settled(); else addEventListener("load", settled);
   }
+  // An address naming what a scene hides, as a step off the stage or a
+  // card on a tab not picked, shows it first, as a jump does (task 1378),
+  // once the page has loaded; and so does a link to one in the page. A
+  // reload goes back where the reader was, as the browser's own does.
+  var toNamed = function (smoothly) {
+    var id = "";
+    try { id = decodeURIComponent(location.hash.slice(1)); } catch (e) {}
+    var target = id && document.getElementById(id);
+    if (target) uncover(target).scrollIntoView({ behavior: smoothly ? smooth() : "auto", block: "start" });
+  };
+  var arrived = performance.getEntriesByType ? performance.getEntriesByType("navigation")[0] : null;
+  if (!kept && location.hash.length > 1 && !(arrived && arrived.type === "reload")) {
+    var landed = function () { document.fonts.ready.then(function () { toNamed(false); }); };
+    if (document.readyState === "complete") landed(); else addEventListener("load", landed);
+  }
+  addEventListener("hashchange", function () { toNamed(true); });
 })();
 
 // Comments on the plan's words (tasks 1105 and 1213), kept as an ebook keeps
@@ -4705,11 +4820,13 @@ const SCRIPT: &str = r##"(function () {
   addEventListener("resize", function () { if (popIds && popFrom && popFrom.isConnected) place(popFrom, popFrom.getBoundingClientRect().top + 1); });
   // A comment on words still in the plan opens at them; one whose words
   // are gone, or one resolved, at its entry under Comments, so it can be
-  // read, edited and deleted there too.
+  // read, edited and deleted there too. What the words sit in shows them
+  // first, even where they have a box: a risk dealt away, a card shut
+  // (task 1378).
   window.ekkoOpenComment = function (id) {
     var at = marksOf(id)[0] || document.getElementById("comment-" + id);
     if (!at) return;
-    if (!at.getClientRects().length && window.ekkoSurface) ekkoSurface(at);
+    if (window.ekkoSurface) ekkoSurface(at);
     at.scrollIntoView({ block: "center" });
     open([id], at);
   };
@@ -6526,9 +6643,9 @@ mod tests {
         // A card a finding: its number and its button are chrome, and its
         // first sentence is its lead, the space after it kept.
         let read = "<button class=\"more\" type=\"button\" aria-expanded=\"false\" data-chrome><span>Read</span> <i aria-hidden=\"true\">\u{2198}</i></button>";
-        assert!(scene.contains(&format!("<li class=\"card\"><span class=\"num\" data-chrome>01 / 02</span><div class=\"body\"><span class=\"lead\">First finding.</span> With more words.</div>{read}</li>")), "{scene}");
-        assert!(scene.contains(&format!("<li class=\"card\"><span class=\"num\" data-chrome>02 / 02</span><div class=\"body\">A <code>code</code> one, with no stop</div>{read}</li>")), "no stop, no lead: {scene}");
-        assert!(scene.contains(&format!("<li class=\"card\"><span class=\"num\" data-chrome>01 / 01</span><div class=\"body\"><span class=\"lead\">Third.</span> Last.</div>{read}</li>")), "{scene}");
+        assert!(scene.contains(&format!("<li class=\"card\" id=\"plan-what-is-known-card-1-1\"><span class=\"num\" data-chrome>01 / 02</span><div class=\"body\"><span class=\"lead\">First finding.</span> With more words.</div>{read}</li>")), "{scene}");
+        assert!(scene.contains(&format!("<li class=\"card\" id=\"plan-what-is-known-card-1-2\"><span class=\"num\" data-chrome>02 / 02</span><div class=\"body\">A <code>code</code> one, with no stop</div>{read}</li>")), "no stop, no lead: {scene}");
+        assert!(scene.contains(&format!("<li class=\"card\" id=\"plan-what-is-known-card-2-1\"><span class=\"num\" data-chrome>01 / 01</span><div class=\"body\"><span class=\"lead\">Third.</span> Last.</div>{read}</li>")), "{scene}");
         assert!(scene.ends_with("<div class=\"controls\" data-chrome><span class=\"count\">01 / 02</span><span class=\"grow\"></span><button class=\"round\" type=\"button\" data-by=\"-1\" aria-label=\"Back\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M14.5 5.5L8 12l6.5 6.5\"/></svg></button><button class=\"round\" type=\"button\" data-by=\"1\" aria-label=\"Next\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M9.5 5.5L16 12l-6.5 6.5\"/></svg></button></div>"), "{scene}");
         assert_eq!(shown, said, "the plan's words, in its order");
 
@@ -6536,7 +6653,7 @@ mod tests {
         // and what follows the list stay as they are.
         let (scene, shown, said) = known("- **First** finding, *a long one*. Then more.\n\n  Its second paragraph.\n  - inside it\n\nAfter the list.\n");
         assert!(!scene.contains("role=\"tab"), "{scene}");
-        assert!(scene.contains("<div class=\"group\"><ul class=\"track\" tabindex=\"0\" aria-label=\"Findings\">"), "{scene}");
+        assert!(scene.contains("<div class=\"group\"><ul class=\"track\" tabindex=\"0\" aria-label=\"Findings\"><li class=\"card\" id=\"plan-what-is-known-card-1-1\">"), "a card has an id, a jump to it shows it: {scene}");
         assert!(scene.contains("<div class=\"body\"><p><span class=\"lead named\"><strong>First</strong> finding, <em>a long one</em>.</span> Then more.</p>\n<p>Its second paragraph.</p>\n<ul>\n<li>inside it</li>\n</ul>\n</div>"), "{scene}");
         assert!(scene.contains("</div><div class=\"controls\" data-chrome><span class=\"count\">01 / 01</span>"), "the controls under the track: {scene}");
         assert!(scene.ends_with("</div><p>After the list.</p>\n"), "{scene}");
@@ -6608,10 +6725,10 @@ mod tests {
         // The first sheet in front, each after it a step further back and
         // inert; each says what it is, an open question by its first word
         // or by the question its first sentence asks.
-        assert!(scene.contains("<li class=\"sheet\" style=\"--d: 0\"><div class=\"num\" data-chrome><span>01 / 04</span><span>Risk</span></div><div class=\"body\"><span class=\"lead\">The page is long.</span> More words.</div></li>"), "{scene}");
-        assert!(scene.contains("<li class=\"sheet ask\" style=\"--d: 1\" inert><div class=\"num\" data-chrome><span>02 / 04</span><span>Open question</span></div><div class=\"body\"><span class=\"lead\">Open, for the user:</span> the page or the menu. More.</div></li>"), "{scene}");
-        assert!(scene.contains("<li class=\"sheet ask\" style=\"--d: 2\" inert><div class=\"num\" data-chrome><span>03 / 04</span><span>Open question</span></div><div class=\"body\"><span class=\"lead\">Which way (a, b)?</span></div></li>"), "{scene}");
-        assert!(scene.contains("<li class=\"sheet\" style=\"--d: 3\" inert><div class=\"num\" data-chrome><span>04 / 04</span><span>Risk</span></div><div class=\"body\"><span class=\"lead named\"><strong>Slow</strong> pages.</span> Measured.\n<ul>\n<li>inside it</li>\n</ul>\n</div></li></ul>"), "{scene}");
+        assert!(scene.contains("<li class=\"sheet\" id=\"plan-risks-and-open-questions-risk-1\" style=\"--d: 0\"><div class=\"num\" data-chrome><span>01 / 04</span><span>Risk</span></div><div class=\"body\"><span class=\"lead\">The page is long.</span> More words.</div></li>"), "{scene}");
+        assert!(scene.contains("<li class=\"sheet ask\" id=\"plan-risks-and-open-questions-risk-2\" style=\"--d: 1\" inert><div class=\"num\" data-chrome><span>02 / 04</span><span>Open question</span></div><div class=\"body\"><span class=\"lead\">Open, for the user:</span> the page or the menu. More.</div></li>"), "{scene}");
+        assert!(scene.contains("<li class=\"sheet ask\" id=\"plan-risks-and-open-questions-risk-3\" style=\"--d: 2\" inert><div class=\"num\" data-chrome><span>03 / 04</span><span>Open question</span></div><div class=\"body\"><span class=\"lead\">Which way (a, b)?</span></div></li>"), "{scene}");
+        assert!(scene.contains("<li class=\"sheet\" id=\"plan-risks-and-open-questions-risk-4\" style=\"--d: 3\" inert><div class=\"num\" data-chrome><span>04 / 04</span><span>Risk</span></div><div class=\"body\"><span class=\"lead named\"><strong>Slow</strong> pages.</span> Measured.\n<ul>\n<li>inside it</li>\n</ul>\n</div></li></ul>"), "{scene}");
         // Under the stack: how far along, the switch, back and on.
         assert!(
             scene.ends_with("</ul><div class=\"controls\" data-chrome><span class=\"count\">01 / 04</span><span class=\"grow\"></span><button class=\"toggle\" type=\"button\" role=\"switch\" aria-checked=\"false\"><i aria-hidden=\"true\"></i><span>All at once</span></button><button class=\"round\" type=\"button\" data-by=\"-1\" aria-label=\"Back\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M14.5 5.5L8 12l6.5 6.5\"/></svg></button><button class=\"round\" type=\"button\" data-by=\"1\" aria-label=\"Next\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M9.5 5.5L16 12l-6.5 6.5\"/></svg></button></div><p>After them.</p>\n"),
