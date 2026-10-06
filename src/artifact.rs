@@ -750,12 +750,25 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     body.push_str("</section>");
 
     // Map: the steps as the graph their `after` draws, on a strip the
-    // window's width, with arrows while it is wider than the window.
+    // window's width, with arrows while it is wider than the window. With
+    // two stages or more, a player that unfolds it stage by stage (task
+    // 1374): Play, a slider through the stages and a line saying the one
+    // shown, written as a page without its script shows the map, whole. The
+    // slider's autocomplete is off: Firefox gave it back its value across
+    // the file page's reload, apart from the stage shown (task 1393).
     if !steps.is_empty() {
         parts.push(("map".to_string(), "Map".to_string()));
+        let stages = layout(&steps).iter().map(|(column, _)| column + 1).max().unwrap_or(1);
+        let player = if stages > 1 {
+            format!(
+                "<div class=\"player\"><button class=\"round play\" type=\"button\" aria-label=\"Play\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M8.5 5.8v12.4L18.2 12z\"/></svg></button><input class=\"scrub\" type=\"range\" autocomplete=\"off\" min=\"1\" max=\"{stages}\" step=\"1\" value=\"{stages}\" style=\"--p: 100%\" aria-label=\"How far the plan unfolds\" aria-valuetext=\"Stage {stages} of {stages}\"><p class=\"at\" aria-live=\"polite\">The whole plan, in {stages} stages</p></div>"
+            )
+        } else {
+            String::new()
+        };
         let _ = write!(
             body,
-            "<section class=\"scene part\" id=\"map\" data-part=\"Map\" data-mode=\"{}\">{}<p>What each step waits on, from the first on the left. A step leads to its place in the list.</p><div class=\"legend\"><span><span class=\"dot proposed\"></span>to approve</span><span><span class=\"dot pending\"></span>pending</span><span><span class=\"dot progress\"></span>in progress</span><span><span class=\"dot done\"></span>done</span><span>an arrow: what a step waits on</span></div><div class=\"bleed\"><div class=\"strip\">{}</div><div class=\"arrows\" hidden><button type=\"button\" data-by=\"-480\" aria-label=\"Back\">\u{2039}</button><button type=\"button\" data-by=\"480\" aria-label=\"On\">\u{203a}</button></div></div></section>",
+            "<section class=\"scene part\" id=\"map\" data-part=\"Map\" data-mode=\"{}\">{}<p>What each step waits on, from the first on the left. A step pointed at lights what it waits on and what waits on it, and a click leads to it among the steps.</p><div class=\"legend\"><span><span class=\"dot proposed\"></span>to approve</span><span><span class=\"dot pending\"></span>pending</span><span><span class=\"dot progress\"></span>in progress</span><span><span class=\"dot done\"></span>done</span><span>an arrow: what a step waits on</span></div>{player}<div class=\"bleed\"><div class=\"strip\">{}</div><div class=\"arrows\" hidden><button type=\"button\" data-by=\"-480\" aria-label=\"Back\">\u{2039}</button><button type=\"button\" data-by=\"480\" aria-label=\"On\">\u{203a}</button></div></div></section>",
             mode("map"),
             opener("Map", Some("what waits on what")),
             map(&steps)
@@ -1140,11 +1153,14 @@ fn texts_kept(item: &Item, earlier: &[&Earlier], version: u32) -> String {
         );
     }
     out.push_str("</ol>");
+    // Its autocomplete off, as the map's: Firefox gave a slider back its
+    // value across the file page's reload, apart from the change the page
+    // shows (task 1393).
     if count > 1 {
         let last = earlier[count - 1].version;
         let _ = write!(
             out,
-            "<input class=\"scrub\" type=\"range\" min=\"1\" max=\"{count}\" step=\"1\" value=\"{count}\" style=\"--p: 100%\" aria-label=\"Which change shows\" aria-valuetext=\"Version {last} \u{2192} {}\">",
+            "<input class=\"scrub\" type=\"range\" autocomplete=\"off\" min=\"1\" max=\"{count}\" step=\"1\" value=\"{count}\" style=\"--p: 100%\" aria-label=\"Which change shows\" aria-valuetext=\"Version {last} \u{2192} {}\">",
             last + 1
         );
     }
@@ -1413,6 +1429,9 @@ fn layout(steps: &[Shown]) -> Vec<(usize, usize)> {
 
 /// The map: a box per step, placed by `layout` with each column centred on
 /// the tallest, and a curve from each step to every step that waits on it.
+/// Each box says its stage, its column counted from 1, which the map plays
+/// in order (task 1374); each curve says the steps it joins and the stage
+/// of the later, and is one long, so that a dash draws it.
 fn map(steps: &[Shown]) -> String {
     let (width, height) = NODE;
     let (gap_x, gap_y) = NODE_GAP;
@@ -1438,7 +1457,13 @@ fn map(steps: &[Shown]) -> String {
             let ((x1, y1), (x2, y2)) = (at(earlier), at(later));
             let (from_x, from_y, to_x, to_y) = (x1 + width, y1 + height / 2, x2.saturating_sub(2), y2 + height / 2);
             let middle = (from_x + to_x) / 2;
-            let _ = write!(out, "<path class=\"edge\" d=\"M{from_x} {from_y} C {middle} {from_y}, {middle} {to_y}, {to_x} {to_y}\" marker-end=\"url(#arrow)\"/>");
+            let _ = write!(
+                out,
+                "<path class=\"edge\" data-from=\"{}\" data-to=\"{}\" data-stage=\"{}\" pathLength=\"1\" d=\"M{from_x} {from_y} C {middle} {from_y}, {middle} {to_y}, {to_x} {to_y}\" marker-end=\"url(#arrow)\"/>",
+                esc(key),
+                esc(&step.step.key),
+                placed[later].0 + 1
+            );
         }
     }
     out.push_str("</svg>");
@@ -1447,9 +1472,10 @@ fn map(steps: &[Shown]) -> String {
         let task = step.task.map(|id| format!("task {id}")).unwrap_or_default();
         let _ = write!(
             out,
-            "<button class=\"node {}\" data-step=\"{}\" style=\"left:{x}px;top:{y}px\"><span class=\"k\">{}</span><span class=\"t\">{}</span><span class=\"s\"><span><span class=\"dot {}\"></span>{}</span><span>{task}</span></span></button>",
+            "<button class=\"node {}\" data-step=\"{}\" data-stage=\"{}\" style=\"left:{x}px;top:{y}px\"><span class=\"k\">{}</span><span class=\"t\">{}</span><span class=\"s\"><span><span class=\"dot {}\"></span>{}</span><span>{task}</span></span></button>",
             step.class,
             esc(&step.step.key),
+            placed[index].0 + 1,
             esc(&step.step.key),
             esc(step.title),
             step.class,
@@ -2342,7 +2368,8 @@ fn fnv_from(hash: u64, bytes: &[u8]) -> u64 {
 /// hides nothing on a page that cannot bring it back.
 const THEME: &str = r##"(function () { var root = document.documentElement, theme = null; try { theme = localStorage.getItem("ekko-theme"); } catch (e) {} root.dataset.theme = theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); if ("IntersectionObserver" in window) root.dataset.motion = ""; })();"##;
 
-/// What the page does: the steps that open in place, the map's arrows,
+/// What the page does: the steps that open in place, the map played stage
+/// by stage and its arrows,
 /// Medium's section bars, AKQA's command bar with the page's commands and
 /// Review beside it, and the place a reader keeps across the reload a new
 /// version makes.
@@ -2454,6 +2481,10 @@ const SCRIPT: &str = r##"(function () {
     return to;
   }
   window.ekkoSurface = uncover;
+  // What a scene keeps across the reload a new version makes (task 1374):
+  // under its name, what keep() returns, which back() gets once the page
+  // has loaded again, before anything comes into view.
+  var keepers = {};
   function jump(id) {
     var target = document.getElementById(id);
     if (target) uncover(target).scrollIntoView({ behavior: smooth(), block: "start" });
@@ -2868,6 +2899,129 @@ const SCRIPT: &str = r##"(function () {
     window.ekkoStage = function (step) {
       var n = steps.indexOf(step);
       if (n >= 0) put(n);
+    };
+  })();
+
+  // The Map (task 1374), played as a film: once it comes into view, its
+  // stages one after another, each step a stage past the latest it waits
+  // on, the curves to them drawn as they come. Play and Pause, and a
+  // slider through the stages, with a line saying the stage; a map wider
+  // than the window has its strip follow it. A step pointed at lights what
+  // it waits on and what waits on it, all the way along. Under reduced
+  // motion it shows whole, and plays only when asked; a reload keeps the
+  // stage, and plays nothing played already.
+  (function () {
+    var scene = document.getElementById("map"), map = scene && scene.querySelector(".map");
+    if (!map) return;
+    var nodes = Array.prototype.slice.call(map.querySelectorAll(".node"));
+    var edges = Array.prototype.slice.call(map.querySelectorAll(".edge"));
+    var chain = function (key) {
+      var keys = [key], lines = [];
+      [["to", "from"], ["from", "to"]].forEach(function (way) {
+        for (var queue = [key]; queue.length;) {
+          var at = queue.shift();
+          edges.forEach(function (edge) {
+            if (edge.dataset[way[0]] !== at) return;
+            if (lines.indexOf(edge) < 0) lines.push(edge);
+            var other = edge.dataset[way[1]];
+            if (keys.indexOf(other) < 0) { keys.push(other); queue.push(other); }
+          });
+        }
+      });
+      return { keys: keys, edges: lines };
+    };
+    var light = function (node) {
+      var lit = node && chain(node.dataset.step);
+      map.classList.toggle("focus", !!lit);
+      nodes.forEach(function (one) { one.classList.toggle("chain", !!lit && lit.keys.indexOf(one.dataset.step) >= 0); });
+      edges.forEach(function (edge) { edge.classList.toggle("chain", !!lit && lit.edges.indexOf(edge) >= 0); });
+    };
+    nodes.forEach(function (node) {
+      node.addEventListener("mouseenter", function () { light(node); });
+      node.addEventListener("focus", function () { light(node); });
+      node.addEventListener("mouseleave", function () { light(nodes.indexOf(document.activeElement) >= 0 ? document.activeElement : null); });
+      node.addEventListener("blur", function () { light(null); });
+    });
+
+    var player = scene.querySelector(".player");
+    if (!player) return;
+    var play = player.querySelector(".play"), scrub = player.querySelector(".scrub"), said = player.querySelector(".at");
+    var strip = scene.querySelector(".strip"), still = matchMedia("(prefers-reduced-motion: reduce)");
+    var stages = Number(scrub.max), shown = stages, timer = 0, played = still.matches || !window.IntersectionObserver;
+    var stage = function (element) { return Number(element.dataset.stage); };
+    // The strip keeps the stage's column three quarters across.
+    var follow = function () {
+      var column = nodes.filter(function (node) { return stage(node) === shown; })[0];
+      if (!column || strip.scrollWidth <= strip.clientWidth) return;
+      var frame = strip.getBoundingClientRect(), box = column.getBoundingClientRect();
+      var left = Math.max(0, Math.min(strip.scrollWidth - strip.clientWidth, strip.scrollLeft + box.right - frame.left - strip.clientWidth * 0.75));
+      if (Math.abs(left - strip.scrollLeft) > 8) strip.scrollTo({ left: left, behavior: smooth() });
+    };
+    var set = function (n) {
+      shown = n;
+      nodes.forEach(function (node) { node.classList.toggle("unlit", stage(node) > n); });
+      edges.forEach(function (edge) { edge.classList.toggle("unlit", stage(edge) > n); });
+      scrub.value = String(n);
+      scrub.style.setProperty("--p", (n - 1) / (stages - 1) * 100 + "%");
+      scrub.setAttribute("aria-valuetext", "Stage " + n + " of " + stages);
+      var keys = nodes.filter(function (node) { return stage(node) === n; }).map(function (node) { return node.dataset.step; });
+      said.textContent = n === stages && !timer ? "The whole plan, in " + stages + " stages" : "Stage " + n + " of " + stages + ": " + keys.join(", ");
+    };
+    // The button says what it does; while it plays, the line is not read
+    // out at each stage, as a carousel that rotates by itself is not.
+    var press = function (playing) {
+      play.setAttribute("aria-label", playing ? "Pause" : "Play");
+      play.querySelector("path").setAttribute("d", playing ? "M9 6v12M15 6v12" : "M8.5 5.8v12.4L18.2 12z");
+      said.setAttribute("aria-live", playing ? "off" : "polite");
+    };
+    var stop = function () {
+      clearInterval(timer);
+      timer = 0;
+      press(false);
+      set(shown);
+    };
+    var start = function (from) {
+      clearInterval(timer);
+      timer = setInterval(function () {
+        if (shown >= stages) return stop();
+        set(shown + 1);
+        follow();
+      }, 1100);
+      press(true);
+      set(from);
+      follow();
+    };
+    // What the reader does to it first, before it comes into view, it does
+    // not undo by playing by itself.
+    play.addEventListener("click", function () {
+      played = true;
+      if (timer) stop(); else start(shown >= stages ? 1 : shown + 1);
+    });
+    scrub.addEventListener("input", function () {
+      played = true;
+      if (timer) stop();
+      set(Number(scrub.value));
+      follow();
+    });
+    if (!played) {
+      set(1);
+      var watch = new IntersectionObserver(function (seen) {
+        if (!seen[0].isIntersecting) return;
+        watch.disconnect();
+        if (played) return;
+        played = true;
+        start(1);
+      }, { rootMargin: "0px 0px -28% 0px" });
+      watch.observe(map);
+    }
+    keepers.map = {
+      keep: function () { return { shown: shown, played: played, playing: !!timer }; },
+      back: function (was) {
+        if (!was.played) return;
+        played = true;
+        var n = Math.max(1, Math.min(stages, was.shown));
+        if (was.playing && n < stages) start(n); else set(n);
+      }
     };
   })();
 
@@ -4006,7 +4160,8 @@ const SCRIPT: &str = r##"(function () {
   window.ekkoKeep = function () {
     var at = anchor();
     var kept = { y: scrollY, id: at ? at.id : "", offset: at ? laidTop(at) - scrollY : 0,
-      open: Array.prototype.map.call(document.querySelectorAll(".step.open:not(.by-stage)"), function (step) { return step.id; }) };
+      open: Array.prototype.map.call(document.querySelectorAll(".step.open:not(.by-stage)"), function (step) { return step.id; }), scenes: {} };
+    Object.keys(keepers).forEach(function (name) { kept.scenes[name] = keepers[name].keep(); });
     if (bar.classList.contains("open") && !quoting && !sending) kept.bar = input.value;
     if (quoting && !sending) { kept.quote = quoting; kept.note = note.value; kept.color = color; kept.editing = editing; kept.suggesting = suggesting; kept.said = said; kept.put = put; }
     if (reviewing && !sending) kept.review = { verdict: reviewing.verdict, note: note.value };
@@ -4018,6 +4173,7 @@ const SCRIPT: &str = r##"(function () {
   try { kept = JSON.parse(sessionStorage.getItem(keptAt)); sessionStorage.removeItem(keptAt); } catch (e) {}
   if (kept) {
     (kept.open || []).forEach(function (id) { var step = document.getElementById(id); if (step) setOpen(step, true); });
+    Object.keys(kept.scenes || {}).forEach(function (name) { if (keepers[name]) keepers[name].back(kept.scenes[name]); });
     var back = function () {
       // An element the page hides now, as an entry of a tab not picked, is
       // shown as a jump shows it (task 1375); one that stays hidden, as a
@@ -5202,6 +5358,25 @@ button.step-head { cursor: pointer; }
 .arrows button:disabled { opacity: 0.3; cursor: default; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 24px 0 0; font: 400 13px/20px var(--sans); color: var(--fg-2); }
 .legend > span { display: inline-flex; align-items: center; gap: 8px; }
+/* The map played (task 1374): Play, the slider and the line saying the
+   stage above it; a stage not reached yet faint and smaller, the curves to
+   it undrawn, each drawn from the step it leaves as its stage comes. A step
+   pointed at lights what it waits on and what waits on it, in ink, and the
+   rest fades. On a screen only: print shows the map whole. The line keeps
+   to one, so that the map under it stays where it is as the stages go. */
+.player { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 20px; margin: 32px 0 0; }
+.player .scrub { margin: 0; }
+.prose .player .at { grid-column: 2; margin: 2px 0 0; overflow: hidden; font: 400 14px/20px var(--sans); white-space: nowrap; text-overflow: ellipsis; color: var(--fg-2); }
+@media screen {
+  .map .node { transition: opacity 0.5s var(--curve), transform 0.5s var(--curve), box-shadow 0.3s ease; }
+  .map .edge { stroke-dasharray: 1; transition: stroke-dashoffset 0.6s var(--curve), opacity 0.3s ease, stroke 0.3s ease, stroke-opacity 0.3s ease; }
+  .map .node.unlit { opacity: 0.12; transform: scale(0.96); }
+  .map .edge.unlit { opacity: 0; stroke-dashoffset: 1; }
+  .map.focus .node:not(.chain) { opacity: 0.18; }
+  .map.focus .edge:not(.chain) { opacity: 0.1; }
+  .map.focus .node.chain { opacity: 1; transform: none; box-shadow: inset 0 0 0 1.5px var(--fg-strong); }
+  .map.focus .edge.chain { opacity: 1; stroke-dashoffset: 0; stroke: var(--fg-strong); stroke-opacity: 1; }
+}
 
 /* ---- notes and history ------------------------------------------------- */
 .note, .version { padding: 24px 0; border-top: 1px solid var(--rule); scroll-margin-top: 24px; }
@@ -5551,7 +5726,7 @@ dialog.side::backdrop { background: rgba(0, 0, 0, 0.32); }
 }
 /* Still: the page takes a scene's mode at once, and nothing breathes. */
 @media (prefers-reduced-motion: reduce) {
-  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before, .prose .sheet, .toggle i, .toggle i::after, .seg::before, .row i, .line button::before { transition: none; }
+  :root, .mark, .fact b, .fact span, .pill, .bar-hint span, .toc-card, .toc-bars, .toc-bars span, .bar-side, .prose .card, .card .more, .round, .prose .point, .ticks button::before, .prose .sheet, .toggle i, .toggle i::after, .seg::before, .row i, .line button::before, .map .node, .map .edge { transition: none; }
   .numeral .out, .numeral .enter, .scene.close::before { animation: none; }
   .goal .held { position: static; min-height: 0; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
@@ -5587,7 +5762,7 @@ dialog.side::backdrop { background: rgba(0, 0, 0, 0.32); }
   .staged .steps .step[hidden] { display: block !important; }
   .talk .tabs, .talk .kinds, .talk .rows, dialog.side { display: none; }
   .talk .panel[hidden] { display: block !important; }
-  .scrub { display: none; }
+  .scrub, .player { display: none; }
   .changed .version[hidden] { display: block !important; }
   .scene.close { min-height: 0; text-align: left; }
   .scene.close::before, .close .acts { display: none; }
@@ -5821,6 +5996,41 @@ mod tests {
         assert!(drawn.contains(&format!("left:{}px;top:{}px", width + gap_x, 0)) && drawn.contains(&format!("left:{}px;top:{}px", 2 * (width + gap_x), (height + gap_y) / 2)), "a column shorter than the tallest is centred on it: {drawn}");
     }
 
+    /// The map says each step's stage, its column counted from 1, and each
+    /// curve the steps it joins and the stage of the later, so the page's
+    /// script plays it stage by stage (task 1374). The player, with two
+    /// stages or more, starts on the whole plan, as a page without its
+    /// script shows it.
+    #[test]
+    fn the_map_plays_stage_by_stage() {
+        let made = steps(
+            &[],
+            &[spec("a", Some("A"), &[]), spec("b", Some("B"), &["a"]), spec("c", Some("C"), &["a"]), spec("d", Some("D"), &["c", "b"]), spec("e", Some("E"), &[]), spec("f", Some("F"), &["a", "d"])],
+        )
+        .unwrap();
+        let item = artifact_item(1, &plan("Ship"), made);
+        let all: ItemMap = BTreeMap::from([(1, item.clone())]);
+        let drawn = map(&shown(item.artifact.as_deref().unwrap(), &all));
+        for (key, stage) in [("a", 1), ("b", 2), ("c", 2), ("d", 3), ("e", 1), ("f", 4)] {
+            assert!(drawn.contains(&format!("data-step=\"{key}\" data-stage=\"{stage}\" style=")), "{key} at stage {stage}: {drawn}");
+        }
+        for (from, to, stage) in [("a", "b", 2), ("a", "c", 2), ("c", "d", 3), ("b", "d", 3), ("a", "f", 4), ("d", "f", 4)] {
+            assert!(drawn.contains(&format!("<path class=\"edge\" data-from=\"{from}\" data-to=\"{to}\" data-stage=\"{stage}\" pathLength=\"1\" d=\"M")), "{from} to {to}, at stage {stage}: {drawn}");
+        }
+        let (html, _) = page(&item, &all, None);
+        assert!(
+            html.contains("<span>an arrow: what a step waits on</span></div><div class=\"player\"><button class=\"round play\" type=\"button\" aria-label=\"Play\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M8.5 5.8v12.4L18.2 12z\"/></svg></button><input class=\"scrub\" type=\"range\" autocomplete=\"off\" min=\"1\" max=\"4\" step=\"1\" value=\"4\" style=\"--p: 100%\" aria-label=\"How far the plan unfolds\" aria-valuetext=\"Stage 4 of 4\"><p class=\"at\" aria-live=\"polite\">The whole plan, in 4 stages</p></div><div class=\"bleed\">"),
+            "the player, on the whole plan, between the legend and the map: {html}"
+        );
+
+        // Steps that wait on none are one stage: nothing to play.
+        let made = steps(&[], &[spec("a", Some("A"), &[]), spec("b", Some("B"), &[])]).unwrap();
+        let item = artifact_item(1, &plan("Ship"), made);
+        let all: ItemMap = BTreeMap::from([(1, item.clone())]);
+        let (html, _) = page(&item, &all, None);
+        assert!(html.contains("data-step=\"b\" data-stage=\"1\"") && !html.contains("class=\"player\""), "{html}");
+    }
+
     #[test]
     fn a_plan_is_cut_at_its_headings_but_inside_code() {
         let cut = sections("Before.\n## Goal\nThe goal.\n```\n## not a heading\n```\n## Design\nThe design.\n");
@@ -6045,7 +6255,7 @@ mod tests {
         let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
         let scene = html.split("<section class=\"scene part changes\" id=\"history\"").nth(1).and_then(|rest| rest.split("</section>").next()).unwrap_or_default();
         let line = format!(
-            "<div class=\"versions\"><ol class=\"line\" aria-label=\"Versions kept\"><li><button type=\"button\" data-node=\"0\" aria-current=\"false\"><b>v1</b><span>{}</span></button></li><li><button type=\"button\" data-node=\"1\" aria-current=\"true\"><b>v3</b><span>{}</span></button></li><li><button type=\"button\" data-node=\"2\" aria-current=\"true\"><b>v4</b><span>{}</span></button></li></ol><input class=\"scrub\" type=\"range\" min=\"1\" max=\"2\" step=\"1\" value=\"2\" style=\"--p: 100%\" aria-label=\"Which change shows\" aria-valuetext=\"Version 3 \u{2192} 4\"></div><div class=\"changed\"><div class=\"version\" id=\"version-3\" data-change=\"2\"><div class=\"kind\">Replaced {}</div><h3>Version 3 \u{2192} 4</h3>",
+            "<div class=\"versions\"><ol class=\"line\" aria-label=\"Versions kept\"><li><button type=\"button\" data-node=\"0\" aria-current=\"false\"><b>v1</b><span>{}</span></button></li><li><button type=\"button\" data-node=\"1\" aria-current=\"true\"><b>v3</b><span>{}</span></button></li><li><button type=\"button\" data-node=\"2\" aria-current=\"true\"><b>v4</b><span>{}</span></button></li></ol><input class=\"scrub\" type=\"range\" autocomplete=\"off\" min=\"1\" max=\"2\" step=\"1\" value=\"2\" style=\"--p: 100%\" aria-label=\"Which change shows\" aria-valuetext=\"Version 3 \u{2192} 4\"></div><div class=\"changed\"><div class=\"version\" id=\"version-3\" data-change=\"2\"><div class=\"kind\">Replaced {}</div><h3>Version 3 \u{2192} 4</h3>",
             when(day(1)),
             when(day(2)),
             when(day(4)),
