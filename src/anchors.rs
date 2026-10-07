@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use chrono::{NaiveDate, TimeZone};
 
 use crate::holder::{Actor, Holder};
-use crate::item::{Anchor, RestsOn, Unread};
+use crate::item::{Anchor, Item, Knowledge, RestsOn, Unread};
 use crate::storage::ItemMap;
 
 /// The words that open the line, in any case.
@@ -39,7 +39,8 @@ const ANCHOR: &str =
 
 /// Reads the line again on each decision, gotcha or procedure among
 /// `changed` whose text this write changed, or which it made one of those
-/// kinds, and drops the record from any other item among them. `before` and
+/// kinds, and drops the record from any task or plain note among them; a
+/// note of a kind a later version added keeps what it had. `before` and
 /// `arrived` hold the items as they were, and `actor` writes. Returns the
 /// notes whose line it read.
 pub fn keep(
@@ -58,8 +59,13 @@ pub fn keep(
             item.rests_on = None;
             continue;
         }
+        // A kind a later version added (task 845): what it rests on, and the
+        // record of it, are that version's.
+        if !lasting(item) {
+            continue;
+        }
         let old = before.get(id).or_else(|| arrived.get(id));
-        if old.is_some_and(|old| old.knowledge.is_some() && old.description == item.description) {
+        if old.is_some_and(|old| lasting(old) && old.description == item.description) {
             continue;
         }
         item.rests_on = rests_on(&item.description, folder, now, || actor.map(|actor| actor.holder(now))).map(Box::new);
@@ -68,6 +74,12 @@ pub fn keep(
         }
     }
     read
+}
+
+/// Whether `item` is a decision, gotcha or procedure: a note of a kind this
+/// version knows.
+fn lasting(item: &Item) -> bool {
+    !item.is_task && matches!(item.knowledge, Some(Knowledge::Decision | Knowledge::Gotcha | Knowledge::Procedure))
 }
 
 /// What the `Rests on:` lines of `text` name, read at `now` for whoever `by`
@@ -407,6 +419,34 @@ mod tests {
         assert_eq!(rests_on("Rests on `src/storage.rs`", Some(&dir), noon(), || None), None, "no colon");
         let rests = rests_on("a\n  rests ON: `src/storage.rs`\nb\nRests on: Claude Code 2.1.289", Some(&dir), noon(), || None).unwrap();
         assert_eq!(anchors(&rests), json!([{"path": "src/storage.rs", "held": true}, {"claudeCode": "2.1.289"}]));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A kind a later version added is no decision, gotcha or procedure
+    /// (task 845): a write leaves its line unread, and whatever record that
+    /// version keeps on it as it was.
+    #[test]
+    fn a_kind_a_later_version_added_is_left_as_it_is() {
+        let dir = project("later");
+        let mut note = Item::new_note(1, "x\nRests on: `src/storage.rs`".into(), vec!["My Board".into()]);
+        note.knowledge = Some(Knowledge::Unknown("lesson"));
+        let mut data = ItemMap::from([(1, note)]);
+        let read = keep(&ItemMap::new(), &ItemMap::new(), &mut data, &[1], Some(&dir), None, noon());
+        assert_eq!((read, data[&1].rests_on.is_none()), (vec![], true), "a new note of that kind");
+
+        let kept = rests_on("Rests on: `src/gone.rs`", Some(&dir), noon(), || None).unwrap();
+        let before = data.clone();
+        let note = data.get_mut(&1).unwrap();
+        note.rests_on = Some(Box::new(kept.clone()));
+        note.description.push_str("\nmore");
+        keep(&before, &ItemMap::new(), &mut data, &[1], Some(&dir), None, noon());
+        assert_eq!(data[&1].rests_on.as_deref(), Some(&kept), "its text changed");
+
+        let before = data.clone();
+        data.get_mut(&1).unwrap().knowledge = Some(Knowledge::Gotcha);
+        let read = keep(&before, &ItemMap::new(), &mut data, &[1], Some(&dir), None, noon());
+        assert_eq!(read, [1], "made a gotcha, its text as it was");
+        assert_eq!(anchors(data[&1].rests_on.as_deref().unwrap()), json!([{"path": "src/storage.rs", "held": true}]));
         std::fs::remove_dir_all(&dir).ok();
     }
 
