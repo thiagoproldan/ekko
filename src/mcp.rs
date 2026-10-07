@@ -131,6 +131,9 @@ pub struct Server {
     /// The linked boards the client's tool list names, as it last read it
     /// (task 811). None until it asks for the list.
     tools_listed: Mutex<Option<Vec<String>>>,
+    /// The version of Claude Code the handshake's initialize named, for
+    /// every request under it (task 1325); see `claude_code`.
+    claude_code: Mutex<Option<String>>,
 }
 
 /// A binary as a file: where its name resolves, every link followed, and
@@ -366,7 +369,20 @@ impl Server {
             dialogs: Mutex::new(Dialogs::default()),
             told_at: Mutex::new(None),
             tools_listed: Mutex::new(None),
+            claude_code: Mutex::new(None),
         }
+    }
+
+    /// The version of Claude Code the session runs, as its client says, for
+    /// a note's `Claude Code` anchor to be judged against (task 1325): under
+    /// 2026-07-28 on each request, which no earlier one may stand in for,
+    /// and under the handshake once, in initialize. None from any other
+    /// client, or one that does not say.
+    fn claude_code(&self, params: &Value, modern: bool) -> Option<String> {
+        if modern {
+            return claude_code_of(params.get("_meta").and_then(|meta| meta.get("io.modelcontextprotocol/clientInfo")));
+        }
+        self.claude_code.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// Whether an upgrade has replaced this server's binary (see `Launch`).
@@ -827,7 +843,7 @@ impl Server {
             // 2026-07-28 dropped ping.
             "ping" if !modern => json!({}),
             "tools/list" if board => json!({"tools": self.tools()}),
-            "tools/call" if board => self.call(params)?,
+            "tools/call" if board => self.call(params, modern)?,
             "prompts/list" if board => json!({"prompts": prompt_definitions()}),
             "prompts/get" if board => self.prompt(params)?,
             "resources/list" if !board => json!({"resources": self.resources()?}),
@@ -851,6 +867,7 @@ impl Server {
     fn initialize(&self, params: &Value) -> Value {
         self.handshake.store(true, Ordering::Relaxed);
         self.dialogs().form = params.get("capabilities").is_some_and(dialog::shows_forms);
+        *self.claude_code.lock().unwrap_or_else(PoisonError::into_inner) = claude_code_of(params.get("clientInfo"));
         let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
         let version = LEGACY.iter().find(|v| **v == requested).copied().unwrap_or(LEGACY[0]);
         let mut reply = json!({"protocolVersion": version, "serverInfo": server_info()});
@@ -917,6 +934,7 @@ impl Server {
             .ok_or_else(|| RpcError::new(-32602, "Invalid params: resources/read needs a uri"))?;
         let not_found = if modern { -32602 } else { -32002 };
         let (ekko, location) = self.open().map_err(resource_error)?;
+        let ekko = ekko.with_claude_code(self.claude_code(params, modern));
         let text = if uri == PRIME_URI {
             agent::prime(&ekko, &location.label()).map_err(resource_error)?.text()
         } else if let Some(id) = uri.strip_prefix("item://").filter(|id| !id.is_empty()) {
@@ -929,7 +947,7 @@ impl Server {
         Ok(json!({"contents": [{"uri": uri, "mimeType": "text/plain", "text": self.noted(text)}]}))
     }
 
-    fn call(&self, params: &Value) -> Result<Value, RpcError> {
+    fn call(&self, params: &Value, modern: bool) -> Result<Value, RpcError> {
         let name = params
             .get("name")
             .and_then(Value::as_str)
@@ -942,7 +960,7 @@ impl Server {
             Some(Value::Object(map)) => map.clone(),
             Some(_) => return Err(RpcError::new(-32602, "Invalid params: arguments must be an object")),
         };
-        let (text, failed) = match self.tool(name, &mut args) {
+        let (text, failed) = match self.tool(name, &mut args, self.claude_code(params, modern)) {
             Ok(text) => (text, false),
             Err(error) => (format!("{}: {}", error.code, error.message), true),
         };
@@ -1049,7 +1067,9 @@ impl Server {
         self.notify("notifications/tools/list_changed")
     }
 
-    fn tool(&self, name: &str, args: &mut Map<String, Value>) -> Result<String, ToolError> {
+    /// Runs tool `name` on `args`, for a session of Claude Code `claude_code`
+    /// where its client said so.
+    fn tool(&self, name: &str, args: &mut Map<String, Value>, claude_code: Option<String>) -> Result<String, ToolError> {
         if name == "wait" && args.contains_key("project") {
             return Err(invalid(
                 "wait takes no project: the hook that wakes a session watches only its own board. \
@@ -1057,6 +1077,7 @@ impl Server {
             ));
         }
         let (ekko, location, project) = self.open_for(args)?;
+        let ekko = ekko.with_claude_code(claude_code);
         let project = project.as_deref();
 
         match name {
@@ -1717,6 +1738,16 @@ fn resource_error(error: EkkoError) -> RpcError {
 
 fn server_info() -> Value {
     json!({"name": "ekko", "version": env!("CARGO_PKG_VERSION")})
+}
+
+/// The version a client's `info` names, when the client is Claude Code --
+/// the only one a note's `Claude Code` anchor speaks of. Self-reported,
+/// which the protocol keeps for display and logs: here it only words what a
+/// view shows.
+fn claude_code_of(info: Option<&Value>) -> Option<String> {
+    let info = info.filter(|info| info.get("name").and_then(Value::as_str) == Some("claude-code"))?;
+    let version = info.get("version").and_then(Value::as_str).map(str::trim).filter(|version| !version.is_empty())?;
+    Some(version.to_string())
 }
 
 /// The methods whose results are a CacheableResult in the 2026-07-28 schema:

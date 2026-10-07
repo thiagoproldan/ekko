@@ -21,7 +21,14 @@
 //! makes a note one of those kinds, reads the line again, whatever wrote it,
 //! and records what it found, with when and by whose write: the fingerprints
 //! a later read of the note compares against.
+//!
+//! prime, context and search check the anchors of the notes they show (task
+//! 1325): a path gone, words their file no longer holds, a date past, or a
+//! version older than the Claude Code reading say to recheck the note, which
+//! shows why and is never dropped.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{NaiveDate, TimeZone};
@@ -78,7 +85,7 @@ pub fn keep(
 
 /// Whether `item` is a decision, gotcha or procedure: a note of a kind this
 /// version knows.
-fn lasting(item: &Item) -> bool {
+pub fn lasting(item: &Item) -> bool {
     !item.is_task && matches!(item.knowledge, Some(Knowledge::Decision | Knowledge::Gotcha | Knowledge::Procedure))
 }
 
@@ -90,6 +97,7 @@ pub fn rests_on(text: &str, folder: Option<&Path>, now: i64, by: impl FnOnce() -
         return None;
     }
     let today = chrono::Local.timestamp_millis_opt(now).single().unwrap_or_else(chrono::Local::now).date_naive();
+    let files = Files::default();
     let mut rests = RestsOn { at: now, by: by(), anchors: Vec::new(), unread: Vec::new(), unknown: Default::default() };
     for line in lines {
         let parts = split(line);
@@ -97,7 +105,7 @@ pub fn rests_on(text: &str, folder: Option<&Path>, now: i64, by: impl FnOnce() -
             rests.unread.push(Unread { text: String::new(), why: format!("the line names nothing: {ANCHOR}"), unknown: Default::default() });
         }
         for part in parts {
-            match anchor(part, folder, today) {
+            match anchor(part, folder, today, &files) {
                 Ok(anchor) => rests.anchors.push(anchor),
                 Err(why) => rests.unread.push(Unread { text: part.to_string(), why, unknown: Default::default() }),
             }
@@ -125,6 +133,102 @@ pub fn problems(rests: &RestsOn) -> Vec<String> {
         });
     }
     said
+}
+
+/// Why the `Rests on:` lines of a note's `text` say to recheck it, read now
+/// (task 1325), each in a few words: an anchor that does not hold today --
+/// worded by whether it held when `kept`, the record of the write, read it
+/// -- and a version of Claude Code older than `claude_code`, the one the
+/// session reading runs, where it is known. Empty when every anchor holds.
+/// A part that names no anchor says nothing here: the reply to the write
+/// that stored it did.
+pub fn recheck(
+    text: &str,
+    kept: Option<&RestsOn>,
+    folder: Option<&Path>,
+    claude_code: Option<&str>,
+    today: NaiveDate,
+    files: &Files,
+) -> Vec<String> {
+    let mut why = Vec::new();
+    for part in text.lines().filter_map(opened).flat_map(split) {
+        let Ok(now) = anchor(part, folder, today, files) else { continue };
+        if let Some(seen) = &now.claude_code {
+            if let Some(reading) = claude_code.filter(|reading| newer(reading, seen)) {
+                why.push(format!("seen with Claude Code {seen}, now {reading}"));
+            }
+            continue;
+        }
+        if now.held != Some(false) {
+            continue;
+        }
+        let held = kept.is_some_and(|kept| {
+            kept.anchors.iter().any(|then| {
+                then.held == Some(true) && (&then.path, &then.words, &then.recheck_after) == (&now.path, &now.words, &now.recheck_after)
+            })
+        });
+        let there = |path: &str| resolve(path, folder).is_ok_and(|file| files.there(&file));
+        why.push(match (&now.path, &now.words, &now.recheck_after, held) {
+            (Some(path), _, _, true) if !there(path) => format!("`{path}` is gone"),
+            (Some(path), _, _, false) if !there(path) => format!("`{path}` is not there"),
+            (Some(path), Some(words), _, true) => format!("`{path}` no longer holds \"{words}\""),
+            (Some(path), Some(words), _, false) => format!("`{path}` does not hold \"{words}\""),
+            (None, _, Some(date), _) => format!("recheck after {date} is past"),
+            _ => continue,
+        });
+    }
+    why
+}
+
+/// Whether `reading`, the version of Claude Code a session runs, is past
+/// `seen`, the one a note was seen with, to the precision `seen` gives: seen
+/// with 2.1, a note holds through every 2.1.x. A version that does not start
+/// with a number is past none.
+fn newer(reading: &str, seen: &str) -> bool {
+    let numbers = |version: &str| -> Vec<u64> {
+        let version = version.trim().trim_start_matches('v');
+        let lead = version.split(|c: char| !c.is_ascii_digit() && c != '.').next().unwrap_or_default();
+        lead.split('.').map_while(|number| number.parse().ok()).collect()
+    };
+    let (reading, seen) = (numbers(reading), numbers(seen));
+    if reading.is_empty() {
+        return false;
+    }
+    let reading: Vec<u64> = (0..seen.len()).map(|at| reading.get(at).copied().unwrap_or(0)).collect();
+    reading > seen
+}
+
+/// The files a read of anchors looks at, each once however many anchors
+/// name it: a view checks every note it shows, and several often rest on
+/// one file.
+#[derive(Default)]
+pub struct Files {
+    there: RefCell<HashMap<PathBuf, bool>>,
+    /// Each file's text squeezed (see `squeeze`); None for what is no file
+    /// or cannot be read.
+    texts: RefCell<HashMap<PathBuf, Option<Squeezed>>>,
+}
+
+impl Files {
+    /// Whether anything is at `path`.
+    fn there(&self, path: &Path) -> bool {
+        *self.there.borrow_mut().entry(path.to_path_buf()).or_insert_with(|| path.exists())
+    }
+
+    /// The line, from 1, where `file` holds `words`, each run of whitespace
+    /// in either read as one space; None where it holds them nowhere, or is
+    /// no file.
+    fn holds(&self, file: &Path, words: &str) -> Option<u32> {
+        let (wanted, _) = squeeze(words);
+        let wanted = wanted.trim();
+        if wanted.is_empty() {
+            return None;
+        }
+        let mut texts = self.texts.borrow_mut();
+        let (text, starts) = texts.entry(file.to_path_buf()).or_insert_with(|| squeezed(file)).as_ref()?;
+        let at = text.find(wanted)?;
+        Some(starts.partition_point(|&start| start <= at) as u32)
+    }
 }
 
 /// What follows the opening words, on a line that starts with them.
@@ -158,8 +262,9 @@ fn split(line: &str) -> Vec<&str> {
     parts.into_iter().map(str::trim).filter(|part| !part.is_empty()).collect()
 }
 
-/// The anchor `part` names, read at `today`, or why it names none.
-fn anchor(part: &str, folder: Option<&Path>, today: NaiveDate) -> Result<Anchor, String> {
+/// The anchor `part` names, read at `today` through `files`, or why it
+/// names none.
+fn anchor(part: &str, folder: Option<&Path>, today: NaiveDate, files: &Files) -> Result<Anchor, String> {
     let mut anchor =
         Anchor { path: None, words: None, claude_code: None, recheck_after: None, held: None, line: None, unknown: Default::default() };
     if let Some(rest) = part.strip_prefix('`') {
@@ -182,9 +287,9 @@ fn anchor(part: &str, folder: Option<&Path>, today: NaiveDate) -> Result<Anchor,
         let file = resolve(path, folder)?;
         anchor.path = Some(path.to_string());
         match words {
-            None => anchor.held = Some(file.exists()),
+            None => anchor.held = Some(files.there(&file)),
             Some(words) => {
-                anchor.line = holds(&file, words);
+                anchor.line = files.holds(&file, words);
                 anchor.held = Some(anchor.line.is_some());
                 anchor.words = Some(words.to_string());
             }
@@ -238,26 +343,22 @@ fn resolve(path: &str, folder: Option<&Path>) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{path} is read from the project's folder, and this board is no project's: write it from / or ~/"))
 }
 
-/// The line, from 1, where `file` holds `words`, each run of whitespace in
-/// either read as one space; None where it holds them nowhere, or is no file.
-fn holds(file: &Path, words: &str) -> Option<u32> {
+/// The text of `file` squeezed (see `squeeze`); None where it is no file, or
+/// cannot be read.
+fn squeezed(file: &Path) -> Option<Squeezed> {
     if !std::fs::metadata(file).is_ok_and(|meta| meta.is_file()) {
         return None;
     }
-    let text = String::from_utf8_lossy(&std::fs::read(file).ok()?).into_owned();
-    let (squeezed, starts) = squeeze(&text);
-    let (wanted, _) = squeeze(words);
-    let wanted = wanted.trim();
-    if wanted.is_empty() {
-        return None;
-    }
-    let at = squeezed.find(wanted)?;
-    Some(starts.partition_point(|&start| start <= at) as u32)
+    Some(squeeze(&String::from_utf8_lossy(&std::fs::read(file).ok()?)))
 }
+
+/// A text with each run of whitespace made one space, and where in it each
+/// line of the text starts.
+type Squeezed = (String, Vec<usize>);
 
 /// `text` with each run of whitespace made one space, and where in it each
 /// line of `text` starts: a line that starts inside a run starts after it.
-fn squeeze(text: &str) -> (String, Vec<usize>) {
+fn squeeze(text: &str) -> Squeezed {
     let (mut squeezed, mut starts, mut space) = (String::with_capacity(text.len()), vec![0], false);
     for c in text.chars() {
         if !c.is_whitespace() {
@@ -420,6 +521,78 @@ mod tests {
         let rests = rests_on("a\n  rests ON: `src/storage.rs`\nb\nRests on: Claude Code 2.1.289", Some(&dir), noon(), || None).unwrap();
         assert_eq!(anchors(&rests), json!([{"path": "src/storage.rs", "held": true}, {"claudeCode": "2.1.289"}]));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A day, here.
+    fn day(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    /// A read says to recheck a note whose words their file no longer holds,
+    /// or whose path is gone -- "no longer" and "gone" for what held when the
+    /// note was written, and "not" for what never did, or where no record of
+    /// the write says it did.
+    #[test]
+    fn changed_words_or_a_path_gone_say_to_recheck() {
+        let dir = project("recheck-moved");
+        std::fs::write(dir.join("src/old.rs"), "x").unwrap();
+        let text = "Keep it\nRests on: `src/storage.rs` \"pub fn keep_unkept_version\"; `src/old.rs`; `src/never.rs`; `src/storage.rs` \"fn never\"";
+        let kept = rests_on(text, Some(&dir), noon(), || None).unwrap();
+        let read = |kept: Option<&RestsOn>| recheck(text, kept, Some(&dir), None, day(2026, 10, 7), &Files::default());
+        assert_eq!(read(Some(&kept)), ["`src/never.rs` is not there", "`src/storage.rs` does not hold \"fn never\""], "as written");
+
+        std::fs::write(dir.join("src/storage.rs"), "use std::fs;\n\npub fn keep_kept_version(\n").unwrap();
+        std::fs::remove_file(dir.join("src/old.rs")).unwrap();
+        assert_eq!(
+            read(Some(&kept)),
+            [
+                "`src/storage.rs` no longer holds \"pub fn keep_unkept_version\"",
+                "`src/old.rs` is gone",
+                "`src/never.rs` is not there",
+                "`src/storage.rs` does not hold \"fn never\"",
+            ]
+        );
+        assert_eq!(read(None)[..2], ["`src/storage.rs` does not hold \"pub fn keep_unkept_version\"", "`src/old.rs` is not there"]);
+        std::fs::remove_file(dir.join("src/storage.rs")).unwrap();
+        assert_eq!(read(Some(&kept))[0], "`src/storage.rs` is gone", "the file of the words");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Words found again by their text say nothing when another line of
+    /// their file changed, or when they moved down it, re-indented and
+    /// wrapped where a space was; changed themselves, they do.
+    #[test]
+    fn an_unrelated_line_changed_or_the_words_moved_say_nothing() {
+        let dir = project("recheck-still");
+        let text = "Rests on: `src/storage.rs` \"pub fn keep_unkept_version( data: &mut ItemMap\"";
+        let kept = rests_on(text, Some(&dir), noon(), || None).unwrap();
+        let read = || recheck(text, Some(&kept), Some(&dir), None, day(2026, 10, 7), &Files::default());
+        assert_eq!(read(), Vec::<String>::new(), "as written");
+        std::fs::write(dir.join("src/storage.rs"), "use std::io;\n\npub fn keep_unkept_version(\n    data: &mut ItemMap,\n) {}\n").unwrap();
+        assert_eq!(read(), Vec::<String>::new(), "another line changed");
+        std::fs::write(dir.join("src/storage.rs"), "// first\n\nmod a;\n\n        pub fn keep_unkept_version(  data:\n &mut ItemMap) {}\n").unwrap();
+        assert_eq!(read(), Vec::<String>::new(), "moved down, indented and wrapped");
+        std::fs::write(dir.join("src/storage.rs"), "pub fn keep_unkept_version(state: &mut ItemMap) {}\n").unwrap();
+        assert_eq!(read(), ["`src/storage.rs` no longer holds \"pub fn keep_unkept_version( data: &mut ItemMap\""]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A read says to recheck a note seen with a version of Claude Code
+    /// older than the one reading, to the precision its line gives, and one
+    /// whose date to recheck after is past; the same version or an older one,
+    /// none known, or the date itself say nothing.
+    #[test]
+    fn a_newer_claude_code_or_a_past_date_say_to_recheck() {
+        let text = "Rests on: Claude Code 2.1.289; recheck after 2026-10-07";
+        let read = |claude_code: Option<&str>, today: NaiveDate| recheck(text, None, None, claude_code, today, &Files::default());
+        assert_eq!(read(Some("2.1.301"), day(2026, 10, 7)), ["seen with Claude Code 2.1.289, now 2.1.301"]);
+        assert_eq!(read(Some("2.1.289"), day(2026, 10, 8)), ["recheck after 2026-10-07 is past"]);
+        assert_eq!(read(Some("3.0.0"), day(2027, 1, 1)), ["seen with Claude Code 2.1.289, now 3.0.0", "recheck after 2026-10-07 is past"]);
+        for not_newer in [Some("2.1.289"), Some("2.1.200"), Some("2.0.999"), Some("next"), None] {
+            assert_eq!(read(not_newer, day(2026, 10, 7)), Vec::<String>::new(), "{not_newer:?}");
+        }
+        assert!(newer("2.2.0", "2.1") && !newer("2.1.999", "2.1"), "seen with 2.1, a note holds through every 2.1.x");
+        assert!(newer("2.1.290-beta.1", "2.1.289") && newer("v2.1.290", "2.1.289") && !newer("2", "2.0.1"));
     }
 
     /// A kind a later version added is no decision, gotcha or procedure

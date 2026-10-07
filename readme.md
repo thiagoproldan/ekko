@@ -561,6 +561,15 @@ Rests on: `src/storage.rs` "fn keep_unkept_version"; `evals/`; Claude Code 2.1.2
 
 A path is read from the project's folder, unless it starts at `/` or `~/`. Each write that changes a decision's, gotcha's or procedure's text, or gives a note one of those kinds, reads the line again, from the terminal or a session, and keeps what each anchor named and what Ekko found -- the path there, the words on their line, the date still ahead -- with when and by whose write (task 1324). What does not hold, and any part that is no anchor, is said under the message, and in a session's reply as a notice; nothing is refused for it. A note without the line is stored as before.
 
+The anchors are checked again whenever the note is read: `--prime` and `--context`, and a session's prime, context and search, look at each decision, gotcha and procedure in force they show (task 1325). One whose ground moved is marked `to recheck`, with why on the line under it, and is never dropped:
+
+```
+  13. [gotcha, to recheck] Run the migrations before the tests, or half of them fail
+      to recheck: `scripts/test.sh` no longer holds "migrate --all"; seen with Claude Code 2.1.289, now 2.1.301
+```
+
+Words are looked for again by their text, so a change elsewhere in the file, or the words moved, says nothing. A path gone, words their file no longer holds, and a date past each say to recheck, and so does a version older than the Claude Code reading -- to the precision written, so a note seen with 2.1 holds through every 2.1.x. That version is the one a session's client gives the MCP server; the terminal gives none, and judges no version.
+
 ### Dependencies
 
 Record what an item is blocked by, and the board stops pretending everything is equally startable -- or finishable:

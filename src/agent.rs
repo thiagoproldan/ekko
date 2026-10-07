@@ -104,6 +104,9 @@ const KNOWLEDGE_SHOWN: usize = 5;
 const KNOWLEDGE_CITED: usize = 3;
 /// Where a prime says the lasting notes it did not list are.
 const KNOWLEDGE_REST: &str = "search with the decision, gotcha or procedure filter";
+/// What a listing says of a note its anchors say to recheck (task 1325),
+/// in its mark and before why, on the line under it.
+const TO_RECHECK: &str = "to recheck";
 /// The words that cite an item by its number, as notes and prompts write
 /// them, in English and Portuguese, each plural before its singular.
 const CITING: [&str; 24] = [
@@ -431,6 +434,10 @@ pub struct Entry {
     /// `Item::cue`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cue: Option<crate::item::Cue>,
+    /// On a decision, gotcha or procedure in force: why its anchors say to
+    /// recheck it, read now (task 1325); see `Reader::recheck`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recheck: Vec<String>,
     /// Notes attached to this task.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<NoteRef>,
@@ -455,6 +462,10 @@ pub struct NoteRef {
     /// On a gotcha: whether its cue is on.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cue: bool,
+    /// On a decision, gotcha or procedure in force: why its anchors say to
+    /// recheck it, read now (task 1325); see `Reader::recheck`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recheck: Vec<String>,
     /// On a comment or a review from an artifact's page: where it stands,
     /// as `feedback::mark` says it (task 1107).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -463,8 +474,9 @@ pub struct NoteRef {
 
 impl NoteRef {
     /// What a listing puts before a typed note's text -- "[gotcha] ", or
-    /// "[decision, superseded by 9] ", "[question] ", "[handoff, replaced by
-    /// 12] ", "[comment, sent] " -- and nothing before an ordinary one.
+    /// "[decision, superseded by 9] ", "[gotcha, to recheck] ", "[question] ",
+    /// "[handoff, replaced by 12] ", "[comment, sent] " -- and nothing before
+    /// an ordinary one.
     fn mark(&self) -> String {
         if let Some(feedback) = &self.feedback {
             return format!("[{feedback}] ");
@@ -478,10 +490,19 @@ impl NoteRef {
         match (self.knowledge, self.superseded_by.as_slice()) {
             (None, []) => String::new(),
             (None, newer) => format!("[handoff, replaced by {}] ", join(newer)),
-            (Some(kind), []) if self.cue => format!("[{}, cue on] ", kind.word()),
-            (Some(kind), []) => format!("[{}] ", kind.word()),
-            (Some(kind), newer) if self.cue => format!("[{}, cue on, superseded by {}] ", kind.word(), join(newer)),
-            (Some(kind), newer) => format!("[{}, superseded by {}] ", kind.word(), join(newer)),
+            (Some(kind), newer) => {
+                let mut words = vec![kind.word().to_string()];
+                if self.cue {
+                    words.push("cue on".to_string());
+                }
+                if !self.recheck.is_empty() {
+                    words.push(TO_RECHECK.to_string());
+                }
+                if !newer.is_empty() {
+                    words.push(format!("superseded by {}", join(newer)));
+                }
+                format!("[{}] ", words.join(", "))
+            }
         }
     }
 
@@ -508,17 +529,30 @@ struct Reader<'a> {
     today: String,
     /// The folder of the board's project, which a cue naming no folder of its
     /// own guards; `None` on the default board, whose cues guard the machine.
+    /// A note's anchors are read from it too.
     folder: Option<std::path::PathBuf>,
+    /// Today, which a note's `recheck after` anchor is judged against.
+    day: chrono::NaiveDate,
+    /// The version of Claude Code the session reading runs, which a note's
+    /// `Claude Code` anchor is judged against; see `Ekko::claude_code`.
+    claude_code: Option<String>,
+    /// The files the anchors of the notes this view shows name, each read
+    /// once.
+    files: crate::anchors::Files,
 }
 
 impl<'a> Reader<'a> {
     fn new(all: &'a ItemMap, links: Arc<Links>, phases: &'a [String]) -> Self {
+        let now = chrono::Local::now();
         Reader {
             graph: Graph::new(all, links),
             me: None,
             order: phase_order(phases),
-            today: chrono::Local::now().format("%Y-%m-%d").to_string(),
+            today: now.format("%Y-%m-%d").to_string(),
             folder: None,
+            day: now.date_naive(),
+            claude_code: None,
+            files: crate::anchors::Files::default(),
         }
     }
 
@@ -531,7 +565,20 @@ impl<'a> Reader<'a> {
     fn seen_by(mut self, ekko: &Ekko) -> Self {
         self.me = ekko.actor.clone();
         self.folder = ekko.folder.clone();
+        self.claude_code = ekko.claude_code.clone();
         self
+    }
+
+    /// Why `item`'s anchors say to recheck it, read now (task 1325): a
+    /// decision, gotcha or procedure in force whose `Rests on:` line names
+    /// ground that moved -- see `anchors::recheck`. Empty for anything else:
+    /// a superseded note is history, and is not checked.
+    fn recheck(&self, item: &Item) -> Vec<String> {
+        if !crate::anchors::lasting(item) || self.graph.links.superseded_by.contains_key(&item.id) {
+            return Vec::new();
+        }
+        let (folder, claude_code) = (self.folder.as_deref(), self.claude_code.as_deref());
+        crate::anchors::recheck(&item.description, item.rests_on.as_deref(), folder, claude_code, self.day, &self.files)
     }
 
     /// Who holds `item`, if it is a task in progress that someone holds.
@@ -582,6 +629,7 @@ impl<'a> Reader<'a> {
             answered: note.question.as_ref().map(|question| question.answer.is_some()),
             waiting: note.wait.as_ref().map(|wait| wait.over.is_none()),
             cue: crate::guard::cue_of(note).is_some(),
+            recheck: self.recheck(note),
             feedback: crate::feedback::mark(note, |uid| self.uid(uid)),
         }
     }
@@ -629,6 +677,7 @@ impl<'a> Reader<'a> {
             knowledge: item.knowledge,
             supersedes: item.supersedes.as_deref().and_then(|uid| self.uid(uid)),
             cue: crate::guard::cue_of(item).cloned(),
+            recheck: self.recheck(item),
             superseded_by: self.superseded_by(item.id),
             step: {
                 let sequence = self.sequence(item.id);
@@ -2634,12 +2683,20 @@ fn knowledge_line(note: &NoteRef) -> String {
     format!("{:>4}. {}{}", note.id, note.mark(), clip(first, TASK_CLIP))
 }
 
+/// The line under a note its anchors say to recheck, `indent` in, with why;
+/// none under any other.
+fn recheck_line(recheck: &[String], indent: usize) -> Option<String> {
+    (!recheck.is_empty()).then(|| format!("{:indent$}{TO_RECHECK}: {}", "", clip(&recheck.join("; "), NOTE_CLIP)))
+}
+
 /// What a listing says an item is, in brackets: a task's state or a note's
 /// kind, and for a superseded note, what supersedes it -- for a note without
-/// a kind, the later handoff that replaced it.
+/// a kind, the later handoff that replaced it -- or for one in force that
+/// its anchors say to recheck, that.
 fn listed_state(entry: &Entry) -> String {
     let word = entry.knowledge.map_or_else(|| word_or_note(entry.state), Knowledge::word);
     match (entry.knowledge, entry.superseded_by.as_slice()) {
+        (_, []) if !entry.recheck.is_empty() => format!("{word}, {TO_RECHECK}"),
         (_, []) => word.to_string(),
         (None, newer) => format!("handoff, replaced by {}", join(newer)),
         (Some(_), newer) => format!("{word}, superseded by {}", join(newer)),
@@ -2848,7 +2905,7 @@ impl Prime {
             },
             Section {
                 heading: format!("\nDecisions, gotchas and procedures ({}): the most cited, then the newest", self.knowledge_total),
-                blocks: self.knowledge.iter().map(|note| (knowledge_line(note), Vec::new())).collect(),
+                blocks: self.knowledge.iter().map(|note| (knowledge_line(note), recheck_line(&note.recheck, 6).into_iter().collect())).collect(),
                 total: self.knowledge_total,
                 rest: Some(KNOWLEDGE_REST),
                 kept: KNOWLEDGE_SHOWN,
@@ -3024,7 +3081,7 @@ impl Section {
                     let ids: Vec<String> = entry.notes.iter().map(|note| note.id.to_string()).collect();
                     vec![format!("{:>10}notes {}: context {}", "", ids.join(", "), entry.id)]
                 } else {
-                    entry.notes.iter().map(|note| note_line(note, NOTE_CLIP)).collect()
+                    entry.notes.iter().flat_map(|note| std::iter::once(note_line(note, NOTE_CLIP)).chain(recheck_line(&note.recheck, 10))).collect()
                 };
                 (entry_line(entry, today), notes)
             })
@@ -3132,6 +3189,9 @@ impl Found {
         for (entry, body) in &self.hits {
             let away = entry.away.map(|away| format!(", {away}")).unwrap_or_default();
             let _ = writeln!(out, "{}", listed_line(entry, &format!("[{}{away}] {body}", listed_state(entry)), true, &today));
+            if let Some(line) = recheck_line(&entry.recheck, 6) {
+                let _ = writeln!(out, "{line}");
+            }
         }
         if self.total > self.hits.len() {
             let _ = writeln!(out, "{} of {} shown: narrow the text or filters, or raise limit.", self.hits.len(), self.total);
@@ -3215,6 +3275,9 @@ impl Context {
         let _ = writeln!(out, "      {}", facts.join(" \u{b7} "));
         if let Some(cue) = &self.cue {
             let _ = writeln!(out, "      cue on: refuses {cue}");
+        }
+        if let Some(line) = recheck_line(&item.recheck, 6) {
+            let _ = writeln!(out, "{line}");
         }
         if let Some(planned) = &self.artifact {
             for line in planned.lines() {
@@ -3344,6 +3407,10 @@ impl Context {
                     (None, _) => clip(&note.description, NOTE_CLIP),
                 };
                 let _ = writeln!(out, "{:>4}. {}{body}", note.id, note.mark());
+                // A note with a block of its own says why there.
+                if let Some(line) = recheck_line(&note.recheck, 6).filter(|_| elsewhere(note.id).is_none()) {
+                    let _ = writeln!(out, "{line}");
+                }
             }
         }
         out
@@ -4115,6 +4182,53 @@ mod tests {
         }
         assert!(text.contains("\nRecent notes, not attached to a task\n   8. a plain note\n\n"), "{text}");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// prime, context and search check the anchors of the decisions, gotchas
+    /// and procedures they show (task 1325): one whose ground moved since it
+    /// was written is marked to recheck, with why on the line under it --
+    /// listed among the lasting notes, quoted under its task, read in a
+    /// context or found by a search. One whose anchors hold, one superseded,
+    /// and a version where the reader's Claude Code is not known say nothing.
+    #[test]
+    fn the_views_say_to_recheck_a_note_whose_ground_moved() {
+        let (ekko, dir) = board("recheck-views");
+        let project = dir.join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "pub fn kept() {}\npub fn moved() {}\n").unwrap();
+        let ekko = ekko.in_folder(Some(project.clone()));
+        let note = |kind: &str, text: &str| serde_json::json!({"op": "create", "kind": kind, "text": text});
+        let mut ops = vec![
+            serde_json::json!({"op": "create", "text": "the work, which gotcha 3 explains"}),
+            serde_json::json!({"op": "create", "kind": "gotcha", "text": "Moved stays\nRests on: `src/lib.rs` \"pub fn moved\"", "attached_to": 1}),
+            note("gotcha", "Kept stays\nRests on: `src/lib.rs` \"pub fn kept\"; Claude Code 2.1.200"),
+            note("decision", "Old way\nRests on: `src/lib.rs` \"pub fn moved\""),
+            serde_json::json!({"op": "create", "kind": "decision", "text": "New way", "supersedes": 4}),
+        ];
+        ops.extend((6..=9).map(|n| note("procedure", &format!("step {n}"))));
+        write(&ekko, &ops);
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "pub fn kept() {}\npub fn shifted() {}\n").unwrap();
+        let why = "to recheck: `src/lib.rs` no longer holds \"pub fn moved\"";
+
+        let text = prime(&ekko, "board").unwrap().text();
+        let quoted = format!("       2. [gotcha, to recheck] Moved stays Rests on: `src/lib.rs` \"pub fn moved\"\n          {why}\n");
+        assert!(text.contains(&quoted), "under its task: {text}");
+        assert!(text.contains("\n   3. [gotcha] Kept stays\n   9. [procedure] step 9\n"), "no version is judged here: {text}");
+        let read = context(&ekko, "2").unwrap().text();
+        assert!(read.contains(&format!("      note, a gotcha \u{b7} My Board\n      {why}\n")), "{read}");
+        let with_task = context(&ekko, "1").unwrap().text();
+        assert!(with_task.contains(&format!("   2. [gotcha, to recheck] Moved stays\nRests on: `src/lib.rs` \"pub fn moved\"\n      {why}\n")), "{with_task}");
+        let found = search(&ekko, Some("stays"), &[], 10).unwrap().text();
+        assert!(found.contains(&format!("   2. [gotcha, to recheck] Moved stays Rests on: `src/lib.rs` \"pub fn moved\"\n      {why}\n")), "{found}");
+        assert!(found.contains("   3. [gotcha] Kept stays"), "{found}");
+        let found = search(&ekko, Some("way"), &[], 10).unwrap().text();
+        assert!(!found.contains("recheck"), "superseded, it is history: {found}");
+
+        let reading = Ekko::new(Storage::new(&dir).unwrap()).in_folder(Some(project)).with_claude_code(Some("2.1.300".into()));
+        let text = prime(&reading, "board").unwrap().text();
+        assert!(text.contains("\n   3. [gotcha, to recheck] Kept stays\n      to recheck: seen with Claude Code 2.1.200, now 2.1.300\n"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

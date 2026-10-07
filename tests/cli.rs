@@ -409,6 +409,44 @@ fn the_terminal_says_what_a_notes_rests_on_line_does_not_hold() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// The terminal's prime and context check a note's anchors as they show it
+/// (task 1325): once its file no longer holds the words, the note is marked
+/// to recheck, with why. The terminal judges no version: only a session's
+/// client says which Claude Code reads.
+#[test]
+fn the_terminal_says_to_recheck_a_note_whose_ground_moved() {
+    let home = temp_ekko_dir();
+    let app = home.join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src").join("lib.rs"), "pub fn kept() {}\n").unwrap();
+    let ekko = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(&app)
+            .env("HOME", &home)
+            .env("EKKO_TERMINAL", "none")
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .output()
+            .expect("failed to run ekko");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    ekko(&["init"]);
+    ekko(&["--note", "--kind", "gotcha", "Kept stays\nRests on: `src/lib.rs` \"pub fn kept\"; Claude Code 2.1.200"]);
+    let read = ekko(&["--context", "1"]);
+    assert!(!read.contains("recheck"), "{read}");
+
+    fs::write(app.join("src").join("lib.rs"), "pub fn renamed() {}\n").unwrap();
+    let why = "      to recheck: `src/lib.rs` no longer holds \"pub fn kept\"\n";
+    let read = ekko(&["--context", "1"]);
+    assert!(read.contains(&format!("      note, a gotcha \u{b7} My Board\n{why}")), "{read}");
+    let prime = ekko(&["--prime"]);
+    assert!(prime.contains(&format!("\n   1. [gotcha, to recheck] Kept stays\n{why}")), "{prime}");
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// A lone `-` takes the description from stdin, verbatim: apostrophes,
 /// quotes and newlines kept, and a first word like `@x` or `d:` not read as a
 /// board or a due date. A `-` among other words is only a word, and stdin is

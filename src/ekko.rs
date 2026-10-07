@@ -661,6 +661,11 @@ pub struct Ekko {
     /// answer linking two projects is written (task 811). `None` for the
     /// default board and one opened through EKKO_DIR, which link to nothing.
     pub(crate) linkable: Option<(PathBuf, crate::project::Project)>,
+    /// The version of Claude Code the session reading through this handle
+    /// runs, as its MCP client said (task 1325): what a note's `Claude Code`
+    /// anchor is judged against. `None` in the terminal and for any other
+    /// client, which judges no version.
+    pub(crate) claude_code: Option<String>,
 }
 
 /// What the words given to `--task` or `--note` say: the `@boards`, the
@@ -676,7 +681,7 @@ struct Created {
 
 impl Ekko {
     pub fn new(storage: Storage) -> Self {
-        Ekko { storage, actor: None, folder: None, linkable: None }
+        Ekko { storage, actor: None, folder: None, linkable: None, claude_code: None }
     }
 
     /// This handle, writing for `actor`.
@@ -688,6 +693,13 @@ impl Ekko {
     /// This handle, for the board of the project in `folder`.
     pub fn in_folder(mut self, folder: Option<PathBuf>) -> Self {
         self.folder = folder;
+        self
+    }
+
+    /// This handle, read by a session of Claude Code `version`, as its MCP
+    /// client said; `None` judges no version.
+    pub fn with_claude_code(mut self, version: Option<String>) -> Self {
+        self.claude_code = version;
         self
     }
 

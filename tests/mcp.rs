@@ -490,6 +490,64 @@ fn a_typed_notes_rests_on_line_is_read_and_the_reply_names_what_does_not_hold() 
     fs::remove_dir_all(&home).ok();
 }
 
+/// The version of Claude Code a session runs is the one its client says
+/// (task 1325): in initialize under the handshake, for every call after it,
+/// and under 2026-07-28 on each request, which no earlier one stands in for.
+/// A note seen with an older version is marked to recheck in what the
+/// session reads, the resources server's included; another client, or a
+/// request that names none, judges no version.
+#[test]
+fn a_note_seen_with_an_older_claude_code_is_marked_to_recheck() {
+    let home = temp_home();
+    let initialize = |name: &str| {
+        request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": name, "version": "2.1.292"}}))
+    };
+    let why = "      to recheck: seen with Claude Code 2.1.200, now 2.1.292\n";
+    let handshake = session(
+        &home,
+        &[
+            initialize("claude-code"),
+            call(2, "create", json!({"kind": "gotcha", "text": "A trap\nRests on: Claude Code 2.1.200"})),
+            call(3, "context", json!({"item": 1})),
+            call(4, "prime", json!({})),
+        ],
+    );
+    assert!(text(&handshake["3"]).contains(&format!("      note, a gotcha \u{b7} My Board\n{why}")), "{}", text(&handshake["3"]));
+    assert!(text(&handshake["4"]).contains(&format!("\n   1. [gotcha, to recheck] A trap\n{why}")), "{}", text(&handshake["4"]));
+    let other = session(&home, &[initialize("claude-code-imitation"), call(2, "context", json!({"item": 1}))]);
+    assert!(!text(&other["2"]).contains("recheck"), "{}", text(&other["2"]));
+
+    let meta = |info: Option<Value>| {
+        let mut meta = json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}});
+        if let Some(info) = info {
+            meta["io.modelcontextprotocol/clientInfo"] = info;
+        }
+        meta
+    };
+    let claude_code = json!({"name": "claude-code", "title": "Claude Code", "version": "2.1.301"});
+    // A process may serve both revisions: the handshake's version is not a
+    // 2026-07-28 request's.
+    let modern = session(
+        &home,
+        &[
+            initialize("claude-code"),
+            request(2, "tools/call", json!({"name": "search", "arguments": {"text": "trap"}, "_meta": meta(Some(claude_code))})),
+            request(3, "tools/call", json!({"name": "search", "arguments": {"text": "trap"}, "_meta": meta(None)})),
+        ],
+    );
+    let found = text(&modern["2"]);
+    assert!(found.contains("   1. [gotcha, to recheck] A trap Rests on: Claude Code 2.1.200\n      to recheck: seen with Claude Code 2.1.200, now 2.1.301\n"), "{found}");
+    assert!(!text(&modern["3"]).contains("recheck"), "{}", text(&modern["3"]));
+
+    let mut resources = Live::start(&home, &["--mcp", "--resources"]);
+    resources.ask(initialize("claude-code"));
+    let read = resources.ask(request(2, "resources/read", json!({"uri": "item://1"})));
+    let read = read["result"]["contents"][0]["text"].as_str().unwrap_or_else(|| panic!("{read}"));
+    assert!(read.contains(why), "{read}");
+    resources.stop();
+    fs::remove_dir_all(&home).ok();
+}
+
 /// The waiting state over stdio: set_state takes it, next and a write's reply
 /// leave the task out as work to take up, prime and search list it, and the
 /// schema an agent reads offers it.
