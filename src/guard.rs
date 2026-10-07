@@ -5,7 +5,9 @@
 //! PreToolUse hook on Bash, refuses each call that matches it, with the
 //! gotcha's text as the reason. The match is against the calls the command
 //! parses into (`crate::shell`), never its text, so a here-document or a
-//! memory file that names the call passes.
+//! memory file that names the call passes. A gotcha marked to recheck
+//! refuses all the same, since only the user turns a cue off, and its
+//! reason says why it may be stale (task 1328).
 //!
 //! A cue on a project's board guards the calls that run inside the project's
 //! folder, and one on the default board the whole machine; a cue may name a
@@ -403,8 +405,12 @@ fn record(home: &Path, seen: &Seen, session: Option<&Process>, code: &str, reaso
     });
     refused.at = now;
     for reason in reasons {
-        if !refused.reasons.contains(reason) {
-            refused.reasons.push(reason.clone());
+        // A cue's reason replaces the one it gave before: what it says of
+        // its gotcha's anchors moves with them (task 1328).
+        let same = |kept: &String| kept == reason || cue_named(reason).is_some_and(|cue| cue_named(kept) == Some(cue));
+        match refused.reasons.iter().position(same) {
+            Some(at) => refused.reasons[at] = reason.clone(),
+            None => refused.reasons.push(reason.clone()),
         }
     }
     write_atomically(&path, &serde_json::to_vec_pretty(&refused).unwrap_or_default())?;
@@ -538,13 +544,37 @@ fn cue_reasons(home: &Path, index: &Index, seen: &Seen) -> Vec<String> {
         .map(|cue| {
             let folder = folders.iter().find(|board| board.dir == cue.board).and_then(|board| board.folder.as_deref());
             format!(
-                "ekko gotcha {}: its cue, which the user turned on, refuses {}. The gotcha:\n{}",
+                "{CUE_REASON}{}: its cue, which the user turned on, refuses {}.{} The gotcha:\n{}",
                 cue.id,
                 described(&cue.cue, folder),
+                stale(cue, folder),
                 clipped(&cue.text, 3_000)
             )
         })
         .collect()
+}
+
+/// How the reason a cue refuses with opens, before its gotcha's id.
+const CUE_REASON: &str = "ekko gotcha ";
+
+/// The words that open `reason`, when a cue of ekko's gave it: `ekko gotcha`
+/// and the gotcha's id.
+fn cue_named(reason: &str) -> Option<&str> {
+    let id = reason.strip_prefix(CUE_REASON)?.split(':').next()?;
+    (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())).then(|| &reason[..CUE_REASON.len() + id.len()])
+}
+
+/// What a refusal says of a cue whose gotcha is marked to recheck (task
+/// 1328): why, as its anchors read now from its board, and that the cue
+/// refuses all the same. Nothing for a gotcha whose anchors hold, or whose
+/// board cannot be read: the call is refused either way.
+fn stale(cue: &Indexed, folder: Option<&Path>) -> String {
+    let Ok(all) = Storage::new(&cue.board).and_then(|storage| storage.get_shared()) else { return String::new() };
+    let why = crate::agent::recheck_of(&all, cue.id, folder);
+    if why.is_empty() {
+        return String::new();
+    }
+    format!(" It is marked to recheck: {}. The cue refuses all the same: only the user turns it off.", why.join("; "))
 }
 
 /// What a guard's refusal ends with, after its own `reasons`: those of
@@ -836,6 +866,44 @@ mod tests {
         assert!(at("make deploy", &other) && !at("make deploy", &project), "a cue's own folder wins");
         let reason = refused(&hook_reply(&home, &event("cargo fmt --all", &project, "t"), &session)).unwrap();
         assert!(reason.contains(&format!("run in {} or under it, this board's project", project.display())), "{reason}");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A cue on a gotcha marked to recheck still refuses, and its refusal
+    /// names why the gotcha may be stale (task 1328): the anchors are read
+    /// as the call is refused, from the project's folder, as a view reads
+    /// them -- one that holds says nothing, a superseded gotcha is history
+    /// -- and only the user turns the cue off.
+    #[test]
+    fn a_cue_on_a_gotcha_to_recheck_still_refuses_and_says_why() {
+        let home = home("stale");
+        let (session, _, _) = test_sessions();
+        let project = home.join("work/p");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        crate::project::init(&home, &project, None, Some("p"), 0).unwrap();
+        let project = std::fs::canonicalize(&project).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        let board = project.join(".ekko");
+        let ekko = ekko_at(&board, None).in_folder(Some(project.clone()));
+        let text = "Never force-push main\nRests on: `src/lib.rs` \"pub fn kept\"";
+        let id = apply(&ekko, json!({"op": "create", "kind": "gotcha", "text": text})).unwrap()[0];
+        let mut data = ekko.storage.get().unwrap();
+        data.get_mut(&id).unwrap().cue = Some(CueOn { cue: cue("git", &["push", "--force"], None), question: "q".into(), at: 0 });
+        ekko.storage.set(&data).unwrap();
+        let reason = || refused(&hook_reply(&home, &event("git push --force", &project, "t"), &session));
+        let holding = reason().expect("refused");
+        assert!(!holding.contains("recheck") && holding.contains(". The gotcha:\nNever force-push main"), "{holding}");
+
+        std::fs::write(project.join("src/lib.rs"), "pub fn renamed() {}\n").unwrap();
+        let stale = reason().expect("refused all the same");
+        let why = ". It is marked to recheck: `src/lib.rs` no longer holds \"pub fn kept\". The cue refuses all the same: only the user turns it off. \
+                   The gotcha:\nNever force-push main";
+        assert!(stale.contains(why) && stale.contains("allow set to \""), "{stale}");
+        assert_eq!(stale.matches(CUE_REASON).count(), 1, "the reason it gave before is replaced: {stale}");
+
+        apply(&ekko, json!({"op": "create", "kind": "gotcha", "text": "Never force-push a shared branch", "supersedes": id})).unwrap();
+        let history = reason().expect("refused");
+        assert!(!history.contains("recheck") && history.matches(CUE_REASON).count() == 1, "superseded, it is history: {history}");
         std::fs::remove_dir_all(&home).ok();
     }
 

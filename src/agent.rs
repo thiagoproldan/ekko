@@ -1605,6 +1605,16 @@ pub struct Link {
     pub description: String,
 }
 
+/// Why the anchors of item `id` of `all` say to recheck it, read now as the
+/// views read them, from `folder`, the board's project (task 1325): what
+/// the refusal of a cue on it names (task 1328). No version is judged: no
+/// hook input carries the one the session runs.
+pub(crate) fn recheck_of(all: &Arc<ItemMap>, id: u32, folder: Option<&Path>) -> Vec<String> {
+    let mut reader = Reader::shared(all, &[]);
+    reader.folder = folder.map(Path::to_path_buf);
+    all.get(&id).map(|item| reader.recheck(item)).unwrap_or_default()
+}
+
 /// The neighbourhood of one item, given by display id or uid.
 pub fn context(ekko: &Ekko, target: &str) -> Result<Context, EkkoError> {
     Ok(contexts(ekko, &[target.to_string()])?.remove(0))
