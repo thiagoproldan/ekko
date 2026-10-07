@@ -2462,9 +2462,14 @@ const SCRIPT: &str = r##"(function () {
     // Shown while the strip overflows, each off at the end it reaches.
     var ends = arrows.querySelectorAll("button");
     var fit = function () {
+      var had = document.activeElement;
       arrows.hidden = strip.scrollWidth <= strip.clientWidth;
       ends[0].disabled = strip.scrollLeft <= 0;
       ends[1].disabled = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 1;
+      // An arrow gone out of use under the focus leaves it on the other,
+      // which goes back the way it came, not on the page (task 1408).
+      var other = had === ends[0] ? ends[1] : had === ends[1] ? ends[0] : null;
+      if (other && had.disabled && !other.disabled && !arrows.hidden) other.focus({ preventScroll: true });
     };
     addEventListener("resize", fit);
     strip.addEventListener("scroll", fit);
@@ -2606,11 +2611,15 @@ const SCRIPT: &str = r##"(function () {
       if (card) track.scrollBy({ left: card.getBoundingClientRect().left - edge(track), behavior: smooth() });
     };
     var update = function () {
-      var group = shown(), track = group.querySelector(".track");
+      var group = shown(), track = group.querySelector(".track"), had = document.activeElement;
       if (!count || arrows.length < 2) return;
       count.textContent = pad(at(group) + 1) + " / " + pad(cards(group).length);
       arrows[0].disabled = track.scrollLeft <= 1;
       arrows[1].disabled = track.scrollLeft + track.clientWidth >= track.scrollWidth - 2;
+      // An arrow gone out of use under the focus leaves it on the track,
+      // where the arrow keys go on, as the Risks' leave it on their stack
+      // (task 1408).
+      if ((had === arrows[0] || had === arrows[1]) && had.disabled) track.focus({ preventScroll: true });
     };
     var open = function (card, wide) {
       var more = card.querySelector(".more");
@@ -4017,6 +4026,14 @@ const SCRIPT: &str = r##"(function () {
   var VERDICTS = [["comment", "Comment"], ["approve", "Approve"], ["changes", "Request changes"]];
   var summary = "", chosen = "comment", DOT = " " + String.fromCharCode(183) + " ";
   function pendingMine() { return window.ekkoPending ? ekkoPending() : []; }
+  // Why Approve cannot be pressed when no question asks for it: in its
+  // title, and said in the fold too, since a title shows to a pointer only
+  // (task 1349).
+  function unapproved() {
+    return asked.changes
+      ? "Question " + asked.changes.id + " asks to approve version " + asked.changes.version + ": the session asks again"
+      : "No question asks to approve this plan: the session asks when it is ready";
+  }
   function verdicts() {
     themesRow.textContent = "";
     themesRow.setAttribute("aria-label", "Verdict");
@@ -4030,15 +4047,15 @@ const SCRIPT: &str = r##"(function () {
       chip.textContent = verdict[1];
       if (verdict[0] === "approve" && !asked.approve) {
         chip.disabled = true;
-        chip.title = asked.changes
-          ? "Question " + asked.changes.id + " asks to approve version " + asked.changes.version + ": the session asks again"
-          : "No question asks to approve this plan: the session asks when it is ready";
+        chip.title = unapproved();
+        chip.setAttribute("aria-describedby", "unapproved");
       }
       themesRow.appendChild(chip);
     });
   }
   // What the review sends and answers, said in the fold: Approve's tasks
-  // listed, and once it was pressed, what the next press does.
+  // listed, and once it was pressed, what the next press does; or, when
+  // Approve cannot be pressed, why.
   function told() {
     var pending = pendingMine().length;
     quoteText.textContent = "Review of version " + asked.version + DOT + (pending === 1 ? "1 pending comment" : (pending || "No") + " pending comments");
@@ -4066,6 +4083,10 @@ const SCRIPT: &str = r##"(function () {
         : "No question waits on an answer: the review goes to the board as it is.");
     } else {
       say("Comment sends the pending comments, and answers no question.");
+    }
+    if (!asked.approve) {
+      say(unapproved() + ".");
+      tell.lastChild.id = "unapproved";
     }
   }
   function review(verdict) {
@@ -4207,6 +4228,31 @@ const SCRIPT: &str = r##"(function () {
   document.addEventListener("pointerdown", function (event) {
     // A comment being written stays open while other words are picked.
     if (expanded && !writing() && !bar.contains(event.target)) close(false);
+  });
+  // A focus gone elsewhere, as Tab takes it out of the panel, does what a
+  // click elsewhere does: left open, the panel hid where the focus went
+  // (task 1349, question 1405).
+  document.addEventListener("focusin", function (event) {
+    if (expanded && !writing() && !bar.contains(event.target)) close(false);
+  });
+  // What Tab focuses comes clear of the pill, as the root's
+  // scroll-padding-bottom asks. Chromium's own scroll does it; Firefox's
+  // leaves a focus already inside the window where it is, under the pill or
+  // not, so the window is moved up by what it lacks (task 1349). By its
+  // box's top and bottom alone: scrollIntoView moved nothing in Firefox, 5
+  // Tabs of 6, for What is known's track still waiting 560 px to the side,
+  // as it does until the frame after a scroll brings the scene. The Tab is
+  // forgotten once its focus has moved, so a click later is no Tab.
+  var tabbed = false;
+  addEventListener("keydown", function (event) {
+    tabbed = event.key === "Tab";
+    if (tabbed) setTimeout(function () { tabbed = false; });
+  }, true);
+  document.addEventListener("focusin", function (event) {
+    if (!tabbed || event.target.closest("#bar, dialog, .toc, .mark")) return;
+    tabbed = false;
+    var box = event.target.getBoundingClientRect(), clear = innerHeight - parseFloat(getComputedStyle(document.documentElement).scrollPaddingBottom);
+    if (box.bottom > clear && box.height <= clear) scrollBy(0, box.bottom - clear);
   });
   // "/" opens the pill, and R the review where the page writes; not while a
   // note's sheet holds the page.
@@ -5210,7 +5256,11 @@ const STYLE: &str = r##"
 /* In the dark theme a dark scene goes to black, the case study's deepest. */
 :root[data-theme="dark"][data-mode="dark"] { --bg: #000; --chip: #191919; --raise: #191919; --card: #191919; --node: #191919; }
 
-html { background: var(--page); }
+/* What a focus brings into view, as Tab moves it, stops clear of the pill
+   and the round Review button beside it: their top edge is 116 px up the
+   window, 60 under them and 56 high, and 16 more (WCAG's technique C43,
+   task 1349). In Firefox the page's script asks for it again. */
+html { background: var(--page); scroll-padding-bottom: 132px; }
 body { margin: 0; overflow-x: clip; background: var(--bg); color: var(--fg); font: 400 16px/24px var(--sans); -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
 a { color: inherit; }
 button { font: inherit; color: inherit; }
@@ -5223,8 +5273,13 @@ body:not([data-writes]) .writes-only { display: none !important; }
 /* No column beside the text, no head above it and no bar (tasks 1337,
    1367): what they held opens the first scene, heads History, or is run
    from the pill. A scene's content lines up on AKQA's widest line, and a
-   paragraph keeps to the measure. */
-.page { padding: 0 0 240px; }
+   paragraph keeps to the measure. What waits beside its scene, as What is
+   known's track before it slides in, is cut at the window's edge, so the
+   page is never wider than the window: body's clip reaches the window as
+   hidden, which a script and a focus still scroll and a phone still opens
+   wider (task 1403). A clip, unlike a hidden, scrolls nothing, so what
+   sticks inside keeps sticking. */
+.page { padding: 0 0 240px; overflow-x: clip; }
 .scene { position: relative; box-sizing: border-box; padding: clamp(96px, 14vh, 160px) max(var(--gutter), calc((100% - var(--wide)) / 2)); }
 .scene > * { max-width: var(--measure); }
 .scene > :is(h1, .opener, .bleed, .facts, .waits, .held) { max-width: none; }
@@ -5855,6 +5910,9 @@ dialog.side::backdrop { background: rgba(0, 0, 0, 0.32); }
   .numeral .out, .numeral .enter, .scene.close::before { animation: none; }
   .goal .held { position: static; min-height: 0; }
   .bar-surface::before, .bar-cursor, .bar-list .item.in, .kicker .state.waiting::before { animation: none; }
+  /* Stopped, the gleam would hold its highlight on the pill's bottom edge:
+     the ring is the even rim of the round button beside it (task 1349). */
+  .bar-surface::before { background: var(--bar-rim); }
 }
 /* A plain document: black on white whatever the theme or the scene, each
    scene as tall as what it holds, and nothing the page moves. What a scene
