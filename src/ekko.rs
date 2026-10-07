@@ -663,7 +663,8 @@ pub struct Ekko {
     pub(crate) linkable: Option<(PathBuf, crate::project::Project)>,
     /// The version of Claude Code the session reading through this handle
     /// runs, as its MCP client said (task 1325): what a note's `Claude Code`
-    /// anchor is judged against. `None` in the terminal and for any other
+    /// anchor is judged against, and what a write that finds a note still
+    /// true records (task 1326). `None` in the terminal and for any other
     /// client, which judges no version.
     pub(crate) claude_code: Option<String>,
 }
@@ -696,8 +697,8 @@ impl Ekko {
         self
     }
 
-    /// This handle, read by a session of Claude Code `version`, as its MCP
-    /// client said; `None` judges no version.
+    /// This handle, read and written by a session of Claude Code `version`,
+    /// as its MCP client said; `None` judges no version.
     pub fn with_claude_code(mut self, version: Option<String>) -> Self {
         self.claude_code = version;
         self
@@ -1269,7 +1270,8 @@ impl Ekko {
         crate::artifact::keep_versions(before, data, &changed, now);
         // A decision, gotcha or procedure whose text it changed has its
         // `Rests on:` line read again (task 1324), whatever wrote it too.
-        let rests_read = crate::anchors::keep(before, arrived, data, &changed, self.folder.as_deref(), self.actor.as_ref(), now);
+        let writer = crate::anchors::Writer { actor: self.actor.as_ref(), claude_code: self.claude_code.as_deref() };
+        let rests_read = crate::anchors::keep(before, arrived, data, &changed, self.folder.as_deref(), writer, now);
 
         let kept = self.storage.get_counters()?;
         let mut counters = kept.clone();

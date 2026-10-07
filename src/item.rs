@@ -650,6 +650,7 @@ pub struct Earlier {
 /// the line names, with what ekko found then, and each part of the line it
 /// could not read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RestsOn {
     /// When the line was read, in epoch milliseconds.
     pub at: i64,
@@ -661,6 +662,34 @@ pub struct RestsOn {
     pub anchors: Vec<Anchor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unread: Vec<Unread>,
+    /// The last recheck that found the note still true (task 1326), kept
+    /// through later writes while its text keeps a `Still true` line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub still_true: Option<StillTrue>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// A recheck that found a note still true: the write that added a `Still
+/// true` line to its text (task 1326). It answers what time moves -- a
+/// version of Claude Code up to the one it ran, a date to recheck after
+/// that it came after -- and not a path or words gone, which the line must
+/// name again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StillTrue {
+    /// When, in epoch milliseconds.
+    pub at: i64,
+    /// Whose write: the session's or the person's, as `created_by` records
+    /// them. Absent where the write names nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<crate::holder::Holder>,
+    /// The newest version of Claude Code a recheck of the note ran, as the
+    /// session's MCP client said; absent where none said, as in the terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code: Option<String>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -1840,7 +1869,8 @@ mod tests {
                 "at": 1790488518284_i64},
             "restsOn": {"at": 1790488580406_i64, "by": holder,
                 "anchors": [{"path": "src/item.rs", "words": "pub struct Item", "held": true, "line": 21}, {"claudeCode": "2.1.289"}],
-                "unread": [{"text": "the readme", "why": "an anchor is a path in backticks"}]},
+                "unread": [{"text": "the readme", "why": "an anchor is a path in backticks"}],
+                "stillTrue": {"at": 1790488580406_i64, "by": holder, "claudeCode": "2.1.292"}},
             "priority": 1
         }));
     }
@@ -1901,7 +1931,8 @@ mod tests {
         checked.sort();
         let expected = [
             "Allowance", "Anchor", "Answer", "Approving", "Artifact", "Comment", "Counters", "Cue", "Earlier", "Holder", "Item", "Linking", "Moved",
-            "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Step", "Unread", "Used", "Wait",
+            "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Step", "StillTrue", "Unread", "Used",
+            "Wait",
         ];
         assert_eq!(checked, expected, "the scan finds the structs it should");
     }

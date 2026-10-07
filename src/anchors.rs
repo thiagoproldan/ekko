@@ -26,6 +26,17 @@
 //! 1325): a path gone, words their file no longer holds, a date past, or a
 //! version older than the Claude Code reading say to recheck the note, which
 //! shows why and is never dropped.
+//!
+//! A recheck ends one of two ways (task 1326). A note found still true takes
+//! a line that starts with `Still true`, dated by convention -- `Still true,
+//! 2026-10-07: retried, the same failure` -- and the write that adds it
+//! reads the line again and records the recheck, with when, by whom and the
+//! Claude Code its session runs. The recheck answers what time moves: a
+//! version up to the one it ran, and a date to recheck after that it came
+//! after. A path gone, or words their file no longer holds, it does not
+//! answer: the line names what holds now, or leaves them out, as Swimm asks
+//! of a snippet whose code is gone. A note no longer true is superseded, and
+//! a superseded note is history, checked no more.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -34,7 +45,7 @@ use std::path::{Path, PathBuf};
 use chrono::{NaiveDate, TimeZone};
 
 use crate::holder::{Actor, Holder};
-use crate::item::{Anchor, Item, Knowledge, RestsOn, Unread};
+use crate::item::{Anchor, Item, Knowledge, RestsOn, StillTrue, Unread};
 use crate::storage::ItemMap;
 
 /// The words that open the line, in any case.
@@ -44,19 +55,36 @@ const OPENING: &str = "rests on:";
 const ANCHOR: &str =
     "an anchor is a path in backticks, a path and words in double quotes, Claude Code and its version, or recheck after a date";
 
+/// The words that open a line saying a recheck found the note still true,
+/// in any case.
+const STILL_TRUE: &str = "still true";
+
+/// Said to a recheck that leaves a path or words that do not hold.
+const UNANSWERED: &str =
+    "a Still true line answers a version or a date, not a path or words that do not hold: name what holds now, or take them out";
+
+/// Who writes: the session's or the person's actor, and the version of
+/// Claude Code the session runs, where its MCP client gave one.
+#[derive(Clone, Copy, Default)]
+pub struct Writer<'a> {
+    pub actor: Option<&'a Actor>,
+    pub claude_code: Option<&'a str>,
+}
+
 /// Reads the line again on each decision, gotcha or procedure among
 /// `changed` whose text this write changed, or which it made one of those
 /// kinds, and drops the record from any task or plain note among them; a
 /// note of a kind a later version added keeps what it had. `before` and
-/// `arrived` hold the items as they were, and `actor` writes. Returns the
-/// notes whose line it read.
+/// `arrived` hold the items as they were, and `writer` writes; a write that
+/// adds a `Still true` line records the recheck too. Returns the notes
+/// whose line it read.
 pub fn keep(
     before: &ItemMap,
     arrived: &ItemMap,
     data: &mut ItemMap,
     changed: &[u32],
     folder: Option<&Path>,
-    actor: Option<&Actor>,
+    writer: Writer<'_>,
     now: i64,
 ) -> Vec<u32> {
     let mut read = Vec::new();
@@ -75,12 +103,59 @@ pub fn keep(
         if old.is_some_and(|old| lasting(old) && old.description == item.description) {
             continue;
         }
-        item.rests_on = rests_on(&item.description, folder, now, || actor.map(|actor| actor.holder(now))).map(Box::new);
+        let mut rests = rests_on(&item.description, folder, now, || writer.actor.map(|actor| actor.holder(now)));
+        if let Some(rests) = rests.as_mut() {
+            rests.still_true = still_true(&item.description, old, writer, now);
+        }
+        item.rests_on = rests.map(Box::new);
         if item.rests_on.is_some() {
             read.push(*id);
         }
     }
     read
+}
+
+/// The recheck a note's `text` keeps after a write by `writer` at `now`
+/// (task 1326): this write's, where it added a `Still true` line to what
+/// the note said as `old`; else `old`'s, while such a line is left; else
+/// none.
+fn still_true(text: &str, old: Option<&Item>, writer: Writer<'_>, now: i64) -> Option<StillTrue> {
+    let said: Vec<&str> = text.lines().filter(|line| is_still_true(line)).collect();
+    if said.is_empty() {
+        return None;
+    }
+    let earlier = old.and_then(|old| old.rests_on.as_deref()).and_then(|rests| rests.still_true.clone());
+    let was = old.map_or("", |old| old.description.as_str());
+    if said.iter().all(|line| was.lines().any(|then| then == *line)) {
+        return earlier;
+    }
+    // The newest version a recheck ran: an earlier one's stays where this
+    // one gave none, or an older one.
+    let claude_code = match (writer.claude_code, earlier.and_then(|earlier| earlier.claude_code)) {
+        (Some(now), Some(then)) if newer(&then, now) => Some(then),
+        (Some(now), _) => Some(now.to_string()),
+        (None, then) => then,
+    };
+    Some(StillTrue { at: now, by: writer.actor.map(|actor| actor.holder(now)), claude_code, unknown: Default::default() })
+}
+
+/// Whether `line` starts with `Still true`, in any case and however
+/// indented, with no letter or digit running on from it.
+fn is_still_true(line: &str) -> bool {
+    let line = line.trim_start();
+    line.get(..STILL_TRUE.len()).is_some_and(|head| head.eq_ignore_ascii_case(STILL_TRUE))
+        && !line[STILL_TRUE.len()..].starts_with(char::is_alphanumeric)
+}
+
+/// Whether the recheck `still` came after `date`, a date to recheck after
+/// written YYYY-MM-DD, and so answers it.
+fn answers(still: &StillTrue, date: &str) -> bool {
+    NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok_and(|date| day_of(still.at) > date)
+}
+
+/// The day, here, of `at` in epoch milliseconds.
+fn day_of(at: i64) -> NaiveDate {
+    chrono::Local.timestamp_millis_opt(at).single().unwrap_or_else(chrono::Local::now).date_naive()
 }
 
 /// Whether `item` is a decision, gotcha or procedure: a note of a kind this
@@ -96,9 +171,9 @@ pub fn rests_on(text: &str, folder: Option<&Path>, now: i64, by: impl FnOnce() -
     if lines.is_empty() {
         return None;
     }
-    let today = chrono::Local.timestamp_millis_opt(now).single().unwrap_or_else(chrono::Local::now).date_naive();
+    let today = day_of(now);
     let files = Files::default();
-    let mut rests = RestsOn { at: now, by: by(), anchors: Vec::new(), unread: Vec::new(), unknown: Default::default() };
+    let mut rests = RestsOn { at: now, by: by(), anchors: Vec::new(), unread: Vec::new(), still_true: None, unknown: Default::default() };
     for line in lines {
         let parts = split(line);
         if parts.is_empty() {
@@ -115,16 +190,32 @@ pub fn rests_on(text: &str, folder: Option<&Path>, now: i64, by: impl FnOnce() -
 }
 
 /// What `rests` found not to hold, or could not read, each in a few words:
-/// what the reply to the write says.
+/// what the reply to the write says. A date a recheck came after is
+/// answered, and a recheck made by this very write is told what it leaves
+/// to recheck (task 1326).
 pub fn problems(rests: &RestsOn) -> Vec<String> {
     let mut said = Vec::new();
+    let still = rests.still_true.as_ref();
     for anchor in rests.anchors.iter().filter(|anchor| anchor.held == Some(false)) {
         said.push(match (&anchor.path, &anchor.words, &anchor.recheck_after) {
             (Some(path), Some(words), _) => format!("`{path}` does not hold \"{words}\""),
             (Some(path), None, _) => format!("`{path}` is not there"),
+            (None, _, Some(date)) if still.is_some_and(|still| answers(still, date)) => continue,
             (None, _, Some(date)) => format!("recheck after {date} is past"),
             _ => continue,
         });
+    }
+    // A recheck this very write made is taken at the moment the line is read.
+    if let Some(still) = still.filter(|still| still.at == rests.at) {
+        if rests.anchors.iter().any(|anchor| anchor.path.is_some() && anchor.held == Some(false)) {
+            said.push(UNANSWERED.to_string());
+        }
+        let seen = rests.anchors.iter().find_map(|anchor| anchor.claude_code.as_deref()).filter(|_| still.claude_code.is_none());
+        if let Some(seen) = seen {
+            said.push(format!(
+                "this Still true knew no Claude Code version, so the note is still seen with {seen}: write the version you checked with in its place"
+            ));
+        }
     }
     for unread in &rests.unread {
         said.push(match unread.text.as_str() {
@@ -139,9 +230,10 @@ pub fn problems(rests: &RestsOn) -> Vec<String> {
 /// (task 1325), each in a few words: an anchor that does not hold today --
 /// worded by whether it held when `kept`, the record of the write, read it
 /// -- and a version of Claude Code older than `claude_code`, the one the
-/// session reading runs, where it is known. Empty when every anchor holds.
-/// A part that names no anchor says nothing here: the reply to the write
-/// that stored it did.
+/// session reading runs, where it is known. The recheck `kept` holds, if
+/// any, answers a version up to the one it ran and a date it came after
+/// (task 1326). Empty when every anchor holds. A part that names no anchor
+/// says nothing here: the reply to the write that stored it did.
 pub fn recheck(
     text: &str,
     kept: Option<&RestsOn>,
@@ -150,16 +242,21 @@ pub fn recheck(
     today: NaiveDate,
     files: &Files,
 ) -> Vec<String> {
+    let still = kept.and_then(|kept| kept.still_true.as_ref());
     let mut why = Vec::new();
     for part in text.lines().filter_map(opened).flat_map(split) {
         let Ok(now) = anchor(part, folder, today, files) else { continue };
         if let Some(seen) = &now.claude_code {
-            if let Some(reading) = claude_code.filter(|reading| newer(reading, seen)) {
-                why.push(format!("seen with Claude Code {seen}, now {reading}"));
+            let rechecked = still.and_then(|still| still.claude_code.as_deref()).filter(|then| newer(then, seen));
+            if let Some(reading) = claude_code.filter(|reading| newer(reading, rechecked.unwrap_or(seen))) {
+                why.push(match rechecked {
+                    Some(then) => format!("still true with Claude Code {then}, now {reading}"),
+                    None => format!("seen with Claude Code {seen}, now {reading}"),
+                });
             }
             continue;
         }
-        if now.held != Some(false) {
+        if now.held != Some(false) || still.zip(now.recheck_after.as_deref()).is_some_and(|(still, date)| answers(still, date)) {
             continue;
         }
         let held = kept.is_some_and(|kept| {
@@ -595,6 +692,125 @@ mod tests {
         assert!(newer("2.1.290-beta.1", "2.1.289") && newer("v2.1.290", "2.1.289") && !newer("2", "2.0.1"));
     }
 
+    /// A gotcha whose text is `text`, as item 1 of a board.
+    fn gotcha(text: &str) -> ItemMap {
+        let mut note = Item::new_note(1, text.into(), vec!["My Board".into()]);
+        note.knowledge = Some(Knowledge::Gotcha);
+        ItemMap::from([(1, note)])
+    }
+
+    /// Item 1 of `data`, its text changed by `change` in a write by
+    /// `writer` at `at`.
+    fn edit(data: &mut ItemMap, change: impl FnOnce(&mut String), folder: Option<&Path>, writer: Writer<'_>, at: i64) {
+        let before = data.clone();
+        change(&mut data.get_mut(&1).unwrap().description);
+        keep(&before, &ItemMap::new(), data, &[1], folder, writer, at);
+    }
+
+    /// Noon, `days` after `noon`.
+    fn days_on(days: i64) -> i64 {
+        noon() + days * 86_400_000
+    }
+
+    /// A write that adds a `Still true` line records the recheck, with when,
+    /// by whom and the Claude Code its session ran (task 1326), and a read
+    /// says no more to recheck what it answers: a version up to the one it
+    /// ran, a date it came after. A newer version says to recheck again; a
+    /// later write keeps the recheck while the line stays, a later recheck
+    /// keeps the newest version, and a recheck that knew no version, as in
+    /// the terminal, answers none and is told so.
+    #[test]
+    fn a_still_true_line_answers_a_newer_version_and_a_date_it_came_after() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let session = |actor, version| Writer { actor: Some(actor), claude_code: Some(version) };
+        let read = |data: &ItemMap, claude_code: &str, today: NaiveDate| {
+            let note = &data[&1];
+            recheck(&note.description, note.rests_on.as_deref(), None, Some(claude_code), today, &Files::default())
+        };
+        let still = |data: &ItemMap| data[&1].rests_on.as_deref().unwrap().still_true.clone();
+        let mut data = gotcha("A trap\nRests on: Claude Code 2.1.200; recheck after 2026-10-01; recheck after 2026-10-07");
+        keep(&ItemMap::new(), &ItemMap::new(), &mut data, &[1], None, session(&me, "2.1.292"), noon());
+        assert_eq!(read(&data, "2.1.292", day(2026, 10, 7)), ["seen with Claude Code 2.1.200, now 2.1.292", "recheck after 2026-10-01 is past"]);
+        assert_eq!(still(&data), None, "written without the line");
+
+        edit(&mut data, |text| text.push_str("\nStill true, 2026-10-07: retried, the same failure"), None, session(&me, "2.1.292"), noon());
+        let rechecked = still(&data).expect("the recheck is recorded");
+        assert_eq!((rechecked.at, rechecked.claude_code.as_deref()), (noon(), Some("2.1.292")));
+        assert!(rechecked.by.as_ref().is_some_and(|by| me.is(by)), "{:?}", rechecked.by);
+        assert_eq!(read(&data, "2.1.292", day(2026, 10, 7)), Vec::<String>::new());
+        assert!(problems(data[&1].rests_on.as_deref().unwrap()).is_empty());
+        assert_eq!(read(&data, "2.1.300", day(2026, 10, 7)), ["still true with Claude Code 2.1.292, now 2.1.300"]);
+        assert_eq!(read(&data, "2.1.292", day(2026, 10, 8)), ["recheck after 2026-10-07 is past"], "a recheck on the day comes after nothing");
+
+        edit(&mut data, |text| *text = text.replacen("A trap", "A trap, restated", 1), None, session(&other, "2.1.250"), days_on(1));
+        assert_eq!(still(&data), Some(rechecked.clone()), "a later write keeps the recheck while its line stays");
+        edit(&mut data, |text| text.push_str("\nStill true, 2026-10-08"), None, session(&other, "2.1.250"), days_on(1));
+        let again = still(&data).unwrap();
+        assert_eq!((again.at, again.claude_code.as_deref()), (days_on(1), Some("2.1.292")), "the newest version a recheck ran");
+        assert!(again.by.as_ref().is_some_and(|by| other.is(by)), "{:?}", again.by);
+        assert_eq!(read(&data, "2.1.292", day(2026, 10, 9)), Vec::<String>::new(), "the 8th came after the 7th");
+        edit(&mut data, |text| *text = text.lines().filter(|line| !is_still_true(line)).collect::<Vec<_>>().join("\n"), None, session(&me, "2.1.292"), days_on(1));
+        assert_eq!(still(&data), None, "the lines gone, so is the recheck");
+
+        let mut data = gotcha("A trap\nRests on: Claude Code 2.1.200; recheck after 2026-10-01");
+        keep(&ItemMap::new(), &ItemMap::new(), &mut data, &[1], None, Writer::default(), noon());
+        edit(&mut data, |text| text.push_str("\n  still TRUE"), None, Writer::default(), noon());
+        assert_eq!((still(&data).map(|still| still.claude_code), read(&data, "2.1.292", day(2026, 10, 7))), (Some(None), vec![
+            "seen with Claude Code 2.1.200, now 2.1.292".to_string()
+        ]));
+        assert_eq!(
+            problems(data[&1].rests_on.as_deref().unwrap()),
+            ["this Still true knew no Claude Code version, so the note is still seen with 2.1.200: write the version you checked with in its place"]
+        );
+        edit(&mut data, |text| *text = text.replacen("A trap", "A trap, restated", 1), None, Writer::default(), days_on(1));
+        assert!(problems(data[&1].rests_on.as_deref().unwrap()).is_empty(), "a later write is no recheck, and its date stays answered");
+
+        for line in ["Still true", "Still true, 2026-10-07: retried", "Still true: yes", "Still true (2026-10-07)", "  sTILL true."] {
+            assert!(is_still_true(line), "{line}");
+        }
+        for line in ["Still trueish", "It is still true", "Still-true", "Still", "Still truth"] {
+            assert!(!is_still_true(line), "{line}");
+        }
+    }
+
+    /// A recheck does not answer a path gone, or words their file no longer
+    /// holds (task 1326): the note still says to recheck them, now as the
+    /// recheck found them, and the reply to it says to name what holds now.
+    /// Named anew, they hold, and the recheck stays.
+    #[test]
+    fn a_still_true_line_answers_no_path_or_words_that_do_not_hold() {
+        let dir = project("still-words");
+        std::fs::write(dir.join("src/old.rs"), "x").unwrap();
+        let mut data = gotcha("Keep it\nRests on: `src/storage.rs` \"pub fn keep_unkept_version\"; `src/old.rs`");
+        keep(&ItemMap::new(), &ItemMap::new(), &mut data, &[1], Some(&dir), Writer::default(), noon());
+        std::fs::write(dir.join("src/storage.rs"), "pub fn keep_kept_version() {}\n").unwrap();
+        std::fs::remove_file(dir.join("src/old.rs")).unwrap();
+        let read = |data: &ItemMap| {
+            let note = &data[&1];
+            recheck(&note.description, note.rests_on.as_deref(), Some(&dir), None, day(2026, 10, 7), &Files::default())
+        };
+        assert_eq!(read(&data), ["`src/storage.rs` no longer holds \"pub fn keep_unkept_version\"", "`src/old.rs` is gone"]);
+
+        edit(&mut data, |text| text.push_str("\nStill true, 2026-10-07: renamed, the same rule"), Some(&dir), Writer::default(), noon());
+        assert_eq!(read(&data), ["`src/storage.rs` does not hold \"pub fn keep_unkept_version\"", "`src/old.rs` is not there"], "still to recheck");
+        let rests = data[&1].rests_on.as_deref().unwrap();
+        assert!(rests.still_true.is_some());
+        assert_eq!(
+            problems(rests),
+            ["`src/storage.rs` does not hold \"pub fn keep_unkept_version\"", "`src/old.rs` is not there", UNANSWERED]
+        );
+        edit(&mut data, |text| *text = text.replacen("Keep it", "Keep it so", 1), Some(&dir), Writer::default(), days_on(1));
+        let unheld = ["`src/storage.rs` does not hold \"pub fn keep_unkept_version\"", "`src/old.rs` is not there"];
+        assert_eq!(problems(data[&1].rests_on.as_deref().unwrap()), unheld, "a later write is no recheck");
+
+        let named = |text: &mut String| *text = text.replace("keep_unkept_version", "keep_kept_version").replace("; `src/old.rs`", "");
+        edit(&mut data, named, Some(&dir), Writer::default(), days_on(1));
+        assert_eq!(read(&data), Vec::<String>::new(), "named anew");
+        let rests = data[&1].rests_on.as_deref().unwrap();
+        assert_eq!((rests.still_true.as_ref().map(|still| still.at), problems(rests)), (Some(noon()), vec![]), "the recheck stays");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A kind a later version added is no decision, gotcha or procedure
     /// (task 845): a write leaves its line unread, and whatever record that
     /// version keeps on it as it was.
@@ -604,7 +820,7 @@ mod tests {
         let mut note = Item::new_note(1, "x\nRests on: `src/storage.rs`".into(), vec!["My Board".into()]);
         note.knowledge = Some(Knowledge::Unknown("lesson"));
         let mut data = ItemMap::from([(1, note)]);
-        let read = keep(&ItemMap::new(), &ItemMap::new(), &mut data, &[1], Some(&dir), None, noon());
+        let read = keep(&ItemMap::new(), &ItemMap::new(), &mut data, &[1], Some(&dir), Writer::default(), noon());
         assert_eq!((read, data[&1].rests_on.is_none()), (vec![], true), "a new note of that kind");
 
         let kept = rests_on("Rests on: `src/gone.rs`", Some(&dir), noon(), || None).unwrap();
@@ -612,12 +828,12 @@ mod tests {
         let note = data.get_mut(&1).unwrap();
         note.rests_on = Some(Box::new(kept.clone()));
         note.description.push_str("\nmore");
-        keep(&before, &ItemMap::new(), &mut data, &[1], Some(&dir), None, noon());
+        keep(&before, &ItemMap::new(), &mut data, &[1], Some(&dir), Writer::default(), noon());
         assert_eq!(data[&1].rests_on.as_deref(), Some(&kept), "its text changed");
 
         let before = data.clone();
         data.get_mut(&1).unwrap().knowledge = Some(Knowledge::Gotcha);
-        let read = keep(&before, &ItemMap::new(), &mut data, &[1], Some(&dir), None, noon());
+        let read = keep(&before, &ItemMap::new(), &mut data, &[1], Some(&dir), Writer::default(), noon());
         assert_eq!(read, [1], "made a gotcha, its text as it was");
         assert_eq!(anchors(data[&1].rests_on.as_deref().unwrap()), json!([{"path": "src/storage.rs", "held": true}]));
         std::fs::remove_dir_all(&dir).ok();

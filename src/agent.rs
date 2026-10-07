@@ -107,6 +107,10 @@ const KNOWLEDGE_REST: &str = "search with the decision, gotcha or procedure filt
 /// What a listing says of a note its anchors say to recheck (task 1325),
 /// in its mark and before why, on the line under it.
 const TO_RECHECK: &str = "to recheck";
+/// How a recheck ends (task 1326), said once by a view that marks a note to
+/// recheck.
+const RECHECK_HOW: &str = "To recheck a note: still true, add a line \"Still true, YYYY-MM-DD: what you checked\" and name anew any path or \
+                           words that moved; no longer true, supersede it.";
 /// The words that cite an item by its number, as notes and prompts write
 /// them, in English and Portuguese, each plural before its singular.
 const CITING: [&str; 24] = [
@@ -1640,7 +1644,17 @@ pub fn contexts(ekko: &Ekko, targets: &[String]) -> Result<Vec<Context>, EkkoErr
 /// has a block of its own is pointed to from the others, not repeated.
 pub fn contexts_text(read: &[Context], detail: Detail) -> String {
     let order: Vec<u32> = read.iter().map(|context| context.item.id).collect();
-    read.iter().map(|context| context.text_among(detail, &order)).collect::<Vec<_>>().join("\n")
+    let text = read.iter().map(|context| context.text_among(detail, &order)).collect::<Vec<_>>().join("\n");
+    with_recheck_how(text, read.iter().any(Context::rechecks))
+}
+
+/// `text`, then how a recheck ends where it marks a note to recheck (task
+/// 1326).
+fn with_recheck_how(mut text: String, rechecks: bool) -> String {
+    if rechecks {
+        let _ = writeln!(text, "\n{RECHECK_HOW}");
+    }
+    text
 }
 
 fn neighbourhood(all: &ItemMap, reader: &Reader<'_>, id: u32) -> Context {
@@ -2769,7 +2783,8 @@ impl Prime {
         }
 
         let attention = self.attention();
-        let close = "\nAn item in full, with its dependencies and notes: context <id>.\n";
+        let recheck_how = if self.rechecks() { format!("\n{RECHECK_HOW}") } else { String::new() };
+        let close = format!("{recheck_how}\nAn item in full, with its dependencies and notes: context <id>.\n");
         // Only a board with typed notes pays for them: without any, this costs
         // nothing and the prime is what it was before they existed.
         let knowledge_more = if self.knowledge.is_empty() {
@@ -2918,8 +2933,15 @@ impl Prime {
         }
 
         out.push_str(&attention);
-        out.push_str(close);
+        out.push_str(&close);
         out
+    }
+
+    /// Whether a note this prime shows -- among the lasting notes, or under
+    /// a task -- is marked to recheck.
+    fn rechecks(&self) -> bool {
+        let entries = [&self.doing, &self.ready, &self.blocked, &self.waiting, &self.with_someone];
+        self.knowledge.iter().chain(entries.into_iter().flatten().flat_map(|entry| &entry.notes)).any(|note| !note.recheck.is_empty())
     }
 
     /// What the board holds against itself: a block the budget always keeps.
@@ -3203,6 +3225,9 @@ impl Found {
                 stashed("matches too", "match too")
             });
         }
+        if self.hits.iter().any(|(entry, _)| !entry.recheck.is_empty()) {
+            let _ = writeln!(out, "\n{RECHECK_HOW}");
+        }
         out
     }
 }
@@ -3214,7 +3239,13 @@ impl Context {
     }
 
     pub fn text_with(&self, detail: Detail) -> String {
-        self.text_among(detail, &[])
+        with_recheck_how(self.text_among(detail, &[]), self.rechecks())
+    }
+
+    /// Whether this block marks a note to recheck: the item itself, or a
+    /// note attached to it.
+    fn rechecks(&self) -> bool {
+        !self.item.recheck.is_empty() || self.item.notes.iter().any(|note| !note.recheck.is_empty())
     }
 
     /// This item's block in a reply whose blocks are `order`, by id and in
@@ -4229,6 +4260,61 @@ mod tests {
         let reading = Ekko::new(Storage::new(&dir).unwrap()).in_folder(Some(project)).with_claude_code(Some("2.1.300".into()));
         let text = prime(&reading, "board").unwrap().text();
         assert!(text.contains("\n   3. [gotcha, to recheck] Kept stays\n      to recheck: seen with Claude Code 2.1.200, now 2.1.300\n"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A recheck ends one of two ways (task 1326). The views that mark a
+    /// note to recheck say how, once -- a note under a task as much as one
+    /// among the lasting notes; a note a session found still true is marked
+    /// no more, and a note superseded is hidden from the prime as before,
+    /// unmarked wherever it is still listed. With nothing marked, no view
+    /// says how.
+    #[test]
+    fn a_note_found_still_true_or_superseded_is_marked_to_recheck_no_more() {
+        let (ekko, dir) = board("recheck-ends");
+        let project = dir.join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        let session = ekko.in_folder(Some(project.clone())).with_claude_code(Some("2.1.292".into()));
+        let mut ops = vec![
+            serde_json::json!({"op": "create", "text": "the work"}),
+            serde_json::json!({"op": "create", "kind": "gotcha", "text": "Old version trap\nRests on: Claude Code 2.1.200"}),
+            serde_json::json!({"op": "create", "kind": "decision", "text": "Kept way\nRests on: `src/lib.rs` \"pub fn kept\"", "attached_to": 1}),
+        ];
+        ops.extend((4..=7).map(|n| serde_json::json!({"op": "create", "kind": "procedure", "text": format!("step {n}")})));
+        write(&session, &ops);
+        session.set_state(&words(&["@1", "progress"]), false).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "pub fn renamed() {}\n").unwrap();
+        let how = format!("\n\n{RECHECK_HOW}\n");
+        let under_task = "       3. [decision, to recheck] Kept way Rests on: `src/lib.rs` \"pub fn kept\"\n          \
+                          to recheck: `src/lib.rs` no longer holds \"pub fn kept\"\n";
+
+        let text = prime(&session, "board").unwrap().text();
+        assert!(text.contains("\n   2. [gotcha, to recheck] Old version trap\n      to recheck: seen with Claude Code 2.1.200, now 2.1.292\n"), "{text}");
+        assert!(text.contains(under_task), "{text}");
+        assert_eq!(text.matches(RECHECK_HOW).count(), 1, "{text}");
+        assert!(text.contains(&format!("{how}An item in full")), "{text}");
+        let read = contexts_text(&contexts(&session, &words(&["2", "3"])).unwrap(), Detail::Concise);
+        assert!(read.ends_with(&how) && read.matches(RECHECK_HOW).count() == 1, "{read}");
+        assert!(context(&session, "2").unwrap().text().ends_with(&how));
+        let found = search(&session, Some("way trap"), &[], 10).unwrap().text();
+        assert!(found.ends_with(&how) && found.matches(RECHECK_HOW).count() == 1, "{found}");
+
+        write(&session, &[serde_json::json!({"op": "edit", "item": 2, "append": "\nStill true, 2026-10-07: retried, the same failure"})]);
+        let text = prime(&session, "board").unwrap().text();
+        assert!(text.contains("\n   2. [gotcha] Old version trap\n") && text.contains(under_task), "{text}");
+        assert!(text.contains(&format!("{how}An item in full")), "the note under the task is still marked: {text}");
+        assert!(!context(&session, "2").unwrap().text().contains("recheck"));
+        assert!(context(&session, "1").unwrap().text().ends_with(&how), "a note attached");
+
+        let renamed = "Renamed way\nRests on: `src/lib.rs` \"pub fn renamed\"";
+        write(&session, &[serde_json::json!({"op": "create", "kind": "decision", "text": renamed, "supersedes": 3})]);
+        let text = prime(&session, "board").unwrap().text();
+        assert!(!text.contains("Kept way") && !text.contains("recheck"), "{text}");
+        let read = contexts_text(&contexts(&session, &words(&["1", "3"])).unwrap(), Detail::Concise);
+        assert!(read.contains("\nSuperseded by, so no longer in force\n") && !read.contains("recheck"), "{read}");
+        let found = search(&session, Some("way trap"), &[], 10).unwrap().text();
+        assert!(found.contains("[decision, superseded by 8] Kept way") && !found.contains("recheck"), "{found}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

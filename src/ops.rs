@@ -3805,6 +3805,48 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A session's edit that adds a `Still true` line records the recheck,
+    /// with when, by whom and the Claude Code its client gave (task 1326),
+    /// and the reply names what the recheck leaves to recheck; the person's,
+    /// at the terminal, is told it answers no version.
+    #[test]
+    fn a_still_true_line_records_the_recheck_and_the_reply_names_what_it_leaves() {
+        let (ekko, dir, project) = project_board("still-true");
+        let (me, _, _) = crate::holder::test_sessions();
+        let session = Ekko::new(Storage::new(&dir).unwrap()).in_folder(Some(project.clone())).acting_as(me.clone());
+        let session = session.with_claude_code(Some("2.1.292".into()));
+        let text = "Kept stays\nRests on: `src/lib.rs` \"pub fn kept\"; Claude Code 2.1.200";
+        batch(&session, &[json!({"op": "create", "kind": "gotcha", "text": text})]).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "pub fn renamed() {}\n").unwrap();
+
+        let rechecked = batch(&session, &[json!({"op": "edit", "item": 1, "append": "\nStill true, 2026-10-07: renamed, the same trap"})]).unwrap();
+        let note = &rechecked.data[&1];
+        let still = note.rests_on.as_deref().and_then(|rests| rests.still_true.clone()).expect("the recheck is recorded");
+        assert_eq!((still.at, still.claude_code.as_deref()), (note.updated_at.unwrap(), Some("2.1.292")));
+        assert!(still.by.as_ref().is_some_and(|by| me.is(by)), "{:?}", still.by);
+        assert_eq!(
+            rechecked.notices,
+            [
+                "note 1's Rests on line: `src/lib.rs` does not hold \"pub fn kept\"; a Still true line answers a version or a date, \
+                 not a path or words that do not hold: name what holds now, or take them out"
+            ]
+        );
+        assert_eq!(ekko.storage.get().unwrap()[&1].rests_on, note.rests_on, "and stored");
+
+        batch(&ekko, &[json!({"op": "create", "kind": "decision", "text": "Ship weekly\nRests on: Claude Code 2.1.200"})]).unwrap();
+        let terminal = batch(&ekko, &[json!({"op": "edit", "item": 2, "append": "\nStill true"})]).unwrap();
+        let still = terminal.data[&2].rests_on.as_deref().and_then(|rests| rests.still_true.clone()).expect("the recheck is recorded");
+        assert!(still.by.as_ref().is_some_and(|by| by.pid.is_none()) && still.claude_code.is_none(), "{still:?}");
+        assert_eq!(
+            terminal.notices,
+            [
+                "note 2's Rests on line: this Still true knew no Claude Code version, so the note is still seen with 2.1.200: \
+                 write the version you checked with in its place"
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A note without the line is stored as before: no field is added to it,
     /// whatever its kind (task 1324).
     #[test]

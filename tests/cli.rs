@@ -447,6 +447,44 @@ fn the_terminal_says_to_recheck_a_note_whose_ground_moved() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// A recheck at the terminal (task 1326): an edit that adds a `Still true`
+/// line answers a date to recheck after that it came after, so the note is
+/// marked no more; the terminal knows no Claude Code version, and the
+/// message under the edit says the recheck answers none.
+#[test]
+fn a_still_true_line_at_the_terminal_answers_a_date_and_says_it_knows_no_version() {
+    let home = temp_ekko_dir();
+    let app = home.join("app");
+    fs::create_dir_all(&app).unwrap();
+    let ekko = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(&app)
+            .env("HOME", &home)
+            .env("EKKO_TERMINAL", "none")
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .output()
+            .expect("failed to run ekko");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    ekko(&["init"]);
+    let text = "A trap\nRests on: recheck after 2026-10-01; Claude Code 2.1.200";
+    ekko(&["--note", "--kind", "gotcha", text]);
+    let read = ekko(&["--context", "1"]);
+    assert!(read.contains("      to recheck: recheck after 2026-10-01 is past\n") && read.contains("\nTo recheck a note: still true"), "{read}");
+
+    let edited = ekko(&["--edit", "@1", &format!("{text}\nStill true, 2026-10-07: it is")]);
+    let said = "Rests on: this Still true knew no Claude Code version, so the note is still seen with 2.1.200: \
+                write the version you checked with in its place";
+    assert!(edited.contains(said), "{edited}");
+    let read = ekko(&["--context", "1"]);
+    assert!(!read.contains("to recheck") && !read.contains("To recheck"), "{read}");
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// A lone `-` takes the description from stdin, verbatim: apostrophes,
 /// quotes and newlines kept, and a first word like `@x` or `d:` not read as a
 /// board or a due date. A `-` among other words is only a word, and stdin is

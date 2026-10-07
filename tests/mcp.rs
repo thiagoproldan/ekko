@@ -548,6 +548,51 @@ fn a_note_seen_with_an_older_claude_code_is_marked_to_recheck() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// A session's edit that adds a `Still true` line records the recheck with
+/// the version of Claude Code its client gave (task 1326) -- in initialize,
+/// or on the 2026-07-28 request itself -- and a read says to recheck no
+/// more, nor how, until a newer version reads it.
+#[test]
+fn a_note_found_still_true_records_the_claude_code_that_rechecked_it() {
+    let home = temp_home();
+    let initialize = |version: &str| {
+        request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "claude-code", "version": version}}))
+    };
+    let how = "\nTo recheck a note: still true, add a line \"Still true, YYYY-MM-DD: what you checked\"";
+    let rechecked = session(
+        &home,
+        &[
+            initialize("2.1.292"),
+            call(2, "create", json!({"kind": "gotcha", "text": "A trap\nRests on: Claude Code 2.1.200"})),
+            call(3, "context", json!({"item": 1})),
+            call(4, "edit", json!({"item": 1, "append": "\nStill true, 2026-10-07: retried, the same failure"})),
+            call(5, "context", json!({"item": 1})),
+        ],
+    );
+    let flagged = text(&rechecked["3"]);
+    assert!(flagged.contains("      to recheck: seen with Claude Code 2.1.200, now 2.1.292\n") && flagged.contains(how), "{flagged}");
+    assert!(!text(&rechecked["5"]).contains("recheck"), "{}", text(&rechecked["5"]));
+    let stored = || -> Value {
+        let board: Value = serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+        board["1"]["restsOn"]["stillTrue"].clone()
+    };
+    assert_eq!(stored()["claudeCode"], json!("2.1.292"), "{}", stored());
+    assert!(stored()["by"]["pid"].is_u64() && stored()["at"].is_i64(), "who and when: {}", stored());
+
+    let newer = session(&home, &[initialize("2.1.300"), call(2, "context", json!({"item": 1}))]);
+    assert!(text(&newer["2"]).contains("      to recheck: still true with Claude Code 2.1.292, now 2.1.300\n"), "{}", text(&newer["2"]));
+
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.301"}
+    });
+    let append = json!({"item": 1, "append": "\nStill true, 2026-10-08"});
+    session(&home, &[initialize("2.1.250"), request(2, "tools/call", json!({"name": "edit", "arguments": append, "_meta": meta}))]);
+    assert_eq!(stored()["claudeCode"], json!("2.1.301"), "the request's own: {}", stored());
+    fs::remove_dir_all(&home).ok();
+}
+
 /// The waiting state over stdio: set_state takes it, next and a write's reply
 /// leave the task out as work to take up, prime and search list it, and the
 /// schema an agent reads offers it.

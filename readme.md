@@ -570,6 +570,14 @@ The anchors are checked again whenever the note is read: `--prime` and `--contex
 
 Words are looked for again by their text, so a change elsewhere in the file, or the words moved, says nothing. A path gone, words their file no longer holds, and a date past each say to recheck, and so does a version older than the Claude Code reading -- to the precision written, so a note seen with 2.1 holds through every 2.1.x. That version is the one a session's client gives the MCP server; the terminal gives none, and judges no version.
 
+A recheck ends one of two ways (task 1326). A note found still true takes a line that starts with `Still true`, dated by convention:
+
+```
+Still true, 2026-10-07: retried with the migrations last, the same failure
+```
+
+The write that adds it records the recheck -- when, by whose write, and the Claude Code its session runs -- and the note says no more to recheck what time moved: a version up to the one the recheck ran, and a date to recheck after that the recheck came after. A path gone, or words their file no longer holds, it does not answer: the `Rests on:` line names what holds now, or leaves them out, and the reply to the write says so. A recheck in the terminal knows no Claude Code version and answers none, which its message says too: write the version you checked with in the line instead. A note no longer true is superseded, as before, and leaves the prime. A view that marks a note to recheck says how a recheck ends, once, at its end.
+
 ### Dependencies
 
 Record what an item is blocked by, and the board stops pretending everything is equally startable -- or finishable:
