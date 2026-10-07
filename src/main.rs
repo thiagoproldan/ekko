@@ -1,4 +1,5 @@
 mod agent;
+mod anchors;
 mod artifact;
 mod cli;
 mod commits;

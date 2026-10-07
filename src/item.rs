@@ -286,6 +286,14 @@ pub struct Item {
     /// reviews is stored exactly as before. Boxed; see `question`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<Box<Review>>,
+    /// On a decision, gotcha or procedure whose text has a `Rests on:` line
+    /// (task 1324): what the line names, as ekko found it when the text was
+    /// last written, with when and by whose write; see `crate::anchors`.
+    /// Read again by every write that changes the text, or makes the note
+    /// one of those kinds, and dropped from any other item, so a board
+    /// without the line is stored exactly as before. Boxed; see `question`.
+    #[serde(rename = "restsOn", default, skip_serializing_if = "Option::is_none")]
+    pub rests_on: Option<Box<RestsOn>>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -341,6 +349,7 @@ impl Item {
             artifact: None,
             comment: None,
             review: None,
+            rests_on: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -384,6 +393,7 @@ impl Item {
             artifact: None,
             comment: None,
             review: None,
+            rests_on: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -629,6 +639,73 @@ pub struct Earlier {
     /// When the write that replaced it was saved, in epoch milliseconds.
     pub at: i64,
     pub text: String,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// What a decision, gotcha or procedure says it rests on, read from its
+/// `Rests on:` line when its text was last written (task 1324): each anchor
+/// the line names, with what ekko found then, and each part of the line it
+/// could not read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestsOn {
+    /// When the line was read, in epoch milliseconds.
+    pub at: i64,
+    /// Whose write read it: the session's or the person's, as `created_by`
+    /// records them. Absent where the write names nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<crate::holder::Holder>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchors: Vec<Anchor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread: Vec<Unread>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// One anchor of a `Rests on:` line: a path; a path and words its file
+/// holds; the Claude Code version the note was seen with; or a date to look
+/// again after. Exactly one of these is named, as the line wrote it, and
+/// `held` and `line` say what ekko found when it read it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Anchor {
+    /// The path as written: from the project's folder, unless it starts at
+    /// `/` or `~/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Words the file at `path` holds, as written between the quotes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code: Option<String>,
+    /// A date, YYYY-MM-DD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recheck_after: Option<String>,
+    /// Whether it held when read: the path was there, its file held the
+    /// words, the date was not past. Absent for a version, which only the
+    /// session reading the note can judge, by the version it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<bool>,
+    /// The line of the file where the words began, from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// A part of a `Rests on:` line that names no anchor ekko can read, as
+/// written, and why: kept, so it is never dropped in silence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Unread {
+    pub text: String,
+    pub why: String,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -1761,6 +1838,9 @@ mod tests {
                 "over": {"how": "answered", "by": holder, "at": 1790488580406_i64, "rev": 904}},
             "cue": {"command": "gh", "words": ["api", "graphql"], "folder": "/", "question": "18d917bcc68eee96-ffdc4",
                 "at": 1790488518284_i64},
+            "restsOn": {"at": 1790488580406_i64, "by": holder,
+                "anchors": [{"path": "src/item.rs", "words": "pub struct Item", "held": true, "line": 21}, {"claudeCode": "2.1.289"}],
+                "unread": [{"text": "the readme", "why": "an anchor is a path in backticks"}]},
             "priority": 1
         }));
     }
@@ -1820,8 +1900,8 @@ mod tests {
         assert!(missing.is_empty(), "no `unknown`, and no reason given here for none: {missing:?}");
         checked.sort();
         let expected = [
-            "Allowance", "Answer", "Approving", "Artifact", "Comment", "Counters", "Cue", "Earlier", "Holder", "Item", "Linking", "Moved", "Over",
-            "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "Review", "Step", "Used", "Wait",
+            "Allowance", "Anchor", "Answer", "Approving", "Artifact", "Comment", "Counters", "Cue", "Earlier", "Holder", "Item", "Linking", "Moved",
+            "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Step", "Unread", "Used", "Wait",
         ];
         assert_eq!(checked, expected, "the scan finds the structs it should");
     }

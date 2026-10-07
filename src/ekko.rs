@@ -374,12 +374,14 @@ pub(crate) fn held_elsewhere_text(held: &[(u32, String, i64)], name: &dyn Fn(u32
 }
 
 /// What a save did that the items it wrote do not show on their own: the
-/// work it set free or left waiting, and the waits it ended, by display id.
+/// work it set free or left waiting, the waits it ended, and the notes whose
+/// `Rests on:` line it read (`crate::anchors`), by display id.
 #[derive(Debug, Default)]
 pub(crate) struct Saved {
     pub released: Vec<u32>,
     pub blocked: Vec<u32>,
     pub ended: Vec<u32>,
+    pub rests_read: Vec<u32>,
 }
 
 impl From<StorageError> for EkkoError {
@@ -559,7 +561,10 @@ impl Outcome {
 
     pub fn render(&self, out: &mut Renderer) {
         match self {
-            Outcome::Task(item) | Outcome::Note(item) => out.success_create(item),
+            Outcome::Task(item) | Outcome::Note(item) => {
+                out.success_create(item);
+                out.rests_unheld(item);
+            }
             Outcome::Check { checked, unchecked, overridden, reopened } => {
                 out.mark_complete_overriding(checked, overridden);
                 out.mark_incomplete(unchecked, reopened);
@@ -601,7 +606,10 @@ impl Outcome {
                 let ids: Vec<u32> = items.iter().map(|r| r.archive_id).collect();
                 out.success_restore(&ids);
             }
-            Outcome::Edit(item) => out.success_edit(item.id),
+            Outcome::Edit(item) => {
+                out.success_edit(item.id);
+                out.rests_unheld(item);
+            }
             Outcome::Answered(item) => out.success_answered(item.id),
             Outcome::Move(item) => out.success_move(item.id, &item.boards),
             Outcome::Priority(item) => out.success_priority(item.id, item.priority.unwrap_or(1)),
@@ -1247,6 +1255,9 @@ impl Ekko {
         // A plan this write changed is a new version of it (task 1019),
         // whatever wrote the change: the artifact tool, edit, the CLI.
         crate::artifact::keep_versions(before, data, &changed, now);
+        // A decision, gotcha or procedure whose text it changed has its
+        // `Rests on:` line read again (task 1324), whatever wrote it too.
+        let rests_read = crate::anchors::keep(before, arrived, data, &changed, self.folder.as_deref(), self.actor.as_ref(), now);
 
         let kept = self.storage.get_counters()?;
         let mut counters = kept.clone();
@@ -1315,7 +1326,7 @@ impl Ekko {
         if counters != kept {
             self.storage.set_counters(&counters)?;
         }
-        Ok(Saved { released, blocked, ended })
+        Ok(Saved { released, blocked, ended, rests_read })
     }
 
     /// Ends each open wait the board in `data` now meets, recording how and
@@ -1419,9 +1430,9 @@ impl Ekko {
             let older = self.validate_ids(&[older.trim_start_matches('@').to_string()], &data)?[0];
             crate::ops::supersede(&mut data, id, Some(older), &|id| id.to_string())?;
         }
-        let item = data[&id].clone();
+        // As saved: the save reads its `Rests on:` line (task 1324).
         self.save_touching(&mut data)?;
-        Ok(Outcome::Note(item))
+        Ok(Outcome::Note(data[&id].clone()))
     }
 
     /// The CLI creates through the `_in` forms; tests mostly need no phase.

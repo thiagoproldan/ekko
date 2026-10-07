@@ -1330,6 +1330,17 @@ impl<'a> Renderer<'a> {
         self.emit(" ", None, &self.painter.grey(&files), "");
     }
 
+    /// What the `Rests on:` line of a note just written does not hold, or
+    /// names in a way ekko cannot read (task 1324): a line each, under the
+    /// message that it was written.
+    pub fn rests_unheld(&mut self, item: &Item) {
+        let Some(rests) = item.rests_on.as_deref() else { return };
+        for problem in crate::anchors::problems(rests) {
+            let line = self.painter.grey(&format!("Rests on: {problem}"));
+            self.emit("   ", None, &line, "");
+        }
+    }
+
     pub fn success_edit(&mut self, id: u32) {
         let suffix = self.painter.grey(&id.to_string());
         self.success("\n", "Updated description of item:", &suffix);

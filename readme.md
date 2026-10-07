@@ -548,6 +548,19 @@ The older note is not rewritten or removed: it stays on the board as history, an
 
 `--list decision`, `gotcha` and `procedure` find each kind, superseded notes included -- that is where the history is found.
 
+A typed note can say what it rests on, in a line of its text that starts with `Rests on:`, its anchors between semicolons:
+
+```
+Rests on: `src/storage.rs` "fn keep_unkept_version"; `evals/`; Claude Code 2.1.289; recheck after 2026-12-01
+```
+
+- a path in backticks, which must be there;
+- a path and words in double quotes, which its file must hold, found by their text with each run of whitespace read as one space, so words that only moved, or were indented or wrapped again where a space was, are still found;
+- `Claude Code` and the version the note was seen with;
+- `recheck after` and a date, for what no anchor can watch.
+
+A path is read from the project's folder, unless it starts at `/` or `~/`. Each write that changes a decision's, gotcha's or procedure's text, or gives a note one of those kinds, reads the line again, from the terminal or a session, and keeps what each anchor named and what Ekko found -- the path there, the words on their line, the date still ahead -- with when and by whose write (task 1324). What does not hold, and any part that is no anchor, is said under the message, and in a session's reply as a notice; nothing is refused for it. A note without the line is stored as before.
+
 ### Dependencies
 
 Record what an item is blocked by, and the board stops pretending everything is equally startable -- or finishable:

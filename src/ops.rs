@@ -2111,7 +2111,20 @@ impl<'a> Draft<'a> {
         notices.extend(self.trailer_of_the_started());
         let saved = self.ekko.save_against(&self.before, &mut self.data)?;
         notices.extend(self.ended_waits(&saved.ended));
+        notices.extend(self.rests_unheld(&saved.rests_read));
         Ok(Committed { data: self.data, overridden, reopened, released: saved.released, blocked: saved.blocked, notices })
+    }
+
+    /// What the `Rests on:` line of each note this write read does not hold,
+    /// or names in a way ekko cannot read (task 1324), told to the session
+    /// that wrote it, so no part of the line is dropped in silence.
+    fn rests_unheld(&self, read: &[u32]) -> Vec<String> {
+        read.iter()
+            .filter_map(|id| {
+                let problems = crate::anchors::problems(self.data.get(id)?.rests_on.as_deref()?);
+                (!problems.is_empty()).then(|| format!("note {id}'s Rests on line: {}", problems.join("; ")))
+            })
+            .collect()
     }
 
     /// Each wait this write ended, told to the session that wrote it: whose
@@ -3702,6 +3715,108 @@ mod tests {
         assert_eq!(board.storage.get().unwrap()[&first].artifact.as_deref().unwrap().steps.len(), 1, "the steps stay as they were");
         let reads = |spec: Value| serde_json::from_value::<ArtifactSpec>(spec).unwrap().reads();
         assert!(reads(json!({"artifact": first})) && !reads(json!({"artifact": first, "resolve": [facts]})));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A board of the project in `project`, whose src/lib.rs holds `pub fn
+    /// kept`, written by the person at the terminal.
+    fn project_board(tag: &str) -> (Ekko, PathBuf, PathBuf) {
+        let (ekko, dir) = board(tag);
+        let project = dir.join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        (ekko.in_folder(Some(project.clone())).acting_as(Actor::person()), dir, project)
+    }
+
+    /// A decision, gotcha or procedure written with a `Rests on:` line keeps
+    /// what each anchor names and what ekko found, read from the project's
+    /// folder by the write that saved it, with when and by whom; the reply
+    /// names each anchor that does not hold and each part it could not read,
+    /// in one notice (task 1324).
+    #[test]
+    fn a_typed_note_keeps_what_its_line_rests_on_and_the_reply_names_what_does_not_hold() {
+        let (ekko, dir, _) = project_board("rests-on");
+        let text = "Kept stays\nRests on: `src/lib.rs` \"pub fn kept\"; `src/gone.rs`; the readme";
+        let written = batch(&ekko, &[json!({"op": "create", "kind": "gotcha", "text": text})]).unwrap();
+
+        let note = &written.data[&1];
+        let rests = note.rests_on.as_deref().expect("its line is read");
+        assert_eq!(
+            serde_json::to_value(&rests.anchors).unwrap(),
+            json!([{"path": "src/lib.rs", "words": "pub fn kept", "held": true, "line": 1}, {"path": "src/gone.rs", "held": false}])
+        );
+        assert_eq!(rests.at, note.updated_at.unwrap(), "read by the write that saved it");
+        assert!(rests.by.as_ref().is_some_and(|by| by.pid.is_none() && by.since == rests.at), "by the person: {:?}", rests.by);
+        assert_eq!(
+            written.notices,
+            [
+                "note 1's Rests on line: `src/gone.rs` is not there; \"the readme\" is no anchor: an anchor is a path in backticks, \
+                 a path and words in double quotes, Claude Code and its version, or recheck after a date"
+            ]
+        );
+        assert_eq!(ekko.storage.get().unwrap()[&1].rests_on, note.rests_on, "and stored");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The line is read again by each write that changes the note's text or
+    /// makes it a decision, gotcha or procedure, and by no other: a star
+    /// leaves what was read as it was, though the file changed meanwhile.
+    /// Made a plain note it rests on nothing, and a plain note, a task or a
+    /// handoff never does, whatever its text says.
+    #[test]
+    fn the_line_is_read_again_when_the_text_changes_and_only_then() {
+        let (ekko, dir, project) = project_board("rests-on-again");
+        let held = |ekko: &Ekko| ekko.storage.get().unwrap()[&1].rests_on.as_deref().map(|rests| rests.anchors[0].held);
+        let text = "Renamed\nRests on: `src/lib.rs` \"pub fn renamed\"";
+        batch(&ekko, &[json!({"op": "create", "kind": "decision", "text": text})]).unwrap();
+        assert_eq!(held(&ekko), Some(Some(false)));
+        let first = ekko.storage.get().unwrap()[&1].rests_on.clone();
+
+        std::fs::write(project.join("src/lib.rs"), "pub fn renamed() {}\n").unwrap();
+        let starred = batch(&ekko, &[json!({"op": "set_state", "items": [1], "state": "starred"})]).unwrap();
+        assert!(starred.data[&1].is_starred);
+        assert_eq!(starred.data[&1].rests_on, first, "a star reads nothing");
+        assert!(starred.notices.is_empty(), "{:?}", starred.notices);
+
+        let edited = batch(&ekko, &[json!({"op": "edit", "item": 1, "replace": {"old": "Renamed", "new": "Renamed, still true"}})]).unwrap();
+        assert_eq!(held(&ekko), Some(Some(true)), "an edit reads it again");
+        assert!(edited.notices.is_empty(), "{:?}", edited.notices);
+
+        batch(&ekko, &[json!({"op": "update", "item": 1, "kind": "note"})]).unwrap();
+        assert_eq!(held(&ekko), None, "a plain note rests on nothing");
+        std::fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        let retyped = batch(&ekko, &[json!({"op": "update", "item": 1, "kind": "procedure"})]).unwrap();
+        assert_eq!(held(&ekko), Some(Some(false)), "made a procedure, read again");
+        assert_eq!(retyped.notices, ["note 1's Rests on line: `src/lib.rs` does not hold \"pub fn renamed\""]);
+
+        let line = "\nRests on: `src/lib.rs`";
+        let others = batch(
+            &ekko,
+            &[
+                json!({"op": "create", "text": format!("A task{line}")}),
+                json!({"op": "create", "kind": "note", "text": format!("A note{line}")}),
+                json!({"op": "create", "kind": "handoff", "attached_to": "$1", "text": format!("A handoff{line}")}),
+            ],
+        )
+        .unwrap();
+        for id in [2, 3, 4] {
+            assert_eq!(others.data[&id].rests_on, None, "{id}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A note without the line is stored as before: no field is added to it,
+    /// whatever its kind (task 1324).
+    #[test]
+    fn a_note_without_the_line_is_stored_as_before() {
+        let (ekko, dir, _) = project_board("rests-on-none");
+        batch(&ekko, &[json!({"op": "create", "kind": "decision", "text": "Ship weekly"})]).unwrap();
+        let stored: Value = serde_json::from_slice(&std::fs::read(dir.join("storage/storage.json")).unwrap()).unwrap();
+        let keys: Vec<&str> = stored["1"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["_id", "_date", "_timestamp", "description", "isStarred", "boards", "_isTask", "uid", "updatedAt", "rev", "createdBy", "knowledge"]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

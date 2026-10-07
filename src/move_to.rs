@@ -333,6 +333,8 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
         knowledge: _,
         priority: _,
         unknown: _,
+        // Paths, words, versions and dates: no item.
+        rests_on: _,
     } = item;
     let mut found: Vec<(&'static str, &str)> = Vec::new();
     found.extend(blocked_by.iter().flatten().map(|uid| ("is blocked by", uid.as_str())));
@@ -404,6 +406,9 @@ fn arriving(item: &Item, id: u32) -> Item {
         knowledge,
         priority,
         unknown,
+        // Read against the folder of the board it leaves; a write there that
+        // changes its text reads it again against that board's.
+        rests_on,
         // Declared there, as `move_to` checks.
         phase,
         // Uids of items that move with it, as `splits` checks.
@@ -505,6 +510,7 @@ fn arriving(item: &Item, id: u32) -> Item {
         knowledge: *knowledge,
         priority: *priority,
         unknown: unknown.clone(),
+        rests_on: rests_on.clone(),
         phase: phase.clone(),
         blocked_by: blocked_by.clone(),
         attached_to: attached_to.clone(),
@@ -981,11 +987,14 @@ mod tests {
         });
         value["wait"] = json!({"on": "w", "until": "done", "by": holder, "rev": 19, "over": {"how": "done", "by": holder, "at": 20, "rev": 21}});
         value["cue"] = json!({"command": "cargo", "words": ["fmt"], "question": "q", "at": 22});
+        value["restsOn"] = json!({"at": 24, "by": holder, "anchors": [{"path": "src/a.rs", "words": "fn a", "held": true, "line": 3}], "unread": [{"text": "x", "why": "y"}]});
         let item: Item = serde_json::from_value(value).unwrap();
         assert_eq!(item.unknown.keys().collect::<Vec<_>>(), ["a later field"], "every other key is a field");
         assert!(item.question.as_ref().unwrap().unknown.is_empty(), "every key of the question is a field");
         let artifact = item.artifact.as_ref().unwrap();
         assert!(artifact.unknown.is_empty() && artifact.steps[0].unknown.is_empty() && artifact.earlier[0].unknown.is_empty(), "every key of the artifact is a field");
+        let rests = item.rests_on.as_ref().unwrap();
+        assert!(rests.unknown.is_empty() && rests.anchors[0].unknown.is_empty() && rests.unread[0].unknown.is_empty(), "every key of what it rests on is a field");
 
         let arrived = arriving(&item, 99);
         let board_s = |item: &Item| {

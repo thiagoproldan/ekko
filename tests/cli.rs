@@ -358,6 +358,57 @@ fn a_typed_note_takes_its_kind_from_the_flags_beside_note() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// A typed note written or edited at the terminal has its `Rests on:` line
+/// read from the project's folder, and what does not hold, or is no anchor,
+/// is said under the message (task 1324).
+#[test]
+fn the_terminal_says_what_a_notes_rests_on_line_does_not_hold() {
+    let home = temp_ekko_dir();
+    let app = home.join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src").join("lib.rs"), "pub fn kept() {}\n").unwrap();
+    let ekko = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(&app)
+            .env("HOME", &home)
+            .env("EKKO_TERMINAL", "none")
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .output()
+            .expect("failed to run ekko")
+    };
+    assert!(ekko(&["init"]).status.success());
+
+    let text = "Kept stays\nRests on: `src/lib.rs` \"pub fn kept\"; `src/gone.rs`; the readme";
+    let created = ekko(&["--note", "--kind", "gotcha", text]);
+    assert!(created.status.success());
+    let out = String::from_utf8_lossy(&created.stdout);
+    let said: Vec<&str> = out.lines().filter(|line| line.trim_start().starts_with("Rests on:")).map(str::trim).collect();
+    assert_eq!(
+        said,
+        [
+            "Rests on: `src/gone.rs` is not there",
+            "Rests on: \"the readme\" is no anchor: an anchor is a path in backticks, a path and words in double quotes, \
+             Claude Code and its version, or recheck after a date",
+        ],
+        "{out}"
+    );
+    let board: serde_json::Value =
+        serde_json::from_slice(&fs::read(app.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+    assert_eq!(board["1"]["restsOn"]["anchors"][0], serde_json::json!({"path": "src/lib.rs", "words": "pub fn kept", "held": true, "line": 1}));
+
+    let edited = ekko(&["--edit", "@1", "Kept stays\nRests on: `src/lib.rs`"]);
+    assert!(edited.status.success());
+    let out = String::from_utf8_lossy(&edited.stdout);
+    assert!(!out.contains("Rests on:"), "every anchor holds now: {out}");
+    let board: serde_json::Value =
+        serde_json::from_slice(&fs::read(app.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+    assert_eq!(board["1"]["restsOn"]["anchors"], serde_json::json!([{"path": "src/lib.rs", "held": true}]), "read again");
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// A lone `-` takes the description from stdin, verbatim: apostrophes,
 /// quotes and newlines kept, and a first word like `@x` or `d:` not read as a
 /// board or a due date. A `-` among other words is only a word, and stdin is

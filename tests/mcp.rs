@@ -459,6 +459,37 @@ fn typed_notes_are_written_listed_and_searched_over_stdio() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// Over stdio, in a project: a gotcha's `Rests on:` line is read from the
+/// project's folder as it is written, and the reply names what does not hold
+/// in a notice; an edit reads it again (task 1324).
+#[test]
+fn a_typed_notes_rests_on_line_is_read_and_the_reply_names_what_does_not_hold() {
+    let home = temp_home();
+    let app = home.join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    fs::write(app.join("src").join("lib.rs"), "pub fn kept() {}\n").unwrap();
+    cli_in(&home, &app, &["init"]);
+    let replies = session_in(
+        &home,
+        &app,
+        &[
+            request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
+            call(2, "create", json!({"kind": "gotcha", "text": "Kept stays\nRests on: `src/lib.rs` \"pub fn kept\"; `src/gone.rs`"})),
+            call(3, "edit", json!({"item": 1, "replace": {"old": "; `src/gone.rs`", "new": ""}})),
+        ],
+    );
+
+    let created: Value = serde_json::from_str(text(&replies["2"])).unwrap();
+    assert_eq!(created["notices"], json!(["note 1's Rests on line: `src/gone.rs` is not there"]), "{created}");
+    let edited: Value = serde_json::from_str(text(&replies["3"])).unwrap();
+    assert!(edited.get("notices").is_none(), "every anchor holds now: {edited}");
+    let board: Value = serde_json::from_slice(&fs::read(app.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+    assert_eq!(board["1"]["restsOn"]["anchors"], json!([{"path": "src/lib.rs", "words": "pub fn kept", "held": true, "line": 1}]));
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// The waiting state over stdio: set_state takes it, next and a write's reply
 /// leave the task out as work to take up, prime and search list it, and the
 /// schema an agent reads offers it.
