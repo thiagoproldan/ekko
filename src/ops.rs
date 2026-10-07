@@ -2115,20 +2115,36 @@ impl<'a> Draft<'a> {
         notices.extend(self.trailer_of_the_started());
         let saved = self.ekko.save_against(&self.before, &mut self.data)?;
         notices.extend(self.ended_waits(&saved.ended));
-        notices.extend(self.rests_unheld(&saved.rests_read));
+        notices.extend(self.rests_told(&saved.rests_read));
         Ok(Committed { data: self.data, overridden, reopened, released: saved.released, blocked: saved.blocked, notices })
     }
 
-    /// What the `Rests on:` line of each note this write read does not hold,
-    /// or names in a way ekko cannot read (task 1324), told to the session
-    /// that wrote it, so no part of the line is dropped in silence.
-    fn rests_unheld(&self, read: &[u32]) -> Vec<String> {
-        read.iter()
-            .filter_map(|id| {
-                let problems = crate::anchors::problems(self.data.get(id)?.rests_on.as_deref()?);
-                (!problems.is_empty()).then(|| format!("note {id}'s Rests on line: {}", problems.join("; ")))
-            })
-            .collect()
+    /// What each decision, gotcha or procedure this write wrote rests on,
+    /// told to the session that wrote it: of one it created, every anchor
+    /// with what ekko took from it, or that its line is missing, with how to
+    /// add one (task 1327); of one whose line it read again, what does not
+    /// hold or names in a way ekko cannot read (task 1324), so no part of
+    /// the line is dropped in silence.
+    fn rests_told(&self, read: &[u32]) -> Vec<String> {
+        // Whatever made them: the create tool writes through no `apply`.
+        let created: Vec<u32> = self.data.keys().filter(|id| !self.before.contains_key(id)).copied().collect();
+        let mut told = Vec::new();
+        for id in &created {
+            let Some(item) = self.data.get(id).filter(|item| crate::anchors::lasting(item)) else { continue };
+            let said = match item.rests_on.as_deref() {
+                Some(rests) => crate::anchors::taken(rests, self.ekko.claude_code.as_deref()).join("; "),
+                None => crate::anchors::unanchored(self.ekko.claude_code.as_deref()),
+            };
+            told.push(format!("note {id}'s Rests on line: {said}"));
+        }
+        for id in read.iter().filter(|id| !created.contains(id)) {
+            let Some(rests) = self.data.get(id).and_then(|item| item.rests_on.as_deref()) else { continue };
+            let problems = crate::anchors::problems(rests);
+            if !problems.is_empty() {
+                told.push(format!("note {id}'s Rests on line: {}", problems.join("; ")));
+            }
+        }
+        told
     }
 
     /// Each wait this write ended, told to the session that wrote it: whose
@@ -3736,7 +3752,8 @@ mod tests {
     /// what each anchor names and what ekko found, read from the project's
     /// folder by the write that saved it, with when and by whom; the reply
     /// names each anchor that does not hold and each part it could not read,
-    /// in one notice (task 1324).
+    /// in one notice (task 1324), and as the write created the note, what
+    /// each anchor that holds found too (task 1327).
     #[test]
     fn a_typed_note_keeps_what_its_line_rests_on_and_the_reply_names_what_does_not_hold() {
         let (ekko, dir, _) = project_board("rests-on");
@@ -3754,9 +3771,10 @@ mod tests {
         assert_eq!(
             written.notices,
             [
-                "note 1's Rests on line: `src/gone.rs` is not there; \"the readme\" is no anchor: an anchor is a path in backticks, \
-                 a path and words in double quotes, Claude Code and its version, or recheck after a date"
-            ]
+                "note 1's Rests on line: `src/lib.rs` holds \"pub fn kept\" at line 1; `src/gone.rs` is not there; \"the readme\" is no anchor: \
+                 an anchor is a path in backticks, a path and words in double quotes, Claude Code and its version, or recheck after a date"
+            ],
+            "created, every anchor is said (task 1327)"
         );
         assert_eq!(ekko.storage.get().unwrap()[&1].rests_on, note.rests_on, "and stored");
         std::fs::remove_dir_all(&dir).ok();
@@ -3806,6 +3824,44 @@ mod tests {
         for id in [2, 3, 4] {
             assert_eq!(others.data[&id].rests_on, None, "{id}");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The reply to a write that creates a decision, gotcha or procedure
+    /// says what it rests on (task 1327): with no `Rests on:` line, that no
+    /// read can tell it may be stale, and how to add one, with the Claude
+    /// Code the session runs where it is known; with one, every anchor and
+    /// what ekko took from it, the version as that session reads it. A plain
+    /// note, a task, and an edit of a note already written say nothing of it.
+    #[test]
+    fn creating_a_decision_gotcha_or_procedure_says_what_it_rests_on() {
+        let (ekko, dir, project) = project_board("rests-told");
+        std::fs::create_dir_all(project.join("evals")).unwrap();
+        let session = Ekko::new(Storage::new(&dir).unwrap()).in_folder(Some(project.clone())).with_claude_code(Some("2.1.292".into()));
+        let line = "Rests on: `src/lib.rs` \"pub fn kept\"; `evals`; Claude Code 2.1.200; Claude Code 2.1.292; recheck after 2099-01-01";
+        let written = batch(
+            &session,
+            &[
+                json!({"op": "create", "kind": "decision", "text": "Ship weekly"}),
+                json!({"op": "create", "kind": "procedure", "text": format!("Release\n{line}")}),
+                json!({"op": "create", "kind": "note", "text": "a plain note"}),
+                json!({"op": "create", "text": "a task"}),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            written.notices,
+            [
+                "note 1's Rests on line: none, so no read can tell it may be stale: if it rests on code, a path, a version or a date, \
+                 add a line Rests on: `path` \"words its file holds\"; Claude Code 2.1.292; recheck after YYYY-MM-DD",
+                "note 2's Rests on line: `src/lib.rs` holds \"pub fn kept\" at line 1; `evals` is there; \
+                 seen with Claude Code 2.1.200, now 2.1.292; seen with Claude Code 2.1.292; recheck after 2099-01-01, ahead",
+            ]
+        );
+        let edited = batch(&session, &[json!({"op": "edit", "item": 1, "append": "and why"}), json!({"op": "edit", "item": 2, "replace": {"old": "Release", "new": "Release, how"}})]);
+        assert!(edited.unwrap().notices.is_empty());
+        let terminal = batch(&ekko, &[json!({"op": "create", "kind": "gotcha", "text": "A trap"})]).unwrap();
+        assert!(terminal.notices.len() == 1 && terminal.notices[0].contains("; Claude Code X.Y.Z; "), "{:?}", terminal.notices);
         std::fs::remove_dir_all(&dir).ok();
     }
 

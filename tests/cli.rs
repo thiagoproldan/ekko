@@ -360,7 +360,9 @@ fn a_typed_note_takes_its_kind_from_the_flags_beside_note() {
 
 /// A typed note written or edited at the terminal has its `Rests on:` line
 /// read from the project's folder, and what does not hold, or is no anchor,
-/// is said under the message (task 1324).
+/// is said under the message (task 1324) -- under the one that created it,
+/// what each anchor that holds found too, or that the line is missing, with
+/// how to add one (task 1327).
 #[test]
 fn the_terminal_says_what_a_notes_rests_on_line_does_not_hold() {
     let home = temp_ekko_dir();
@@ -388,11 +390,12 @@ fn the_terminal_says_what_a_notes_rests_on_line_does_not_hold() {
     assert_eq!(
         said,
         [
+            "Rests on: `src/lib.rs` holds \"pub fn kept\" at line 1",
             "Rests on: `src/gone.rs` is not there",
             "Rests on: \"the readme\" is no anchor: an anchor is a path in backticks, a path and words in double quotes, \
              Claude Code and its version, or recheck after a date",
         ],
-        "{out}"
+        "created, every anchor is said (task 1327): {out}"
     );
     let board: serde_json::Value =
         serde_json::from_slice(&fs::read(app.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
@@ -405,6 +408,15 @@ fn the_terminal_says_what_a_notes_rests_on_line_does_not_hold() {
     let board: serde_json::Value =
         serde_json::from_slice(&fs::read(app.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
     assert_eq!(board["1"]["restsOn"]["anchors"], serde_json::json!([{"path": "src/lib.rs", "held": true}]), "read again");
+
+    let bare = ekko(&["--note", "--kind", "decision", "Ship weekly"]);
+    let out = String::from_utf8_lossy(&bare.stdout);
+    let said: Vec<&str> = out.lines().filter(|line| line.trim_start().starts_with("Rests on:")).map(str::trim).collect();
+    let none = "Rests on: none, so no read can tell it may be stale: if it rests on code, a path, a version or a date, \
+                add a line Rests on: `path` \"words its file holds\"; Claude Code X.Y.Z; recheck after YYYY-MM-DD";
+    assert_eq!(said, [none], "the terminal knows no version: {out}");
+    let plain = ekko(&["--note", "a plain note"]);
+    assert!(!String::from_utf8_lossy(&plain.stdout).contains("Rests on"));
 
     fs::remove_dir_all(&home).ok();
 }

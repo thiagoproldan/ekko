@@ -197,23 +197,78 @@ pub fn rests_on(text: &str, folder: Option<&Path>, now: i64, by: impl FnOnce() -
 }
 
 /// What `rests` found not to hold, or could not read, each in a few words:
-/// what the reply to the write says. A date a recheck came after is
-/// answered, and a recheck made by this very write is told what it leaves
-/// to recheck (task 1326).
+/// what the reply to a write that changed the note says. A date a recheck
+/// came after is answered, and a recheck made by this very write is told
+/// what it leaves to recheck (task 1326).
 pub fn problems(rests: &RestsOn) -> Vec<String> {
-    let mut said = Vec::new();
     let still = rests.still_true.as_ref();
-    for anchor in rests.anchors.iter().filter(|anchor| anchor.held == Some(false)) {
-        said.push(match (&anchor.path, &anchor.words, &anchor.recheck_after) {
-            (Some(path), Some(words), _) => format!("`{path}` does not hold \"{words}\""),
-            (Some(path), None, _) => format!("`{path}` is not there"),
-            (None, _, Some(date)) if still.is_some_and(|still| answers(still, date)) => continue,
-            (None, _, Some(date)) => format!("recheck after {date} is past"),
+    let mut said: Vec<String> = rests.anchors.iter().filter_map(|anchor| unheld(anchor, still)).collect();
+    said.extend(beyond_anchors(rests));
+    said
+}
+
+/// Every anchor `rests` names, with what ekko took from it -- the line its
+/// words begin on, the path there, the date still ahead, the version as the
+/// session running `claude_code` reads it -- or what does not hold, then
+/// what it could not read: what the reply to the write that created the
+/// note says (task 1327), so the writer sees what a read will check.
+pub fn taken(rests: &RestsOn, claude_code: Option<&str>) -> Vec<String> {
+    let still = rests.still_true.as_ref();
+    let mut said = Vec::new();
+    for anchor in &rests.anchors {
+        if let Some(unheld) = unheld(anchor, still) {
+            said.push(unheld);
+            continue;
+        }
+        said.push(match (&anchor.path, &anchor.words, &anchor.claude_code, &anchor.recheck_after) {
+            (Some(path), Some(words), _, _) => match anchor.line {
+                Some(line) => format!("`{path}` holds \"{words}\" at line {line}"),
+                None => format!("`{path}` holds \"{words}\""),
+            },
+            (Some(path), None, _, _) => format!("`{path}` is there"),
+            (None, _, Some(seen), _) => seen_with(seen, still, claude_code).0,
+            (None, _, None, Some(date)) if anchor.held == Some(false) => format!("recheck after {date}, answered by its Still true line"),
+            (None, _, None, Some(date)) => format!("recheck after {date}, ahead"),
             _ => continue,
         });
     }
+    said.extend(beyond_anchors(rests));
+    said
+}
+
+/// Said of a decision, gotcha or procedure created with no `Rests on:` line
+/// (task 1327), after the words that name its line: that no read can tell
+/// it may be stale, and how to add one, with the version of Claude Code the
+/// writing session runs where it is known.
+pub fn unanchored(claude_code: Option<&str>) -> String {
+    format!(
+        "none, so no read can tell it may be stale: if it rests on code, a path, a version or a date, add a line \
+         Rests on: `path` \"words its file holds\"; Claude Code {}; recheck after YYYY-MM-DD",
+        claude_code.unwrap_or("X.Y.Z")
+    )
+}
+
+/// What `anchor` found not to hold, in a few words; None for one that held,
+/// a version, and a date the recheck `still` came after.
+fn unheld(anchor: &Anchor, still: Option<&StillTrue>) -> Option<String> {
+    if anchor.held != Some(false) {
+        return None;
+    }
+    match (&anchor.path, &anchor.words, &anchor.recheck_after) {
+        (Some(path), Some(words), _) => Some(format!("`{path}` does not hold \"{words}\"")),
+        (Some(path), None, _) => Some(format!("`{path}` is not there")),
+        (None, _, Some(date)) if still.is_some_and(|still| answers(still, date)) => None,
+        (None, _, Some(date)) => Some(format!("recheck after {date} is past")),
+        _ => None,
+    }
+}
+
+/// What a reply says of `rests` beyond its anchors: what a recheck made by
+/// this very write leaves to recheck, and each part it could not read.
+fn beyond_anchors(rests: &RestsOn) -> Vec<String> {
+    let mut said = Vec::new();
     // A recheck this very write made is taken at the moment the line is read.
-    if let Some(still) = still.filter(|still| still.at == rests.at) {
+    if let Some(still) = rests.still_true.as_ref().filter(|still| still.at == rests.at) {
         if rests.anchors.iter().any(|anchor| anchor.path.is_some() && anchor.held == Some(false)) {
             said.push(UNANSWERED.to_string());
         }
@@ -254,12 +309,8 @@ pub fn recheck(
     for part in text.lines().filter_map(opened).flat_map(split) {
         let Ok(now) = anchor(part, folder, today, files) else { continue };
         if let Some(seen) = &now.claude_code {
-            let rechecked = still.and_then(|still| still.claude_code.as_deref()).filter(|then| newer(then, seen));
-            if let Some(reading) = claude_code.filter(|reading| newer(reading, rechecked.unwrap_or(seen))) {
-                why.push(match rechecked {
-                    Some(then) => format!("still true with Claude Code {then}, now {reading}"),
-                    None => format!("seen with Claude Code {seen}, now {reading}"),
-                });
+            if let (said, true) = seen_with(seen, still, claude_code) {
+                why.push(said);
             }
             continue;
         }
@@ -282,6 +333,22 @@ pub fn recheck(
         });
     }
     why
+}
+
+/// What a note seen with Claude Code `seen` was last seen with -- that
+/// version, or a newer one the recheck `still` ran -- in a few words, and
+/// whether `reading`, the version the session reading runs, is past it,
+/// which the words then say too.
+fn seen_with(seen: &str, still: Option<&StillTrue>, reading: Option<&str>) -> (String, bool) {
+    let rechecked = still.and_then(|still| still.claude_code.as_deref()).filter(|then| newer(then, seen));
+    let said = match rechecked {
+        Some(then) => format!("still true with Claude Code {then}"),
+        None => format!("seen with Claude Code {seen}"),
+    };
+    match reading.filter(|reading| newer(reading, rechecked.unwrap_or(seen))) {
+        Some(reading) => (format!("{said}, now {reading}"), true),
+        None => (said, false),
+    }
 }
 
 /// Whether `reading`, the version of Claude Code a session runs, is past

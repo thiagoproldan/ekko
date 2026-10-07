@@ -1330,13 +1330,21 @@ impl<'a> Renderer<'a> {
         self.emit(" ", None, &self.painter.grey(&files), "");
     }
 
-    /// What the `Rests on:` line of a note just written does not hold, or
-    /// names in a way ekko cannot read (task 1324): a line each, under the
-    /// message that it was written.
-    pub fn rests_unheld(&mut self, item: &Item) {
-        let Some(rests) = item.rests_on.as_deref() else { return };
-        for problem in crate::anchors::problems(rests) {
-            let line = self.painter.grey(&format!("Rests on: {problem}"));
+    /// What a decision, gotcha or procedure just written rests on, a line
+    /// each under the message that it was written: if `created`, every
+    /// anchor with what ekko took from it, or that its line is missing,
+    /// with how to add one (task 1327); else what its line does not hold,
+    /// or names in a way ekko cannot read (task 1324).
+    pub fn rests_told(&mut self, item: &Item, created: bool) {
+        let rests = item.rests_on.as_deref();
+        let said = match (created && crate::anchors::lasting(item), rests) {
+            (true, Some(rests)) => crate::anchors::taken(rests, None),
+            (true, None) => vec![crate::anchors::unanchored(None)],
+            (false, Some(rests)) => crate::anchors::problems(rests),
+            (false, None) => Vec::new(),
+        };
+        for said in said {
+            let line = self.painter.grey(&format!("Rests on: {said}"));
             self.emit("   ", None, &line, "");
         }
     }

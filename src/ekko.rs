@@ -563,7 +563,7 @@ impl Outcome {
         match self {
             Outcome::Task(item) | Outcome::Note(item) => {
                 out.success_create(item);
-                out.rests_unheld(item);
+                out.rests_told(item, true);
             }
             Outcome::Check { checked, unchecked, overridden, reopened } => {
                 out.mark_complete_overriding(checked, overridden);
@@ -608,7 +608,7 @@ impl Outcome {
             }
             Outcome::Edit(item) => {
                 out.success_edit(item.id);
-                out.rests_unheld(item);
+                out.rests_told(item, false);
             }
             Outcome::Answered(item) => out.success_answered(item.id),
             Outcome::Move(item) => out.success_move(item.id, &item.boards),

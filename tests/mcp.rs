@@ -461,7 +461,8 @@ fn typed_notes_are_written_listed_and_searched_over_stdio() {
 
 /// Over stdio, in a project: a gotcha's `Rests on:` line is read from the
 /// project's folder as it is written, and the reply names what does not hold
-/// in a notice; an edit reads it again (task 1324).
+/// in a notice -- created, what each anchor that holds found too (task 1327)
+/// -- and an edit reads it again (task 1324).
 #[test]
 fn a_typed_notes_rests_on_line_is_read_and_the_reply_names_what_does_not_hold() {
     let home = temp_home();
@@ -481,7 +482,8 @@ fn a_typed_notes_rests_on_line_is_read_and_the_reply_names_what_does_not_hold() 
     );
 
     let created: Value = serde_json::from_str(text(&replies["2"])).unwrap();
-    assert_eq!(created["notices"], json!(["note 1's Rests on line: `src/gone.rs` is not there"]), "{created}");
+    let said = "note 1's Rests on line: `src/lib.rs` holds \"pub fn kept\" at line 1; `src/gone.rs` is not there";
+    assert_eq!(created["notices"], json!([said]), "created, every anchor is said (task 1327): {created}");
     let edited: Value = serde_json::from_str(text(&replies["3"])).unwrap();
     assert!(edited.get("notices").is_none(), "every anchor holds now: {edited}");
     let board: Value = serde_json::from_slice(&fs::read(app.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
@@ -545,6 +547,32 @@ fn a_note_seen_with_an_older_claude_code_is_marked_to_recheck() {
     let read = read["result"]["contents"][0]["text"].as_str().unwrap_or_else(|| panic!("{read}"));
     assert!(read.contains(why), "{read}");
     resources.stop();
+    fs::remove_dir_all(&home).ok();
+}
+
+/// Over stdio, the reply to create says what a decision, gotcha or
+/// procedure rests on (task 1327), by the version of Claude Code the
+/// session's client gave: that a note with no Rests on line has none, and
+/// how to add one; every anchor of one with the line, the version as that
+/// session reads it. A plain note says nothing of it.
+#[test]
+fn creating_a_typed_note_says_what_it_rests_on_by_the_sessions_claude_code() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "claude-code", "version": "2.1.292"}})),
+            call(2, "create", json!({"kind": "decision", "text": "Ship weekly"})),
+            call(3, "create", json!({"kind": "gotcha", "text": "A trap\nRests on: Claude Code 2.1.200; recheck after 2099-01-01"})),
+            call(4, "create", json!({"kind": "note", "text": "a plain note"})),
+        ],
+    );
+    let notices = |id: &str| serde_json::from_str::<Value>(text(&replies[id])).unwrap()["notices"].clone();
+    let none = "note 1's Rests on line: none, so no read can tell it may be stale: if it rests on code, a path, a version or a date, \
+                add a line Rests on: `path` \"words its file holds\"; Claude Code 2.1.292; recheck after YYYY-MM-DD";
+    assert_eq!(notices("2"), json!([none]));
+    assert_eq!(notices("3"), json!(["note 2's Rests on line: seen with Claude Code 2.1.200, now 2.1.292; recheck after 2099-01-01, ahead"]));
+    assert_eq!(notices("4"), Value::Null, "{}", text(&replies["4"]));
     fs::remove_dir_all(&home).ok();
 }
 
