@@ -139,6 +139,13 @@ fn still_true(text: &str, old: Option<&Item>, writer: Writer<'_>, now: i64) -> O
     Some(StillTrue { at: now, by: writer.actor.map(|actor| actor.holder(now)), claude_code, unknown: Default::default() })
 }
 
+/// Whether `text` starts with a line ekko reads from a note -- a `Rests on:`
+/// line, or a `Still true` one -- which an edit appending it puts on a line
+/// of its own (task 1423).
+pub fn opens_a_line(text: &str) -> bool {
+    text.trim_start().lines().next().is_some_and(|line| opened(line).is_some() || is_still_true(line))
+}
+
 /// Whether `line` starts with `Still true`, in any case and however
 /// indented, with no letter or digit running on from it.
 fn is_still_true(line: &str) -> bool {

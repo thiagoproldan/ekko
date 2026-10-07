@@ -1849,8 +1849,12 @@ impl<'a> Draft<'a> {
                 if more.trim().is_empty() {
                     return Err(invalid("append is empty, so there is nothing to add"));
                 }
-                if item.is_task && !item.description.trim_end().contains('\n') {
-                    // What is added to a task goes to its body, never its title.
+                // What is added to a task goes to its body, never its title;
+                // and a line ekko reads from a note starts a line of its own,
+                // or the line before it would take it in, unread (task 1423).
+                let own_line =
+                    if item.is_task { !item.description.trim_end().contains('\n') } else { crate::anchors::opens_a_line(more) };
+                if own_line {
                     format!("{}\n{}", item.description.trim_end(), more.trim_start())
                 } else {
                     let joins = item.description.ends_with(char::is_whitespace) || more.starts_with(char::is_whitespace);
@@ -3844,6 +3848,27 @@ mod tests {
                  write the version you checked with in its place"
             ]
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A line ekko reads from a note -- `Rests on:`, `Still true` -- appended
+    /// starts a line of its own, newline before it or not, and is read (task
+    /// 1423); words that only mention one, and any other append, join the
+    /// text as before.
+    #[test]
+    fn an_appended_rests_on_or_still_true_line_starts_a_line_of_its_own() {
+        let (ekko, dir, _) = project_board("append-lines");
+        batch(&ekko, &[json!({"op": "create", "kind": "gotcha", "text": "A trap"})]).unwrap();
+        let append = |more: &str| batch(&ekko, &[json!({"op": "edit", "item": 1, "append": more})]).unwrap().data[&1].clone();
+
+        let note = append("Rests on: `src/lib.rs` \"pub fn kept\"");
+        assert_eq!(note.description, "A trap\nRests on: `src/lib.rs` \"pub fn kept\"");
+        assert!(note.rests_on.as_deref().is_some_and(|rests| rests.anchors[0].held == Some(true)), "read: {:?}", note.rests_on);
+        let note = append("  still TRUE, 2026-10-07: it is");
+        assert_eq!(note.description, "A trap\nRests on: `src/lib.rs` \"pub fn kept\"\nstill TRUE, 2026-10-07: it is");
+        assert_eq!(append("\nStill true (2026-10-08)").description.lines().last(), Some("Still true (2026-10-08)"), "one newline, not two");
+        assert_eq!(append("as rests on: says").description.lines().last(), Some("Still true (2026-10-08) as rests on: says"), "a mention joins");
+        assert!(append("Still trueish").description.ends_with("\nStill true (2026-10-08) as rests on: says Still trueish"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
