@@ -67,11 +67,24 @@ const PRIME_BUDGET: usize = 6_000;
 /// Ready tasks whose attached notes a prime quotes; later ones show the task.
 const READY_WITH_NOTES: usize = 3;
 /// The most of a handoff a prime quotes, in characters, on top of
-/// `PRIME_BUDGET`: together they stay under the 10,000 Claude Code keeps of a
-/// hook's output. About a thousand tokens -- where the last session stopped,
-/// what it decided and why, the files and the next step; a longer handoff
-/// shows its start and points at `context` for the rest.
+/// `PRIME_BUDGET`, under `PRIME_CAP` with it. About a thousand tokens --
+/// where the last session stopped, what it decided and why, the files and
+/// the next step; a longer handoff shows its start and its end, from its
+/// next step, and points at `context` for the rest.
 const HANDOFF_BUDGET: usize = 3_500;
+/// The most the whole prime says, in characters, whatever the blocks before
+/// its sections hold: under the 10,000 Claude Code keeps of a hook's output,
+/// with room for the lines the hook writes above it (task 1455; OpenViking
+/// caps its SessionStart at 9,500 for the same reason).
+const PRIME_CAP: usize = 9_500;
+/// What the sections keep of `PRIME_CAP` when the blocks before them would
+/// leave them less: room for the work in progress and the first ready tasks.
+const SECTIONS_FLOOR: usize = 2_500;
+/// The ids a cut list names of the entries it left out.
+const REST_IDS: usize = 10;
+/// The entries of each list before the sections a cut prime keeps before
+/// any list grows into the room left.
+const LIST_KEPT: usize = 1;
 /// What a cut prime keeps of each section before any section grows into the
 /// room left: the ten best ready tasks, the first blocked ones -- whose lines
 /// name what holds them -- and the newest loose notes. Without these a long
@@ -2352,6 +2365,9 @@ pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Pat
             Vec::new()
         });
     }
+    let taken: String = taken.iter().map(|notice| format!("{notice}\n")).collect();
+    // The notices come above the prime in the same output, under one cap.
+    let cap = PRIME_CAP.saturating_sub(taken.chars().count());
     let revision = ekko.storage.get_counters()?.revision as i64;
     let served = event.session_id.as_deref().and_then(|session| served_cursor(state, session, board));
     let text = match (event.source.as_str(), served) {
@@ -2363,18 +2379,17 @@ pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Pat
             if moved.chars().count() <= RESUME_CHANGES {
                 format!("ekko \u{b7} {board} \u{b7} what moved since this session last read the board\n{moved}")
             } else {
-                prime(ekko, board)?.text()
+                prime(ekko, board)?.text_capped(cap)
             }
         }
         ("resume" | "fork", None) => format!(
             "ekko \u{b7} {board} \u{b7} cursor {revision} \u{b7} the prime earlier in this session still applies; changes with its cursor lists what moved\n"
         ),
-        _ => prime(ekko, board)?.text(),
+        _ => prime(ekko, board)?.text_capped(cap),
     };
     if let Some(session) = &event.session_id {
         remember(state, session, board, revision);
     }
-    let taken: String = taken.iter().map(|notice| format!("{notice}\n")).collect();
     Ok(format!("{taken}{text}"))
 }
 
@@ -2749,16 +2764,26 @@ fn open_tasks(n: usize) -> String {
 
 impl Prime {
     pub fn text(&self) -> String {
-        self.text_within(PRIME_BUDGET)
+        self.text_capped(PRIME_CAP)
     }
 
-    /// The resume view in at most `budget` characters. The header, what needs
-    /// attention and the closing line always fit; the sections fill what is
-    /// left in the order an agent needs them -- work in progress, ready work
-    /// best first, blocked work, waiting work, work with someone, loose notes
-    /// -- and a section cut short says how much it left out and where the
-    /// rest is.
-    pub fn text_within(&self, budget: usize) -> String {
+    /// The resume view in at most `cap` characters: a hook passes less than
+    /// `PRIME_CAP` when it writes lines of its own above the prime.
+    pub fn text_capped(&self, cap: usize) -> String {
+        self.text_within(PRIME_BUDGET, cap)
+    }
+
+    /// The resume view: its sections in at most `budget` characters, and the
+    /// whole in at most `cap`. The header, what needs attention and the
+    /// closing line always fit; the sections fill what is left in the order
+    /// an agent needs them -- work in progress, ready work best first,
+    /// blocked work, waiting work, work with someone, loose notes -- and a
+    /// section cut short says how much it left out and where the rest is.
+    /// Before the sections come the handoff and the lists of questions and
+    /// waits; when all of it would pass `cap`, those lists are cut to leave
+    /// the sections `SECTIONS_FLOOR`, and the sections spend what the blocks
+    /// before them left. A prime under `cap` is written whole, as it was.
+    fn text_within(&self, budget: usize, cap: usize) -> String {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut out = String::new();
         let _ = writeln!(out, "ekko \u{b7} {} \u{b7} cursor {}", self.board, self.cursor);
@@ -2816,9 +2841,9 @@ impl Prime {
             + with_more
             + artifacts_more
             + knowledge_more;
-        let mut room = Room(budget.saturating_sub(fixed));
+        let mut head = String::new();
         if let Some(handoff) = &self.handoff {
-            out.push_str(&handoff.text());
+            head.push_str(&handoff.text());
         }
         if !self.other_handoffs.is_empty() {
             let named: Vec<String> = self
@@ -2841,62 +2866,9 @@ impl Prime {
                 .collect();
             let more = self.other_handoffs.len().saturating_sub(OTHER_HANDOFFS_SHOWN);
             let more = if more > 0 { format!("; +{more} more") } else { String::new() };
-            let _ = writeln!(out, "    Other handoffs in the last hour: {}{more}", named.join("; "));
+            let _ = writeln!(head, "    Other handoffs in the last hour: {}{more}", named.join("; "));
         }
-
-        // Questions before the work: the user's answers are what unblocks it.
-        if !self.waiting_on_you.is_empty() {
-            let _ = writeln!(out, "\nWaiting on you ({})", self.waiting_on_you.len());
-            for asked in self.waiting_on_you.iter().take(WAITING_ON_YOU_SHOWN) {
-                let about = asked.about.map(|task| format!(", about {task}")).unwrap_or_default();
-                let moved = match asked.moved {
-                    0 => String::new(),
-                    1 => ", 1 write ago".to_string(),
-                    n => format!(", {n} writes ago"),
-                };
-                let _ = writeln!(out, "{:>4}. [asked by {}{about}{moved}] {}", asked.id, asked.by, clip(&asked.text, NOTE_CLIP));
-            }
-            if let Some(more @ 1..) = self.waiting_on_you.len().checked_sub(WAITING_ON_YOU_SHOWN) {
-                let _ = writeln!(out, "      +{more} more: ekko --sessions lists them by who asked");
-            }
-        }
-        if !self.answered.is_empty() {
-            let _ = writeln!(out, "\nAnswered, for this session ({})", self.answered.len());
-            for asked in &self.answered {
-                let (answer, by) = (asked.answer.as_deref().unwrap_or_default(), asked.answered_by.as_deref().unwrap_or("the user"));
-                // The board moving in between is what makes an answer stale.
-                let moved = match asked.moved {
-                    0 => String::new(),
-                    1 => ", 1 write after it was asked".to_string(),
-                    n => format!(", {n} writes after it was asked"),
-                };
-                let _ =
-                    writeln!(out, "{:>4}. {}\n      -> {} (recorded by {by}{moved})", asked.id, clip(&asked.text, TASK_CLIP), clip(answer, NOTE_CLIP));
-            }
-        }
-        // Waits beside the questions: what sessions and the user owe each
-        // other (task 389).
-        if !self.waits.is_empty() {
-            let _ = writeln!(out, "\nThis session waits ({})", self.waits.len());
-            for wait in &self.waits {
-                let held = wait.held.as_ref().map(|by| format!(", held by {by}")).unwrap_or_default();
-                let _ = writeln!(out, "{:>4}. on {} until {}{held}: {}", wait.id, wait.on(), wait.until, clip(&wait.text, NOTE_CLIP));
-            }
-        }
-        if !self.waits_over.is_empty() {
-            let _ = writeln!(out, "\nWaits over, for this session ({})", self.waits_over.len());
-            for wait in &self.waits_over {
-                let by = wait.ended_by.as_ref().map(|by| format!(", by {by}")).unwrap_or_default();
-                let ended = wait.ended.unwrap_or_default();
-                let _ = writeln!(out, "{:>4}. {} {ended}{by}\n      -> {}", wait.id, wait.on(), clip(&wait.text, NOTE_CLIP));
-            }
-        }
-        if !self.waited_on.is_empty() {
-            let _ = writeln!(out, "\nOther sessions wait on your work ({})", self.waited_on.len());
-            for wait in &self.waited_on {
-                let _ = writeln!(out, "{:>4}. {} waits on {} until {}: {}", wait.id, wait.by, wait.on(), wait.until, clip(&wait.text, NOTE_CLIP));
-            }
-        }
+        let lists = self.lists();
 
         let sections = [
             Section::of_entries("In progress", &self.doing, usize::MAX, self.doing.len(), "context <id> reads one", usize::MAX, &today),
@@ -2937,14 +2909,115 @@ impl Prime {
                 reserved: true,
             },
         ];
-        let shown = fit(&sections, &mut room);
-        for (section, shown) in sections.iter().zip(&shown) {
-            section.write(&mut out, shown);
+        let write_sections = |room: usize| {
+            let mut written = String::new();
+            for (section, shown) in sections.iter().zip(&fit(&sections, &mut Room(room))) {
+                section.write(&mut written, shown);
+            }
+            written
+        };
+        let chars = |text: &str| text.chars().count();
+        let room = budget.saturating_sub(fixed);
+        let mut listed = write_lists(&lists, None);
+        let mut written = write_sections(room);
+        let whole = chars(&out) + chars(&head) + chars(&listed) + chars(&written) + chars(&attention) + chars(&close);
+        if whole > cap {
+            // Past the cap, Claude Code would hand the session a file path
+            // and a preview instead (task 1455). `fixed` holds the lines the
+            // sections may end with, which `fit` leaves out of its room.
+            let floor = SECTIONS_FLOOR.min(chars(&written));
+            listed = write_lists(&lists, Some(cap.saturating_sub(fixed + chars(&head) + floor)));
+            written = write_sections(room.min(cap.saturating_sub(fixed + chars(&head) + chars(&listed))));
         }
 
+        out.push_str(&head);
+        out.push_str(&listed);
+        out.push_str(&written);
         out.push_str(&attention);
         out.push_str(&close);
         out
+    }
+
+    /// The lists a prime writes between the handoff and the sections, in
+    /// order: questions before the work, since the user's answers are what
+    /// unblocks it, then the waits sessions and the user owe each other
+    /// (task 389).
+    fn lists(&self) -> Vec<Listed> {
+        let mut lists = Vec::new();
+        if !self.waiting_on_you.is_empty() {
+            let entries = self
+                .waiting_on_you
+                .iter()
+                .map(|asked| {
+                    let about = asked.about.map(|task| format!(", about {task}")).unwrap_or_default();
+                    let moved = match asked.moved {
+                        0 => String::new(),
+                        1 => ", 1 write ago".to_string(),
+                        n => format!(", {n} writes ago"),
+                    };
+                    (asked.id, format!("{:>4}. [asked by {}{about}{moved}] {}\n", asked.id, asked.by, clip(&asked.text, NOTE_CLIP)))
+                })
+                .collect();
+            let heading = format!("\nWaiting on you ({})", self.waiting_on_you.len());
+            lists.push(Listed { heading, entries, limit: WAITING_ON_YOU_SHOWN, rest: Some("ekko --sessions lists them by who asked") });
+        }
+        if !self.answered.is_empty() {
+            let entries = self
+                .answered
+                .iter()
+                .map(|asked| {
+                    let (answer, by) = (asked.answer.as_deref().unwrap_or_default(), asked.answered_by.as_deref().unwrap_or("the user"));
+                    // The board moving in between is what makes an answer stale.
+                    let moved = match asked.moved {
+                        0 => String::new(),
+                        1 => ", 1 write after it was asked".to_string(),
+                        n => format!(", {n} writes after it was asked"),
+                    };
+                    let (text, answer) = (clip(&asked.text, TASK_CLIP), clip(answer, NOTE_CLIP));
+                    (asked.id, format!("{:>4}. {text}\n      -> {answer} (recorded by {by}{moved})\n", asked.id))
+                })
+                .collect();
+            let heading = format!("\nAnswered, for this session ({})", self.answered.len());
+            lists.push(Listed { heading, entries, limit: usize::MAX, rest: None });
+        }
+        if !self.waits.is_empty() {
+            let entries = self
+                .waits
+                .iter()
+                .map(|wait| {
+                    let held = wait.held.as_ref().map(|by| format!(", held by {by}")).unwrap_or_default();
+                    (wait.id, format!("{:>4}. on {} until {}{held}: {}\n", wait.id, wait.on(), wait.until, clip(&wait.text, NOTE_CLIP)))
+                })
+                .collect();
+            let heading = format!("\nThis session waits ({})", self.waits.len());
+            lists.push(Listed { heading, entries, limit: usize::MAX, rest: None });
+        }
+        if !self.waits_over.is_empty() {
+            let entries = self
+                .waits_over
+                .iter()
+                .map(|wait| {
+                    let by = wait.ended_by.as_ref().map(|by| format!(", by {by}")).unwrap_or_default();
+                    let ended = wait.ended.unwrap_or_default();
+                    (wait.id, format!("{:>4}. {} {ended}{by}\n      -> {}\n", wait.id, wait.on(), clip(&wait.text, NOTE_CLIP)))
+                })
+                .collect();
+            let heading = format!("\nWaits over, for this session ({})", self.waits_over.len());
+            lists.push(Listed { heading, entries, limit: usize::MAX, rest: None });
+        }
+        if !self.waited_on.is_empty() {
+            let entries = self
+                .waited_on
+                .iter()
+                .map(|wait| {
+                    let text = clip(&wait.text, NOTE_CLIP);
+                    (wait.id, format!("{:>4}. {} waits on {} until {}: {text}\n", wait.id, wait.by, wait.on(), wait.until))
+                })
+                .collect();
+            let heading = format!("\nOther sessions wait on your work ({})", self.waited_on.len());
+            lists.push(Listed { heading, entries, limit: usize::MAX, rest: None });
+        }
+        lists
     }
 
     /// Whether a note this prime shows -- among the lasting notes, or under
@@ -3045,34 +3118,188 @@ impl Handoff {
             self.id, self.task, self.task_state
         );
         let body = self.description.trim();
-        let total = body.chars().count();
-        let mut spent = 0;
-        let mut shown = 0;
-        for line in body.lines() {
-            let quoted = format!("    > {line}");
-            let cost = quoted.chars().count() + 1;
-            if spent + cost > HANDOFF_BUDGET {
-                let room = HANDOFF_BUDGET.saturating_sub(spent + 8);
-                if room > 40 {
-                    let head: String = line.chars().take(room).collect();
-                    let _ = writeln!(out, "    > {head}");
-                    shown += head.chars().count();
-                }
-                break;
-            }
-            let _ = writeln!(out, "{quoted}");
-            spent += cost;
-            shown += line.chars().count() + 1;
+        let cut = handoff_cut(&body.lines().collect::<Vec<_>>(), HANDOFF_BUDGET);
+        let mark = format!("    \u{2026} +{} chars: context {} reads it whole\n", body.chars().count().saturating_sub(cut.shown), self.id);
+        for line in &cut.head {
+            let _ = writeln!(out, "    > {line}");
         }
-        if shown < total {
-            let _ = writeln!(out, "    \u{2026} +{} chars: context {} reads it whole", total - shown.min(total), self.id);
+        // The mark stands where text was left out: before the end, or after
+        // it when the head ran on into it.
+        if cut.before {
+            out.push_str(&mark);
+        }
+        for line in &cut.tail {
+            let _ = writeln!(out, "    > {line}");
+        }
+        if cut.after && !cut.before {
+            out.push_str(&mark);
         }
         out
     }
 }
 
+/// What a prime quotes of a handoff: its head and its end, the lines of
+/// each, whether text was left out before the end and after it, and how
+/// many of the body's characters they show.
+struct HandoffCut {
+    head: Vec<String>,
+    tail: Vec<String>,
+    before: bool,
+    after: bool,
+    shown: usize,
+}
+
+/// Whether a handoff's line opens what to do next, as handoffs write it:
+/// "Next step: ...", "NEXT STEP", "**Next steps**", "- Next: ...".
+fn opens_next_step(line: &str) -> bool {
+    let line = line.trim_start_matches(|c: char| c.is_whitespace() || "-*#>".contains(c)).to_lowercase();
+    line.starts_with("next step") || line.starts_with("next:")
+}
+
+/// The lines of a handoff a prime quotes within `budget`, each costing its
+/// quoted line: all of them when they fit; else its end and its head. The
+/// end runs from its last line opening a next step, where a handoff most
+/// often says what to do (task 1456), else it is its last lines, in at most
+/// half of `budget`; the head takes what the end leaves, and when it runs
+/// into the end, the end goes on. A line the head has no room for whole
+/// shows its start, as long as that says something.
+fn handoff_cut(lines: &[&str], budget: usize) -> HandoffCut {
+    let cost = |line: &str| line.chars().count() + 7;
+    let whole = |lines: &[&str]| lines.iter().map(|line| line.to_string()).collect::<Vec<_>>();
+    let n = lines.len();
+    if lines.iter().map(|line| cost(line)).sum::<usize>() <= budget {
+        let shown = lines.iter().map(|line| line.chars().count() + 1).sum();
+        return HandoffCut { head: whole(lines), tail: Vec::new(), before: false, after: false, shown };
+    }
+    let half = budget / 2;
+    let mut spent = 0;
+    let (start, mut end) = match lines.iter().rposition(|line| opens_next_step(line)) {
+        Some(at) => {
+            // The line that says what to do shows whole when it can at all.
+            let mut end = at;
+            while end < n && (end == at && cost(lines[at]) <= budget || spent + cost(lines[end]) <= half) {
+                spent += cost(lines[end]);
+                end += 1;
+            }
+            (at, end)
+        }
+        None => {
+            let mut start = n;
+            while start > 0 && spent + cost(lines[start - 1]) <= half {
+                spent += cost(lines[start - 1]);
+                start -= 1;
+            }
+            (start, n)
+        }
+    };
+    let mut head = 0;
+    while head < start && spent + cost(lines[head]) <= budget {
+        spent += cost(lines[head]);
+        head += 1;
+    }
+    if head == start {
+        while end < n && spent + cost(lines[end]) <= budget {
+            spent += cost(lines[end]);
+            end += 1;
+        }
+    }
+    let mut quoted = whole(&lines[..head]);
+    let room = budget.saturating_sub(spent + 8);
+    if head < start && room > 40 {
+        quoted.push(lines[head].chars().take(room).collect());
+    }
+    let tail = whole(&lines[start..end]);
+    let shown = quoted.iter().chain(&tail).map(|line| line.chars().count() + 1).sum::<usize>()
+        - usize::from(quoted.len() > head);
+    HandoffCut { head: quoted, tail, before: head < start, after: end < n, shown }
+}
+
 /// The characters a budgeted view has left.
 struct Room(usize);
+
+/// A list a prime writes before its sections -- the questions waiting on
+/// the user, this session's answers and waits, the waits on its work: its
+/// heading, each entry by id with its lines, how many a whole list shows,
+/// and where the rest is read; `None` names them by id.
+struct Listed {
+    heading: String,
+    entries: Vec<(u32, String)>,
+    limit: usize,
+    rest: Option<&'static str>,
+}
+
+impl Listed {
+    /// The heading, the first `shown` entries and a line counting the rest.
+    fn write(&self, out: &mut String, shown: usize) {
+        let _ = writeln!(out, "{}", self.heading);
+        for (_, lines) in self.entries.iter().take(shown) {
+            out.push_str(lines);
+        }
+        out.push_str(&self.more(shown));
+    }
+
+    /// The line counting the entries after the first `shown`, and saying
+    /// where they are read.
+    fn more(&self, shown: usize) -> String {
+        let left = &self.entries[shown.min(self.entries.len())..];
+        if left.is_empty() {
+            return String::new();
+        }
+        match self.rest {
+            Some(rest) => format!("      +{} more: {rest}\n", left.len()),
+            None => {
+                let ids: Vec<String> = left.iter().take(REST_IDS).map(|(id, _)| id.to_string()).collect();
+                let tail = if left.len() > REST_IDS { ", \u{2026}" } else { "" };
+                format!("      +{} more, context <id> reads each: {}{tail}\n", left.len(), ids.join(", "))
+            }
+        }
+    }
+
+    /// The most `more` can write, whatever it leaves out: its count at the
+    /// list's length, and as many ids as it names, each as long as the
+    /// longest, with the mark of more.
+    fn more_bound(&self) -> usize {
+        if self.rest.is_some() {
+            return self.more(0).chars().count();
+        }
+        let width = self.entries.iter().map(|(id, _)| id.to_string().len()).max().unwrap_or_default();
+        let named = self.entries.len().min(REST_IDS);
+        format!("      +{} more, context <id> reads each: \n", self.entries.len()).chars().count() + named * (width + 2) + 1
+    }
+}
+
+/// The lists before a prime's sections: whole when `room` is `None` or holds
+/// them, else every heading with the line counting the rest, and as many
+/// first entries as fit in `room` -- the first `LIST_KEPT` of each list,
+/// then more of each in order -- so one long list cannot hide the others.
+fn write_lists(lists: &[Listed], room: Option<usize>) -> String {
+    let whole = |list: &Listed| list.limit.min(list.entries.len());
+    let mut out = String::new();
+    for list in lists {
+        list.write(&mut out, whole(list));
+    }
+    let Some(room) = room.filter(|room| out.chars().count() > *room) else { return out };
+    let reserved: usize = lists.iter().map(|list| list.heading.chars().count() + 1 + list.more_bound()).sum();
+    let mut left = room.saturating_sub(reserved);
+    let mut shown = vec![0; lists.len()];
+    for kept in [LIST_KEPT, usize::MAX] {
+        for (list, shown) in lists.iter().zip(&mut shown) {
+            while let Some((_, lines)) = list.entries.get(*shown).filter(|_| *shown < whole(list).min(kept)) {
+                let cost = lines.chars().count();
+                if cost > left {
+                    break;
+                }
+                left -= cost;
+                *shown += 1;
+            }
+        }
+    }
+    let mut out = String::new();
+    for (list, shown) in lists.iter().zip(shown) {
+        list.write(&mut out, shown);
+    }
+    out
+}
 
 /// One prime section before it is fitted: its heading, each entry as its own
 /// line and the notes quoted under it, how many there are in all, where the
@@ -4131,6 +4358,132 @@ mod tests {
         assert!(text.chars().count() < 10_000, "{} characters", text.chars().count());
         assert!(text.contains("chars: context 101 reads it whole"), "{text}");
         assert!(text.contains("Ready, best first"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A handoff past its budget keeps its end beside its head: from its last
+    /// line opening a next step, else its last lines, with what was left out
+    /// between them counted (task 1456). Measured 2026-10-07: handoff 1353
+    /// lost its NEXT STEP, the last two of its 76 lines, in a resume prime.
+    #[test]
+    fn a_cut_handoff_keeps_its_next_step_and_its_end() {
+        let (ekko, dir) = board("handoff-end");
+        ekko.create_task(&words(&["the work in progress"])).unwrap();
+        ekko.create_task(&words(&["other work"])).unwrap();
+        ekko.set_state(&words(&["@1", "progress"]), false).unwrap();
+        ekko.set_state(&words(&["@2", "progress"]), false).unwrap();
+        let found: String = (1..=74).map(|k| format!("line {k}: something this session found out and the next must know\n")).collect();
+        hand_over(&ekko, 1, &format!("Where it stopped.\n{found}NEXT STEP: rebuild, then rerun the eval\nand read its log first"));
+        let text = prime(&ekko, "default board").unwrap().text();
+        let quoted = text.split("\nWhere the last session stopped: ").nth(1).unwrap_or_default();
+        let quoted: String = quoted.lines().skip(1).take_while(|line| line.starts_with("    ")).map(|line| format!("{line}\n")).collect();
+        assert!(quoted.starts_with("    > Where it stopped.\n    > line 1: "), "the head: {quoted}");
+        assert!(quoted.ends_with("    > NEXT STEP: rebuild, then rerun the eval\n    > and read its log first\n"), "the end: {quoted}");
+        assert!(quoted.contains("chars: context 3 reads it whole\n"), "what was left out: {quoted}");
+        assert!(quoted.chars().count() <= HANDOFF_BUDGET + 100, "{} characters: {quoted}", quoted.chars().count());
+
+        // With no line that opens a next step, its last lines are its end.
+        let last: String = (1..=90).map(|k| format!("line {k}: something this session found out and the next must know\n")).collect();
+        hand_over(&ekko, 2, &format!("{last}then the last thing to do"));
+        let text = prime(&ekko, "default board").unwrap().text();
+        assert!(text.contains("    > line 90: something this session found out and the next must know\n    > then the last thing to do\n"), "{text}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every block the prime writes before its sections, each full -- the
+    /// handoff, the other handoffs, the questions waiting on the user, this
+    /// session's answers, its waits open and over, the waits on its work --
+    /// beside full sections, and the prime stays under the cap that keeps it
+    /// whole in a hook, the hook's own output too (task 1455). Measured
+    /// 2026-10-07: 13 of 394 primes passed 10,000 characters, which Claude
+    /// Code turns into a file path and a preview, once answers, questions
+    /// and a handoff came on top of full sections.
+    #[test]
+    fn the_prime_stays_under_its_cap_whatever_the_blocks_before_its_sections_hold() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let (_, dir) = board("prime-cap");
+        let registry = crate::holder::Registry::at(dir.join("processes"));
+        let as_ = |actor: &crate::holder::Actor| {
+            Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
+        };
+        let person = crate::holder::Actor::person();
+        let long = |what: &str, k: u32| format!("{what} {k}, {}", "worded at the length real ones run to, ".repeat(8));
+        for k in 1..=60 {
+            let task = format!("task {k}, titled at the length real titles run to on a board\n{}", long("its body", k));
+            as_(&me).create_task(&words(&[task.as_str()])).unwrap();
+        }
+        for k in 1..=5 {
+            as_(&me).set_state(&words(&[&format!("@{k}"), "progress"]), false).unwrap();
+            as_(&me).create_note(&words(&[long("a note on the work", k).as_str()])).unwrap();
+            as_(&me).set_attached_to(&words(&[&format!("@{}", 60 + k), &k.to_string()])).unwrap();
+        }
+        for k in 6..=10 {
+            as_(&other).set_state(&words(&[&format!("@{k}"), "progress"]), false).unwrap();
+        }
+        let wait = |actor: &crate::holder::Actor, on: std::ops::RangeInclusive<u32>| {
+            let ekko = as_(actor);
+            let mut draft = crate::ops::Draft::open(&ekko).unwrap();
+            for k in on {
+                let spec = crate::ops::WaitOn { item: crate::ops::Ref::Id(k), until: None, text: Some(long("then", k)), cancel: false };
+                let crate::ops::Waited::Recorded(_) = draft.wait(&spec).unwrap() else { panic!("a wait recorded") };
+            }
+            draft.commit(false).unwrap();
+        };
+        wait(&me, 6..=15);
+        wait(&other, 1..=5);
+        for k in 11..=15 {
+            as_(&person).set_state(&words(&[&format!("@{k}"), "done"]), false).unwrap();
+        }
+        let ask = |actor: &crate::holder::Actor, count: u32| {
+            let ekko = as_(actor);
+            let mut draft = crate::ops::Draft::open(&ekko).unwrap();
+            let asked: Vec<u32> = (1..=count).map(|k| draft.ask(&long("a question", k), Some(&crate::ops::Ref::Id(20 + k))).unwrap()).collect();
+            draft.commit(false).unwrap();
+            asked
+        };
+        for id in ask(&me, 30) {
+            as_(&person).answer_question(&words(&[&id.to_string(), long("an answer", id).as_str()])).unwrap();
+        }
+        ask(&other, 12);
+        for k in 16..=21 {
+            hand_over(&as_(&other), k, &long("stopped here", k));
+        }
+        let stopped: String = (1..=200).map(|k| format!("step {k}: something this session found out and the next must know\n")).collect();
+        hand_over(&as_(&me), 1, &stopped);
+
+        let text = prime(&as_(&me), "default board").unwrap().text();
+        for block in [
+            "\nWhere the last session stopped: handoff ",
+            "\n    Other handoffs in the last hour: ",
+            "\nWaiting on you (12)\n",
+            "\nAnswered, for this session (30)\n",
+            "\nThis session waits (5)\n",
+            "\nWaits over, for this session (5)\n",
+            "\nOther sessions wait on your work (5)\n",
+            "\nIn progress (10)\n",
+        ] {
+            assert!(text.contains(block), "{block:?} is not shown: {text}");
+        }
+        assert!(text.chars().count() <= PRIME_CAP, "{} characters:\n{text}", text.chars().count());
+        // Cut, each list keeps its first entry and says where the rest is.
+        let lists = [
+            "Waiting on you (12)",
+            "Answered, for this session (30)",
+            "This session waits (5)",
+            "Waits over, for this session (5)",
+            "Other sessions wait on your work (5)",
+        ];
+        for heading in lists {
+            let mut lines = text.split(&format!("\n{heading}\n")).nth(1).unwrap_or_default().lines();
+            assert!(lines.next().is_some_and(|line| line_ids(line).len() == 1), "{heading} shows no entry: {text}");
+            let rest = lines.take_while(|line| !line.is_empty()).any(|line| line.trim_start().starts_with('+') && line.contains(" more"));
+            assert!(rest, "{heading} does not count the rest: {text}");
+        }
+        let event = SessionEvent { source: "startup".to_string(), session_id: Some("c-mine".to_string()), transcript: None };
+        let hooked = session_start(&as_(&me), "default board", &event, &dir.join("sessions")).unwrap();
+        assert!(hooked.chars().count() <= PRIME_CAP, "{} characters", hooked.chars().count());
 
         std::fs::remove_dir_all(&dir).ok();
     }
