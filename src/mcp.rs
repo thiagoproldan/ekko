@@ -2069,6 +2069,54 @@ fn tool_definitions(linked: &[String]) -> Value {
 mod tests {
     use super::*;
 
+    /// The most each text ekko puts ahead of every session's work may take,
+    /// in characters (task 1472): the server's instructions, each
+    /// always-loaded tool's definition as tools/list sends it on a board
+    /// linked to no other (a link adds its `project` to each), and the caps
+    /// of the two SessionStart hooks, the prime and the memory page, which
+    /// their own tests hold them to. Today's size and about 5%, rounded up
+    /// to 50; the instructions' 2,048 is where Claude Code cuts them (note
+    /// 167). A session that lengthens one makes every later session pay for
+    /// it, so raising a budget is the user's call, through procedure 1435's
+    /// gate.
+    const START_BUDGETS: &[(&str, usize)] = &[
+        ("instructions", 2_048),
+        ("prime", 9_500),
+        ("memory page", 6_000),
+        ("context", 850),
+        ("search", 1_000),
+        ("create", 2_500),
+        ("set_state", 800),
+        ("edit", 800),
+        ("ask", 4_100),
+    ];
+
+    #[test]
+    fn every_text_a_session_pays_for_at_start_stays_under_its_budget() {
+        let mut texts = vec![
+            ("instructions".to_string(), INSTRUCTIONS.chars().count()),
+            ("prime".to_string(), crate::agent::PRIME_CAP),
+            ("memory page".to_string(), crate::memory::BUDGET),
+        ];
+        for tool in tool_definitions(&[]).as_array().expect("an array") {
+            if tool["_meta"]["anthropic/alwaysLoad"] == true {
+                texts.push((tool["name"].as_str().expect("a name").to_string(), tool.to_string().chars().count()));
+            }
+        }
+        assert_eq!(texts.len(), 3 + ALWAYS_LOADED.len(), "every always-loaded tool is measured");
+        for (name, size) in &texts {
+            let budget = START_BUDGETS.iter().find(|(budgeted, _)| budgeted == name).map(|(_, budget)| *budget);
+            let budget = budget.unwrap_or_else(|| panic!("{name} has no budget: add one to START_BUDGETS, on the user's word"));
+            assert!(
+                *size <= budget,
+                "{name} takes {size} characters, past its budget of {budget}: shorten it, or raise the budget on the user's word (procedure 1435)"
+            );
+        }
+        for (name, _) in START_BUDGETS {
+            assert!(texts.iter().any(|(measured, _)| measured == name), "{name} has a budget, but no session pays for it: drop the budget");
+        }
+    }
+
     /// A move refused for what a running session watches (task 909) says so
     /// in an agent's words: --force is the user's, in a terminal, since the
     /// tool has none.

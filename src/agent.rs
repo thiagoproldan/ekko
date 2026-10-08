@@ -76,7 +76,7 @@ const HANDOFF_BUDGET: usize = 3_500;
 /// its sections hold: under the 10,000 Claude Code keeps of a hook's output,
 /// with room for the lines the hook writes above it (task 1455; OpenViking
 /// caps its SessionStart at 9,500 for the same reason).
-const PRIME_CAP: usize = 9_500;
+pub(crate) const PRIME_CAP: usize = 9_500;
 /// What the sections keep of `PRIME_CAP` when the blocks before them would
 /// leave them less: room for the work in progress and the first ready tasks.
 const SECTIONS_FLOOR: usize = 2_500;
