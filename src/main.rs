@@ -628,7 +628,9 @@ fn dispatch(
         if cli.hook {
             let event = agent::SessionEvent::from_hook_input(&read_hook_input());
             let repeats = || ekko.folder.as_deref().and_then(|root| repeats::announce(home_dir, root));
-            let text = agent::session_start(ekko, board_label, &event, &agent::session_state_dir(home_dir), repeats)?;
+            let me = ekko.actor.as_ref().and_then(|actor| actor.process.as_ref()).map(|process| process.pid);
+            let doctor = || doctor::attention(home_dir, ekko.storage.storage_path(), me);
+            let text = agent::session_start(ekko, board_label, &event, &agent::session_state_dir(home_dir), repeats, doctor)?;
             return Ok(vec![Outcome::Hook(text)]);
         }
         return Ok(vec![Outcome::Prime(Box::new(agent::prime(ekko, board_label)?))]);

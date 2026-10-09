@@ -1089,6 +1089,130 @@ fn the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// The prime names the sessions on its board that need a restart (task
+/// 1287): a stand-in for Claude Code, a script named `claude` (procedure
+/// 1552), runs ekko's MCP server in project `app`, and its SessionStart
+/// hook when told. With no record of its hook it is too new to judge at
+/// first and named once its server is 5 s old; recorded by its hook it is
+/// not; once the ekko on its PATH is swapped it is named again, as "this
+/// session" in its own prime. The prime of another project never names it.
+#[test]
+fn the_prime_names_the_sessions_on_its_board_that_need_a_restart() {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = temp_ekko_dir();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_ekko"), bin.join("ekko")).unwrap();
+    let ekko = |cwd: &PathBuf, args: &[&str], stdin: &str| -> String {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &dir)
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("CLAUDECODE")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to run ekko");
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let (app, other) = (dir.join("app"), dir.join("other"));
+    for project in [&app, &other] {
+        fs::create_dir_all(project).unwrap();
+        ekko(project, &["init"], "");
+    }
+    let start = r#"{"hook_event_name":"SessionStart","source":"startup"}"#;
+    let line = |prime: &str| prime.lines().find_map(|line| line.strip_prefix("  ! sessions on this board to restart: ")).map(str::to_string);
+
+    // Its server reads a FIFO the stand-in holds open until it ends; each
+    // event file named on the stand-in's stdin runs as its SessionStart hook.
+    let fifo = dir.join("mcp-in");
+    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    let claude = dir.join("claude");
+    let script = "#!/bin/sh\nekko --mcp < \"$1\" > /dev/null &\nexec 3> \"$1\"\nwhile read event; do\n  CLAUDECODE=1 ekko --prime --hook < \"$event\" > \"$event.out\"\n  : > \"$event.done\"\ndone\n";
+    fs::write(&claude, script).unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut session = Command::new(&claude)
+        .arg(&fifo)
+        .current_dir(&app)
+        .env("PATH", &bin)
+        .env("HOME", &dir)
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("EKKO_DIR")
+        .env_remove("EKKO_PROJECT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = session.id();
+    let mut events = session.stdin.take().unwrap();
+    let mut hook = |source: &str, conversation: &str| -> String {
+        let event = dir.join(format!("{conversation}.json"));
+        fs::write(&event, serde_json::json!({"hook_event_name": "SessionStart", "source": source, "session_id": conversation}).to_string()).unwrap();
+        writeln!(events, "{}", event.display()).unwrap();
+        let done = dir.join(format!("{conversation}.json.done"));
+        for _ in 0..250 {
+            if done.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(done.exists(), "the stand-in's hook did not end");
+        fs::read_to_string(dir.join(format!("{conversation}.json.out"))).unwrap()
+    };
+    let server = (0..100).any(|_| {
+        let found = fs::read_dir("/proc").unwrap().flatten().any(|entry| {
+            let at = entry.path();
+            let parent = fs::read_to_string(at.join("stat")).ok().and_then(|stat| stat.rsplit(')').next()?.split_whitespace().nth(1)?.parse::<u32>().ok());
+            parent == Some(pid) && fs::read(at.join("cmdline")).is_ok_and(|args| args == b"ekko\0--mcp\0")
+        });
+        if !found {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        found
+    });
+    assert!(server, "the stand-in's server did not start");
+    let started = std::time::Instant::now();
+
+    let first = ekko(&app, &["--prime", "--hook"], start);
+    assert_eq!(line(&first), None, "a server just started is too new to judge:\n{first}");
+    std::thread::sleep(std::time::Duration::from_millis(5_200).saturating_sub(started.elapsed()));
+    let hookless = ekko(&app, &["--prime", "--hook"], start);
+    assert_eq!(line(&hookless), Some(format!("Claude Code pid {pid} (its hooks did not run) -- ekko --doctor says why")), "{hookless}");
+    assert_eq!(line(&ekko(&other, &["--prime", "--hook"], start)), None, "a session on another board");
+
+    let own = hook("startup", "c-1");
+    assert!(own.contains("project app"), "{own}");
+    assert_eq!(line(&own), None, "{own}");
+    assert_eq!(line(&ekko(&app, &["--prime", "--hook"], start)), None, "a session its hook recorded");
+
+    // An upgrade puts another binary under the same name.
+    fs::copy(env!("CARGO_BIN_EXE_ekko"), bin.join("ekko.new")).unwrap();
+    fs::rename(bin.join("ekko.new"), bin.join("ekko")).unwrap();
+    let runs = fs::canonicalize(&bin).unwrap().join("ekko");
+    let replaced = format!("(it runs {}, replaced since) -- ekko --doctor says why", runs.display());
+    let upgraded = ekko(&app, &["--prime", "--hook"], start);
+    assert_eq!(line(&upgraded), Some(format!("default, pid {pid} \u{b7} c-1 {replaced}")), "{upgraded}");
+    let cleared = hook("clear", "c-2");
+    assert_eq!(line(&cleared), Some(format!("this session {replaced}")), "{cleared}");
+    assert_eq!(line(&ekko(&other, &["--prime", "--hook"], start)), None, "a session on another board");
+
+    drop(events);
+    assert!(session.wait().unwrap().success());
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// The guard records each Bash call it sees in the session it runs under
 /// (task 1284): a stand-in for Claude Code, a script named `claude`, runs
 /// it as a PreToolUse hook, on a Bash call and on a Read.

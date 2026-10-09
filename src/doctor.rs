@@ -4,11 +4,14 @@
 //! after an upgrade (gotcha 194), a session whose plugin hooks did not run
 //! has no prime, no wake and no guard, and one whose FileChanged hook stopped
 //! hearing the board's file is never woken (task 1248, 1283). The checks
-//! read /proc and ekko's
-//! state directory and write nothing. Each gives ok, fail, or skipped when
-//! it cannot judge, in one line, about one session; a fail makes the exit 1.
-//! No check gives a warning yet: the plan's warn comes with the first that
-//! has one to give.
+//! read /proc and ekko's state directory, and write nothing; finding the
+//! board of a session no hook recorded reads the config file, as every ekko
+//! command does, which writes the defaults where it is missing. Each gives
+//! ok, fail, or skipped when it cannot judge, in one line, about one
+//! session; a fail makes the exit 1. No check gives a warning yet: the
+//! plan's warn comes with the first that has one to give. The prime runs
+//! those that read no transcript, and names in one line the sessions on its
+//! board that fail one (task 1287).
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -60,6 +63,10 @@ pub struct Check {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
     pub says: String,
+    /// A fail about a session as the prime tells it, after the session's
+    /// name (task 1287).
+    #[serde(skip)]
+    pub brief: Option<String>,
 }
 
 /// A Claude Code process, as a check names it to machines.
@@ -74,6 +81,10 @@ pub struct Session {
     /// The conversation it runs, as its SessionStart hook recorded it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    /// The board it runs on, by its storage file: as its SessionStart hook
+    /// recorded it, or else as its ekko finds its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,8 +112,11 @@ const TAIL: u64 = 1 << 20;
 const MARGIN: i64 = 5_000;
 
 /// What the checks read beside /proc: the SessionStart hook's records, the
-/// wake hook's, this boot's id, where the store is, the time now, and how
-/// long this boot has run, in milliseconds, when /proc/uptime says.
+/// wake hook's, this boot's id, where the store is, the time now, how long
+/// this boot has run, in milliseconds, when /proc/uptime says, and the home
+/// a board is found from. `transcripts` says whether Guard ran reads the
+/// sessions' transcripts, Claude Code's files: the prime's checks read none
+/// (plan 1279, Design 4).
 struct Records<'a> {
     registry: &'a Registry,
     told: &'a Path,
@@ -110,6 +124,8 @@ struct Records<'a> {
     store: &'a Path,
     now: i64,
     up: Option<i64>,
+    home: &'a Path,
+    transcripts: bool,
 }
 
 /// A process as /proc shows it, as far as the checks need.
@@ -127,6 +143,9 @@ struct Proc {
     exe: Option<PathBuf>,
     cwd: Option<PathBuf>,
     path_var: Option<OsString>,
+    /// Its EKKO_DIR and EKKO_PROJECT, by which an ekko finds its board.
+    ekko_dir: Option<String>,
+    ekko_project: Option<String>,
 }
 
 impl Proc {
@@ -140,9 +159,9 @@ impl Proc {
             .map(|arg| String::from_utf8_lossy(arg).into_owned())
             .collect();
         let exe = format!("/proc/{pid}/exe");
-        let path_var = fs::read(format!("/proc/{pid}/environ"))
-            .ok()
-            .and_then(|environ| environ.split(|&b| b == 0).find_map(|var| var.strip_prefix(b"PATH=").map(|path| OsString::from_vec(path.to_vec()))));
+        let environ = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        let var = |name: &str| environ.split(|&b| b == 0).find_map(|var| var.strip_prefix(name.as_bytes())?.strip_prefix(b"=").map(<[u8]>::to_vec));
+        let text = |name: &str| var(name).map(|value| String::from_utf8_lossy(&value).into_owned());
         Some(Proc {
             pid,
             parent,
@@ -153,14 +172,18 @@ impl Proc {
             running: fs::metadata(&exe).ok().map(|file| (file.dev(), file.ino())),
             exe: fs::read_link(&exe).ok(),
             cwd: fs::read_link(format!("/proc/{pid}/cwd")).ok(),
-            path_var,
+            path_var: var("PATH").map(OsString::from_vec),
+            ekko_dir: text("EKKO_DIR"),
+            ekko_project: text("EKKO_PROJECT"),
         })
     }
 
-    /// Every process /proc lets this user read.
+    /// Every process /proc lets this user read that the checks are about,
+    /// by its name, read first so that each other process costs one read.
     fn all() -> Vec<Proc> {
         let Ok(entries) = fs::read_dir("/proc") else { return Vec::new() };
-        entries.flatten().filter_map(|entry| entry.file_name().to_str()?.parse().ok()).filter_map(Proc::read).collect()
+        let named = |pid: &u32| checked(&fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default());
+        entries.flatten().filter_map(|entry| entry.file_name().to_str()?.parse().ok()).filter(named).filter_map(Proc::read).collect()
     }
 
     /// What it serves, for an ekko the checks are about: a session's MCP
@@ -179,6 +202,14 @@ impl Proc {
     fn is_claude(&self) -> bool {
         self.comm.trim_start_matches('.').starts_with("claude")
     }
+}
+
+/// Whether a process named `comm` is one the checks are about: an ekko or
+/// a Claude Code, `.claude-unwrapped` behind a nix wrapper. Reading every
+/// process whole added 26 ms to the prime over 453 processes, and reading
+/// the name first 6.9 ms (task 1287).
+fn checked(comm: &str) -> bool {
+    ["ekko", "claude"].iter().any(|name| comm.trim().trim_start_matches('.').starts_with(name))
 }
 
 /// A binary's name as the report gives it: its folder in `store` without
@@ -429,14 +460,34 @@ fn served_page(dir: &Path, version: &str) -> Vec<(Verdict, String)> {
 
 /// The Claude Code process `claude` as a check names it: as a claim names
 /// its holder where its SessionStart hook recorded it, for a person; and for
-/// machines.
-fn about(claude: &Proc, record: Option<&Running>) -> (String, Option<Session>) {
+/// machines, with `board`, the one it runs on.
+fn about(claude: &Proc, record: Option<&Running>, board: Option<PathBuf>) -> (String, Option<Session>) {
     let name = match record {
         Some(running) => running.label(),
         None => format!("Claude Code pid {}{}", claude.pid, claude.tty.as_deref().map(|tty| format!(" on {tty}")).unwrap_or_default()),
     };
     let conversation = record.map(|running| running.conversation.clone());
-    (name, Some(Session { pid: claude.pid, tty: claude.tty.clone(), folder: claude.cwd.clone(), conversation }))
+    (name, Some(Session { pid: claude.pid, tty: claude.tty.clone(), folder: claude.cwd.clone(), conversation, board }))
+}
+
+/// The board a session runs on, by its storage file: the one its
+/// SessionStart hook recorded, or else the one `server`, its ekko, finds
+/// for itself from its folder, EKKO_DIR and EKKO_PROJECT, in the order
+/// `directory::locate` gives them.
+fn board_of(record: Option<&Running>, server: &Proc, home: &Path) -> Option<PathBuf> {
+    if let Some(board) = record.and_then(|running| running.board.clone()) {
+        return Some(board);
+    }
+    let location = crate::directory::locate(home, server.cwd.as_deref()?, None, server.ekko_dir.as_deref(), server.ekko_project.as_deref()).ok()?;
+    Some(location.dir.join("storage").join("storage.json"))
+}
+
+/// Whether two paths name one board's file, however each is reached -- a
+/// folder may be mounted at two paths: by the folder that holds the file,
+/// which a write keeps while it replaces the file.
+fn same_board(a: &Path, b: &Path) -> bool {
+    let folder = |file: &Path| fs::metadata(file.parent()?).ok().map(|meta| (meta.dev(), meta.ino()));
+    folder(a).is_some_and(|a| folder(b) == Some(a))
 }
 
 /// The Claude Code process `proc` runs under, if its parent is one.
@@ -458,12 +509,17 @@ fn checks(all: &[Proc], records: &Records) -> Vec<Check> {
             _ => "",
         };
         let (about, session) = match (claude_of(proc, all), what) {
-            (Some(claude), _) => about(claude, records.registry.of(&process(claude, records)).as_ref()),
+            (Some(claude), _) => {
+                let record = records.registry.of(&process(claude, records));
+                about(claude, record.as_ref(), board_of(record.as_ref(), proc, records.home))
+            }
             // `ekko serve` runs in a session of its own, for every board.
             (None, "ekko serve") => ("this machine".to_string(), None),
             (None, _) => (format!("no Claude Code process, under pid {}", proc.parent), None),
         };
-        found.push(Check { check: OLD_BINARY, verdict, about, session, says: format!("{what} (pid {}): {says}{mend}", proc.pid) });
+        let runs = proc.exe.as_deref().map_or_else(|| "an ekko".to_string(), |exe| named(exe, records.store));
+        let brief = (verdict == Verdict::Fail).then(|| format!("it runs {runs}, replaced since"));
+        found.push(Check { check: OLD_BINARY, verdict, about, session, says: format!("{what} (pid {}): {says}{mend}", proc.pid), brief });
     }
     // The plugin's server, not the resources' registered beside it: a
     // session that runs it loaded the plugin, whose SessionStart hook
@@ -490,8 +546,10 @@ fn checks(all: &[Proc], records: &Records) -> Vec<Check> {
                 "it runs ekko's MCP server, and no SessionStart hook recorded it: the plugin's hooks did not run there, so it has no prime, no wake and no guard; restart it, and if this stays, check that the plugin is enabled".to_string(),
             ),
         };
-        let (named, session) = about(claude, record.as_ref());
-        found.push(Check { check: HOOKS_LOADED, verdict, about: named.clone(), session: session.clone(), says });
+        let brief = |verdict: Verdict, what: &str| (verdict == Verdict::Fail).then(|| what.to_string());
+        let (named, session) = about(claude, record.as_ref(), board_of(record.as_ref(), server, records.home));
+        let check = Check { check: HOOKS_LOADED, verdict, about: named.clone(), session: session.clone(), says, brief: brief(verdict, "its hooks did not run") };
+        found.push(check);
         // Where the hook recorded the session, the board whose file its
         // FileChanged hook watches.
         let Some(board) = record.as_ref().and_then(|running| running.board.as_deref()) else { continue };
@@ -499,14 +557,69 @@ fn checks(all: &[Proc], records: &Records) -> Vec<Check> {
         let before = server.exe.as_deref().and_then(|exe| before_records(exe, records.store));
         let started = records.registry.recorded_at(&process);
         let (verdict, says) = wake_heard(version(board), started, heard.as_ref(), before.as_deref(), records.now);
-        found.push(Check { check: WAKE_HEARD, verdict, about: named.clone(), session: session.clone(), says });
+        let brief_wake = brief(verdict, "its FileChanged hook missed the board's last write");
+        found.push(Check { check: WAKE_HEARD, verdict, about: named.clone(), session: session.clone(), says, brief: brief_wake });
         // The conversation it runs, whose transcript holds its Bash calls.
-        let Some(transcript) = record.as_ref().and_then(|running| running.transcript.as_deref()) else { continue };
+        let Some(transcript) = record.as_ref().and_then(|running| running.transcript.as_deref()).filter(|_| records.transcripts) else { continue };
         let guarded = Told::within(records.told, &process).last_guarded();
         let (verdict, says) = guard_ran(last_bash(transcript, TAIL), started, guarded.as_ref(), before.as_deref(), records.now);
-        found.push(Check { check: GUARD_RAN, verdict, about: named, session, says });
+        found.push(Check { check: GUARD_RAN, verdict, about: named, session, says, brief: brief(verdict, "its guard missed its last Bash call") });
     }
     found
+}
+
+/// How many sessions the prime's line names; it counts the rest.
+const NAMED: usize = 2;
+
+/// The prime's line from `found`, on the sessions on the board whose file
+/// is `board`: each that fails a check, once, by its first fail, with `me`
+/// -- the Claude Code process the prime is for -- first and as "this
+/// session"; the first `NAMED` named and the rest counted. `None` when none
+/// fails.
+fn line(found: &[Check], board: &Path, me: Option<u32>) -> Option<String> {
+    let mut sessions: Vec<(u32, String)> = Vec::new();
+    for check in found.iter().filter(|check| check.verdict == Verdict::Fail) {
+        let (Some(session), Some(brief)) = (&check.session, &check.brief) else { continue };
+        if !session.board.as_deref().is_some_and(|theirs| same_board(theirs, board)) || sessions.iter().any(|(pid, _)| *pid == session.pid) {
+            continue;
+        }
+        let who = if me == Some(session.pid) { "this session" } else { &check.about };
+        sessions.push((session.pid, format!("{who} ({brief})")));
+    }
+    if sessions.is_empty() {
+        return None;
+    }
+    sessions.sort_by_key(|(pid, _)| me != Some(*pid));
+    let named: Vec<&str> = sessions.iter().take(NAMED).map(|(_, said)| said.as_str()).collect();
+    let more = sessions.len().saturating_sub(NAMED);
+    let more = if more > 0 { format!("; +{more} more") } else { String::new() };
+    Some(format!("sessions on this board to restart: {}{more} -- ekko --doctor says why", named.join("; ")))
+}
+
+/// The prime's line on the sessions on the board whose file is `board`
+/// (task 1287): those that fail a check reading /proc and ekko's state
+/// directory, never the transcripts nor the served page, with `me`, the
+/// Claude Code process the prime is for, named "this session". `None` when
+/// none fails.
+pub fn attention(home: &Path, board: &Path, me: Option<u32>) -> Option<String> {
+    line(&check_all(home, &crate::holder::boot()?, false), board, me)
+}
+
+/// The checks over every process running now, with the records ekko's
+/// hooks keep under `home` and `boot`, this boot's id; `transcripts` as in
+/// `Records`.
+fn check_all(home: &Path, boot: &str, transcripts: bool) -> Vec<Check> {
+    let records = Records {
+        registry: &Registry::at(crate::agent::processes_dir(home)),
+        told: &crate::wake::told_dir(home),
+        boot,
+        store: Path::new(STORE),
+        now: chrono::Local::now().timestamp_millis(),
+        up: uptime(),
+        home,
+        transcripts,
+    };
+    checks(&Proc::all(), &records)
 }
 
 impl Report {
@@ -540,18 +653,10 @@ impl Report {
 /// `ekko --doctor`: the report on every session on this machine, as text or
 /// JSON, exiting 1 when a check fails.
 pub fn run(home: &Path, json: bool) -> ExitCode {
-    let boot = crate::holder::boot().unwrap_or_default();
-    let records = Records {
-        registry: &Registry::at(crate::agent::processes_dir(home)),
-        told: &crate::wake::told_dir(home),
-        boot: &boot,
-        store: Path::new(STORE),
-        now: chrono::Local::now().timestamp_millis(),
-        up: uptime(),
-    };
-    let mut report = Report { checks: checks(&Proc::all(), &records) };
+    let mut report = Report { checks: check_all(home, &crate::holder::boot().unwrap_or_default(), true) };
     let served = served_page(&crate::agent::state_dir(home), env!("CARGO_PKG_VERSION"));
-    report.checks.extend(served.into_iter().map(|(verdict, says)| Check { check: SERVED_PAGE, verdict, about: "this machine".to_string(), session: None, says }));
+    let page = |(verdict, says)| Check { check: SERVED_PAGE, verdict, about: "this machine".to_string(), session: None, says, brief: None };
+    report.checks.extend(served.into_iter().map(page));
     if json {
         // The envelope of every --json answer: `ok` says the command ran,
         // and the exit says whether a check failed, as for the text.
@@ -577,9 +682,10 @@ mod tests {
     }
 
     /// What the checks read beside /proc, in a test's folders, 1,000 s into
-    /// the boot.
+    /// the boot, with `told`'s folder as the home.
     fn records<'a>(registry: &'a Registry, told: &'a Path, now: i64) -> Records<'a> {
-        Records { registry, told, boot: "boot-1", store: Path::new(STORE), now, up: Some(1_000_000) }
+        let home = told.parent().unwrap();
+        Records { registry, told, boot: "boot-1", store: Path::new(STORE), now, up: Some(1_000_000), home, transcripts: true }
     }
 
     fn id(path: &Path) -> Option<(u64, u64)> {
@@ -767,6 +873,120 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// The prime's line names each session on its board that fails a check,
+    /// once, by its first fail, this session first, and counts those past
+    /// `NAMED`; a session on another board, or one that passes, is not in
+    /// it. A session's board is the one its hook recorded, or else the one
+    /// its ekko finds. Every fail about a session has the words the line
+    /// gives it, and the prime's checks read no transcript.
+    #[test]
+    fn the_primes_line_names_each_failing_session_on_its_board_once() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let dir = crate::paths::test_dir("ekko-doctor-prime");
+        let (old, new) = (binary(&dir, "old"), binary(&dir, "new"));
+        let on_path = new.parent().unwrap();
+        let registry = Registry::at(dir.join("processes"));
+        let told = dir.join("told");
+        let file = |project: &str| dir.join(project).join(".ekko").join("storage").join("storage.json");
+        let (board, elsewhere, quiet) = (file("app"), file("other"), file("quiet"));
+        for board in [&board, &elsewhere, &quiet] {
+            fs::create_dir_all(board.parent().unwrap()).unwrap();
+            fs::write(board, "{}").unwrap();
+        }
+        let at = |path: &Path, millis: u64| {
+            fs::File::options().write(true).open(path).unwrap().set_modified(UNIX_EPOCH + Duration::from_millis(millis)).unwrap();
+        };
+        let claude = |pid: u32| Proc { pid, parent: 1, start: 11, comm: "claude".into(), ..Proc::default() };
+        let hookless = |pid: u32, parent: u32| Proc {
+            ekko_dir: Some(dir.join("app").join(".ekko").to_string_lossy().into_owned()),
+            ..server(pid, parent, Path::new("ekko"), &new, on_path)
+        };
+        // 100 runs a replaced ekko, missed the board's last write and ran a
+        // Bash call past its guard; 200 and 300 have no hooks, and their ekko
+        // finds the board by its EKKO_DIR; 400 runs a replaced ekko on
+        // another board; 500 passes.
+        let all = vec![
+            claude(100),
+            server(10, 100, Path::new("ekko"), &old, on_path),
+            claude(200),
+            hookless(20, 200),
+            claude(300),
+            hookless(30, 300),
+            claude(400),
+            server(40, 400, Path::new("ekko"), &old, on_path),
+            claude(500),
+            server(50, 500, Path::new("ekko"), &new, on_path),
+        ];
+        let record = |pid: u32, board: &Path| Running {
+            pid,
+            start: 11,
+            boot: "boot-1".into(),
+            profile: None,
+            tty: Some(format!("pts/{}", pid / 100)),
+            config_dir: None,
+            board: Some(board.to_path_buf()),
+            transcript: Some(dir.join(format!("c-{pid}.jsonl"))),
+            conversation: format!("c-{pid}"),
+            earlier: Vec::new(),
+            since: 0,
+        };
+        // All recorded before any is dated: a record forgets the records of
+        // ended processes as old as these.
+        let sessions = [(100, &board, 1_000_000), (400, &elsewhere, 1_000_000), (500, &board, 3_000_000)];
+        for (pid, board, _) in sessions {
+            registry.record(record(pid, board)).unwrap();
+        }
+        for (pid, _, started) in sessions {
+            at(&dir.join("processes").join(format!("boot1-{pid}-11.json")), started);
+        }
+        at(&board, 2_000_000);
+        let call = serde_json::json!([{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}]);
+        fs::write(dir.join("c-100.jsonl"), row("assistant", "1970-01-01T00:33:20Z", false, call) + "\n").unwrap();
+        let found = checks(&all, &records(&registry, &told, 2_060_000));
+        let failed = |name: &str| -> Vec<u32> {
+            found.iter().filter(|check| check.check == name && check.verdict == Verdict::Fail).filter_map(|check| Some(check.session.as_ref()?.pid)).collect()
+        };
+        assert_eq!((failed(OLD_BINARY), failed(HOOKS_LOADED), failed(WAKE_HEARD), failed(GUARD_RAN)), (vec![100, 400], vec![200, 300], vec![100], vec![100]));
+        for check in found.iter().filter(|check| check.verdict == Verdict::Fail) {
+            assert!(check.brief.is_some(), "a fail with no words for the prime: {check:?}");
+        }
+
+        let old = old.display();
+        assert_eq!(
+            line(&found, &board, None).as_deref(),
+            Some(format!("sessions on this board to restart: default on pts/1 \u{b7} c-100 (it runs {old}, replaced since); Claude Code pid 200 (its hooks did not run); +1 more -- ekko --doctor says why").as_str())
+        );
+        assert_eq!(
+            line(&found, &board, Some(300)).as_deref(),
+            Some(format!("sessions on this board to restart: this session (its hooks did not run); default on pts/1 \u{b7} c-100 (it runs {old}, replaced since); +1 more -- ekko --doctor says why").as_str())
+        );
+        assert_eq!(
+            line(&found, &elsewhere, None).as_deref(),
+            Some(format!("sessions on this board to restart: default on pts/4 \u{b7} c-400 (it runs {old}, replaced since) -- ekko --doctor says why").as_str())
+        );
+        assert_eq!(line(&found, &quiet, None), None, "a board whose sessions all pass");
+        let unread = checks(&all, &Records { transcripts: false, ..records(&registry, &told, 2_060_000) });
+        assert!(unread.iter().all(|check| check.check != GUARD_RAN), "the prime's checks read a transcript");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One board's file reached by two paths is one board, as a project's
+    /// folder mounted at two paths is.
+    #[test]
+    fn a_board_is_known_by_its_folder_however_it_is_reached() {
+        let dir = crate::paths::test_dir("ekko-doctor-same-board");
+        let file = dir.join("a").join("storage").join("storage.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "{}").unwrap();
+        std::os::unix::fs::symlink(dir.join("a"), dir.join("b")).unwrap();
+        assert!(same_board(&file, &dir.join("b").join("storage").join("storage.json")));
+        let other = dir.join("c").join("storage").join("storage.json");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        assert!(!same_board(&file, &other));
+        assert!(!same_board(&file, &dir.join("gone").join("storage").join("storage.json")), "a board whose folder is gone");
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// A hook that recorded nothing is judged by its ekko's version, since no
     /// hook recorded what it heard up to 0.39.1; and one that recorded the
     /// board's version now heard it, whatever the clocks say.
@@ -905,7 +1125,8 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// The doctor reads a process as /proc shows it: this test's own.
+    /// The doctor reads a process as /proc shows it: this test's own, and a
+    /// child's environment, by which an ekko finds its board.
     #[test]
     fn a_process_is_read_from_proc() {
         let me = Proc::read(std::process::id()).expect("/proc reads this process");
@@ -915,6 +1136,41 @@ mod tests {
         assert!(!me.args.is_empty());
         assert_eq!(me.cwd, std::env::current_dir().ok());
         assert_eq!(me.serves(), None);
+        let mut child = std::process::Command::new("cat")
+            .env("EKKO_DIR", "/work/.ekko")
+            .env("EKKO_PROJECT", "site")
+            .env("EKKO_DIRECTORY", "not this one")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The parent of a spawn may run again inside the child's exec, before
+        // the kernel sets where its arguments and environment lie: /proc
+        // shows them empty until then (8 runs in 30 of the suite).
+        let read = (0..200)
+            .find_map(|_| {
+                let read = Proc::read(child.id()).filter(|read| !read.args.is_empty());
+                if read.is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                read
+            })
+            .expect("/proc reads the child");
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert_eq!((read.ekko_dir.as_deref(), read.ekko_project.as_deref()), (Some("/work/.ekko"), Some("site")));
+    }
+
+    /// Only an ekko or a Claude Code is read past its name, wrapped too: this
+    /// test's own binary, named `ekko-<hash>` by cargo, among them.
+    #[test]
+    fn only_an_ekko_or_a_claude_code_is_read_whole() {
+        for comm in ["ekko", ".ekko-wrapped", "claude", ".claude-unwrapp\n"] {
+            assert!(checked(comm), "{comm}");
+        }
+        for comm in ["bash", "node", "my-ekko", "", "sh\n"] {
+            assert!(!checked(comm), "{comm}");
+        }
+        assert!(Proc::all().iter().any(|proc| proc.pid == std::process::id()), "this test's process was not read");
     }
 
     /// The ekkos checked are the servers, by their arguments: the MCP
