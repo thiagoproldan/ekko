@@ -2209,6 +2209,7 @@ impl<'a> Draft<'a> {
         let saved = self.ekko.save_against(&self.before, &mut self.data)?;
         notices.extend(self.ended_waits(&saved.ended));
         notices.extend(self.rests_told(&saved.rests_read));
+        notices.extend(self.next_to_claim());
         Ok(Committed { data: self.data, overridden, reopened, released: saved.released, blocked: saved.blocked, notices })
     }
 
@@ -2290,6 +2291,45 @@ impl<'a> Draft<'a> {
             ),
             [] => unreachable!("returned above when no task was started"),
         }]
+    }
+
+    /// The step after a finished task, told to the session that finished it
+    /// when it then holds nothing on a board where other sessions run (task
+    /// 1560, decision 1615): to set the next task in progress before it
+    /// changes anything for it. In the six-session run of 2026-10-09 a
+    /// session worked 22 minutes on the task after a done one before it
+    /// claimed it, and the others, finding nothing in progress, saw none of
+    /// that work.
+    fn next_to_claim(&self) -> Vec<String> {
+        let Some(actor) = self.ekko.actor.as_ref().filter(|actor| !actor.is_person()) else { return Vec::new() };
+        let ended = |item: &Item| matches!(State::of(item), Some(State::Done | State::Cancelled));
+        if !self.data.values().any(|task| task.is_task && ended(task) && !self.before.get(&task.id).is_some_and(ended)) {
+            return Vec::new();
+        }
+        let holds = |task: &Item| {
+            State::of(task) == Some(State::Progress) && task.held_by.as_ref().is_some_and(|holder| actor.is(holder) || actor.continues(holder))
+        };
+        if self.data.values().any(|task| task.is_task && holds(task)) {
+            return Vec::new();
+        }
+        let board = self.ekko.storage.storage_path();
+        let others = actor
+            .registry
+            .as_ref()
+            .map(crate::holder::Registry::all)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|running| running.board.as_deref() == Some(board) && actor.process.as_ref() != Some(&running.process()))
+            .filter(|running| running.process().alive())
+            .count();
+        let others = match others {
+            0 => return Vec::new(),
+            1 => "1 other session runs".to_string(),
+            n => format!("{n} other sessions run"),
+        };
+        vec![format!(
+            "this session holds no task now, and {others} on this board: set the next task in progress before you change anything for it, the claim they see"
+        )]
     }
 
     /// Each `$N` a batch's text holds for another operation N that created an

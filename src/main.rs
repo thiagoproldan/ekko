@@ -1,6 +1,7 @@
 mod agent;
 mod anchors;
 mod artifact;
+mod claims;
 mod cli;
 mod commits;
 mod config;

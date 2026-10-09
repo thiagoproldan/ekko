@@ -511,39 +511,46 @@ pub fn hook(home: &Path, input: &str) -> ExitCode {
     if let (Some(process), Some(seen)) = (&actor.process, seen(&event).filter(|seen| seen.tool == "Bash")) {
         crate::wake::Told::of(home, process).guarded(&seen.tool_use_id, now);
     }
-    if let Some(reply) = reply_to(home, &event, &actor, now) {
+    if let Some(reply) = reply_to(home, &event, &actor, &crate::claims::Env::of_this_process(), now) {
         println!("{reply}");
     }
     ExitCode::SUCCESS
 }
 
-/// What the hook answers `input` with, for the session `actor`: see
-/// `reply_to`.
+/// What the hook answers `input` with, for the session `actor`, with no
+/// EKKO_DIR or EKKO_PROJECT: see `reply_to`.
 #[cfg(test)]
 fn hook_reply(home: &Path, input: &str, actor: &Actor) -> Option<Value> {
-    reply_to(home, &serde_json::from_str::<Value>(input).ok()?, actor, chrono::Local::now().timestamp_millis())
+    let event = serde_json::from_str::<Value>(input).ok()?;
+    reply_to(home, &event, actor, &crate::claims::Env::default(), chrono::Local::now().timestamp_millis())
 }
 
-/// What the hook answers `event` with, for the session `actor`: nothing,
-/// a refusal, or word that the user's answer let the call through.
-fn reply_to(home: &Path, event: &Value, actor: &Actor, now: i64) -> Option<Value> {
+/// What the hook answers `event` with, for the session `actor`: nothing, a
+/// refusal, or context for a call it lets run -- word that the user's
+/// answer let it through, the task a branch it creates claimed, a task its
+/// commit names that the session does not hold (task 1560).
+fn reply_to(home: &Path, event: &Value, actor: &Actor, env: &crate::claims::Env, now: i64) -> Option<Value> {
     let seen = seen(event).filter(|seen| seen.tool == "Bash")?;
     let index = current(home, now);
     let reasons = cue_reasons(home, &index, &seen);
-    if reasons.is_empty() {
-        return None;
+    let mut context = Vec::new();
+    if !reasons.is_empty() {
+        match decide(home, &index, &seen, &reasons, actor, now) {
+            Verdict::Through(question) => {
+                context.push(format!("ekko: the user's answer to question {question} let this call through, once, past the cue that refuses it."));
+            }
+            Verdict::Refused(code, all) => {
+                return Some(json!({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": clipped(&format!("{}{}", reasons.join("\n\n"), ending(&code, &all, &reasons)), 9_000),
+                }}));
+            }
+        }
     }
-    Some(match decide(home, &index, &seen, &reasons, actor, now) {
-        Verdict::Through(question) => json!({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "additionalContext": format!("ekko: the user's answer to question {question} let this call through, once, past the cue that refuses it."),
-        }}),
-        Verdict::Refused(code, all) => json!({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": clipped(&format!("{}{}", reasons.join("\n\n"), ending(&code, &all, &reasons)), 9_000),
-        }}),
-    })
+    let cwd = Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd });
+    context.extend(crate::claims::told(home, &seen.call, cwd, actor, env));
+    (!context.is_empty()).then(|| json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context.join("\n")}}))
 }
 
 /// The reasons of the cues that are on and name the Bash call `seen`.
@@ -711,7 +718,7 @@ mod tests {
     use super::*;
     use crate::ekko::{Ekko, EkkoError};
     use crate::holder::test_sessions;
-    use crate::item::CueOn;
+    use crate::item::{CueOn, State};
     use crate::ops::{Draft, Inquiry, Op, Ref};
 
     fn home(tag: &str) -> PathBuf {
@@ -953,6 +960,36 @@ mod tests {
         assert!(at("make deploy", &other) && !at("make deploy", &project), "a cue's own folder wins");
         let reason = refused(&hook_reply(&home, &event("cargo fmt --all", &project, "t"), &session)).unwrap();
         assert!(reason.contains(&format!("run in {} or under it, this board's project", project.display())), "{reason}");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The hook's reply carries what a call says of its task (task 1560) as
+    /// context, the call left to run: a branch `task-N` claims N. A call a
+    /// cue refuses claims nothing, and one that names no task gets no reply.
+    #[test]
+    fn a_branch_task_n_the_hook_lets_run_claims_n_and_one_it_refuses_does_not() {
+        let home = home("claims");
+        let (session, _, _) = test_sessions();
+        let project = home.join("work/p");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::project::init(&home, &project, None, Some("p"), 0).unwrap();
+        let project = std::fs::canonicalize(&project).unwrap();
+        let board = project.join(".ekko");
+        for text in ["one", "two"] {
+            apply(&ekko_at(&board, None), json!({"op": "create", "text": text})).unwrap();
+        }
+        let state = |id: u32| State::of(&ekko_at(&board, None).storage.get().unwrap()[&id]);
+
+        let reply = hook_reply(&home, &event("git checkout -b task-1", &project, "t1"), &session).expect("a reply");
+        let output = &reply["hookSpecificOutput"];
+        assert!(output.get("permissionDecision").is_none(), "{reply}");
+        assert!(output["additionalContext"].as_str().unwrap().contains("task 1 is in progress now, held by this session"), "{reply}");
+        assert_eq!(state(1), Some(State::Progress));
+
+        cued(&board, "Branch only from a worktree", cue("git", &["checkout", "-b"], None));
+        assert!(refused(&hook_reply(&home, &event("git checkout -b task-2", &project, "t2"), &session)).is_some());
+        assert_eq!(state(2), Some(State::Pending), "a refused call claims nothing");
+        assert_eq!(hook_reply(&home, &event("git status", &project, "t3"), &session), None);
         std::fs::remove_dir_all(&home).ok();
     }
 

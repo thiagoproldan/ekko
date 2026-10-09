@@ -1066,6 +1066,11 @@ pub struct Prime {
     /// first: other sessions stopping on the same board.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub other_handoffs: Vec<OtherHandoff>,
+    /// The other sessions running on this board, each with the tasks it
+    /// holds in progress (task 1560): work a session has not set in progress
+    /// shows nowhere else.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub others: Vec<OtherSession>,
     /// The decisions, gotchas and procedures in force a prime lists: the
     /// most cited, then the newest gotchas and procedures. `knowledge_total`
     /// counts them all.
@@ -1217,6 +1222,49 @@ pub struct OtherHandoff {
 
 /// How many other handoffs a prime names before it counts the rest.
 const OTHER_HANDOFFS_SHOWN: usize = 5;
+
+/// A session running on the board beside the one reading the prime, by the
+/// name a claim gives it, with the tasks it holds in progress.
+#[derive(Debug, Serialize)]
+pub struct OtherSession {
+    pub name: String,
+    pub holding: Vec<u32>,
+}
+
+/// How many other sessions a prime names before it counts the rest, and how
+/// many tasks of each.
+const OTHERS_SHOWN: usize = 4;
+const HOLDING_SHOWN: usize = 4;
+
+/// The sessions running on the board `ekko` has open, but the reader's own,
+/// each with the tasks it holds in progress, by name (task 1560). Read from
+/// the registry the SessionStart hook keeps: where there is none, as in a
+/// test, there are none.
+fn others_on(ekko: &Ekko, all: &ItemMap) -> Vec<OtherSession> {
+    let Some(registry) = ekko.actor.as_ref().and_then(|actor| actor.registry.as_ref()) else { return Vec::new() };
+    let me = ekko.actor.as_ref().and_then(|actor| actor.process.clone());
+    let here = ekko.storage.storage_path();
+    let recorded: Vec<crate::holder::Running> =
+        registry.all().into_iter().filter(|running| running.board.as_deref() == Some(here)).collect();
+    let moved = moved_out(&recorded);
+    let went_on = |process: crate::holder::Process| moved.iter().find(|(from, _)| *from == process).map_or(process, |(_, into)| into.clone());
+    let mut others: Vec<(crate::holder::Process, OtherSession)> = recorded
+        .iter()
+        .filter(|running| running.process().alive() && me.as_ref() != Some(&running.process()))
+        .filter(|running| !moved.iter().any(|(from, _)| *from == running.process()))
+        .map(|running| (running.process(), OtherSession { name: running.label(), holding: Vec::new() }))
+        .collect();
+    let mut held: Vec<&Item> = all.values().filter(|item| visible(item) && item.is_task && State::of(item) == Some(State::Progress)).collect();
+    held.sort_by_key(|item| item.id);
+    for task in held {
+        let Some(process) = task.held_by.as_ref().and_then(crate::holder::Holder::process).map(went_on) else { continue };
+        if let Some((_, other)) = others.iter_mut().find(|(known, _)| *known == process) {
+            other.holding.push(task.id);
+        }
+    }
+    others.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name));
+    others.into_iter().map(|(_, other)| other).collect()
+}
 
 /// The open questions a prime quotes, oldest first: the rest are counted, and
 /// `ekko --sessions` lists them by the session that asked.
@@ -1514,6 +1562,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         freed_by_cancelling,
         handoff,
         other_handoffs,
+        others: others_on(ekko, &all),
         knowledge,
         knowledge_total,
         decisions,
@@ -2534,6 +2583,27 @@ fn remember(state: &Path, session: &str, board: &str, cursor: i64, rechecked: Op
     let _ = std::fs::write(file, serde_json::json!({"board": board, "cursor": cursor, "rechecked": rechecked}).to_string());
 }
 
+/// Each running process whose conversation Claude Code moved to another
+/// running process -- a background session -- with that process: no session
+/// of its own, its work is the one's the conversation goes on in (tasks 862,
+/// 871).
+fn moved_out(recorded: &[crate::holder::Running]) -> Vec<(crate::holder::Process, crate::holder::Process)> {
+    recorded
+        .iter()
+        .filter(|running| running.process().alive())
+        .filter_map(|running| {
+            let dir = running.transcript.as_deref()?.parent()?;
+            let to = crate::holder::continued_in(dir, &running.conversation)?;
+            let into = recorded.iter().find(|other| {
+                other.process() != running.process()
+                    && other.process().alive()
+                    && (other.conversation == to || other.earlier.contains(&to))
+            })?;
+            Some((running.process(), into.process()))
+        })
+        .collect()
+}
+
 /// The Claude Code sessions on a board, as `ekko --sessions` shows them to
 /// the user: each running one that started on it, and each, running or
 /// ended, that holds work on it, finished some today or asked what still
@@ -2586,20 +2656,7 @@ pub fn sessions(ekko: &Ekko, board: &str) -> Result<Sessions, EkkoError> {
     // A process whose conversation Claude Code moved to a background session
     // is no session of its own: what it holds, finished, asked and waits on
     // is the one's the conversation goes on in (tasks 862, 871).
-    let moved: Vec<(crate::holder::Process, crate::holder::Process)> = recorded
-        .iter()
-        .filter(|running| running.process().alive())
-        .filter_map(|running| {
-            let dir = running.transcript.as_deref()?.parent()?;
-            let to = crate::holder::continued_in(dir, &running.conversation)?;
-            let into = recorded.iter().find(|other| {
-                other.process() != running.process()
-                    && other.process().alive()
-                    && (other.conversation == to || other.earlier.contains(&to))
-            })?;
-            Some((running.process(), into.process()))
-        })
-        .collect();
+    let moved = moved_out(&recorded);
     let went_on = |process: crate::holder::Process| moved.iter().find(|(from, _)| *from == process).map_or(process, |(_, into)| into.clone());
     let here = ekko.storage.storage_path();
     let mut found: Vec<(Option<crate::holder::Process>, SessionView)> = recorded
@@ -2918,6 +2975,26 @@ impl Prime {
                 "Linked boards: {} -- every tool works on one with project; none of their items is shown here.",
                 self.linked.join(", ")
             );
+        }
+        if !self.others.is_empty() {
+            let named: Vec<String> = self
+                .others
+                .iter()
+                .take(OTHERS_SHOWN)
+                .map(|other| {
+                    let ids: Vec<String> = other.holding.iter().take(HOLDING_SHOWN).map(u32::to_string).collect();
+                    match other.holding.len().saturating_sub(HOLDING_SHOWN) {
+                        _ if ids.is_empty() => format!("{} holds nothing", other.name),
+                        0 => format!("{} holds {}", other.name, ids.join(", ")),
+                        more => format!("{} holds {} and {more} more", other.name, ids.join(", ")),
+                    }
+                })
+                .collect();
+            let more = match self.others.len().saturating_sub(OTHERS_SHOWN) {
+                0 => String::new(),
+                more => format!("; +{more} more: ekko --sessions lists them"),
+            };
+            let _ = writeln!(out, "Other sessions on this board: {}{more}", named.join("; "));
         }
 
         let attention = self.attention();
@@ -5769,6 +5846,7 @@ mod tests {
                 ("the wait", prime.contains("\nThis session waits (1)\n")),
                 ("the wait's end", woken.contains(&format!("This session waited on it (note {ended}) to: ship it"))),
                 ("no session of its own", !listed.contains("default on pts/2")),
+                ("no other session beside it", !prime.contains("\nOther sessions on this board: ")),
             ];
             for (what, holds) in checks {
                 assert_eq!(holds, yes, "{text}, {what}: {prime}\n{woken}\n{listed}");
@@ -5787,6 +5865,8 @@ mod tests {
 
         terminal(&[&message, &moved, &after]);
         owned("moved here", true);
+        let seen = prime(&as_(&crate::holder::Actor::person()), "default board").unwrap().text();
+        assert!(seen.contains("\nOther sessions on this board: default on pts/1 \u{b7} c-backgr holds 1, 3, 5\n"), "{seen}");
         as_(&me).set_state(&words(&["@1", "done"]), false).expect("its own claim, before SessionStart took it back");
         let mine = as_(&me);
         let mut draft = crate::ops::Draft::open(&mine).unwrap();
@@ -5893,6 +5973,133 @@ mod tests {
         assert!(text.contains("claude --resume c-gone\n"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session that finishes a task and so holds nothing, on a board where
+    /// another session runs, is told to set the next one in progress before
+    /// it starts it (task 1560): not alone, nor beside an ended session or
+    /// one on another board, nor while it holds another task, nor on a retry
+    /// that changes nothing, nor as the user.
+    #[test]
+    fn finishing_the_last_task_held_beside_another_session_says_to_claim_the_next() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let (_, dir) = board("claim-next");
+        let (_, elsewhere) = board("claim-next-elsewhere");
+        let registry = crate::holder::Registry::at(dir.join("processes"));
+        let on = |dir: &Path, actor: &crate::holder::Actor| {
+            Ekko::new(Storage::new(dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
+        };
+        let start = |dir: &Path, actor: &crate::holder::Actor| {
+            let event = SessionEvent { source: "startup".to_string(), session_id: Some(format!("c-{}", actor.tty.clone().unwrap_or_default())), transcript: None };
+            session_start(&on(dir, actor), "default board", &event, &dir.join("sessions"), || None, || None).unwrap();
+        };
+        let write = |actor: &crate::holder::Actor, ops: serde_json::Value| -> Vec<String> {
+            let ekko = on(&dir, actor);
+            let mut draft = crate::ops::Draft::open(&ekko).unwrap();
+            for op in ops.as_array().unwrap() {
+                draft.apply(&serde_json::from_value(op.clone()).unwrap()).unwrap();
+            }
+            draft.commit(false).unwrap().notices
+        };
+        let state = |items: &[u32], state: &str| serde_json::json!([{"op": "set_state", "items": items, "state": state}]);
+        let told = |notices: &[String]| notices.iter().find(|notice| notice.contains("set the next task in progress")).cloned();
+
+        start(&dir, &me);
+        for name in ["one", "two", "three", "four", "five", "six", "seven"] {
+            on(&dir, &me).create_task(&words(&[name])).unwrap();
+        }
+        write(&me, state(&[1], "progress"));
+        assert_eq!(told(&write(&me, state(&[1], "done"))), None, "alone on the board");
+        start(&dir, &gone);
+        start(&elsewhere, &other);
+        write(&me, state(&[2], "progress"));
+        assert_eq!(told(&write(&me, state(&[2], "done"))), None, "beside an ended session and one on another board");
+
+        start(&dir, &other);
+        write(&me, state(&[3, 4], "progress"));
+        assert_eq!(told(&write(&me, state(&[3], "done"))), None, "while it holds 4");
+        let notice = told(&write(&me, state(&[4], "done"))).expect("told once it holds nothing");
+        assert!(notice.contains("1 other session runs on this board"), "{notice}");
+        write(&me, state(&[5], "progress"));
+        let next = serde_json::json!([{"op": "set_state", "items": [5], "state": "done"}, {"op": "set_state", "items": [6], "state": "progress"}]);
+        assert_eq!(told(&write(&me, next)), None, "claiming the next in the same write");
+        assert!(told(&write(&me, state(&[6], "cancelled"))).is_some(), "cancelled ends a task too");
+        assert_eq!(told(&write(&me, state(&[6], "cancelled"))), None, "a retry ends nothing");
+        let mut third = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let process = crate::holder::Process::of(third.id()).unwrap();
+        let actor = crate::holder::Actor { process: Some(process), tty: Some("pts/4".into()), ..me.clone() };
+        actor.with_registry(registry.clone()).record("c-third", on(&dir, &me).storage.storage_path(), None);
+        write(&me, state(&[6], "progress"));
+        let notice = told(&write(&me, state(&[6], "done"))).expect("told");
+        assert!(notice.contains("2 other sessions run on this board"), "{notice}");
+        third.kill().ok();
+        third.wait().ok();
+        assert_eq!(told(&write(&crate::holder::Actor::person(), state(&[7], "done"))), None, "the user");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    /// The prime names the other sessions running on its board, each with
+    /// the tasks it holds in progress or holding nothing, and leaves out the
+    /// reader, a session that ended and one on another board; the user's
+    /// prime names them all (task 1560).
+    #[test]
+    fn the_prime_names_the_other_sessions_on_the_board_and_what_each_holds() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let (_, dir) = board("others");
+        let (_, elsewhere) = board("others-elsewhere");
+        let registry = crate::holder::Registry::at(dir.join("processes"));
+        let on = |dir: &Path, actor: &crate::holder::Actor| {
+            Ekko::new(Storage::new(dir).unwrap()).acting_as(actor.clone().with_registry(registry.clone()))
+        };
+        let start = |dir: &Path, actor: &crate::holder::Actor| {
+            let event = SessionEvent { source: "startup".to_string(), session_id: Some(format!("c-{}", actor.tty.clone().unwrap_or_default())), transcript: None };
+            session_start(&on(dir, actor), "default board", &event, &dir.join("sessions"), || None, || None).unwrap();
+        };
+        let line = |actor: &crate::holder::Actor| {
+            let text = prime(&on(&dir, actor), "default board").unwrap().text();
+            text.lines().find(|line| line.starts_with("Other sessions")).map(str::to_string)
+        };
+
+        start(&dir, &me);
+        start(&dir, &gone);
+        for name in ["mine", "the ended one's", "the other's", "two", "three", "four", "five"] {
+            on(&dir, &me).create_task(&words(&[name])).unwrap();
+        }
+        on(&dir, &me).set_state(&words(&["@1", "progress"]), false).unwrap();
+        on(&dir, &gone).set_state(&words(&["@2", "progress"]), false).unwrap();
+        assert_eq!(line(&me), None, "alone, beside a session that ended");
+        start(&elsewhere, &other);
+        assert_eq!(line(&me), None, "beside a session on another board");
+
+        start(&dir, &other);
+        assert_eq!(line(&me).as_deref(), Some("Other sessions on this board: default on pts/2 \u{b7} c-pts/2 holds nothing"));
+        on(&dir, &other).set_state(&words(&["@3", "progress"]), false).unwrap();
+        assert_eq!(line(&me).as_deref(), Some("Other sessions on this board: default on pts/2 \u{b7} c-pts/2 holds 3"));
+        on(&dir, &other).set_state(&words(&["@4", "@5", "@6", "@7", "progress"]), false).unwrap();
+        assert_eq!(line(&me).as_deref(), Some("Other sessions on this board: default on pts/2 \u{b7} c-pts/2 holds 3, 4, 5, 6 and 1 more"));
+        assert_eq!(line(&other).as_deref(), Some("Other sessions on this board: default on pts/1 \u{b7} c-pts/1 holds 1"));
+        let both = line(&crate::holder::Actor::person()).unwrap();
+        assert!(both.contains("default on pts/1 \u{b7} c-pts/1 holds 1; default on pts/2 \u{b7} c-pts/2 holds 3, 4, 5, 6 and 1 more"), "{both}");
+
+        // Past four, the rest are counted.
+        let mut sleepers: Vec<std::process::Child> =
+            (0..4).map(|_| std::process::Command::new("sleep").arg("60").spawn().unwrap()).collect();
+        for (at, sleeper) in sleepers.iter().enumerate() {
+            let process = crate::holder::Process::of(sleeper.id()).unwrap();
+            let actor = crate::holder::Actor { process: Some(process), tty: Some(format!("pts/3{at}")), ..me.clone() };
+            actor.with_registry(registry.clone()).record(&format!("c-{at}"), on(&dir, &me).storage.storage_path(), None);
+        }
+        let many = line(&me).unwrap();
+        assert!(many.ends_with("; +1 more: ekko --sessions lists them") && many.matches(" holds ").count() == 4, "{many}");
+        for sleeper in &mut sleepers {
+            sleeper.kill().ok();
+            sleeper.wait().ok();
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
     }
 
     /// A wait shows where each side needs it (task 389): in the prime of the

@@ -1811,7 +1811,7 @@ fn a_link_ask_proposes_is_made_only_by_the_users_answer_in_ekkos_menu() {
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0xf4c7e6fd0fcb9ba8;
+const PREFIX_FINGERPRINT: u64 = 0x9f6aa5dc6fc6502f;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {
