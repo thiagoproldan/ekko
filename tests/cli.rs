@@ -914,3 +914,80 @@ fn docs_are_written_from_the_board_and_only_over_their_own_files() {
 
     fs::remove_dir_all(&home).ok();
 }
+
+/// `ekko --repeats` reads the project's Claude Code transcripts, under
+/// ~/.claude/projects in the folder named after the project's, and lists a
+/// failure seen in two sessions on two days; the SessionStart prime tells it
+/// once (task 1442). The default board has no sessions of its own to read.
+#[test]
+fn repeats_lists_a_failure_that_recurs_and_the_prime_tells_it_once() {
+    use std::io::Write as _;
+    let dir = temp_ekko_dir();
+    let app = dir.join("app");
+    fs::create_dir_all(&app).unwrap();
+    let ekko = |cwd: &PathBuf, args: &[&str], stdin: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &dir)
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to run ekko");
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    assert!(ekko(&app, &["init"], "").status.success());
+
+    let named: String = app.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let folder = dir.join(".claude").join("projects").join(named);
+    fs::create_dir_all(&folder).unwrap();
+    let failure = "Exit code 127\n/run/current-system/sw/bin/bash: line 1: python3: command not found";
+    for (session, day) in [("s1", "2026-10-01"), ("s2", "2026-10-02")] {
+        let at = format!("{day}T10:00:00.000Z");
+        let id = format!("toolu_{session}");
+        let row = |kind: &str, block: serde_json::Value| {
+            serde_json::json!({"type": kind, "sessionId": session, "timestamp": at, "cwd": app, "entrypoint": "cli",
+                               "message": {"role": kind, "content": [block]}})
+        };
+        let call = row("assistant", serde_json::json!({"type": "tool_use", "id": id, "name": "Bash", "input": {"command": "python3 check.py"}}));
+        let failed = row("user", serde_json::json!({"type": "tool_result", "content": failure, "is_error": true, "tool_use_id": id}));
+        fs::write(folder.join(format!("{session}.jsonl")), format!("{call}\n{failed}\n")).unwrap();
+    }
+
+    let start = r#"{"session_id":"s-9","hook_event_name":"SessionStart","source":"startup"}"#;
+    let hook = || {
+        let output = ekko(&app, &["--prime", "--hook"], start);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let told = hook();
+    assert!(
+        told.contains("  ! failures that newly recur across sessions: Bash: Exit code 127 | /run/current-system/sw/bin/bash: line 1: python3: command not found (2 sessions, "),
+        "{told}"
+    );
+    let again = hook();
+    assert!(!again.contains("newly recur"), "the prime told the same recurrence twice:\n{again}");
+
+    let listed = ekko(&app, &["--repeats"], "");
+    let text = String::from_utf8(listed.stdout).unwrap();
+    assert!(listed.status.success(), "{text}");
+    assert!(text.starts_with("Failures that repeat across sessions \u{b7} project app, found from this folder \u{b7} 1 of 1 fingerprints"), "{text}");
+    assert!(text.contains(" 2 sessions \u{b7} 2 days \u{b7} 2 times \u{b7} last 2026-10-02 "), "{text}");
+    let json = ekko(&app, &["--json", "--repeats"], "");
+    let reply: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(reply["repeats"]["recurring"][0]["sessions"], 2, "{reply}");
+    assert_eq!(reply["repeats"]["recurring"][0].get("new"), None, "a recurrence the prime told is still new: {reply}");
+
+    let default = ekko(&dir, &["--json", "--repeats"], "");
+    assert!(!default.status.success());
+    let refused: serde_json::Value = serde_json::from_slice(&default.stdout).unwrap();
+    assert_eq!(refused["code"], "INVALID_INPUT", "{refused}");
+
+    fs::remove_dir_all(&dir).ok();
+}

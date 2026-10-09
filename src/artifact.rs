@@ -2350,8 +2350,8 @@ fn state_class(state: &str) -> &'static str {
 }
 
 /// FNV-1a, 64 bits: the page's version, which only has to change when the
-/// page does, and the fonts' names.
-fn fnv(bytes: &[u8]) -> u64 {
+/// page does, the fonts' names, and a repeating failure's (task 1442).
+pub(crate) fn fnv(bytes: &[u8]) -> u64 {
     fnv_from(FNV_OFFSET, bytes)
 }
 

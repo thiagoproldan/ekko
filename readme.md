@@ -50,6 +50,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Folded notes** on screen, whole in pipes and `--json`
 - **Typed notes**: a decision, a gotcha or a procedure, written on purpose, and `--supersedes` for the one it replaces -- what stays true after the work is done
 - **Gotchas that refuse**: a gotcha's command cue, once you turn it on in Ekko's menu, refuses the Bash calls it names, and a refused call goes through once on your answer
+- **Failures that repeat**: `ekko --repeats` reads the project's Claude Code transcripts and lists the failed tool calls seen in 2 or more sessions on 2 or more days, grouped by fingerprint with no model, for a gotcha to stop them
 - **Errors instead of silence** when a filter term matches nothing
 - **A `flock` lock and atomic writes**, so concurrent invocations queue rather than lose updates
 - **Stash and trash**: put finished work out of the way and keep it reachable, or remove it with 30 days to change your mind
@@ -122,6 +123,7 @@ $ ekko --help
       --copy, -y          Copy item description
       --delete, -d        Delete item
       --destroy           Move a project's board to the trash
+      --dismiss <IDS>     With --repeats: set fingerprints aside until they recur again
       --edit, -e          Edit item description
       --find, -f          Search for items
       --force             Override the blocked-by rule or a running session's hold
@@ -145,6 +147,7 @@ $ ekko --help
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
+      --repeats           List the failed tool calls that repeat across this project's sessions
       --restore, -r       Restore items from archive
       --roadmap           Show the project's roadmap through its phases
       --sessions          Show each Claude Code session on this board and its work
@@ -186,6 +189,7 @@ $ ekko --help
       $ ekko --note @coding - < why.txt
       $ ekko --prime
       $ ekko --priority @3 2
+      $ ekko --repeats
       $ ekko --restore 4
       $ ekko --project demo --roadmap
       $ ekko --star 2
@@ -294,6 +298,8 @@ It replaced the `/ekko` skill, which sat in every conversation whether the board
 - The expanded view: `app:toggleTodos` (`ctrl+t`, which Konsole and others keep for a new tab; `~/.claude/keybindings.json` can move it) switches between the whole list and one `Next:` line, and Claude Code remembers the choice.
 
 None of this is documented by Claude Code: the file format and the rules come from its 2.1.278 binary and from testing it, so a Claude Code that changes them breaks the drawing, never the board.
+
+**Failures that repeat.** A session that fails as an earlier one did -- `python3` not found, a title over 80 characters, an Edit before a Read -- learns nothing from the earlier one unless someone wrote it down. `ekko --repeats` finds those failures without a model (task 1442). It reads the Claude Code transcripts of the sessions begun in the project's folder or in one inside it, a worktree's included: those under `projects/` in `~/.claude`, in each `~/.claude-<profile>` and in `CLAUDE_CONFIG_DIR`, in the folder Claude Code names after the one the session began in, each character but a letter or a digit turned to `-`. Headless runs and subagents are left out. Each tool call marked as an error there counts once, by its `tool_use_id`, since a session begun from another's history repeats its rows. Each gets a fingerprint, as Sentry groups errors: the tool; for Bash, the first command the call ran, as the guard's lexer reads it, unless the message names the command, as `command not found` does; and the message -- its first two lines, or for Bash its `Exit code` line and the output's last, since what fails last prints last -- with quoted text, paths, hashes and numbers taken out. A fingerprint seen in 2 or more sessions on 2 or more days recurs. `ekko --repeats` lists each, most sessions first, with its sessions, days and times, when it was last seen and its latest failure as written; `--json` gives the same. The session at work, or you, write the gotcha from that evidence: nothing writes the board. `ekko --repeats --dismiss <id>` sets one aside until it recurs again, in 2 sessions on 2 days after. What was read is kept outside the board, under `repeats/` in ekko's state directory: each transcript's offset, so a read takes only what was written since, and each failure found, kept after its transcript is gone -- on 2026-10-09 no transcript on this machine was older than 30 days. The SessionStart hook reads too, for at most 400 ms, leaving the rest to the next start, and the prime adds a line under Needs attention when a fingerprint recurs that no prime or listing showed before. On this project's 32 transcripts, about 230 MB, the first read took 0.36 s in 15 MB of memory and the next 0.01 s, and the hook's prime 0.32 s the first time and 0.05 s after (a release build, 2026-10-09).
 
 ### Reading the board as an agent
 

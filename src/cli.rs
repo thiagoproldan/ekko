@@ -206,6 +206,13 @@ pub struct Cli {
     /// finished today, what it asked that waits, and how to resume it.
     #[arg(long)]
     pub sessions: bool,
+    /// The failed tool calls that repeat across this project's Claude Code
+    /// sessions, read from their transcripts -- see `repeats`.
+    #[arg(long)]
+    pub repeats: bool,
+    /// With --repeats: set fingerprints aside, by id, until they recur again.
+    #[arg(long, num_args = 1.., value_name = "IDS", requires = "repeats")]
+    pub dismiss: Option<Vec<String>>,
 
     /// With --prime, --memory, --tasklist, --wake or --guard: answer a Claude Code hook, whose
     /// event arrives as JSON on stdin. For --prime, a session that resumes or

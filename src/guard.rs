@@ -227,7 +227,7 @@ fn build(boards: &[Board], stamps: Vec<(PathBuf, Stamp)>, now: i64) -> Index {
     index
 }
 
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let temp = dir.join(format!(".{}.{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("guard"), std::process::id()));

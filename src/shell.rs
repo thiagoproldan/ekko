@@ -482,6 +482,12 @@ impl Parse {
     }
 }
 
+/// Whether a call named `name` runs its arguments as a command, as `timeout`
+/// and `env` do: `calls` lists it, and the command after it.
+pub(crate) fn is_wrapper(name: &str) -> bool {
+    WRAPPERS.contains(&name)
+}
+
 /// A command's name without its directory, as `word.rsplit("/", 1)[-1]`.
 fn base_name(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)

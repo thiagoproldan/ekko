@@ -1067,6 +1067,10 @@ pub struct Prime {
     /// 1019), in place of its line among the ready or the blocked work.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactLine>,
+    /// The failures that newly recur across the project's sessions, in one
+    /// line: only the SessionStart hook reads transcripts for it (task 1442).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeats: Option<String>,
 }
 
 /// An open artifact as the prime lists it.
@@ -1466,6 +1470,7 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         waits_over,
         waited_on,
         artifacts,
+        repeats: None,
     })
 }
 
@@ -2352,7 +2357,15 @@ pub fn processes_dir(home: &Path) -> PathBuf {
 /// when nothing moved since the cursor this hook last served it, what moved
 /// when little did, and the prime only when the list would be longer. A
 /// session this hook never served is pointed at the prime it already holds.
-pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Path) -> Result<String, EkkoError> {
+/// `repeats` gives a prime's line on failures that newly recur, and runs
+/// only for a prime that is written.
+pub fn session_start(
+    ekko: &Ekko,
+    board: &str,
+    event: &SessionEvent,
+    state: &Path,
+    repeats: impl FnOnce() -> Option<String>,
+) -> Result<String, EkkoError> {
     // The conversation now running in this session's process: what its
     // claims name, and how a conversation resumed after a restart, or moved
     // here out of another process, knows the ones it made before, which it
@@ -2370,6 +2383,11 @@ pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Pat
     let cap = PRIME_CAP.saturating_sub(taken.chars().count());
     let revision = ekko.storage.get_counters()?.revision as i64;
     let served = event.session_id.as_deref().and_then(|session| served_cursor(state, session, board));
+    let primed = || -> Result<String, EkkoError> {
+        let mut view = prime(ekko, board)?;
+        view.repeats = repeats();
+        Ok(view.text_capped(cap))
+    };
     let text = match (event.source.as_str(), served) {
         ("resume" | "fork", Some(cursor)) if cursor == revision => {
             format!("ekko \u{b7} {board} \u{b7} cursor {revision} \u{b7} nothing moved since this session last read the board\n")
@@ -2379,13 +2397,13 @@ pub fn session_start(ekko: &Ekko, board: &str, event: &SessionEvent, state: &Pat
             if moved.chars().count() <= RESUME_CHANGES {
                 format!("ekko \u{b7} {board} \u{b7} what moved since this session last read the board\n{moved}")
             } else {
-                prime(ekko, board)?.text_capped(cap)
+                primed()?
             }
         }
         ("resume" | "fork", None) => format!(
             "ekko \u{b7} {board} \u{b7} cursor {revision} \u{b7} the prime earlier in this session still applies; changes with its cursor lists what moved\n"
         ),
-        _ => prime(ekko, board)?.text_capped(cap),
+        _ => primed()?,
     };
     if let Some(session) = &event.session_id {
         remember(state, session, board, revision);
@@ -3052,6 +3070,9 @@ impl Prime {
             let pairs: Vec<String> =
                 self.freed_by_cancelling.iter().map(|(task, blocker)| format!("{task} \u{21e0} {blocker}")).collect();
             attention.push(format!("ready only because what it waited on was cancelled: {}", capped(pairs, "; ", "")));
+        }
+        if let Some(line) = &self.repeats {
+            attention.push(line.clone());
         }
         if !attention.is_empty() {
             let _ = writeln!(out, "\nNeeds attention");
@@ -4482,7 +4503,7 @@ mod tests {
             assert!(rest, "{heading} does not count the rest: {text}");
         }
         let event = SessionEvent { source: "startup".to_string(), session_id: Some("c-mine".to_string()), transcript: None };
-        let hooked = session_start(&as_(&me), "default board", &event, &dir.join("sessions")).unwrap();
+        let hooked = session_start(&as_(&me), "default board", &event, &dir.join("sessions"), || None).unwrap();
         assert!(hooked.chars().count() <= PRIME_CAP, "{} characters", hooked.chars().count());
 
         std::fs::remove_dir_all(&dir).ok();
@@ -5020,20 +5041,20 @@ mod tests {
         ekko.create_task(&words(&["first"])).unwrap();
         let event = |source: &str| SessionEvent { source: source.to_string(), session_id: Some("abc-123".to_string()), transcript: None };
 
-        let started = session_start(&ekko, "default board", &event("startup"), &state).unwrap();
+        let started = session_start(&ekko, "default board", &event("startup"), &state, || None).unwrap();
         assert!(started.contains("Ready, best first (1)"), "{started}");
 
-        let resumed = session_start(&ekko, "default board", &event("resume"), &state).unwrap();
+        let resumed = session_start(&ekko, "default board", &event("resume"), &state, || None).unwrap();
         assert!(resumed.lines().count() == 1 && resumed.contains("nothing moved"), "{resumed}");
 
         ekko.create_task(&words(&["second"])).unwrap();
-        let moved = session_start(&ekko, "default board", &event("resume"), &state).unwrap();
+        let moved = session_start(&ekko, "default board", &event("resume"), &state, || None).unwrap();
         assert!(moved.contains("   2. [pending] second"), "{moved}");
 
         let stranger = SessionEvent { source: "fork".to_string(), session_id: Some("never-served".to_string()), transcript: None };
-        assert_eq!(session_start(&ekko, "default board", &stranger, &state).unwrap().lines().count(), 1);
+        assert_eq!(session_start(&ekko, "default board", &stranger, &state, || None).unwrap().lines().count(), 1);
 
-        let cleared = session_start(&ekko, "default board", &event("clear"), &state).unwrap();
+        let cleared = session_start(&ekko, "default board", &event("clear"), &state, || None).unwrap();
         assert!(cleared.contains("Ready, best first (2)"), "{cleared}");
 
         assert_eq!(SessionEvent::from_hook_input("not json").source, "startup");
@@ -5280,7 +5301,7 @@ mod tests {
         };
         let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
             let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()), transcript: None };
-            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions"), || None).unwrap();
         };
         let hand_off = |actor: &crate::holder::Actor, text: &str, task: u32| {
             let ekko = as_(actor);
@@ -5393,7 +5414,7 @@ mod tests {
         };
         let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
             let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()), transcript: None };
-            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions"), || None).unwrap();
         };
         start(&me, "startup", "c1-mine");
         start(&other, "startup", "c2-theirs");
@@ -5426,7 +5447,7 @@ mod tests {
         };
         let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
             let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()), transcript: None };
-            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap()
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions"), || None).unwrap()
         };
         start(&gone, "startup", "c-before-the-restart");
         start(&other, "startup", "c-other");
@@ -5471,7 +5492,7 @@ mod tests {
         let start = |actor: &crate::holder::Actor, source: &str, conversation: &str| {
             let transcript = Some(transcripts.join(format!("{conversation}.jsonl")));
             let event = SessionEvent { source: source.to_string(), session_id: Some(conversation.to_string()), transcript };
-            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap()
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions"), || None).unwrap()
         };
         let terminal = |records: &[&serde_json::Value]| {
             let text: String = records.iter().map(|record| format!("{record}\n")).collect();
@@ -5573,7 +5594,7 @@ mod tests {
         };
         let start = |actor: &crate::holder::Actor, conversation: &str| {
             let event = SessionEvent { source: "resume".to_string(), session_id: Some(conversation.to_string()), transcript: None };
-            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap()
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions"), || None).unwrap()
         };
         let _ = start(&gone, "c-asker");
         as_(&gone).create_task(&words(&["the merge"])).unwrap();
@@ -5621,7 +5642,7 @@ mod tests {
         };
         for (actor, conversation) in [(&me, "c-mine"), (&other, "c-idle"), (&gone, "c-gone")] {
             let event = SessionEvent { source: "startup".to_string(), session_id: Some(conversation.to_string()), transcript: None };
-            session_start(&as_(actor), "default board", &event, &dir.join("sessions")).unwrap();
+            session_start(&as_(actor), "default board", &event, &dir.join("sessions"), || None).unwrap();
         }
         for name in ["mine", "finished", "left behind"] {
             as_(&me).create_task(&words(&[name])).unwrap();

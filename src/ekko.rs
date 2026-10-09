@@ -505,6 +505,8 @@ pub enum Outcome {
     /// than every other outcome and would otherwise size the whole enum.
     Prime(Box<crate::agent::Prime>),
     Sessions(Box<crate::agent::Sessions>),
+    /// The failures that repeat across the project's sessions (task 1442).
+    Repeats(Box<crate::repeats::Report>),
     /// What the SessionStart hook puts in context, already worded.
     Hook(String),
     Next(Vec<crate::agent::Entry>),
@@ -554,6 +556,7 @@ impl Outcome {
             Outcome::Stats(_) => "stats",
             Outcome::Prime(_) | Outcome::Hook(_) => "prime",
             Outcome::Sessions(_) => "sessions",
+            Outcome::Repeats(_) => "repeats",
             Outcome::Next(_) => "next",
             Outcome::Context(_) => "context",
         }
@@ -640,6 +643,7 @@ impl Outcome {
             Outcome::Stats(stats) => out.display_stats(stats),
             Outcome::Prime(prime) => out.raw(&prime.text()),
             Outcome::Sessions(sessions) => out.raw(&sessions.text()),
+            Outcome::Repeats(report) => out.raw(&report.text()),
             Outcome::Hook(text) => out.raw(text),
             Outcome::Next(entries) => out.raw(&crate::agent::list_text(entries, "Nothing is in progress or ready.")),
             Outcome::Context(context) => out.raw(&context.text()),

@@ -23,6 +23,7 @@ mod ops;
 mod project;
 mod paths;
 mod render;
+mod repeats;
 mod serve;
 mod shell;
 mod storage;
@@ -58,6 +59,7 @@ const HELP: &str = r#"
       --copy, -y          Copy item description
       --delete, -d        Delete item
       --destroy           Move a project's board to the trash
+      --dismiss <IDS>     With --repeats: set fingerprints aside until they recur again
       --edit, -e          Edit item description
       --find, -f          Search for items
       --force             Override the blocked-by rule or a running session's hold
@@ -84,9 +86,10 @@ const HELP: &str = r#"
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
+      --repeats           List the failed tool calls that repeat across this project's sessions
       --restore, -r       Restore items from archive
       --roadmap           Show the project's roadmap through its phases
-      --sessions          Show each Claude Code session on this board and its work
+      --sessions         Show each Claude Code session on this board and its work
       --set               Set item state idempotently (retry-safe)
       --since <MILLIS>    Only items changed at or after a timestamp
       --star, -s          Star/unstar item
@@ -127,6 +130,7 @@ const HELP: &str = r#"
       $ ekko --note @coding - < why.txt
       $ ekko --prime
       $ ekko --priority @3 2
+      $ ekko --repeats
       $ ekko --restore 4
       $ ekko --project demo --roadmap
       $ ekko --star 2
@@ -317,9 +321,9 @@ fn main() -> ExitCode {
                     // board nobody can open any more. And for a hook's reply,
                     // which Claude Code reads as JSON only when it is nothing
                     // else: --tasklist's watchPaths would become context. And
-                    // for --sessions, whose first line names the board.
+                    // for --sessions and --repeats, whose first line names the board.
                     if let Some(project) = &location.project {
-                        if !cli.projects && !cli.destroy && !cli.prime && !cli.tasklist && !cli.sessions {
+                        if !cli.projects && !cli.destroy && !cli.prime && !cli.tasklist && !cli.sessions && !cli.repeats {
                             r.display_project(&project.name);
                         }
                     }
@@ -605,10 +609,19 @@ fn dispatch(
     if cli.sessions {
         return Ok(vec![Outcome::Sessions(Box::new(agent::sessions(ekko, board_label)?))]);
     }
+    if cli.repeats {
+        let root = ekko.folder.as_deref();
+        let report = match cli.dismiss.as_deref() {
+            Some(ids) => repeats::dismiss(home_dir, root, board_label, ids)?,
+            None => repeats::report(home_dir, root, board_label)?,
+        };
+        return Ok(vec![Outcome::Repeats(Box::new(report))]);
+    }
     if cli.prime {
         if cli.hook {
             let event = agent::SessionEvent::from_hook_input(&read_hook_input());
-            let text = agent::session_start(ekko, board_label, &event, &agent::session_state_dir(home_dir))?;
+            let repeats = || ekko.folder.as_deref().and_then(|root| repeats::announce(home_dir, root));
+            let text = agent::session_start(ekko, board_label, &event, &agent::session_state_dir(home_dir), repeats)?;
             return Ok(vec![Outcome::Hook(text)]);
         }
         return Ok(vec![Outcome::Prime(Box::new(agent::prime(ekko, board_label)?))]);
