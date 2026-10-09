@@ -85,6 +85,7 @@ const OLD_BINARY: &str = "Old binary";
 const HOOKS_LOADED: &str = "Hooks loaded";
 const WAKE_HEARD: &str = "Wake heard";
 const GUARD_RAN: &str = "Guard ran";
+const SERVED_PAGE: &str = "Served page";
 
 /// How much of a transcript's end the guard's check reads for the session's
 /// last Bash call.
@@ -362,6 +363,47 @@ fn guard_ran(last: Result<Option<(String, i64)>, String>, started: Option<i64>, 
     }
 }
 
+/// What `ekko serve` shows of itself, from `dir`, ekko's state directory:
+/// whether the server `serve.json` names answers `version`, and whether the
+/// files that hold its token, `serve.json` and the `serve-open.html` beside
+/// it, are the user's alone. Nothing where no server ever ran.
+fn served_page(dir: &Path, version: &str) -> Vec<(Verdict, String)> {
+    let runtime = dir.join(crate::serve::RUNTIME);
+    let Ok(text) = fs::read(&runtime) else { return Vec::new() };
+    let mut found = Vec::new();
+    for file in [runtime, dir.join(crate::serve::OPEN)] {
+        let Ok(meta) = fs::metadata(&file) else { continue };
+        let mode = meta.mode() & 0o777;
+        let name = file.file_name().unwrap_or_default().to_string_lossy();
+        found.push(if mode & 0o077 == 0 {
+            (Verdict::Ok, format!("{name} is readable by you alone (mode {mode:o})"))
+        } else {
+            (
+                Verdict::Fail,
+                format!("{name} is open to others (mode {mode:o}), and holds the token that stops the server and lets a page write as you: chmod 600 {}", file.display()),
+            )
+        });
+    }
+    found.push(match serde_json::from_slice::<crate::serve::Runtime>(&text) {
+        Err(_) => (Verdict::Skipped, "serve.json cannot be read as a server's".to_string()),
+        Ok(runtime) => match crate::serve::status(runtime.port) {
+            None => (
+                Verdict::Skipped,
+                format!("nothing answers on 127.0.0.1:{}, where serve.json names the last server: none runs now, and the next ekko artifact starts one", runtime.port),
+            ),
+            Some(answered) if answered == version => (Verdict::Ok, format!("ekko serve on 127.0.0.1:{} answers this version, {version}", runtime.port)),
+            Some(answered) => (
+                Verdict::Fail,
+                format!(
+                    "ekko serve on 127.0.0.1:{} answers version {answered}, and this ekko is {version}: its pages follow {answered} until ekko serve --stop, or the next ekko artifact, replaces it",
+                    runtime.port
+                ),
+            ),
+        },
+    });
+    found
+}
+
 /// The Claude Code process `claude` as a check names it: as a claim names
 /// its holder where its SessionStart hook recorded it, for a person; and for
 /// machines.
@@ -453,7 +495,7 @@ impl Report {
             .map(|verdict| format!("{} {}", count(verdict), verdict.word()))
             .collect();
         let _ = writeln!(out, "ekko --doctor \u{b7} {}", if counts.is_empty() { "no session runs ekko's MCP server, and no ekko serve runs: nothing to check".to_string() } else { counts.join(" \u{b7} ") });
-        for name in [OLD_BINARY, HOOKS_LOADED, WAKE_HEARD, GUARD_RAN] {
+        for name in [OLD_BINARY, HOOKS_LOADED, WAKE_HEARD, GUARD_RAN, SERVED_PAGE] {
             let of: Vec<&Check> = self.checks.iter().filter(|check| check.check == name).collect();
             if of.is_empty() {
                 continue;
@@ -478,7 +520,9 @@ pub fn run(home: &Path, json: bool) -> ExitCode {
         store: Path::new(STORE),
         now: chrono::Local::now().timestamp_millis(),
     };
-    let report = Report { checks: checks(&Proc::all(), &records) };
+    let mut report = Report { checks: checks(&Proc::all(), &records) };
+    let served = served_page(&crate::agent::state_dir(home), env!("CARGO_PKG_VERSION"));
+    report.checks.extend(served.into_iter().map(|(verdict, says)| Check { check: SERVED_PAGE, verdict, about: "this machine".to_string(), session: None, says }));
     if json {
         // The envelope of every --json answer: `ok` says the command ran,
         // and the exit says whether a check failed, as for the text.
@@ -757,6 +801,67 @@ mod tests {
         assert_eq!(verdict(Err("unreadable".into()), None, None, now), Verdict::Skipped);
         let (_, says) = guard_ran(call("toolu_1", 2_000_000), started, Some(&guarded("toolu_0", 1_990_000)), None, now);
         assert!(says.ends_with("its PreToolUse hook did not run; restart the session"), "{says}");
+    }
+
+    /// A server that answers on a port of its own, as `ekko serve` answers
+    /// `/status`, with `version`, for `answers` requests.
+    fn serving(version: &'static str, answers: usize) -> u16 {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(answers) {
+                let mut stream = stream.unwrap();
+                // The whole request, which the client may write in pieces.
+                let (mut request, mut buffer) = (Vec::new(), [0; 1024]);
+                while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => request.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                let body = serde_json::json!({"ekko": version, "pid": 1}).to_string();
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        port
+    }
+
+    /// The served page passes when its server answers this version and the
+    /// files holding its token are the user's alone; it fails on a server of
+    /// another version, or a file others can read.
+    #[test]
+    fn a_server_of_another_version_or_a_token_others_read_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::paths::test_dir("ekko-doctor-serve");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(served_page(&dir, "0.39.1").is_empty(), "no server ever ran");
+        let runtime = |port: u16, mode: u32| {
+            let file = dir.join("serve.json");
+            fs::write(&file, serde_json::json!({"pid": 1, "port": port, "version": "x", "token": "t"}).to_string()).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let verdicts = |found: Vec<(Verdict, String)>| found.into_iter().map(|(verdict, _)| verdict).collect::<Vec<_>>();
+
+        runtime(serving("0.39.1", 1), 0o600);
+        assert_eq!(verdicts(served_page(&dir, "0.39.1")), [Verdict::Ok, Verdict::Ok], "the right setup");
+        runtime(serving("0.38.1", 1), 0o600);
+        let found = served_page(&dir, "0.39.1");
+        assert_eq!(found[1].0, Verdict::Fail, "a server of another version: {found:?}");
+        assert!(found[1].1.contains("answers version 0.38.1, and this ekko is 0.39.1"), "{found:?}");
+        runtime(serving("0.39.1", 1), 0o644);
+        let found = served_page(&dir, "0.39.1");
+        assert_eq!(verdicts(found.clone()), [Verdict::Fail, Verdict::Ok], "serve.json others can read: {found:?}");
+        assert!(found[0].1.starts_with("serve.json is open to others (mode 644)"), "{found:?}");
+        runtime(serving("0.39.1", 1), 0o600);
+        fs::write(dir.join("serve-open.html"), "token").unwrap();
+        fs::set_permissions(dir.join("serve-open.html"), fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(verdicts(served_page(&dir, "0.39.1")), [Verdict::Ok, Verdict::Fail, Verdict::Ok], "serve-open.html others can read");
+        fs::remove_file(dir.join("serve-open.html")).unwrap();
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        runtime(closed, 0o600);
+        assert_eq!(verdicts(served_page(&dir, "0.39.1")), [Verdict::Ok, Verdict::Skipped], "no server runs");
+        fs::remove_dir_all(&dir).ok();
     }
 
     /// The doctor reads a process as /proc shows it: this test's own.

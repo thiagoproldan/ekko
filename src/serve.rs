@@ -39,7 +39,10 @@ pub const IDLE: Duration = Duration::from_secs(60 * 60);
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The runtime file, in ekko's state directory.
-const RUNTIME: &str = "serve.json";
+pub(crate) const RUNTIME: &str = "serve.json";
+
+/// The file `ekko artifact` opens, beside it, which holds the token too.
+pub(crate) const OPEN: &str = "serve-open.html";
 
 /// The file a running server holds a lock on, so that one runs.
 const LOCK: &str = "serve.lock";
@@ -131,7 +134,7 @@ pub fn redirect_file(home: &Path, address: &str) -> Result<PathBuf, String> {
     let html = format!(
         "<!doctype html>\n<meta charset=\"utf-8\">\n<meta http-equiv=\"refresh\" content=\"0;url={target}\">\n<title>ekko</title>\n<a href=\"{target}\">{address}</a>\n"
     );
-    let path = dir(home).join("serve-open.html");
+    let path = dir(home).join(OPEN);
     private(&path, html.as_bytes()).map_err(|error| format!("{} cannot be written: {error}", path.display()))?;
     Ok(path)
 }
@@ -207,7 +210,7 @@ pub fn stop_running(home: &Path) -> Result<Option<u16>, String> {
 }
 
 /// The version of the ekko serving on `port`, if one answers there.
-fn status(port: u16) -> Option<String> {
+pub(crate) fn status(port: u16) -> Option<String> {
     let (code, body) = ask(port, "GET", "/status", None).ok()?;
     let status: serde_json::Value = serde_json::from_slice(&body).ok().filter(|_| code == 200)?;
     status["ekko"].as_str().map(str::to_string)
