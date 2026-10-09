@@ -1082,3 +1082,66 @@ fn the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks() {
     assert!(ended.success(), "{ended:?}");
     fs::remove_dir_all(&dir).ok();
 }
+
+/// The guard records each Bash call it sees in the session it runs under
+/// (task 1284): a stand-in for Claude Code, a script named `claude`, runs
+/// it as a PreToolUse hook, on a Bash call and on a Read.
+#[test]
+fn the_guard_records_each_bash_call_it_sees_for_its_session() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = temp_ekko_dir();
+    let claude = dir.join("claude");
+    // The stand-in says when the guard is done, and holds on until told to
+    // end, so its folder stays whole.
+    fs::write(&claude, "#!/bin/sh\n\"$EKKO\" --guard --hook < \"$1\"\n: > \"$1.done\"\nread end\nexit 0\n").unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let event = |tool: &str, id: &str| {
+        let path = dir.join(format!("{id}.json"));
+        let input = if tool == "Bash" { serde_json::json!({"command": "ls"}) } else { serde_json::json!({"file_path": "/x"}) };
+        let event = serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": input, "tool_use_id": id, "cwd": dir});
+        fs::write(&path, event.to_string()).unwrap();
+        path
+    };
+    let guarded = |tool: &str, id: &str| -> Option<serde_json::Value> {
+        let event = event(tool, id);
+        let mut session = Command::new(&claude)
+            .arg(&event)
+            .env("EKKO", env!("CARGO_BIN_EXE_ekko"))
+            .env("HOME", &dir)
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("EKKO_DIR")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = session.id();
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let start = stat.rsplit(')').next().unwrap().split_whitespace().nth(19).unwrap().to_string();
+        let boot: String = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap().chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+        let file = dir.join(format!(".local/state/ekko/told/{boot}-{pid}-{start}/guarded"));
+        let done = event.with_extension("json.done");
+        for _ in 0..250 {
+            if done.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(done.exists(), "the stand-in's guard did not end");
+        let found = fs::read_to_string(&file).ok();
+        drop(session.stdin.take());
+        assert!(session.wait().unwrap().success());
+        found.map(|text| serde_json::from_str(&text).unwrap())
+    };
+
+    let before = chrono_now_millis();
+    let record = guarded("Bash", "toolu_bash").expect("the guard recorded the Bash call");
+    assert_eq!(record["tool_use_id"], "toolu_bash", "{record}");
+    assert!(record["at"].as_i64().unwrap() >= before, "{record}");
+    assert_eq!(guarded("Read", "toolu_read"), None, "the guard records only the Bash calls it is asked about");
+    fs::remove_dir_all(&dir).ok();
+}
+
+fn chrono_now_millis() -> i64 {
+    i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap()
+}

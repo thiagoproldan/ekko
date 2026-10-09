@@ -501,18 +501,31 @@ fn how_to_ask(code: &str) -> String {
 /// everything else, and on any error, since a broken guard must not break
 /// the shell.
 pub fn hook(home: &Path, input: &str) -> ExitCode {
-    if let Some(reply) = hook_reply(home, input, &Actor::of_this_command()) {
+    let Ok(event) = serde_json::from_str::<Value>(input) else { return ExitCode::SUCCESS };
+    let actor = Actor::of_this_command();
+    let now = chrono::Local::now().timestamp_millis();
+    // Each run, whatever it answers: what `ekko --doctor` reads to tell a
+    // session whose PreToolUse hook does not run (task 1284).
+    if let (Some(process), Some(seen)) = (&actor.process, seen(&event).filter(|seen| seen.tool == "Bash")) {
+        crate::wake::Told::of(home, process).guarded(&seen.tool_use_id, now);
+    }
+    if let Some(reply) = reply_to(home, &event, &actor, now) {
         println!("{reply}");
     }
     ExitCode::SUCCESS
 }
 
-/// What the hook answers `input` with, for the session `actor`: nothing,
-/// a refusal, or word that the user's answer let the call through.
+/// What the hook answers `input` with, for the session `actor`: see
+/// `reply_to`.
+#[cfg(test)]
 fn hook_reply(home: &Path, input: &str, actor: &Actor) -> Option<Value> {
-    let event = serde_json::from_str::<Value>(input).ok()?;
-    let seen = seen(&event).filter(|seen| seen.tool == "Bash")?;
-    let now = chrono::Local::now().timestamp_millis();
+    reply_to(home, &serde_json::from_str::<Value>(input).ok()?, actor, chrono::Local::now().timestamp_millis())
+}
+
+/// What the hook answers `event` with, for the session `actor`: nothing,
+/// a refusal, or word that the user's answer let the call through.
+fn reply_to(home: &Path, event: &Value, actor: &Actor, now: i64) -> Option<Value> {
+    let seen = seen(event).filter(|seen| seen.tool == "Bash")?;
     let index = current(home, now);
     let reasons = cue_reasons(home, &index, &seen);
     if reasons.is_empty() {

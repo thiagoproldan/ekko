@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use crate::holder::{when, Process, Registry, Running};
 use crate::mcp::Binary;
-use crate::wake::{Heard, Told};
+use crate::wake::{Guarded, Heard, Told};
 
 /// Where NixOS keeps the binary a session started with after an upgrade:
 /// a store path never changes, so the plugin, which starts ekko by its store
@@ -84,6 +84,11 @@ pub struct Report {
 const OLD_BINARY: &str = "Old binary";
 const HOOKS_LOADED: &str = "Hooks loaded";
 const WAKE_HEARD: &str = "Wake heard";
+const GUARD_RAN: &str = "Guard ran";
+
+/// How much of a transcript's end the guard's check reads for the session's
+/// last Bash call.
+const TAIL: u64 = 1 << 20;
 
 /// How old the board's last write must be before a session's wake hook is
 /// judged on it, in milliseconds. The hook ran about 0.6 s after a write in
@@ -229,10 +234,10 @@ fn version(board: &Path) -> Option<(u64, i64, u64)> {
     Some((file.ino(), file.mtime().saturating_mul(1_000_000_000).saturating_add(file.mtime_nsec()), file.len()))
 }
 
-/// The version of a store build of ekko that records nothing of what its
-/// wake hook heard -- 0.39.1 or before, by its folder's name -- or `None`. A
-/// build named by no version is taken to record it.
-fn before_heard(exe: &Path, store: &Path) -> Option<String> {
+/// The version of a store build of ekko whose hooks record nothing of their
+/// runs, `heard` and `guarded` -- 0.39.1 or before, by its folder's name --
+/// or `None`. A build named by no version is taken to record them.
+fn before_records(exe: &Path, store: &Path) -> Option<String> {
     let name = named(exe, store);
     let numbers: Vec<u64> = name.strip_prefix("ekko-")?.split('.').map(|number| number.parse().ok()).collect::<Option<_>>()?;
     (numbers.as_slice() <= [0, 39, 1].as_slice()).then_some(name)
@@ -281,6 +286,78 @@ fn wake_heard(board: Option<(u64, i64, u64)>, started: Option<i64>, heard: Optio
         (None, None) => (
             Verdict::Fail,
             format!("{missed}, and its wake hook recorded hearing nothing: its FileChanged hook did not run; restart the session to watch the file again"),
+        ),
+    }
+}
+
+/// The last Bash call in the end of `transcript`, the last `tail` bytes:
+/// its tool_use id and when Claude Code wrote it, in milliseconds. A
+/// subagent's calls, which its own transcripts hold, are left out. An end
+/// with no row read as Claude Code writes them -- its format is not
+/// documented, and can change -- is an error that says so.
+fn last_bash(transcript: &Path, tail: u64) -> Result<Option<(String, i64)>, String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let unread = |error: std::io::Error| format!("its transcript cannot be read: {error}");
+    let mut file = fs::File::open(transcript).map_err(unread)?;
+    let length = file.metadata().map_err(unread)?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(tail))).map_err(unread)?;
+    let mut end = Vec::new();
+    file.read_to_end(&mut end).map_err(unread)?;
+    // A read from inside the file starts within a row.
+    let whole = if length > tail { end.iter().position(|&b| b == b'\n').map_or(&end[..0], |at| &end[at + 1..]) } else { &end[..] };
+    let mut rows = 0;
+    for line in whole.split(|&b| b == b'\n').rev().filter(|line| !line.is_empty()) {
+        let Ok(row) = serde_json::from_slice::<serde_json::Value>(line) else { continue };
+        let Some(kind) = row["type"].as_str() else { continue };
+        rows += 1;
+        if kind != "assistant" || row["isSidechain"] == true {
+            continue;
+        }
+        let blocks = row["message"]["content"].as_array().into_iter().flatten();
+        let Some(call) = blocks.rev().find(|block| block["type"] == "tool_use" && block["name"] == "Bash") else { continue };
+        let at = row["timestamp"].as_str().and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()).map(|at| at.timestamp_millis());
+        let (Some(id), Some(at)) = (call["id"].as_str(), at) else { continue };
+        return Ok(Some((id.to_string(), at)));
+    }
+    if rows == 0 && !whole.is_empty() {
+        return Err("its transcript's end holds no row as Claude Code writes them".to_string());
+    }
+    Ok(None)
+}
+
+/// Whether the guard ran for a session's last Bash call: given that call,
+/// when its SessionStart hook last ran, the guard's last run there, and the
+/// version of its ekko where that records nothing. A call before the
+/// SessionStart, or newer than `MARGIN`, is not judged.
+fn guard_ran(last: Result<Option<(String, i64)>, String>, started: Option<i64>, guarded: Option<&Guarded>, before: Option<&str>, now: i64) -> (Verdict, String) {
+    let (id, at) = match last {
+        Err(why) => return (Verdict::Skipped, why),
+        Ok(None) => return (Verdict::Skipped, "no Bash call in its transcript's end: nothing to judge".to_string()),
+        Ok(Some(call)) => call,
+    };
+    let Some(started) = started else {
+        return (Verdict::Skipped, "when its SessionStart hook ran cannot be read".to_string());
+    };
+    if at <= started {
+        return (Verdict::Skipped, format!("no Bash call since its SessionStart at {}: nothing to judge", clock(started)));
+    }
+    if now - at < MARGIN {
+        return (Verdict::Skipped, format!("its last Bash call, {} ms ago, is too new to judge", (now - at).max(0)));
+    }
+    match (guarded, before) {
+        (Some(guarded), _) if guarded.tool_use_id == id || guarded.at + MARGIN >= at => (Verdict::Ok, format!("its guard ran for its last Bash call, at {}", clock(at))),
+        (Some(guarded), _) => (
+            Verdict::Fail,
+            format!(
+                "its last Bash call, at {}, came after the guard's last run there, at {}: its PreToolUse hook did not run; restart the session",
+                clock(at),
+                clock(guarded.at)
+            ),
+        ),
+        (None, Some(version)) => (Verdict::Skipped, format!("its {version} records nothing of its guard's runs, which began after 0.39.1")),
+        (None, None) => (
+            Verdict::Fail,
+            format!("its last Bash call, at {}, ran with no record of the guard: its PreToolUse hook did not run there; restart the session, and if this stays, check that the plugin is enabled", clock(at)),
         ),
     }
 }
@@ -349,9 +426,15 @@ fn checks(all: &[Proc], records: &Records) -> Vec<Check> {
         // FileChanged hook watches.
         let Some(board) = record.as_ref().and_then(|running| running.board.as_deref()) else { continue };
         let heard = Told::within(records.told, &process).last_heard();
-        let before = server.exe.as_deref().and_then(|exe| before_heard(exe, records.store));
-        let (verdict, says) = wake_heard(version(board), records.registry.recorded_at(&process), heard.as_ref(), before.as_deref(), records.now);
-        found.push(Check { check: WAKE_HEARD, verdict, about: named, session, says });
+        let before = server.exe.as_deref().and_then(|exe| before_records(exe, records.store));
+        let started = records.registry.recorded_at(&process);
+        let (verdict, says) = wake_heard(version(board), started, heard.as_ref(), before.as_deref(), records.now);
+        found.push(Check { check: WAKE_HEARD, verdict, about: named.clone(), session: session.clone(), says });
+        // The conversation it runs, whose transcript holds its Bash calls.
+        let Some(transcript) = record.as_ref().and_then(|running| running.transcript.as_deref()) else { continue };
+        let guarded = Told::within(records.told, &process).last_guarded();
+        let (verdict, says) = guard_ran(last_bash(transcript, TAIL), started, guarded.as_ref(), before.as_deref(), records.now);
+        found.push(Check { check: GUARD_RAN, verdict, about: named, session, says });
     }
     found
 }
@@ -370,7 +453,7 @@ impl Report {
             .map(|verdict| format!("{} {}", count(verdict), verdict.word()))
             .collect();
         let _ = writeln!(out, "ekko --doctor \u{b7} {}", if counts.is_empty() { "no session runs ekko's MCP server, and no ekko serve runs: nothing to check".to_string() } else { counts.join(" \u{b7} ") });
-        for name in [OLD_BINARY, HOOKS_LOADED, WAKE_HEARD] {
+        for name in [OLD_BINARY, HOOKS_LOADED, WAKE_HEARD, GUARD_RAN] {
             let of: Vec<&Check> = self.checks.iter().filter(|check| check.check == name).collect();
             if of.is_empty() {
                 continue;
@@ -550,7 +633,7 @@ mod tests {
                 tty: None,
                 config_dir: None,
                 board: Some(board.clone()),
-                transcript: None,
+                transcript: Some(dir.join("c-1.jsonl")),
                 conversation: "c-1".into(),
                 earlier: Vec::new(),
                 since: 0,
@@ -588,6 +671,14 @@ mod tests {
         let (verdict, says) = wake(3_060_000);
         assert_eq!(verdict, Verdict::Skipped, "a write before the SessionStart: {says}");
         assert!(says.starts_with("nothing was written to its board since its SessionStart at "), "{says}");
+
+        // The same session's Bash calls, by its transcript, and the guard's.
+        let guard = |now: i64| checks(&all, &records(&registry, &told, now)).into_iter().find(|check| check.check == GUARD_RAN).unwrap().verdict;
+        let call = serde_json::json!([{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}]);
+        fs::write(dir.join("c-1.jsonl"), row("assistant", "1970-01-01T00:58:20Z", false, call) + "\n").unwrap();
+        assert_eq!(guard(3_560_000), Verdict::Fail, "a call at 3,500 s, after the SessionStart, with no guard");
+        fs::write(told.join("boot1-100-11").join("guarded"), r#"{"tool_use_id":"toolu_1","at":3500100}"#).unwrap();
+        assert_eq!(guard(3_560_000), Verdict::Ok);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -606,12 +697,66 @@ mod tests {
         assert_eq!(wake_heard(board, started, Some(&same), None, now).0, Verdict::Ok, "a hook that heard the version the board is at");
         assert_eq!(wake_heard(None, started, None, None, now).0, Verdict::Skipped, "a board that cannot be read");
         let store = Path::new(STORE);
-        let before = |exe: &str| before_heard(Path::new(exe), store);
+        let before = |exe: &str| before_records(Path::new(exe), store);
         assert_eq!(before("/nix/store/h-ekko-0.39.1/bin/ekko (deleted)").as_deref(), Some("ekko-0.39.1"));
         assert_eq!(before("/nix/store/h-ekko-0.38.0/bin/ekko").as_deref(), Some("ekko-0.38.0"));
         assert_eq!(before("/nix/store/h-ekko-0.39.2/bin/ekko"), None);
         assert_eq!(before("/nix/store/h-ekko-0.40.0/bin/ekko"), None);
         assert_eq!(before("/projects/ekko/target/release/ekko"), None, "a dev build");
+    }
+
+    /// A transcript row as Claude Code writes one, with its content blocks.
+    fn row(kind: &str, at: &str, sidechain: bool, blocks: serde_json::Value) -> String {
+        serde_json::json!({"type": kind, "timestamp": at, "isSidechain": sidechain, "message": {"role": kind, "content": blocks}}).to_string()
+    }
+
+    /// The last Bash call is the main conversation's, read from the end of
+    /// the transcript, and an end with no row Claude Code writes says so.
+    #[test]
+    fn the_last_bash_call_is_read_from_the_end_of_the_transcript() {
+        let dir = crate::paths::test_dir("ekko-doctor-transcript");
+        fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("t.jsonl");
+        let bash = |id: &str| serde_json::json!([{"type": "tool_use", "id": id, "name": "Bash", "input": {"command": "ls"}}]);
+        let rows = [
+            row("assistant", "2026-10-09T03:00:00.000Z", false, bash("toolu_old")),
+            row("assistant", "2026-10-09T03:00:10.000Z", false, bash("toolu_last")),
+            row("user", "2026-10-09T03:00:11.000Z", false, serde_json::json!([{"type": "tool_result", "tool_use_id": "toolu_last", "content": "ok"}])),
+            row("assistant", "2026-10-09T03:00:20.000Z", false, serde_json::json!([{"type": "tool_use", "id": "toolu_read", "name": "Read", "input": {}}])),
+            row("assistant", "2026-10-09T03:00:30.000Z", true, bash("toolu_subagent")),
+        ];
+        fs::write(&transcript, rows.join("\n") + "\n").unwrap();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-09T03:00:10Z").unwrap().timestamp_millis();
+        assert_eq!(last_bash(&transcript, TAIL), Ok(Some(("toolu_last".to_string(), at))));
+        // An end that starts inside a row reads from the next whole one.
+        let cut = rows[3].len() as u64 + rows[4].len() as u64 + 2 + 10;
+        assert_eq!(last_bash(&transcript, cut), Ok(None), "no Bash call in the end read");
+        assert_eq!(last_bash(&transcript, 40), Ok(None), "an end inside the last row holds no row whole, and is no error");
+        fs::write(&transcript, "not a transcript\nat all\n").unwrap();
+        assert!(last_bash(&transcript, TAIL).unwrap_err().starts_with("its transcript's end holds no row"));
+        assert!(last_bash(&dir.join("gone.jsonl"), TAIL).unwrap_err().starts_with("its transcript cannot be read"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A Bash call after the SessionStart, and longer ago than the margin,
+    /// ran past the guard, or its PreToolUse hook does not run.
+    #[test]
+    fn a_bash_call_the_guard_did_not_see_fails() {
+        let call = |id: &str, at: i64| Ok(Some((id.to_string(), at)));
+        let (started, now) = (Some(1_000_000), 2_060_000);
+        let guarded = |id: &str, at: i64| Guarded { tool_use_id: id.to_string(), at };
+        let verdict = |last, guard: Option<&Guarded>, before: Option<&str>, now| guard_ran(last, started, guard, before, now).0;
+        assert_eq!(verdict(call("toolu_1", 2_000_000), Some(&guarded("toolu_1", 1_000_100)), None, now), Verdict::Ok, "the guard ran for that call, whatever its clock");
+        assert_eq!(verdict(call("toolu_1", 2_000_000), Some(&guarded("toolu_2", 2_003_000)), None, now), Verdict::Ok, "for another, about then");
+        assert_eq!(verdict(call("toolu_1", 2_000_000), Some(&guarded("toolu_0", 1_990_000)), None, now), Verdict::Fail, "its last run was before");
+        assert_eq!(verdict(call("toolu_1", 2_000_000), None, None, now), Verdict::Fail, "it never ran");
+        assert_eq!(verdict(call("toolu_1", 2_000_000), None, Some("ekko-0.39.1"), now), Verdict::Skipped, "an ekko that records nothing");
+        assert_eq!(verdict(call("toolu_1", 2_000_000), None, None, 2_004_000), Verdict::Skipped, "too new");
+        assert_eq!(verdict(call("toolu_1", 900_000), None, None, now), Verdict::Skipped, "before the SessionStart");
+        assert_eq!(verdict(Ok(None), None, None, now), Verdict::Skipped, "no Bash call");
+        assert_eq!(verdict(Err("unreadable".into()), None, None, now), Verdict::Skipped);
+        let (_, says) = guard_ran(call("toolu_1", 2_000_000), started, Some(&guarded("toolu_0", 1_990_000)), None, now);
+        assert!(says.ends_with("its PreToolUse hook did not run; restart the session"), "{says}");
     }
 
     /// The doctor reads a process as /proc shows it: this test's own.

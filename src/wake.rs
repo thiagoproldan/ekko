@@ -52,6 +52,22 @@ impl Told {
         serde_json::from_str(&fs::read_to_string(self.dir.join("heard")).ok()?).ok()
     }
 
+    /// Records, in `guarded`, that the PreToolUse guard ran in this process
+    /// for the Bash call `tool_use_id`, at `at`: what `ekko --doctor`
+    /// compares with the session's last Bash call, to tell a session whose
+    /// guard does not run (task 1284). Written whole on every run, best
+    /// effort, as `heard` is.
+    pub(crate) fn guarded(&self, tool_use_id: &str, at: i64) {
+        if let Ok(bytes) = serde_json::to_vec(&Guarded { tool_use_id: tool_use_id.to_string(), at }) {
+            let _ = crate::guard::write_atomically(&self.dir.join("guarded"), &bytes);
+        }
+    }
+
+    /// The guard's last run in this process, where one recorded it.
+    pub(crate) fn last_guarded(&self) -> Option<Guarded> {
+        serde_json::from_str(&fs::read_to_string(self.dir.join("guarded")).ok()?).ok()
+    }
+
     fn has(&self, key: &str) -> bool {
         self.dir.join(key).exists()
     }
@@ -102,6 +118,14 @@ pub(crate) struct Heard {
     pub mtime_ns: i64,
     pub size: u64,
     pub revision: u64,
+    pub at: i64,
+}
+
+/// The Bash call a guard run in a process saw, by its tool_use_id, and when,
+/// in milliseconds.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Guarded {
+    pub tool_use_id: String,
     pub at: i64,
 }
 
