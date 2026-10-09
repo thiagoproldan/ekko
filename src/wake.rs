@@ -60,6 +60,39 @@ impl Told {
     pub fn left_open(&self, uid: &str) {
         self.mark(&format!("open-{uid}"));
     }
+
+    /// Records, in `heard`, the version of the board's file this run of the
+    /// hook saw and the revision it read: what `ekko --doctor` compares with
+    /// the board's last write, to tell a session whose hook went deaf from
+    /// one with nothing to hear (task 1281). Written whole on every run, best
+    /// effort: a hook run on every write must not fail on it.
+    fn heard(&self, ekko: &Ekko) {
+        use std::os::unix::fs::MetadataExt as _;
+        let (Ok(file), Ok(counters)) = (fs::metadata(ekko.storage.storage_path()), ekko.storage.get_counters()) else { return };
+        let heard = Heard {
+            inode: file.ino(),
+            mtime_ns: file.mtime().saturating_mul(1_000_000_000).saturating_add(file.mtime_nsec()),
+            size: file.len(),
+            revision: counters.revision,
+            at: chrono::Local::now().timestamp_millis(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&heard) {
+            let _ = crate::guard::write_atomically(&self.dir.join("heard"), &bytes);
+        }
+    }
+}
+
+/// The version of the board's file a wake hook run saw: its inode, its
+/// modification time in nanoseconds and its size, as a rename or a write in
+/// place changes them; the board revision it read; and when, in
+/// milliseconds.
+#[derive(Debug, serde::Serialize)]
+struct Heard {
+    inode: u64,
+    mtime_ns: i64,
+    size: u64,
+    revision: u64,
+    at: i64,
 }
 
 /// Where the markers of every process are kept.
@@ -250,6 +283,7 @@ pub fn hook(ekko: &Ekko, input: &str, home: &Path, board: &str) -> ExitCode {
     let Some(process) = me.process.as_ref() else { return ExitCode::SUCCESS };
     forget_ended(home);
     let told = Told::of(home, process);
+    told.heard(ekko);
     let since = event["session_id"]
         .as_str()
         .and_then(|session| agent::served_cursor(&agent::session_state_dir(home), session, board))
@@ -350,6 +384,46 @@ mod tests {
         assert_eq!(hook(&board, &input, &home, "default board"), ExitCode::SUCCESS, "once");
         let elsewhere = serde_json::json!({"file_path": "/elsewhere/storage.json"}).to_string();
         assert_eq!(hook(&board, &elsewhere, &home, "default board"), ExitCode::SUCCESS, "another board's file");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Each run on this board's file records the version of the file it saw
+    /// and the revision it read, whether or not it has anything to tell;
+    /// another board's file leaves the record as it was (task 1281).
+    #[test]
+    fn the_hook_records_the_version_of_the_board_it_heard() {
+        use std::os::unix::fs::MetadataExt as _;
+        let (me, _, _) = crate::holder::test_sessions();
+        let dir = crate::paths::test_dir("ekko-wake-heard");
+        let home = dir.join("home");
+        let board = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me.clone());
+        let heard = Told::of(&home, me.process.as_ref().unwrap()).dir.join("heard");
+        let read = || serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&heard).unwrap()).unwrap();
+        let on = |path: &Path| serde_json::json!({"hook_event_name": "FileChanged", "file_path": path}).to_string();
+        let elsewhere = on(Path::new("/elsewhere/storage.json"));
+        let version = || {
+            let file = std::fs::metadata(board.storage.storage_path()).unwrap();
+            let revision = board.storage.get_counters().unwrap().revision;
+            (Some(file.ino()), Some(file.mtime() * 1_000_000_000 + file.mtime_nsec()), Some(file.len()), Some(revision))
+        };
+        let recorded = |heard: &serde_json::Value| {
+            (heard["inode"].as_u64(), heard["mtime_ns"].as_i64(), heard["size"].as_u64(), heard["revision"].as_u64())
+        };
+
+        board.create_task(&["first".to_string()]).unwrap();
+        hook(&board, &elsewhere, &home, "default board");
+        assert!(!heard.exists(), "another board's file was heard");
+        assert_eq!(hook(&board, &on(board.storage.storage_path()), &home, "default board"), ExitCode::SUCCESS, "nothing to tell");
+        let first = read();
+        assert_eq!(recorded(&first), version());
+
+        board.create_task(&["second".to_string()]).unwrap();
+        hook(&board, &elsewhere, &home, "default board");
+        assert_eq!(read(), first, "another board's file changed the record");
+        hook(&board, &on(board.storage.storage_path()), &home, "default board");
+        let second = read();
+        assert_eq!(recorded(&second), version());
+        assert_ne!(recorded(&second), recorded(&first));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
