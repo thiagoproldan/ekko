@@ -994,8 +994,9 @@ fn repeats_lists_a_failure_that_recurs_and_the_prime_tells_it_once() {
 
 /// `ekko --doctor` on a real process tree (task 1282): a stand-in for Claude
 /// Code -- a script named `claude`, as /proc names a script -- runs the
-/// ekko on its PATH as an MCP server. With no SessionStart record it fails
-/// Hooks loaded; with one it passes both checks; and once the binary on its
+/// ekko on its PATH as an MCP server. With no SessionStart record it is too
+/// new to judge at first, and fails Hooks loaded once its server is 5 s old;
+/// with a record it passes both checks; and once the binary on its
 /// PATH is swapped it fails Old binary. Other sessions on the machine are
 /// judged too, against this test's empty HOME, so only the stand-in's lines
 /// are asserted, and the exit against the count of fails.
@@ -1055,6 +1056,11 @@ fn the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks() {
     };
     let verdicts = |old: &str, hooks: &str| vec![("Old binary".to_string(), old.to_string()), ("Hooks loaded".to_string(), hooks.to_string())];
 
+    // A server just started is ahead of the hook that records it (task
+    // 1555), and is judged once it is 5 s old.
+    let started = std::time::Instant::now();
+    assert_eq!(doctor().0, verdicts("ok", "skipped"), "no SessionStart record yet, on a server just started");
+    std::thread::sleep(std::time::Duration::from_millis(5_200).saturating_sub(started.elapsed()));
     let (mine, failed) = doctor();
     assert_eq!(mine, verdicts("ok", "fail"), "no SessionStart record");
     assert!(failed >= 1);

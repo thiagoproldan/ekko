@@ -95,16 +95,21 @@ const TAIL: u64 = 1 << 20;
 /// judged on it, in milliseconds. The hook ran about 0.6 s after a write in
 /// the measurements (notes 1264, 1265); a loaded machine may take longer,
 /// and a margin too short raises false alarms (plan 1279's first risk).
+/// A session's server, too, is this old before its hooks are judged: the
+/// SessionStart hook recorded the session 0.13 and 0.16 s after its server
+/// started, in two sessions measured (task 1555).
 const MARGIN: i64 = 5_000;
 
 /// What the checks read beside /proc: the SessionStart hook's records, the
-/// wake hook's, this boot's id, where the store is, and the time now.
+/// wake hook's, this boot's id, where the store is, the time now, and how
+/// long this boot has run, in milliseconds, when /proc/uptime says.
 struct Records<'a> {
     registry: &'a Registry,
     told: &'a Path,
     boot: &'a str,
     store: &'a Path,
     now: i64,
+    up: Option<i64>,
 }
 
 /// A process as /proc shows it, as far as the checks need.
@@ -242,6 +247,24 @@ fn before_records(exe: &Path, store: &Path) -> Option<String> {
     let name = named(exe, store);
     let numbers: Vec<u64> = name.strip_prefix("ekko-")?.split('.').map(|number| number.parse().ok()).collect::<Option<_>>()?;
     (numbers.as_slice() <= [0, 39, 1].as_slice()).then_some(name)
+}
+
+/// How long this boot has run, in milliseconds: the clock in which /proc
+/// counts a process's start.
+fn uptime() -> Option<i64> {
+    let seconds: f64 = fs::read_to_string("/proc/uptime").ok()?.split_whitespace().next()?.parse().ok()?;
+    Some((seconds * 1000.0) as i64)
+}
+
+/// The clock ticks in a second, in which /proc gives a process's start.
+fn hertz() -> u64 {
+    // SAFETY: sysconf reads a constant of the system and touches no memory.
+    u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).ok().filter(|&hertz| hertz > 0).unwrap_or(100)
+}
+
+/// A process's start, given in clock ticks after boot, in milliseconds.
+fn since_boot(start: u64) -> i64 {
+    i64::try_from(start.saturating_mul(1000) / hertz()).unwrap_or(i64::MAX)
 }
 
 /// A time to the second, as the margin needs: the hour today, the day and
@@ -455,9 +478,14 @@ fn checks(all: &[Proc], records: &Records) -> Vec<Check> {
     for (claude, server) in sessions {
         let process = process(claude, records);
         let record = records.registry.of(&process);
-        let (verdict, says) = match &record {
-            Some(running) => (Verdict::Ok, format!("its SessionStart hook recorded it, on its conversation since {}", when(running.since))),
-            None => (
+        // A server just started is ahead of the hook that records it.
+        let young = records.up.map(|up| up - since_boot(server.start)).filter(|&age| age < MARGIN);
+        let (verdict, says) = match (&record, young) {
+            (Some(running), _) => (Verdict::Ok, format!("its SessionStart hook recorded it, on its conversation since {}", when(running.since))),
+            (None, Some(age)) => {
+                (Verdict::Skipped, format!("its ekko --mcp started {} ms ago, too new to judge: its SessionStart hook may still be on its way", age.max(0)))
+            }
+            (None, None) => (
                 Verdict::Fail,
                 "it runs ekko's MCP server, and no SessionStart hook recorded it: the plugin's hooks did not run there, so it has no prime, no wake and no guard; restart it, and if this stays, check that the plugin is enabled".to_string(),
             ),
@@ -519,6 +547,7 @@ pub fn run(home: &Path, json: bool) -> ExitCode {
         boot: &boot,
         store: Path::new(STORE),
         now: chrono::Local::now().timestamp_millis(),
+        up: uptime(),
     };
     let mut report = Report { checks: checks(&Proc::all(), &records) };
     let served = served_page(&crate::agent::state_dir(home), env!("CARGO_PKG_VERSION"));
@@ -547,9 +576,10 @@ mod tests {
         path
     }
 
-    /// What the checks read beside /proc, in a test's folders.
+    /// What the checks read beside /proc, in a test's folders, 1,000 s into
+    /// the boot.
     fn records<'a>(registry: &'a Registry, told: &'a Path, now: i64) -> Records<'a> {
-        Records { registry, told, boot: "boot-1", store: Path::new(STORE), now }
+        Records { registry, told, boot: "boot-1", store: Path::new(STORE), now, up: Some(1_000_000) }
     }
 
     fn id(path: &Path) -> Option<(u64, u64)> {
@@ -625,6 +655,17 @@ mod tests {
         };
 
         assert_eq!(hooks(&all), [(Verdict::Fail, "Claude Code pid 100".to_string())]);
+        // A server started 1 s ago is ahead of the hook that records it; one
+        // of 10 s ago is not, nor one whose age /proc/uptime does not tell.
+        let started = |ago: u64| (1_000_000 - ago) * hertz() / 1000;
+        let young = |ago: u64| vec![claude(100), Proc { start: started(ago), ..server(20, 100, Path::new("ekko"), &new, on_path) }];
+        let found = checks(&young(1_000), &records(&registry, &told, 0));
+        let check = found.iter().find(|check| check.check == HOOKS_LOADED).unwrap();
+        assert_eq!(check.verdict, Verdict::Skipped, "{}", check.says);
+        assert!(check.says.ends_with(" ms ago, too new to judge: its SessionStart hook may still be on its way"), "{}", check.says);
+        assert_eq!(hooks(&young(10_000)), [(Verdict::Fail, "Claude Code pid 100".to_string())]);
+        let unknown = checks(&young(1_000), &Records { up: None, ..records(&registry, &told, 0) });
+        assert_eq!(unknown.iter().find(|check| check.check == HOOKS_LOADED).unwrap().verdict, Verdict::Fail);
         let report = Report { checks: checks(&all, &records(&registry, &told, 0)) };
         assert!(report.failed());
         assert!(report.text().starts_with("ekko --doctor \u{b7} 4 ok \u{b7} 1 fail\nOld binary\n"), "{}", report.text());
