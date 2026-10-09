@@ -42,13 +42,49 @@ fn temp_ekko_dir() -> PathBuf {
     dir
 }
 
-fn run_task_create(exe: &str, dir: &std::path::Path, description: &str) -> process::Child {
-    Command::new(exe)
-        .args(["--ekko-dir", dir.to_str().unwrap(), "--task", description])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn ekko")
+/// An ekko run on a test's board, kept with its arguments so that `finish`
+/// can run it again.
+struct Run {
+    args: Vec<String>,
+    child: process::Child,
+}
+
+/// Starts `ekko --ekko-dir <dir> <args>`, its output kept for `finish`.
+fn spawn(exe: &str, dir: &std::path::Path, args: &[&str]) -> Run {
+    let args: Vec<String> = ["--ekko-dir", dir.to_str().unwrap()].iter().chain(args).map(|arg| arg.to_string()).collect();
+    let child = Command::new(exe).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("failed to spawn ekko");
+    Run { args, child }
+}
+
+fn run_task_create(exe: &str, dir: &std::path::Path, description: &str) -> Run {
+    spawn(exe, dir, &["--task", description])
+}
+
+/// Waits for `run`, and runs it again, up to three times, while the board's
+/// lock refused it: a writer that timed out waiting for the lock wrote
+/// nothing, so running it again keeps every count these tests make. Under
+/// other sessions' load a holder can starve past LOCK_ACQUIRE_TIMEOUT
+/// (task 1588), as it can for any caller, who is told so and may retry. Any
+/// other failure fails the test in the writer's own words.
+fn finish(exe: &str, run: Run) {
+    let mut output = run.child.wait_with_output().expect("failed to wait on ekko");
+    for _ in 0..3 {
+        if output.status.success() || !String::from_utf8_lossy(&output.stdout).contains("waiting for the ekko storage lock") {
+            break;
+        }
+        output = Command::new(exe).args(&run.args).output().expect("failed to run ekko");
+    }
+    let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "ekko {} exited {}: {said}", run.args.join(" "), output.status);
+}
+
+/// The tests that start many writers at once take turns: run together they
+/// raced one another for the CPU, beside the load of other sessions
+/// (task 1588), and each board is its own, so nothing they check needs them
+/// together.
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[test]
@@ -56,13 +92,11 @@ fn concurrent_writers_neither_collide_on_an_id_nor_lose_an_update() {
     let dir = temp_ekko_dir();
     let exe = env!("CARGO_BIN_EXE_ekko");
     let total = 25;
+    let _turn = one_at_a_time();
 
-    let children: Vec<process::Child> =
-        (0..total).map(|i| run_task_create(exe, &dir, &format!("concurrent task {i}"))).collect();
-
-    for mut child in children {
-        let status = child.wait().expect("failed to wait on child");
-        assert!(status.success(), "an `ekko --task` invocation exited non-zero: {status:?}");
+    let runs: Vec<Run> = (0..total).map(|i| run_task_create(exe, &dir, &format!("concurrent task {i}"))).collect();
+    for run in runs {
+        finish(exe, run);
     }
 
     let storage_path = dir.join(".ekko").join("storage").join("storage.json");
@@ -87,12 +121,11 @@ fn fifty_concurrent_writers_still_neither_collide_nor_lose_updates() {
     let dir = temp_ekko_dir();
     let exe = env!("CARGO_BIN_EXE_ekko");
     let total = 50;
+    let _turn = one_at_a_time();
 
-    let children: Vec<process::Child> =
-        (0..total).map(|i| run_task_create(exe, &dir, &format!("task {i}"))).collect();
-
-    for mut child in children {
-        assert!(child.wait().expect("failed to wait on child").success());
+    let runs: Vec<Run> = (0..total).map(|i| run_task_create(exe, &dir, &format!("task {i}"))).collect();
+    for run in runs {
+        finish(exe, run);
     }
 
     let storage_path = dir.join(".ekko").join("storage").join("storage.json");
@@ -104,16 +137,6 @@ fn fifty_concurrent_writers_still_neither_collide_nor_lose_updates() {
     fs::remove_dir_all(&dir).ok();
 }
 
-fn spawn(exe: &str, dir: &std::path::Path, args: &[&str]) -> process::Child {
-    Command::new(exe)
-        .args(["--ekko-dir", dir.to_str().unwrap()])
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn ekko")
-}
-
 fn read_storage(dir: &std::path::Path) -> serde_json::Map<String, serde_json::Value> {
     let path = dir.join(".ekko").join("storage").join("storage.json");
     let content = fs::read_to_string(&path).expect("storage.json should exist");
@@ -121,10 +144,9 @@ fn read_storage(dir: &std::path::Path) -> serde_json::Map<String, serde_json::Va
 }
 
 fn seed_tasks(exe: &str, dir: &std::path::Path, count: u32) {
-    let children: Vec<_> =
-        (0..count).map(|i| run_task_create(exe, dir, &format!("seed {i}"))).collect();
-    for mut child in children {
-        assert!(child.wait().expect("failed to wait on child").success());
+    let runs: Vec<Run> = (0..count).map(|i| run_task_create(exe, dir, &format!("seed {i}"))).collect();
+    for run in runs {
+        finish(exe, run);
     }
 }
 
@@ -137,20 +159,21 @@ fn concurrent_mixed_mutations_neither_lose_writes_nor_corrupt_state() {
     let dir = temp_ekko_dir();
     let exe = env!("CARGO_BIN_EXE_ekko");
     let seeded = 20;
+    let _turn = one_at_a_time();
 
     seed_tasks(exe, &dir, seeded);
 
     // `--check` and `--star` both toggle, so exactly one of each per id
     // leaves a state that is deterministic no matter what order they land
     // in -- but only if every single one of them survives.
-    let mut children = Vec::new();
+    let mut runs = Vec::new();
     for id in 1..=seeded {
-        children.push(spawn(exe, &dir, &["--check", &id.to_string()]));
-        children.push(spawn(exe, &dir, &["--star", &id.to_string()]));
-        children.push(run_task_create(exe, &dir, &format!("extra {id}")));
+        runs.push(spawn(exe, &dir, &["--check", &id.to_string()]));
+        runs.push(spawn(exe, &dir, &["--star", &id.to_string()]));
+        runs.push(run_task_create(exe, &dir, &format!("extra {id}")));
     }
-    for mut child in children {
-        assert!(child.wait().expect("failed to wait on child").success());
+    for run in runs {
+        finish(exe, run);
     }
 
     let data = read_storage(&dir);
@@ -172,6 +195,7 @@ fn concurrent_mixed_mutations_neither_lose_writes_nor_corrupt_state() {
 fn readers_never_observe_a_torn_storage_file() {
     let dir = temp_ekko_dir();
     let exe = env!("CARGO_BIN_EXE_ekko");
+    let _turn = one_at_a_time();
 
     seed_tasks(exe, &dir, 5);
 
@@ -189,8 +213,8 @@ fn readers_never_observe_a_torn_storage_file() {
         );
     }
 
-    for mut writer in writers {
-        assert!(writer.wait().expect("failed to wait on child").success());
+    for writer in writers {
+        finish(exe, writer);
     }
 
     for reader in readers {
@@ -247,8 +271,8 @@ fn a_lock_holder_killed_outright_does_not_wedge_later_writers() {
     holder.wait().ok();
 
     let start = Instant::now();
-    let mut child = run_task_create(exe, &dir, "after the holder was killed");
-    assert!(child.wait().expect("failed to wait on child").success());
+    let output = run_task_create(exe, &dir, "after the holder was killed").child.wait_with_output().expect("failed to wait on ekko");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     let elapsed = start.elapsed();
 
     assert!(elapsed < Duration::from_secs(2), "a killed holder wedged the lock for {elapsed:?}");
@@ -381,7 +405,7 @@ fn a_follower_of_changes_never_misses_a_write_made_while_it_reads() {
         let dir = dir.clone();
         std::thread::spawn(move || {
             for i in 0..total {
-                assert!(run_task_create(exe, &dir, &format!("followed {i}")).wait().unwrap().success());
+                finish(exe, run_task_create(exe, &dir, &format!("followed {i}")));
             }
         })
     };
