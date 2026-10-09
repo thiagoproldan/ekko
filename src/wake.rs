@@ -38,8 +38,18 @@ pub struct Told {
 impl Told {
     /// The markers of `process`, under the ekko state directory in `home`.
     pub fn of(home: &Path, process: &Process) -> Told {
+        Told::within(&told_dir(home), process)
+    }
+
+    /// The markers of `process` in `dir`, which holds every process's.
+    pub(crate) fn within(dir: &Path, process: &Process) -> Told {
         let boot: String = process.boot.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
-        Told { dir: told_dir(home).join(format!("{boot}-{}-{}", process.pid, process.start)) }
+        Told { dir: dir.join(format!("{boot}-{}-{}", process.pid, process.start)) }
+    }
+
+    /// What the hook's last run in this process heard, where one recorded it.
+    pub(crate) fn last_heard(&self) -> Option<Heard> {
+        serde_json::from_str(&fs::read_to_string(self.dir.join("heard")).ok()?).ok()
     }
 
     fn has(&self, key: &str) -> bool {
@@ -86,17 +96,17 @@ impl Told {
 /// modification time in nanoseconds and its size, as a rename or a write in
 /// place changes them; the board revision it read; and when, in
 /// milliseconds.
-#[derive(Debug, serde::Serialize)]
-struct Heard {
-    inode: u64,
-    mtime_ns: i64,
-    size: u64,
-    revision: u64,
-    at: i64,
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Heard {
+    pub inode: u64,
+    pub mtime_ns: i64,
+    pub size: u64,
+    pub revision: u64,
+    pub at: i64,
 }
 
 /// Where the markers of every process are kept.
-fn told_dir(home: &Path) -> PathBuf {
+pub(crate) fn told_dir(home: &Path) -> PathBuf {
     agent::state_dir(home).join("told")
 }
 

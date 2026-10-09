@@ -1899,6 +1899,7 @@ mod tests {
             ("Posed", "handed to the menu this same binary starts"),
             ("StepSpec", "a call's input, which `crate::artifact::steps` makes a `Step` of"),
             ("Runtime", "serve.json, written only by the server it names, whole and new as it starts"),
+            ("Heard", "the wake hook's record, written whole on every run from what it saw, never from what it read"),
         ];
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut checked = Vec::new();

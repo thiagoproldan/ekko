@@ -369,6 +369,13 @@ impl Registry {
         self.of(process).map(|running| running.conversation)
     }
 
+    /// When the SessionStart hook last recorded `process`, in milliseconds:
+    /// it writes the file whole at startup, resume, /clear and compaction.
+    pub fn recorded_at(&self, process: &Process) -> Option<i64> {
+        let modified = fs::metadata(self.file(process)).ok()?.modified().ok()?;
+        i64::try_from(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()
+    }
+
     /// Every process recorded, running or ended.
     pub fn all(&self) -> Vec<Running> {
         let Ok(entries) = fs::read_dir(&self.dir) else { return Vec::new() };
