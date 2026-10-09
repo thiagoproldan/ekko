@@ -231,7 +231,9 @@ bump() {
 }
 
 tests() {
-  dev cargo test --locked
+  # As CI runs them, without the CLAUDECODE a Claude Code session sets: a
+  # test that leaned on it passed here and failed in CI (task 1620).
+  env -u CLAUDECODE nix develop --command cargo test --locked
   awk '/^test result: ok\./ { passed += $4 } END { print passed " passed" }' "$step_log" >&3
 }
 
