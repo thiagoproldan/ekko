@@ -109,6 +109,10 @@ pub struct Storage {
     /// folder -- `~/.ekko/copies/<project id>/` -- or `None` for a board
     /// that is no project's (task 503).
     copy_dir: Option<PathBuf>,
+    /// Why a project's board is not copied out from here (task 1585), said
+    /// on stderr at the first write that would have copied it.
+    not_copied: Option<String>,
+    said: std::sync::atomic::AtomicBool,
 }
 
 /// Proof of a held lock. Releases it on drop, including when a caller
@@ -150,6 +154,8 @@ impl Storage {
             lock_file: ekko_dir.join(".lock"),
             history_dir: ekko_dir.join("history"),
             copy_dir: None,
+            not_copied: None,
+            said: std::sync::atomic::AtomicBool::new(false),
         };
 
         storage.clean_temp_dir()?;
@@ -157,9 +163,12 @@ impl Storage {
     }
 
     /// This storage, copying the board's files to `copy_dir` at every write
-    /// (see `copy_out`).
-    pub fn copied_to(mut self, copy_dir: Option<PathBuf>) -> Self {
-        self.copy_dir = copy_dir;
+    /// (see `copy_out`), or, given why not, saying it at the first.
+    pub fn copied_to(mut self, copy_dir: Result<Option<PathBuf>, String>) -> Self {
+        match copy_dir {
+            Ok(copy_dir) => self.copy_dir = copy_dir,
+            Err(why) => self.not_copied = Some(why),
+        }
         self
     }
 
@@ -277,7 +286,14 @@ impl Storage {
     /// place by rename, so a copy is always a whole file. Best effort, like
     /// history: a copy that cannot be made never stops the write.
     fn copy_out(&self, file: &Path) {
-        let Some(copy) = self.copy_of(file) else { return };
+        let Some(copy) = self.copy_of(file) else {
+            if let Some(why) = &self.not_copied {
+                if !self.said.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("ekko: {why}");
+                }
+            }
+            return;
+        };
         let (Ok(source), Some(parent)) = (fs::metadata(file), copy.parent()) else { return };
         // Already this very file: a journal appended in place, or a file no
         // write has replaced since.
@@ -1345,7 +1361,7 @@ mod tests {
     fn a_write_touches_the_version_it_replaces_only_by_replacing_it() {
         let dir = temp_ekko_dir();
         fs::write(dir.join("project.json"), r#"{"name": "site", "id": "abc"}"#).unwrap();
-        let storage = Storage::new(&dir).unwrap().copied_to(Some(temp_ekko_dir().join("copy")));
+        let storage = Storage::new(&dir).unwrap().copied_to(Ok(Some(temp_ekko_dir().join("copy"))));
         let file = dir.join("storage").join("storage.json");
         let mut data = BTreeMap::new();
         storage.set(&data).unwrap();
@@ -1445,7 +1461,7 @@ mod tests {
         let dir = temp_ekko_dir();
         let copy = temp_ekko_dir().join("copy");
         fs::write(dir.join("project.json"), r#"{"name": "site", "id": "abc"}"#).unwrap();
-        let storage = Storage::new(&dir).unwrap().copied_to(Some(copy.clone()));
+        let storage = Storage::new(&dir).unwrap().copied_to(Ok(Some(copy.clone())));
         storage.set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
         storage.set_counters(&Counters { revision: 1, highest_id: 1, ..Counters::default() }).unwrap();
         storage.append_journal(&serde_json::json!({"rev": 1})).unwrap();
@@ -1478,7 +1494,7 @@ mod tests {
         before.append_journal(&serde_json::json!({"rev": 1})).unwrap();
         before.set_counters(&Counters { revision: 1, highest_id: 2, ..Counters::default() }).unwrap();
 
-        let storage = Storage::new(&dir).unwrap().copied_to(Some(copy.clone()));
+        let storage = Storage::new(&dir).unwrap().copied_to(Ok(Some(copy.clone())));
         storage.set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
 
         let copied = Storage::new(&copy).unwrap();
@@ -1497,7 +1513,7 @@ mod tests {
         let dir = temp_ekko_dir();
         let not_a_directory = dir.join("copy");
         fs::write(&not_a_directory, "").unwrap();
-        let storage = Storage::new(&dir).unwrap().copied_to(Some(not_a_directory));
+        let storage = Storage::new(&dir).unwrap().copied_to(Ok(Some(not_a_directory)));
         storage.set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
         assert_eq!(storage.get().unwrap().len(), 1);
         fs::remove_dir_all(&dir).ok();

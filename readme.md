@@ -769,7 +769,7 @@ It works the way an issue moves between Jira projects or GitHub repositories:
 
 #### A copy outside the folder
 
-The board lives in its folder, so whatever takes the folder's untracked files takes the board: `git clean -fdx`, whose `-x` removes what `.git/info/exclude` keeps out of git, removing the folder, or cloning it again. So every write also copies the board's files to `~/.ekko/copies/<project id>/` -- the board as its `.ekko/` holds it, without the history of its versions. On one filesystem the copy is a hard link and costs nothing: a write replaces a file by rename, never in place, so a version once linked never changes. Across filesystems, or btrfs subvolumes, it is a copy, which btrfs makes a clone.
+The board lives in its folder, so whatever takes the folder's untracked files takes the board: `git clean -fdx`, whose `-x` removes what `.git/info/exclude` keeps out of git, removing the folder, or cloning it again. So every write also copies the board's files to `~/.ekko/copies/<project id>/` -- the board as its `.ekko/` holds it, without the history of its versions. On one filesystem the copy is a hard link and costs nothing: a write replaces a file by rename, never in place, so a version once linked never changes. Across filesystems, or btrfs subvolumes, it is a copy, which btrfs makes a clone. Only the folder the registry names for the project writes its copy, however that folder is reached: a copy of the folder elsewhere -- a backup, a test's fixture -- holds the same `project.json`, so its writes stay its own, and its first write says so on stderr (task 1585).
 
 A folder that has lost its board works on the default board, and the line every prime starts with says so:
 

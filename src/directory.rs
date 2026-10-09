@@ -161,7 +161,7 @@ pub struct Location {
     /// `EKKO_PROJECT`.
     pub discovered: bool,
     /// Where every write copies the board, when the board is a project's.
-    pub copy: Option<PathBuf>,
+    pub copy: Result<Option<PathBuf>, String>,
     /// On the default board, the project registered for this folder when the
     /// folder no longer holds its board.
     pub lost: Option<project::Lost>,
@@ -369,13 +369,13 @@ mod tests {
         fs::create_dir_all(&folder).unwrap();
         let id = project::init(&home, &folder, None, None, 0).unwrap().id;
         let found = locate(&home, &folder, None, None, None).unwrap();
-        assert_eq!(found.copy, Some(home.join(".ekko").join(COPIES_DIR_NAME).join(&id)));
+        assert_eq!(found.copy, Ok(Some(home.join(".ekko").join(COPIES_DIR_NAME).join(&id))));
         assert_eq!(found.label(), "project site, found from this folder");
         crate::ekko::Ekko::at(&found).unwrap().storage.set(&crate::storage::ItemMap::new()).unwrap();
 
         fs::remove_dir_all(folder.join(EKKO_DIR_NAME)).unwrap();
         let fallen = locate(&home, &folder, None, None, None).unwrap();
-        assert_eq!((fallen.dir.clone(), fallen.copy.clone()), (home.join(".ekko"), None));
+        assert_eq!((fallen.dir.clone(), fallen.copy.clone()), (home.join(".ekko"), Ok(None)));
         let label = fallen.label();
         assert!(label.starts_with("default board -- "), "{label}");
         assert!(label.contains(&format!("{} was project site, whose board is gone: ekko init", folder.display())), "{label}");

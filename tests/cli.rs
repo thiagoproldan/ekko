@@ -1442,3 +1442,44 @@ fn the_guard_records_each_bash_call_it_sees_for_its_session() {
 fn chrono_now_millis() -> i64 {
     i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap()
 }
+
+/// A copy of a project's folder elsewhere writes its own board only: the
+/// project's copy outside the folder is written from the registered folder
+/// alone, and the copy's first write says so, once (task 1585).
+#[test]
+fn a_copy_of_a_projects_folder_leaves_the_projects_copy_alone() {
+    let dir = temp_ekko_dir();
+    let (site, elsewhere) = (dir.join("site"), dir.join("elsewhere"));
+    fs::create_dir_all(&site).unwrap();
+    let ekko = |cwd: &PathBuf, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &dir)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("CLAUDECODE")
+            .output()
+            .unwrap()
+    };
+    assert!(ekko(&site, &["init"]).status.success());
+    assert!(ekko(&site, &["--task", "from the project"]).status.success());
+    let copies = dir.join(".ekko").join("copies");
+    let copy = fs::read_dir(&copies).unwrap().next().unwrap().unwrap().path().join("storage").join("storage.json");
+    let kept = fs::read(&copy).unwrap();
+    assert!(Command::new("cp").arg("-r").arg(&site).arg(&elsewhere).status().unwrap().success());
+
+    let output = ekko(&elsewhere, &["--task", "from a copy of the folder"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(said.matches("registered at").count(), 1, "{said}");
+    assert_eq!(fs::read(&copy).unwrap(), kept, "a copy of the folder wrote the project's copy");
+    let own = fs::read_to_string(elsewhere.join(".ekko").join("storage").join("storage.json")).unwrap();
+    assert!(own.contains("from a copy of the folder"), "{own}");
+
+    let output = ekko(&site, &["--task", "from the project again"]);
+    assert!(output.status.success() && output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(fs::read_to_string(&copy).unwrap().contains("from the project again"));
+    fs::remove_dir_all(&dir).ok();
+}

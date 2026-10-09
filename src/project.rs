@@ -170,9 +170,43 @@ fn marker_in(ekko_dir: &Path) -> Option<Marker> {
 
 /// Where the board in `ekko_dir` is copied at every write, when it is a
 /// project's: `~/.ekko/copies/<id>/`, by the project's id, which neither a
-/// move nor a new folder changes.
-pub fn copy_dir(home: &Path, ekko_dir: &Path) -> Option<PathBuf> {
-    copies(home, &marker_in(ekko_dir)?.id)
+/// move nor a new folder changes. Only from the folder the registry names
+/// for that id, however it is reached (task 1585): a copy of the folder
+/// elsewhere -- a backup, a test's fixture -- holds the same project.json,
+/// and its writes would replace the project's copy. From there, or for an
+/// id no entry has, it is `Err`, saying why; a registry that cannot be read
+/// keeps the copy, which is what brings a lost board back.
+pub fn copy_dir(home: &Path, ekko_dir: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(marker) = marker_in(ekko_dir) else { return Ok(None) };
+    let Some(copy) = copies(home, &marker.id) else { return Ok(None) };
+    let Ok(registry) = read_registry(home) else { return Ok(Some(copy)) };
+    let here = ekko_dir.parent().unwrap_or(ekko_dir);
+    match registry.projects.iter().find(|entry| entry.id == marker.id) {
+        Some(entry) if same_folder(&entry.path, here) => Ok(Some(copy)),
+        Some(entry) => Err(format!(
+            "this board in {} holds project {}'s project.json, but that project is registered at {}: its copy in {} is written from there only, so this write is not copied (task 1585)",
+            here.display(),
+            entry.name,
+            entry.path.display(),
+            copy.display()
+        )),
+        None => Err(format!(
+            "this board in {} holds the project.json of {}, which is no registered project: it is not copied to {} (task 1585)",
+            here.display(),
+            marker.name,
+            copy.display()
+        )),
+    }
+}
+
+/// Whether two paths reach one folder, as a folder mounted at two paths, or
+/// reached through a link, does.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
 }
 
 fn copies(home: &Path, id: &str) -> Option<PathBuf> {
@@ -1091,6 +1125,42 @@ mod tests {
         assert_eq!(board[&1].description, "kept outside the folder");
         assert_eq!(lost_at(&home, &inside), None);
         assert_eq!(discover(&home, &inside).map(|p| p.name), Some("site".to_string()));
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A board is copied out only from the folder the registry names for its
+    /// project, however that folder is reached (task 1585): a copy of the
+    /// folder elsewhere, holding the same project.json, writes its own board
+    /// and leaves the project's copy as it was.
+    #[test]
+    fn only_the_registered_folder_writes_the_projects_copy() {
+        let home = temp("copy-from");
+        let site = folder(&home, "work/site");
+        let id = init(&home, &site, None, None, NOW).unwrap().id;
+        let copied = || fs::read_to_string(copies(&home, &id).unwrap().join("storage").join("storage.json")).unwrap();
+        seed_copied(&home, &site, "from the project");
+        assert!(copied().contains("from the project"));
+
+        let elsewhere = folder(&home, "backup/site");
+        copy_tree(&site.join(EKKO_DIR_NAME), &elsewhere.join(EKKO_DIR_NAME)).unwrap();
+        let why = copy_dir(&home, &elsewhere.join(EKKO_DIR_NAME)).unwrap_err();
+        assert!(why.contains(&format!("registered at {}", site.display())), "{why}");
+        seed_copied(&home, &elsewhere, "from a copy of the folder");
+        assert!(copied().contains("from the project"), "a copy of the folder wrote the project's copy: {}", copied());
+
+        // The project's own folder, reached by another path.
+        let link = home.join("link-to-site");
+        std::os::unix::fs::symlink(&site, &link).unwrap();
+        assert_eq!(copy_dir(&home, &link.join(EKKO_DIR_NAME)), Ok(copies(&home, &id)));
+        seed_copied(&home, &link, "from the project again");
+        assert!(copied().contains("from the project again"));
+
+        // A project.json that no registered project has.
+        let stray = folder(&home, "stray");
+        fs::create_dir_all(stray.join(EKKO_DIR_NAME)).unwrap();
+        fs::write(stray.join(EKKO_DIR_NAME).join(MARKER), r#"{"name": "stray", "id": "18dccc0000000000-1"}"#).unwrap();
+        assert!(copy_dir(&home, &stray.join(EKKO_DIR_NAME)).is_err_and(|why| why.contains("no registered project")));
 
         fs::remove_dir_all(&home).ok();
     }
