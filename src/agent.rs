@@ -612,6 +612,32 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Who holds the work a handoff on `task` hands over (task 1562): the
+    /// task's holder, or for an artifact, the holder of one of its steps in
+    /// progress, with that step's id -- this reader before a running
+    /// session, and either before a holder that is gone. A session that
+    /// resumes an artifact's handoff claims its next step, never the
+    /// artifact. A claim is the reader's too when made in the conversation
+    /// it carries on, as its handoffs are (`Holder::whose`).
+    fn holding(&self, task: &Item) -> Option<(Held, Option<u32>)> {
+        let steps = task.artifact.as_deref().map(|artifact| artifact.steps.as_slice()).unwrap_or_default();
+        let items = std::iter::once((task, None)).chain(steps.iter().filter_map(|step| {
+            let id = self.uid(step.task.as_deref()?)?;
+            Some((self.graph.all.get(&id)?, Some(id)))
+        }));
+        let held: Vec<(Held, Option<u32>)> = items
+            .filter_map(|(item, step)| {
+                let mut held = self.held(item)?;
+                if item.held_by.as_ref()?.whose(self.me.as_ref()) == Some(Whose::Yours) {
+                    (held.yours, held.gone) = (true, false);
+                }
+                Some((held, step))
+            })
+            .collect();
+        let first = |pick: fn(&Held) -> bool| held.iter().find(|(held, _)| pick(held)).cloned();
+        first(|held| held.yours).or_else(|| first(Held::elsewhere)).or_else(|| held.first().cloned())
+    }
+
     /// Whose `note` is, by the session that wrote it: `None` for one written
     /// before authors were recorded (0.19.0), or by a person.
     fn whose(&self, note: &Item) -> Option<Whose> {
@@ -1211,6 +1237,11 @@ pub struct Handoff {
     pub by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub whose: Option<Whose>,
+    /// Who holds the work it hands over, where the line about its author
+    /// does not say (task 1562): another running session, through its task
+    /// or one of its steps, or the reader, through a step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -1293,9 +1324,12 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
             (visible(task) && holds(task)).then_some((note, task))
         })
         .collect();
-    let rank = |note: &Item, task: &Item| match (reader.held(task), reader.whose(note)) {
-        (Some(held), _) if held.yours => 0,
-        (Some(held), _) if held.elsewhere() => 2,
+    // Work is held through its task, or for an artifact through a step the
+    // session that resumed it claimed (task 1562): a handoff whose artifact
+    // has a step another running session holds is that session's.
+    let rank = |note: &Item, task: &Item| match (reader.holding(task), reader.whose(note)) {
+        (Some((held, _)), _) if held.yours => 0,
+        (Some((held, _)), _) if held.elsewhere() => 2,
         (_, Some(Whose::Yours)) => 0,
         (_, Some(Whose::Running)) => 2,
         _ => 1,
@@ -1310,7 +1344,10 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
             id: note.id,
             task: task.id,
             updated_at: updated(note),
-            held: reader.held(task).map(|held| held.text()),
+            held: reader.holding(task).map(|(held, step)| match step {
+                Some(step) => format!("{} through step {step}", held.text()),
+                None => held.text(),
+            }),
             by: reader.author(note),
             whose: reader.whose(note),
         })
@@ -1324,6 +1361,15 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
         description: note.description.clone(),
         by: reader.author(note),
         whose: reader.whose(note),
+        held: reader.holding(task).and_then(|(held, step)| {
+            let through = step.map(|step| format!(" through its step {step}")).unwrap_or_default();
+            if held.yours {
+                return step.is_some().then(|| format!("yours{through}"));
+            }
+            // Its author's line says so already when that session holds it.
+            let said = reader.whose(note) == Some(Whose::Running) && reader.author(note).as_deref() == Some(held.by.as_str());
+            (held.elsewhere() && !said).then(|| format!("held by {}{through}: that session's, not this one's", held.by))
+        }),
     });
     if let Some(shown) = &handoff {
         for entry in listed([&mut doing, &mut ready, &mut blocked, &mut waiting, &mut with_someone]) {
@@ -3217,8 +3263,9 @@ impl Handoff {
             (_, Some(by)) => format!(" by {by}"),
             (_, None) => String::new(),
         };
+        let held = self.held.as_ref().map(|held| format!("; {held}")).unwrap_or_default();
         let mut out = format!(
-            "\nWhere the last session stopped: handoff {} on task {} [{}], written {written}{by}\n",
+            "\nWhere the last session stopped: handoff {} on task {} [{}], written {written}{by}{held}\n",
             self.id, self.task, self.task_state
         );
         let body = self.description.trim();
@@ -5395,6 +5442,71 @@ mod tests {
         let fresh = prime(&as_(&crate::holder::Actor::person()), "default board").unwrap().text();
         assert!(fresh.contains("Where the last session stopped: handoff 6 on task 3 [pending], written "), "{fresh}");
         assert!(fresh.contains(" by default on pts/2, which still runs: its own, not this session's\n"), "{fresh}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A handoff on an artifact hands over its steps (task 1562): once a
+    /// running session holds one, the handoff is that session's, not where
+    /// another resumes, and the prime says who holds it; the session that
+    /// holds the step reads it as its own. Seen on 2026-10-09, when handoff
+    /// 1554, on artifact 1279, by a session that had ended, led the prime of
+    /// every session that started while another held its step 1286.
+    #[test]
+    fn a_handoff_whose_artifact_has_a_step_another_session_holds_is_that_sessions() {
+        let (_, other, gone) = crate::holder::test_sessions();
+        let person = crate::holder::Actor::person();
+        let (_, dir) = board("handoff-steps");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        let hand_off = |text: &str, task: u32| {
+            let ekko = as_(&gone);
+            let mut draft = crate::ops::Draft::open(&ekko).unwrap();
+            let op = serde_json::json!({"op": "create", "kind": "handoff", "text": text, "attached_to": task});
+            draft.apply(&serde_json::from_value(op).unwrap()).unwrap();
+            draft.commit(false).unwrap();
+        };
+        for name in ["the plan", "its step", "other work"] {
+            as_(&person).create_task(&words(&[name])).unwrap();
+        }
+        // Task 1 an artifact whose step is task 2, as the user's approval makes it.
+        let ekko = as_(&person);
+        let mut all = (*ekko.storage.get_shared().unwrap()).clone();
+        let step = crate::item::Step {
+            key: "probe".into(),
+            text: "its step".into(),
+            done_when: None,
+            after: Vec::new(),
+            task: all[&2].uid.clone(),
+            unknown: BTreeMap::new(),
+        };
+        let plan = crate::item::Artifact { steps: vec![step], version: 1, earlier: Vec::new(), approved_version: None, unknown: BTreeMap::new() };
+        all.get_mut(&1).unwrap().artifact = Some(Box::new(plan));
+        ekko.storage.set(&all).unwrap();
+        // Both by a session that has ended, the artifact's the newer.
+        hand_off("stopped on other work", 3);
+        hand_off("stopped on the plan: next, its step", 1);
+        let fresh = || prime(&as_(&person), "default board").unwrap().text();
+        assert!(fresh().contains("Where the last session stopped: handoff 5 on task 1 [pending], written "), "{}", fresh());
+
+        as_(&other).set_state(&words(&["@2", "progress"]), false).unwrap();
+        let text = fresh();
+        assert!(text.contains("Where the last session stopped: handoff 4 on task 3 [pending], written "), "{text}");
+        assert!(text.contains("Other handoffs in the last hour: 5 on task 1 (") && text.contains(", held by default on pts/2 through step 2)\n"), "{text}");
+        as_(&person).set_state(&words(&["@3", "done"]), false).unwrap();
+        let text = fresh();
+        let shown = "Where the last session stopped: handoff 5 on task 1 [pending], written ";
+        assert!(text.contains(shown), "the only handoff left: {text}");
+        assert!(text.contains(", which has ended; held by default on pts/2 through its step 2: that session's, not this one's\n"), "{text}");
+        let theirs = prime(&as_(&other), "default board").unwrap().text();
+        assert!(theirs.contains(shown) && theirs.contains(", which has ended; yours through its step 2\n"), "{theirs}");
+
+        // Held through its own task, it says so the same way.
+        as_(&person).create_task(&words(&["held work"])).unwrap();
+        as_(&other).set_state(&words(&["@6", "progress"]), false).unwrap();
+        hand_off("stopped on held work", 6);
+        let text = fresh();
+        assert!(text.contains("Where the last session stopped: handoff 7 on task 6 [in progress], written "), "{text}");
+        assert!(text.contains(", which has ended; held by default on pts/2: that session's, not this one's\n"), "{text}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
