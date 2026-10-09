@@ -1390,8 +1390,11 @@ fn the_guard_records_each_bash_call_it_sees_for_its_session() {
     let dir = temp_ekko_dir();
     let claude = dir.join("claude");
     // The stand-in says when the guard is done, and holds on until told to
-    // end, so its folder stays whole.
-    write_executable(&claude, "#!/bin/sh\n\"$EKKO\" --guard --hook < \"$1\"\n: > \"$1.done\"\nread end\nexit 0\n");
+    // end, so its folder stays whole. It sets CLAUDECODE as Claude Code does
+    // for its hooks: without it the guard runs as the person, who has no
+    // session to record. The test's own CLAUDECODE is taken away, so a run
+    // inside a Claude Code session judges as CI does, where it is unset.
+    write_executable(&claude, "#!/bin/sh\nCLAUDECODE=1 \"$EKKO\" --guard --hook < \"$1\"\n: > \"$1.done\"\nread end\nexit 0\n");
     let event = |tool: &str, id: &str| {
         let path = dir.join(format!("{id}.json"));
         let input = if tool == "Bash" { serde_json::json!({"command": "ls"}) } else { serde_json::json!({"file_path": "/x"}) };
@@ -1407,6 +1410,7 @@ fn the_guard_records_each_bash_call_it_sees_for_its_session() {
             .env("HOME", &dir)
             .env_remove("XDG_STATE_HOME")
             .env_remove("EKKO_DIR")
+            .env_remove("CLAUDECODE")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
