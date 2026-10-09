@@ -14,6 +14,23 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+/// Writes `content` as an executable at `to` through a child process, so
+/// that this test process never holds a descriptor open for writing on it.
+/// A test's thread that forks while one is open hands it to its child,
+/// which keeps it until its own exec, and running the file in that window
+/// fails with ETXTBSY, "Text file busy" (task 1579).
+fn write_executable(to: &Path, content: &str) {
+    let mut child = Command::new("sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(to).stdin(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(content.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success(), "{} was not written", to.display());
+}
+
+/// Copies the executable `from` to `to` through a child process, for the
+/// reason `write_executable` gives.
+fn copy_executable(from: &str, to: &Path) {
+    assert!(Command::new("cp").arg(from).arg(to).status().unwrap().success(), "{} was not copied", to.display());
+}
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn temp_home() -> PathBuf {
@@ -355,7 +372,7 @@ fn from_bash(home: &Path, port: u16, request: &str, as_claude: bool) -> String {
         // Copied once: the copy keeps the store's read-only mode, which
         // refuses a second copy over it.
         if !claude.exists() {
-            fs::copy(bash.trim(), &claude).unwrap();
+            copy_executable(bash.trim(), &claude);
         }
         let mut command = Command::new(claude);
         command.arg("-c").arg(script);
@@ -366,19 +383,9 @@ fn from_bash(home: &Path, port: u16, request: &str, as_claude: bool) -> String {
         command
     };
     command.env("REQUEST", request).env("OUT", &out);
-    // A file just copied is busy to run while another test's fork, made
-    // before its exec, still holds the copy open: run it a moment later.
-    let mut tries = 0;
-    let status = loop {
-        match command.status() {
-            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
-                tries += 1;
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            other => break other.unwrap(),
-        }
-    };
-    assert!(status.success());
+    // The copy was made by a child process, so no fork of this one holds
+    // it open for writing: it runs at once (task 1579).
+    assert!(command.status().unwrap().success());
     assert!(until(10, || out.exists()), "bash never got its answer");
     fs::read_to_string(out).unwrap()
 }
@@ -686,8 +693,7 @@ impl Session {
         // The arguments end in `<ekko> --menu <file>`; the pid file beside
         // the file is how the menu says it is up.
         let body = "spec=; prev=\nfor a in \"$@\"; do\n  [ \"$prev\" = --menu ] && spec=$a\n  prev=$a\ndone\necho $$ > \"${spec%.json}.pid\"\necho $$ >> \"$(dirname \"$0\")/menus\"\nexec sleep 60\n";
-        fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
-        fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        write_executable(&script, &format!("#!/bin/sh\n{body}"));
         let mut child = ekko(home)
             .arg("--mcp")
             .env("EKKO_TERMINAL", &script)

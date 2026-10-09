@@ -8028,8 +8028,7 @@ sleep 0.5
 } > 'SEEN.part'
 mv 'SEEN.part' 'SEEN'
 "#;
-        std::fs::write(&opener, script.replace("SEEN", &seen.display().to_string())).unwrap();
-        std::fs::set_permissions(&opener, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        crate::paths::write_executable(&opener, &script.replace("SEEN", &seen.display().to_string()));
         let page = "/a page's \"name\" & $HOME.html";
         open_with(&opener.display().to_string(), page.as_ref()).unwrap();
         let began = std::time::Instant::now();

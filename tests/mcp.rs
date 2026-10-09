@@ -10,6 +10,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+/// Writes `content` as an executable at `to` through a child process, so
+/// that this test process never holds a descriptor open for writing on it.
+/// A test's thread that forks while one is open hands it to its child,
+/// which keeps it until its own exec, and running the file in that window
+/// fails with ETXTBSY, "Text file busy" (task 1579).
+fn write_executable(to: &Path, content: &str) {
+    let mut child = Command::new("sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(to).stdin(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(content.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success(), "{} was not written", to.display());
+}
+
 /// A counter beside the clock: tests run in parallel, and two can read the
 /// same clock value (task 393).
 fn temp_home() -> PathBuf {
@@ -1063,8 +1074,7 @@ impl Held {
         // variables that pick the board it takes as the command line sets them.
         let prelude = "spec=; exe=; prev=\nfor a in \"$@\"; do\n  [ \"$prev\" = --menu ] && spec=$a\n  [ \"$a\" = --menu ] && exe=$prev\n  case \"$a\" in EKKO_DIR=*|EKKO_PROJECT=*) export \"$a\";; esac\n  prev=$a\ndone\npid=\"${spec%.json}.pid\"\n";
         let log = home.join("terminal.log");
-        fs::write(&script, format!("#!/bin/sh\necho \"$@\" >> \"{}\"\n{prelude}{terminal}\n", log.display())).unwrap();
-        fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        write_executable(&script, &format!("#!/bin/sh\necho \"$@\" >> \"{}\"\n{prelude}{terminal}\n", log.display()));
         let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
         match folder {
             Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),

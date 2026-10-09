@@ -68,6 +68,20 @@ pub(crate) fn test_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{next}", std::process::id()))
 }
 
+/// Writes `content` as an executable at `to` through a child process, so
+/// that the test process never holds a descriptor open for writing on it.
+/// A test's thread that forks while one is open hands it to its child,
+/// which keeps it until its own exec, and running the file in that window
+/// fails with ETXTBSY, "Text file busy" (task 1579).
+#[cfg(test)]
+pub(crate) fn write_executable(to: &Path, content: &str) {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(to).stdin(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(content.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success(), "{} was not written", to.display());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

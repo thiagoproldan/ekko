@@ -24,6 +24,36 @@ fn temp_ekko_dir() -> PathBuf {
     dir
 }
 
+/// Writes `content` as an executable at `to` through a child process, so
+/// that this test process never holds a descriptor open for writing on it.
+/// A test's thread that forks while one is open hands it to its child,
+/// which keeps it until its own exec, and running the file in that window
+/// fails with ETXTBSY, "Text file busy" (task 1579).
+fn write_executable(to: &std::path::Path, content: &str) {
+    use std::io::Write as _;
+    let mut child = Command::new("sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(to).stdin(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(content.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success(), "{} was not written", to.display());
+}
+
+/// Copies the executable `from` to `to` through a child process, for the
+/// reason `write_executable` gives.
+fn copy_executable(from: &str, to: &std::path::Path) {
+    assert!(Command::new("cp").arg(from).arg(to).status().unwrap().success(), "{} was not copied", to.display());
+}
+
+/// Every executable the integration tests run is put in place by a child
+/// process (task 1579): none is written, nor copied, by a test process.
+#[test]
+fn no_test_here_writes_an_executable_it_runs() {
+    let sources = [("cli.rs", include_str!("cli.rs")), ("mcp.rs", include_str!("mcp.rs")), ("serve.rs", include_str!("serve.rs")), ("concurrency.rs", include_str!("concurrency.rs"))];
+    for (file, source) in sources {
+        for written in [concat!("fs::", "copy("), concat!("from_", "mode(0o7")] {
+            assert!(!source.contains(written), "tests/{file} puts an executable in place with {written}: use write_executable or copy_executable (task 1579)");
+        }
+    }
+}
+
 /// Writes a board big enough that its `--json` output cannot fit in a pipe
 /// buffer, so the child is still writing when the reader goes away. Built
 /// directly rather than by spawning the binary a few hundred times.
@@ -1035,14 +1065,12 @@ fn repeats_lists_a_failure_that_recurs_and_the_prime_tells_it_once() {
 #[test]
 fn the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks() {
     use std::io::Write as _;
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = temp_ekko_dir();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_ekko"), bin.join("ekko")).unwrap();
+    copy_executable(env!("CARGO_BIN_EXE_ekko"), &bin.join("ekko"));
     let claude = dir.join("claude");
-    fs::write(&claude, "#!/bin/sh\nekko --mcp\nexit $?\n").unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&claude, "#!/bin/sh\nekko --mcp\nexit $?\n");
     let mut session = Command::new(&claude)
         .env("PATH", &bin)
         .env("HOME", &dir)
@@ -1109,7 +1137,7 @@ fn the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks() {
     assert_eq!(doctor().0, verdicts("ok", "ok"), "a clean session");
 
     // An upgrade puts another binary under the same name.
-    fs::copy(env!("CARGO_BIN_EXE_ekko"), bin.join("ekko.new")).unwrap();
+    copy_executable(env!("CARGO_BIN_EXE_ekko"), &bin.join("ekko.new"));
     fs::rename(bin.join("ekko.new"), bin.join("ekko")).unwrap();
     let (mine, failed) = doctor();
     assert_eq!(mine, verdicts("fail", "ok"), "the binary on its PATH was swapped");
@@ -1131,11 +1159,10 @@ fn the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks() {
 #[test]
 fn the_prime_names_the_sessions_on_its_board_that_need_a_restart() {
     use std::io::Write as _;
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = temp_ekko_dir();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_ekko"), bin.join("ekko")).unwrap();
+    copy_executable(env!("CARGO_BIN_EXE_ekko"), &bin.join("ekko"));
     let ekko = |cwd: &PathBuf, args: &[&str], stdin: &str| -> String {
         let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
             .args(args)
@@ -1170,8 +1197,7 @@ fn the_prime_names_the_sessions_on_its_board_that_need_a_restart() {
     assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
     let claude = dir.join("claude");
     let script = "#!/bin/sh\nekko --mcp < \"$1\" > /dev/null &\nexec 3> \"$1\"\nwhile read event; do\n  CLAUDECODE=1 ekko --prime --hook < \"$event\" > \"$event.out\"\n  : > \"$event.done\"\ndone\n";
-    fs::write(&claude, script).unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&claude, script);
     let mut session = Command::new(&claude)
         .arg(&fifo)
         .current_dir(&app)
@@ -1230,7 +1256,7 @@ fn the_prime_names_the_sessions_on_its_board_that_need_a_restart() {
     assert_eq!(line(&ekko(&app, &["--prime", "--hook"], start)), None, "a session its hook recorded");
 
     // An upgrade puts another binary under the same name.
-    fs::copy(env!("CARGO_BIN_EXE_ekko"), bin.join("ekko.new")).unwrap();
+    copy_executable(env!("CARGO_BIN_EXE_ekko"), &bin.join("ekko.new"));
     fs::rename(bin.join("ekko.new"), bin.join("ekko")).unwrap();
     let runs = fs::canonicalize(&bin).unwrap().join("ekko");
     let replaced = format!("(it runs {}, replaced since) -- ekko --doctor says why", runs.display());
@@ -1255,12 +1281,11 @@ fn the_prime_names_the_sessions_on_its_board_that_need_a_restart() {
 /// fails it, and the board holds the same items.
 #[test]
 fn the_probe_writes_the_board_again_and_finds_the_session_that_did_not_hear_it() {
-    use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::process::CommandExt as _;
     let dir = temp_ekko_dir();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_ekko"), bin.join("ekko")).unwrap();
+    copy_executable(env!("CARGO_BIN_EXE_ekko"), &bin.join("ekko"));
     let (app, other) = (dir.join("app"), dir.join("other"));
     let ekko_in = |cwd: &PathBuf, args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_ekko"))
@@ -1293,8 +1318,7 @@ fn the_probe_writes_the_board_again_and_finds_the_session_that_did_not_hear_it()
         let folder = dir.join(name);
         fs::create_dir_all(&folder).unwrap();
         let claude = folder.join("claude");
-        fs::write(&claude, script).unwrap();
-        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&claude, script);
         let fifo = folder.join("mcp-in");
         assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
         fs::write(folder.join("mcp-in.start"), format!(r#"{{"hook_event_name":"SessionStart","source":"startup","session_id":"{name}"}}"#)).unwrap();
@@ -1363,13 +1387,11 @@ fn the_probe_writes_the_board_again_and_finds_the_session_that_did_not_hear_it()
 /// it as a PreToolUse hook, on a Bash call and on a Read.
 #[test]
 fn the_guard_records_each_bash_call_it_sees_for_its_session() {
-    use std::os::unix::fs::PermissionsExt as _;
     let dir = temp_ekko_dir();
     let claude = dir.join("claude");
     // The stand-in says when the guard is done, and holds on until told to
     // end, so its folder stays whole.
-    fs::write(&claude, "#!/bin/sh\n\"$EKKO\" --guard --hook < \"$1\"\n: > \"$1.done\"\nread end\nexit 0\n").unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&claude, "#!/bin/sh\n\"$EKKO\" --guard --hook < \"$1\"\n: > \"$1.done\"\nread end\nexit 0\n");
     let event = |tool: &str, id: &str| {
         let path = dir.join(format!("{id}.json"));
         let input = if tool == "Bash" { serde_json::json!({"command": "ls"}) } else { serde_json::json!({"file_path": "/x"}) };
