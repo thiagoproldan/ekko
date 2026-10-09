@@ -1673,7 +1673,7 @@ impl<'a> Draft<'a> {
         let there = crate::project::resolve_named(home, name.trim())?;
         let projects = crate::project::linkable(here, &there)?;
         if self.ekko.linked().iter().any(|linked| linked.name == there.name) {
-            return Err(invalid(format!("{} and {} are linked already: every tool but wait takes project: {} here", here.name, there.name, there.name)));
+            return Err(invalid(format!("{} and {} are linked already: every tool takes project: {} here", here.name, there.name, there.name)));
         }
         let named = |project: &crate::project::Project| match &project.root {
             Some(root) => format!("{} ({})", project.name, root.display()),
@@ -1681,7 +1681,7 @@ impl<'a> Draft<'a> {
         };
         let block = format!(
             "\n\nThe link proposed: the boards of projects {} and {}, both ways. A Claude Code session on either would read and write \
-             the other's through ekko's MCP, without a prompt: every tool but wait takes project: {} on {}'s board, and \
+             the other's through ekko's MCP, without a prompt: every tool takes project: {} on {}'s board, and \
              project: {} on {}'s. ekko --unlink-project, in either folder, takes it away.",
             named(here),
             named(&there),

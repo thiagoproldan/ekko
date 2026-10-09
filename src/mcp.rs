@@ -128,9 +128,10 @@ pub struct Server {
     actor: holder::Actor,
     /// ask's dialogs open in the client, waiting for the user.
     dialogs: Mutex<Dialogs>,
-    /// The board's revision when this session was last told what it had
-    /// not been (see `told`): nothing new to tell until it moves.
-    told_at: Mutex<Option<u64>>,
+    /// Each board's revision when this session was last told what it had
+    /// not been there (see `told`), by the board's file: nothing new to tell
+    /// on one until it moves.
+    told_at: Mutex<HashMap<PathBuf, u64>>,
     /// The linked boards the client's tool list names, as it last read it
     /// (task 811). None until it asks for the list.
     tools_listed: Mutex<Option<Vec<String>>>,
@@ -381,7 +382,7 @@ impl Server {
             launched,
             actor,
             dialogs: Mutex::new(Dialogs::default()),
-            told_at: Mutex::new(None),
+            told_at: Mutex::new(HashMap::new()),
             tools_listed: Mutex::new(None),
             claude_code: Mutex::new(None),
         }
@@ -850,22 +851,27 @@ impl Server {
     /// `wake::untold`): the user's feedback on an artifact it works, its
     /// waits another's write ended, the answers to the questions its ask left
     /// open, and the waits others keep on its work -- each once, on the board
-    /// it started on (tasks 389 and 1108).
+    /// it started on and on those linked to it (tasks 389, 1108 and 1443).
     fn told(&self, text: String) -> String {
         let Some(process) = self.actor.process.as_ref().filter(|_| self.mode == Mode::Board) else { return text };
         let Ok((ekko, location)) = self.open() else { return text };
-        let Ok(revision) = ekko.storage.get_counters().map(|counters| counters.revision) else { return text };
-        if self.told_at.lock().unwrap_or_else(PoisonError::into_inner).replace(revision) == Some(revision) {
+        let told = wake::Told::of(&self.home, process);
+        let moved = |board: &Ekko| {
+            let Ok(revision) = board.storage.get_counters().map(|counters| counters.revision) else { return false };
+            let path = board.storage.storage_path().to_path_buf();
+            self.told_at.lock().unwrap_or_else(PoisonError::into_inner).insert(path, revision) != Some(revision)
+        };
+        let mut lines = Vec::new();
+        if moved(&ekko) {
+            let since = wake::since(&self.home, &self.actor, &location.label());
+            lines = wake::untold(&ekko, &self.actor, &told, since, true).unwrap_or_default();
+        }
+        lines.extend(wake::untold_linked(&ekko, &self.actor, &told, &self.home, true, moved));
+        if lines.is_empty() {
             return text;
         }
-        let since = wake::since(&self.home, &self.actor, &location.label());
-        match wake::untold(&ekko, &self.actor, &wake::Told::of(&self.home, process), since, true) {
-            Ok(lines) if !lines.is_empty() => {
-                let lines: Vec<String> = lines.iter().map(|line| format!("ekko: {line}")).collect();
-                format!("{}\n\n{}\n", text.trim_end(), lines.join("\n"))
-            }
-            _ => text,
-        }
+        let lines: Vec<String> = lines.iter().map(|line| format!("ekko: {line}")).collect();
+        format!("{}\n\n{}\n", text.trim_end(), lines.join("\n"))
     }
 
     /// Marks ask's questions that come back without an answer as left open
@@ -1114,12 +1120,6 @@ impl Server {
     /// Runs tool `name` on `args`, for a session of Claude Code `claude_code`
     /// where its client said so.
     fn tool(&self, name: &str, args: &mut Map<String, Value>, claude_code: Option<String>) -> Result<String, ToolError> {
-        if name == "wait" && args.contains_key("project") {
-            return Err(invalid(
-                "wait takes no project: the hook that wakes a session watches only its own board. \
-                 On a linked board, read what moved with changes and project",
-            ));
-        }
         let (ekko, location, project) = self.open_for(args)?;
         let ekko = ekko.with_claude_code(claude_code);
         let project = project.as_deref();
@@ -1243,7 +1243,7 @@ impl Server {
             }
             "wait" => {
                 let spec: ops::WaitOn = parse(args)?;
-                wait(&ekko, &spec)
+                wait(&ekko, &spec, project.is_some())
             }
             "artifact" => {
                 let spec: ops::ArtifactSpec = parse(args)?;
@@ -1481,10 +1481,12 @@ fn ops_ref_text(reference: &ops::Ref) -> String {
     }
 }
 
-/// wait: records that this session waits on an item, or, with cancel, that
-/// it no longer does. An item already where the wait would end, or already
-/// waited on by this session for the same, writes nothing and says so.
-fn wait(ekko: &Ekko, spec: &ops::WaitOn) -> Result<String, ToolError> {
+/// wait: records that this session waits on an item of `ekko`'s board --
+/// a linked one's when `linked`, beside its item there -- or, with cancel,
+/// that it no longer does. An item already where the wait would end, or
+/// already waited on by this session for the same, writes nothing and says
+/// so.
+fn wait(ekko: &Ekko, spec: &ops::WaitOn, linked: bool) -> Result<String, ToolError> {
     let mut draft = Draft::open(ekko)?;
     let waited = if spec.cancel {
         draft.unwait(&spec.item).map(|dropped| (dropped, None))
@@ -1517,7 +1519,10 @@ fn wait(ekko: &Ekko, spec: &ops::WaitOn) -> Result<String, ToolError> {
     let items: Vec<Value> = recorded.iter().map(|id| ops::written(&committed.data, *id)).collect();
     let mut reply = json!({"ok": true, "items": items});
     if dropped.is_empty() {
-        reply["told"] = json!("once the wait is over, whichever way it ends: woken while idle where ekko's plugin runs, else in your next ekko reply");
+        // The plugin watches a linked board's file from the session's start
+        // (tasklist's watchPaths), so one linked since is told in replies.
+        let woken = if linked { "where ekko's plugin runs and this session started after the link" } else { "where ekko's plugin runs" };
+        reply["told"] = json!(format!("once the wait is over, whichever way it ends: woken while idle {woken}, else in your next ekko reply"));
     } else {
         reply["dropped"] = json!(dropped);
     }
@@ -1849,7 +1854,7 @@ fn prompt_definitions() -> Value {
 }
 
 /// Every tool, as `tools/list` lists them. On a board linked to others
-/// (task 811), each but wait also takes project, naming the linked boards; on
+/// (task 811), each also takes project, naming the linked boards; on
 /// one with no links the tools read as they did before links, so what a
 /// session without links is sent ahead of the conversation moved only with
 /// ask's link_project.
@@ -2113,9 +2118,7 @@ fn tool_definitions(linked: &[String]) -> Value {
         if ALWAYS_LOADED.contains(&tool["name"].as_str().unwrap_or_default()) {
             tool["_meta"] = json!({"anthropic/alwaysLoad": true});
         }
-        // wait watches this session's own board: the hook that tells it a wait
-        // is over reads no other (tasklist's watchPaths).
-        if !linked.is_empty() && tool["name"] != "wait" {
+        if !linked.is_empty() {
             tool["inputSchema"]["properties"]["project"] = project.clone();
         }
     }

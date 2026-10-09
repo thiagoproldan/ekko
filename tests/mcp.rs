@@ -1357,10 +1357,7 @@ fn no_tool_reaches_another_projects_board() {
     for (name, id) in names.iter().zip(first..) {
         let reply = &replies[&id.to_string()];
         assert_eq!(reply["result"]["isError"], true, "{name}: {reply}");
-        let rule = match *name {
-            "wait" => "INVALID_INPUT: wait takes no project: the hook that wakes a session watches only its own board",
-            _ => "INVALID_INPUT: other is not linked to this session's board: this session's board is not a project's, and links to none. A session works on its own board",
-        };
+        let rule = "INVALID_INPUT: other is not linked to this session's board: this session's board is not a project's, and links to none. A session works on its own board";
         assert!(text(reply).starts_with(rule), "{name}: {}", text(reply));
     }
     assert!(replies["99"]["error"]["message"].as_str().unwrap().contains("Unknown tool: projects"), "{}", replies["99"]);
@@ -1411,7 +1408,7 @@ fn taking_project(reply: &Value) -> Vec<(String, Value)> {
 /// A session reaches the boards the user linked to its own, and only those
 /// (task 811). Before the link, a call naming the other project is refused
 /// and no tool takes project. Once the user links the two in a terminal,
-/// every tool but wait works on the other board with project -- reads and
+/// every tool works on the other board with project -- reads and
 /// writes, both ways, with no prompt -- and the tools and the prime name
 /// it; a project not linked is still refused. Taken away again, from
 /// either side, it is refused as before.
@@ -1449,22 +1446,22 @@ fn a_session_reaches_the_board_the_user_linked_and_no_other() {
             call(4, "create", json!({"text": "written from the site's session", "project": "blog"})),
             call(5, "prime", json!({"project": "blog"})),
             call(6, "prime", json!({})),
-            call(7, "wait", json!({"on": 1, "until": "done", "then": "carry on", "project": "blog"})),
+            call(7, "wait", json!({"item": 1, "until": "done", "text": "carry on", "project": "blog"})),
             call(8, "search", json!({"text": "blog", "project": "shop"})),
             call(9, "search", json!({"text": "written"})),
         ]),
     );
     let tools = taking_project(&linked["2"]);
-    assert_eq!(tools.len(), linked["2"]["result"]["tools"].as_array().unwrap().len() - 1, "every tool but wait: {tools:?}");
-    assert!(tools.iter().all(|(name, project)| name != "wait" && project["enum"] == json!(["blog"])), "{tools:?}");
+    assert_eq!(tools.len(), linked["2"]["result"]["tools"].as_array().unwrap().len(), "every tool: {tools:?}");
+    assert!(tools.iter().all(|(_, project)| project["enum"] == json!(["blog"])), "{tools:?}");
     assert!(text(&linked["3"]).contains("a task of the blog"), "{}", text(&linked["3"]));
     assert!(text(&linked["10"]).starts_with("ekko \u{b7} project blog"), "{}", text(&linked["10"]));
     assert_eq!(text(&linked["11"]), format!("unchanged since cursor {cursor}\n"));
     assert_eq!(linked["4"]["result"]["isError"], false, "{}", text(&linked["4"]));
     assert!(text(&linked["5"]).starts_with("ekko \u{b7} project blog \u{b7} cursor "), "{}", text(&linked["5"]));
-    assert!(text(&linked["6"]).contains("\nLinked boards: blog -- every tool but wait works on one with project;"), "{}", text(&linked["6"]));
+    assert!(text(&linked["6"]).contains("\nLinked boards: blog -- every tool works on one with project;"), "{}", text(&linked["6"]));
     assert!(!text(&linked["6"]).contains("a task of the blog"), "none of the linked board's items enters the prime");
-    assert!(text(&linked["7"]).starts_with("INVALID_INPUT: wait takes no project"), "{}", text(&linked["7"]));
+    assert!(text(&linked["7"]).starts_with("{\"ok\":true,\"items\":[{\"id\":3,") && text(&linked["7"]).contains("this session started after the link"), "{}", text(&linked["7"]));
     assert!(
         text(&linked["8"]).starts_with("INVALID_INPUT: shop is not linked to this session's board: project takes only blog."),
         "{}",
@@ -1795,6 +1792,42 @@ fn a_session_waiting_on_another_is_told_once_it_is_over() {
     assert!(!waiter.call("next", json!({})).contains("ekko: "), "the session waiting is told once");
     let late = waiter.call("wait", json!({"item": 1, "text": "late"}));
     assert_eq!(late, "No wait was recorded: 1 is done already.\n");
+
+    holder.close();
+    waiter.close();
+    fs::remove_dir_all(&home).ok();
+}
+
+/// A session waits on a task of a board the user linked to its own (task
+/// 1443): the wait is kept on that board, beside the task, and its holder
+/// there is told of it; once the holder completes the task, the session
+/// waiting is told once, in its next reply, naming the board. A wait on a
+/// project not linked is refused, saying why.
+#[test]
+fn a_session_waiting_on_a_linked_boards_task_is_told_once_it_is_done() {
+    let home = temp_home();
+    let folders = projects(&home, &["site", "blog", "shop"]);
+    cli_in(&home, &folders[0], &["--link-project", "blog"]);
+    let board = |folder: &Path| fs::read_to_string(folder.join(".ekko").join("storage").join("storage.json")).unwrap_or_default();
+    let mut holder = Session::in_folder(&home, &folders[1]);
+    let mut waiter = Session::in_folder(&home, &folders[0]);
+    holder.call("create", json!({"text": "Release the blog"}));
+    holder.call("set_state", json!({"items": [1], "state": "progress"}));
+
+    let refused = waiter.call("wait", json!({"item": 1, "text": "announce it", "project": "shop"}));
+    assert!(refused.starts_with("INVALID_INPUT: shop is not linked to this session's board: project takes only blog."), "{refused}");
+    let waited = waiter.call("wait", json!({"item": 1, "text": "announce it on the site", "project": "blog"}));
+    assert!(waited.starts_with("{\"ok\":true,\"items\":[{\"id\":2,") && waited.contains("this session started after the link"), "{waited}");
+    assert!(board(&folders[1]).contains("announce it on the site"), "the wait is kept on the blog's board");
+    assert!(!board(&folders[0]).contains("announce it") && !board(&folders[2]).contains("announce it"), "and on no other");
+
+    let told = holder.call("next", json!({}));
+    assert!(told.ends_with("waits on 1 (Release the blog), which this session holds, until done (note 2): announce it on the site\n"), "{told}");
+    holder.call("set_state", json!({"items": [1], "state": "done"}));
+    let over = waiter.call("next", json!({}));
+    assert!(over.contains("\n\nekko: On project blog: 1 (Release the blog) is done, by "), "{over}");
+    assert!(over.ends_with("This session waited on it (note 2) to: announce it on the site\n"), "{over}");
+    assert!(!waiter.call("next", json!({})).contains("ekko: "), "the session waiting is told once");
 
     holder.close();
     waiter.close();

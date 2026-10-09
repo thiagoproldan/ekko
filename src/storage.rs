@@ -126,6 +126,12 @@ pub struct LockGuard<'a> {
     _file: File,
 }
 
+/// The file of the board in `ekko_dir`, as `Storage::storage_path` names it,
+/// found without opening the board.
+pub fn storage_file(ekko_dir: &Path) -> PathBuf {
+    ekko_dir.join("storage").join("storage.json")
+}
+
 impl Storage {
     pub fn new(ekko_dir: &Path) -> Result<Self, StorageError> {
         let storage_dir = ekko_dir.join("storage");
@@ -138,7 +144,7 @@ impl Storage {
 
         let storage = Storage {
             dir: ekko_dir.to_path_buf(),
-            storage_file: storage_dir.join("storage.json"),
+            storage_file: storage_file(ekko_dir),
             archive_file: archive_dir.join("archive.json"),
             temp_dir,
             lock_file: ekko_dir.join(".lock"),

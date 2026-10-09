@@ -6,7 +6,10 @@
 //! session's next ekko reply carries the same lines, for a client without
 //! that hook. The session holding a task is told, once and only in a reply,
 //! that another waits on it. So are the sessions working an artifact, by the
-//! hook too, of the user's feedback from its page (task 1108).
+//! hook too, of the user's feedback from its page (task 1108). A wait on an
+//! item of a linked board is kept on that board, beside the item, and told
+//! the same ways: the session watches each linked board's file too (task
+//! 1443).
 //!
 //! What was told is kept outside the board, since reading the board writes
 //! nothing to it: a marker file per line, in a folder per Claude Code
@@ -307,29 +310,52 @@ pub fn since(home: &Path, me: &Actor, board: &str) -> u64 {
 /// must not show the user.
 pub fn hook(ekko: &Ekko, input: &str, home: &Path, board: &str) -> ExitCode {
     let event: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
-    // Another board's file, watched by the same session, is not this one.
-    if let Some(changed) = event["file_path"].as_str() {
-        if Path::new(changed) != ekko.storage.storage_path() {
-            return ExitCode::SUCCESS;
-        }
-    }
     let Some(me) = ekko.actor.as_ref().filter(|actor| !actor.is_person()) else { return ExitCode::SUCCESS };
     let Some(process) = me.process.as_ref() else { return ExitCode::SUCCESS };
     forget_ended(home);
     let told = Told::of(home, process);
-    told.heard(ekko);
-    let since = event["session_id"]
-        .as_str()
-        .and_then(|session| agent::served_cursor(&agent::session_state_dir(home), session, board))
-        .and_then(|cursor| u64::try_from(cursor).ok())
-        .unwrap_or_else(|| self::since(home, me, board));
-    match untold(ekko, me, &told, since, false) {
-        Ok(lines) if !lines.is_empty() => {
-            eprintln!("{}", lines.join("\n"));
-            ExitCode::from(2)
+    let lines = match event["file_path"].as_str().map(Path::new) {
+        // Another board's file, watched by the same session: one linked to
+        // this one, where it may wait, or one it reads nothing of.
+        Some(changed) if changed != ekko.storage.storage_path() => {
+            untold_linked(ekko, me, &told, home, false, |there| there.storage.storage_path() == changed)
         }
-        _ => ExitCode::SUCCESS,
+        _ => {
+            told.heard(ekko);
+            let since = event["session_id"]
+                .as_str()
+                .and_then(|session| agent::served_cursor(&agent::session_state_dir(home), session, board))
+                .and_then(|cursor| u64::try_from(cursor).ok())
+                .unwrap_or_else(|| self::since(home, me, board));
+            untold(ekko, me, &told, since, false).unwrap_or_default()
+        }
+    };
+    if lines.is_empty() {
+        return ExitCode::SUCCESS;
     }
+    eprintln!("{}", lines.join("\n"));
+    ExitCode::from(2)
+}
+
+/// What `me` has not been told yet on the boards linked to `ekko`'s (task
+/// 1443), as `untold` finds it on each one `keep` takes: above all its waits
+/// there that a write there ended. Each line names its board, whose display
+/// ids are not this one's. No prime of this session read a linked board, so
+/// none gave it a cursor there: what ended there is told once in each
+/// process, rather than missed for having ended while none ran.
+pub fn untold_linked(ekko: &Ekko, me: &Actor, told: &Told, home: &Path, holding: bool, mut keep: impl FnMut(&Ekko) -> bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    for project in ekko.linked() {
+        let Ok(location) = crate::directory::locate(home, home, None, None, Some(&project.name)) else { continue };
+        let Ok(there) = Ekko::at(&location) else { continue };
+        let there = there.acting_as(me.clone());
+        if !keep(&there) {
+            continue;
+        }
+        let found = untold(&there, me, told, 0, holding).unwrap_or_default();
+        lines.extend(found.into_iter().map(|line| format!("On project {}: {line}", project.name)));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -458,6 +484,45 @@ mod tests {
         let second = read();
         assert_eq!(recorded(&second), version());
         assert_ne!(recorded(&second), recorded(&first));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A wait on a task of a linked board, kept on that board, is told by the
+    /// hook run on that board's file once the task is done, once, naming the
+    /// board (task 1443). A wait on a board not linked is not told, and the
+    /// linked board's file leaves the record of what the session heard of
+    /// its own as it was.
+    #[test]
+    fn a_wait_on_a_linked_boards_task_is_told_by_the_hook_on_that_boards_file() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let dir = crate::paths::test_dir("ekko-wake-linked");
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = std::fs::canonicalize(&dir).unwrap();
+        let boards = crate::project::test_projects(&home, &["site", "blog", "shop"], &[(0, 1)]);
+        let as_ = |board: usize, actor: &Actor| Ekko::at(&boards[board]).unwrap().acting_as(actor.clone());
+        let (site, blog, shop) = (as_(0, &me), as_(1, &other), as_(2, &other));
+        let process = me.process.as_ref().unwrap();
+        // A board with a file, whose version the hook could record.
+        site.create_task(&["the site's work".to_string()]).unwrap();
+        for board in [&blog, &shop] {
+            board.create_task(&["the release".to_string()]).unwrap();
+            set(board, 1, "progress", false);
+        }
+        let note = wait_on(&as_(1, &me), 1, "done", "announce it on the site");
+        wait_on(&as_(2, &me), 1, "done", "nothing: the shop is not linked");
+        let on = |board: &Ekko| serde_json::json!({"hook_event_name": "FileChanged", "file_path": board.storage.storage_path()}).to_string();
+
+        assert_eq!(hook(&site, &on(&blog), &home, "project site"), ExitCode::SUCCESS, "nothing is over yet");
+        set(&blog, 1, "done", false);
+        set(&shop, 1, "done", false);
+        assert_eq!(hook(&site, &on(&shop), &home, "project site"), ExitCode::SUCCESS, "a board not linked");
+        assert_eq!(hook(&site, &on(&blog), &home, "project site"), ExitCode::from(2));
+        assert_eq!(hook(&site, &on(&blog), &home, "project site"), ExitCode::SUCCESS, "once");
+        assert!(!Told::of(&home, process).dir.join("heard").exists(), "a linked board's file heard as the session's own");
+
+        let afresh = Told::within(&home.join("afresh"), process);
+        let told = untold_linked(&site, &me, &afresh, &home, false, |_| true);
+        assert_eq!(told, vec![format!("On project blog: 1 (the release) is done, by default on pts/2. This session waited on it (note {note}) to: announce it on the site")]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

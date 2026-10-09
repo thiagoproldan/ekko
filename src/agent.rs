@@ -2869,7 +2869,7 @@ impl Prime {
         if !self.linked.is_empty() {
             let _ = writeln!(
                 out,
-                "Linked boards: {} -- every tool but wait works on one with project; none of their items is shown here.",
+                "Linked boards: {} -- every tool works on one with project; none of their items is shown here.",
                 self.linked.join(", ")
             );
         }

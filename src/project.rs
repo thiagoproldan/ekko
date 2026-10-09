@@ -345,6 +345,26 @@ pub fn link(home: &Path, a: &Project, b: &Project) -> Result<bool, DirectoryErro
     join(home, &a_id, &b_id)
 }
 
+/// For tests: projects `names`, each made in a folder of `home` named after
+/// it, with the pairs of them `links` names linked; where each one's board
+/// is, in that order.
+#[cfg(test)]
+pub(crate) fn test_projects(home: &Path, names: &[&str], links: &[(usize, usize)]) -> Vec<crate::directory::Location> {
+    let projects: Vec<Project> = names
+        .iter()
+        .map(|name| {
+            let folder = home.join(name);
+            fs::create_dir_all(&folder).unwrap();
+            init(home, &folder, None, None, 0).unwrap();
+            resolve_named(home, name).unwrap()
+        })
+        .collect();
+    for (a, b) in links {
+        link(home, &projects[*a], &projects[*b]).unwrap();
+    }
+    names.iter().map(|name| crate::directory::locate(home, home, None, None, Some(name)).unwrap()).collect()
+}
+
 /// Links the projects whose ids are `a` and `b`, as `link` does, for a
 /// question that named them when it was asked: each must still be
 /// registered, since one gone since would leave a link to nothing.
