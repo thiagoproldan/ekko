@@ -636,11 +636,12 @@ fn route(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
         ("POST", "/api/comment/apply") => comment(shared, request, socket, "apply"),
         ("POST", "/api/review") => review(shared, request, socket),
         ("POST", "/api/answer") => answer(shared, request, socket),
+        ("POST", "/api/start") => start_step(shared, request, socket),
         ("GET", path) => match query.split('&').find_map(|pair| pair.strip_prefix("token=")) {
             Some(token) if path.starts_with("/default/") || path.starts_with("/project/") => opened(shared, path, token),
             _ => font(path).or_else(|| page(shared, path)).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
         },
-        _ => Answer::text(405, "the server answers GET, and POST to /stop, /api/who, /api/comment, /api/review and /api/answer"),
+        _ => Answer::text(405, "the server answers GET, and POST to /stop, /api/who, /api/comment, /api/review, /api/answer and /api/start"),
     }
 }
 
@@ -804,6 +805,39 @@ fn answer(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
             log(&shared.home, &format!("POST /api/answer: question {id} on {uid}, by the user, {person}"));
             let answer = note.as_ref().and_then(|note| note.question.as_ref()?.answer.as_ref()).map(|answer| answer.text.clone());
             json(200, serde_json::json!({"id": id, "uid": note.and_then(|note| note.uid), "answer": answer, "notices": notices}))
+        }
+        Err(why) => json(409, serde_json::json!({"why": why})),
+    }
+}
+
+/// `POST /api/start`: the person's Start on a step of an artifact's page
+/// (task 1111), as JSON naming the page's path and the step by key. It
+/// sends the comment "Start this" on the step, as `Draft::start_step`
+/// does, so the sessions working the plan are told; a step whose task
+/// cannot be taken up now, or that was sent Start already, is refused.
+fn start_step(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Posted {
+        page: String,
+        step: String,
+    }
+    let person = match writer(shared, request, socket) {
+        Ok(person) => person,
+        Err(why) => return Answer::refuse(why, true),
+    };
+    let posted: Posted = match serde_json::from_slice(&request.body) {
+        Ok(posted) => posted,
+        Err(error) => return json(400, serde_json::json!({"why": format!("not a Start: {error}")})),
+    };
+    let Some((project, uid)) = board_of(&posted.page) else {
+        return json(404, serde_json::json!({"why": format!("{} is no artifact's page", posted.page)}));
+    };
+    let written = as_person(shared, project.as_deref(), |draft| draft.start_step(&crate::ops::Ref::Text(uid.clone()), &posted.step));
+    match written {
+        Ok((id, note, _)) => {
+            log(&shared.home, &format!("POST /api/start: note {id} on step {} of {uid}, by the user, {person}", posted.step));
+            json(200, serde_json::json!({"id": id, "uid": note.and_then(|note| note.uid)}))
         }
         Err(why) => json(409, serde_json::json!({"why": why})),
     }

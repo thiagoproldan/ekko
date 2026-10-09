@@ -387,6 +387,8 @@ pub fn read(item: &Item, all: &ItemMap, me: Option<&Actor>) -> String {
 
     let shown = Shown::of(&item.description);
     let steps: Vec<&str> = item.artifact.as_deref().map(|plan| plan.steps.iter().map(|step| step.key.as_str()).collect()).unwrap_or_default();
+    // A step's task, by the step's key, while the board holds it.
+    let task_of = |key: &str| item.artifact.as_deref()?.steps.iter().find(|step| step.key == key)?.task.as_deref().and_then(by_uid);
     let who = |note: &Item| match (&note.created_by, me) {
         (Some(by), Some(me)) if by.pid.is_some() && me.is(by) => "this session".to_string(),
         (Some(by), me) if by.pid.is_some() => format!("a session, {}", me.map_or_else(|| by.label(), |me| me.name(by))),
@@ -419,6 +421,9 @@ pub fn read(item: &Item, all: &ItemMap, me: Option<&Actor>) -> String {
             }
             (None, Some(step)) => {
                 let _ = write!(out, " on step {step}");
+                if let Some(task) = task_of(step) {
+                    let _ = write!(out, " (task {})", task.id);
+                }
                 if !settled && !steps.contains(&step.as_str()) {
                     out.push_str(", outdated: the plan has no such step now");
                 }
@@ -441,6 +446,11 @@ pub fn read(item: &Item, all: &ItemMap, me: Option<&Actor>) -> String {
         };
         if own {
             let _ = write!(out, ": {}", crate::artifact::collapsed(&note.description));
+        }
+        // Start on the page (task 1111) asks for the step's task to be
+        // taken up, which resolves it.
+        if !settled && crate::artifact::is_start(note) {
+            out.push_str(" -- the user's Start: set its task in progress and take it up, which resolves it");
         }
         out.push('\n');
         if let Some(uid) = note.uid.as_deref() {

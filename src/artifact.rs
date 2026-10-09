@@ -465,6 +465,64 @@ pub fn feedback(note: &Item) -> bool {
     note.comment.as_deref().is_some_and(|comment| comment.sent.is_some() && comment.resolved.is_none())
 }
 
+/// What Start on a ready step of the page sends (task 1111): a comment on
+/// that step, sent at once, which is told to the sessions working the plan
+/// as any comment sent alone is -- Kiro's Start task, with no session
+/// started from the page.
+pub const START: &str = "Start this";
+
+/// Whether `note` is a Start: the person's comment on a step that says
+/// `START` and nothing else, sent.
+pub fn is_start(note: &Item) -> bool {
+    note.created_by.as_ref().is_none_or(|by| by.pid.is_none())
+        && note.description.trim() == START
+        && note.comment.as_deref().is_some_and(|comment| comment.step.is_some() && comment.quote.is_none() && comment.sent.is_some())
+}
+
+/// The Start that still waits on step `key` of the artifact `item`: in no
+/// trash, and not resolved, as it is once the step's task is taken up.
+pub fn open_start<'a>(item: &Item, key: &str, all: &'a ItemMap) -> Option<&'a Item> {
+    let uid = item.uid.as_deref()?;
+    all.values().find(|note| {
+        note.trashed.is_none()
+            && note.attached_to.as_deref() == Some(uid)
+            && is_start(note)
+            && note.comment.as_deref().is_some_and(|comment| comment.step.as_deref() == Some(key) && comment.resolved.is_none())
+    })
+}
+
+/// Why a step's `task` cannot be started from the page, if it cannot.
+/// Start asks a session to take up work it may begin now: pending or
+/// paused, with no one in particular, and waiting on nothing open.
+pub fn startable(task: &Item, all: &ItemMap) -> Result<(), String> {
+    if task.trashed.is_some() {
+        return Err(format!("task {} is in the trash", task.id));
+    }
+    match State::of(task) {
+        Some(State::Pending | State::Paused) => {}
+        Some(State::Waiting) => return Err(format!("task {} is waiting on something outside the board", task.id)),
+        Some(state) => return Err(format!("task {} is {} already", task.id, state.word())),
+        None => return Err(format!("{} is no task", task.id)),
+    }
+    if let Some(with) = &task.with {
+        return Err(format!("task {} is with {with}: theirs to take up, not a session's", task.id));
+    }
+    let index = crate::ekko::uid_index(all);
+    let mut open: Vec<u32> = task
+        .blocked_by
+        .iter()
+        .flatten()
+        .filter_map(|uid| index.get(uid.as_str()).copied())
+        .filter(|id| all.get(id).is_some_and(crate::ekko::holds))
+        .collect();
+    if open.is_empty() {
+        return Ok(());
+    }
+    open.sort_unstable();
+    let open: Vec<String> = open.iter().map(u32::to_string).collect();
+    Err(format!("task {} waits on {}, still open", task.id, open.join(", ")))
+}
+
 /// The open question asking the user to approve `item`'s plan, if one does:
 /// the newest, on a board that holds more than one.
 pub fn approval_asked<'a>(item: &Item, all: &'a ItemMap) -> Option<&'a Item> {
@@ -741,6 +799,23 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
                 .collect();
             if staged.is_some() && !waits.is_empty() {
                 let _ = write!(body, "<div class=\"after\">{}</div>", waits.concat());
+            }
+            // Start, on a step whose task a session may take up now (task
+            // 1111), where the page writes; once pressed, the Start it sent,
+            // until the task is taken up.
+            if step.task.and_then(|id| all.get(&id)).is_some_and(|task| startable(task, all).is_ok()) {
+                match open_start(item, &step.step.key, all) {
+                    Some(asked) => {
+                        let _ = write!(body, "<p class=\"start asked\">Start sent in comment {}: waiting for a session to take it up</p>", asked.id);
+                    }
+                    None => {
+                        let _ = write!(
+                            body,
+                            "<div class=\"start writes-only\"><button class=\"pill\" type=\"button\" data-start=\"{}\">Start</button><span class=\"status\" role=\"status\"></span></div>",
+                            esc(&step.step.key)
+                        );
+                    }
+                }
             }
             if !more {
                 body.push_str("</li>");
@@ -3607,6 +3682,33 @@ const SCRIPT: &str = r##"(function () {
     };
   })();
 
+  // Start, on a step a session may take up now (task 1111), where the page
+  // writes: POST /api/start sends the comment "Start this" on the step,
+  // told to the sessions working the plan; the board's next version then
+  // shows it sent in place of the button.
+  Array.prototype.forEach.call(document.querySelectorAll("button[data-start]"), function (button) {
+    var status = button.parentNode.querySelector(".status");
+    button.addEventListener("click", function () {
+      if (button.disabled) return;
+      button.disabled = true;
+      status.textContent = "";
+      fetch("/api/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ page: location.pathname, step: button.dataset.start }) })
+        .then(function (reply) {
+          return reply.text().then(function (body) {
+            var got = {};
+            try { got = JSON.parse(body); } catch (e) { got = { why: body.trim() }; }
+            if (!reply.ok) throw new Error(got.why || "the server answered " + reply.status);
+            return got;
+          });
+        })
+        .then(function (got) { status.textContent = "Start sent in comment " + got.id + ": waiting for a session to take it up"; })
+        .catch(function (error) {
+          button.disabled = false;
+          status.textContent = "Not started: " + (window.ekkoUnreached ? ekkoUnreached(error) : error.message);
+        });
+    });
+  });
+
   // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
   // into a panel, which finds a part, a step, a note or a comment of the
   // page, and runs the page's commands. The surface's width and radius, its
@@ -5803,6 +5905,15 @@ button.step-head { cursor: pointer; }
 .step .after { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
 .after .chip { height: 32px; padding: 0 14px; font-size: 13px; line-height: 32px; }
 .staged .steps.all .after { display: none; }
+/* Start on a step a session may take up now (task 1111): Kiro's Start task,
+   the one filled pill of the step; once sent, a line saying so. */
+.step .start { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 12px 0 16px 48px; }
+.step .start .pill { background: var(--fg-strong); color: var(--bg); }
+.step .start .pill:disabled { opacity: 0.5; cursor: default; }
+.step .start .status:empty { display: none; }
+.step :is(.start .status, .start.asked) { font: 400 14px/20px var(--sans); color: var(--fg-2); }
+.staged .steps:not(.all) .step .start { margin-left: 0; }
+@media print { .step .start:not(.asked) { display: none; } }
 .staged .controls { margin-top: 32px; }
 :is(.seg, .staged .steps):focus-visible { outline: 2px solid var(--fg-strong); outline-offset: 3px; }
 @media screen {
@@ -6418,6 +6529,72 @@ mod tests {
         State::Cancelled.write(&mut closed);
         assert_eq!(Standing::of(&closed, &all).unwrap().words(), "cancelled");
         assert!(Standing::of(&all[&2], &all).is_none(), "a task without a plan has no standing");
+    }
+
+    /// A step can start from the page when a session may take its task up
+    /// now (task 1111), and the refusal says why it cannot.
+    #[test]
+    fn a_step_can_start_when_its_task_may_be_taken_up_now() {
+        let task = |id: u32, state: State| {
+            let mut task = Item::new_task(id, format!("Task {id}"), vec![], 1);
+            state.write(&mut task);
+            task
+        };
+        let (open, closed) = (task(2, State::Pending), task(3, State::Done));
+        let mut all: ItemMap = BTreeMap::from([(2, open.clone()), (3, closed.clone())]);
+        let judge = |item: &Item, all: &ItemMap| startable(item, all);
+        assert_eq!(judge(&task(1, State::Pending), &all), Ok(()));
+        assert_eq!(judge(&task(1, State::Paused), &all), Ok(()));
+        assert_eq!(judge(&task(1, State::Progress), &all), Err("task 1 is in progress already".to_string()));
+        assert_eq!(judge(&task(1, State::Done), &all), Err("task 1 is done already".to_string()));
+        assert_eq!(judge(&task(1, State::Cancelled), &all), Err("task 1 is cancelled already".to_string()));
+        assert_eq!(judge(&task(1, State::Waiting), &all), Err("task 1 is waiting on something outside the board".to_string()));
+        let mut with = task(1, State::Pending);
+        with.with = Some("thiago".into());
+        assert_eq!(judge(&with, &all), Err("task 1 is with thiago: theirs to take up, not a session's".to_string()));
+        let mut trashed = task(1, State::Pending);
+        trashed.trashed = Some(1);
+        assert_eq!(judge(&trashed, &all), Err("task 1 is in the trash".to_string()));
+        let mut waits = task(1, State::Pending);
+        waits.blocked_by = Some(vec![closed.uid.clone().unwrap(), open.uid.clone().unwrap(), "no-such-uid".into()]);
+        assert_eq!(judge(&waits, &all), Err("task 1 waits on 2, still open".to_string()), "a closed blocker or one not on the board holds nothing");
+        all.get_mut(&2).unwrap().trashed = Some(1);
+        assert_eq!(judge(&waits, &all), Ok(()), "nor one in the trash");
+    }
+
+    /// A Start is the person's comment on a step saying "Start this" and
+    /// nothing else, sent (task 1111): not one pending, a session's, one on
+    /// words or the whole plan, or one that says more.
+    #[test]
+    fn a_start_is_the_persons_sent_start_this_on_a_step() {
+        let mut start = Item::new_note(1, START.into(), vec![]);
+        start.comment = Some(Box::new(crate::item::Comment {
+            version: 1,
+            quote: None,
+            replacement: None,
+            step: Some("one".into()),
+            reply_to: None,
+            sent: Some(1),
+            resolved: None,
+            applied: None,
+            theme: None,
+            color: None,
+            unknown: Default::default(),
+        }));
+        assert!(is_start(&start));
+        let varied = |change: &dyn Fn(&mut Item)| {
+            let mut note = start.clone();
+            change(&mut note);
+            is_start(&note)
+        };
+        assert!(!varied(&|note| note.comment.as_mut().unwrap().sent = None), "pending");
+        assert!(!varied(&|note| note.created_by = Some(crate::holder::test_sessions().0.holder(1))), "a session's");
+        assert!(!varied(&|note| note.comment.as_mut().unwrap().step = None), "on the whole plan");
+        assert!(!varied(&|note| {
+            note.comment.as_mut().unwrap().quote = Some(crate::item::Quote { exact: "x".into(), prefix: String::new(), suffix: String::new(), section: String::new(), unknown: Default::default() })
+        }), "on words");
+        assert!(!varied(&|note| note.description = "Start this, after the review".into()), "it says more");
+        assert!(varied(&|note| note.description = format!("{START}\n")), "its words as written, around them aside");
     }
 
     #[test]
@@ -7190,7 +7367,7 @@ mod tests {
         // lead to them.
         assert!(scene.contains("<li class=\"step done\" id=\"step-a\" data-state=\"done\" hidden><button class=\"step-head\" type=\"button\" aria-expanded=\"false\">"), "{scene}");
         assert!(
-            scene.contains("<li class=\"step pending open\" id=\"step-b\" data-state=\"pending\"><button class=\"step-head\" type=\"button\" aria-expanded=\"true\"><span class=\"num\">02</span><span class=\"title\">Second</span><span class=\"meta\"><span class=\"dot pending\"></span>pending \u{b7} task 3 \u{b7} after a</span></button><div class=\"after\"><button class=\"pill chip\" type=\"button\" data-step=\"a\"><i aria-hidden=\"true\">\u{2196}</i> after 01 a</button></div><div class=\"more\"><p>How.</p>\n</div></li>"),
+            scene.contains("<li class=\"step pending open\" id=\"step-b\" data-state=\"pending\"><button class=\"step-head\" type=\"button\" aria-expanded=\"true\"><span class=\"num\">02</span><span class=\"title\">Second</span><span class=\"meta\"><span class=\"dot pending\"></span>pending \u{b7} task 3 \u{b7} after a</span></button><div class=\"after\"><button class=\"pill chip\" type=\"button\" data-step=\"a\"><i aria-hidden=\"true\">\u{2196}</i> after 01 a</button></div><div class=\"start writes-only\"><button class=\"pill\" type=\"button\" data-start=\"b\">Start</button><span class=\"status\" role=\"status\"></span></div><div class=\"more\"><p>How.</p>\n</div></li>"),
             "{scene}"
         );
         assert!(
@@ -7864,6 +8041,105 @@ mod tests {
             theirs.created_by = Some(holder.holder(1));
             assert!(feedback(&data[&first]) && feedback(&data[&changes]) && feedback(&worded), "feedback");
             assert!(!feedback(&data[&asked]) && !feedback(&resolved) && !feedback(&settled) && !feedback(&bare) && !feedback(&theirs), "not feedback");
+            std::fs::remove_dir_all(&home).ok();
+        }
+
+        /// Start on the page (task 1111): on a step whose task a session may
+        /// take up now, where the page writes, it sends "Start this" on the
+        /// step, which is told to the sessions working the plan, naming the
+        /// task, and to no other; the page then says it was sent. Taking the
+        /// task up resolves it. Only the person starts, and only a step that
+        /// can start, once.
+        #[test]
+        fn start_on_a_ready_step_asks_the_sessions_working_the_plan_to_take_it_up() {
+            let home = crate::paths::test_dir("ekko-artifact-start");
+            let dir = home.join(".ekko");
+            let (holder, _, idle) = test_sessions();
+            let (as_holder, as_user) = (ekko_at(&dir, &holder), ekko_at(&dir, &Actor::person()));
+            let steps = json!([
+                {"key": "one", "text": "The field"},
+                {"key": "two", "text": "The tool", "after": ["one"]},
+                {"key": "three", "text": "The page"},
+                {"key": "four", "text": "The docs"}
+            ]);
+            let target = artifact(&as_holder, json!({"text": plan("Ship the page"), "steps": steps})).unwrap();
+            let board = || as_user.storage.get().unwrap();
+            let start = |ekko: &Ekko, key: &str| -> Result<(u32, Vec<String>), EkkoError> {
+                let mut draft = Draft::open(ekko)?;
+                let id = draft.start_step(&Ref::Id(target), key)?;
+                Ok((id, draft.commit(false)?.notices))
+            };
+            let refused = |ekko: &Ekko, key: &str| start(ekko, key).unwrap_err().to_string();
+            assert!(refused(&as_user, "three").contains("step three has no task yet: approving the plan makes it"));
+            let asked = ask(&as_holder, &home, target).unwrap();
+            answer(&as_user, asked, "Aprovar").unwrap();
+            let task = |key: &str| {
+                let data = board();
+                let uid = data[&target].artifact.as_ref().unwrap().steps.iter().find(|step| step.key == key).unwrap().task.clone().unwrap();
+                data.values().find(|item| item.uid.as_deref() == Some(uid.as_str())).unwrap().id
+            };
+            let (one, two, three) = (task("one"), task("two"), task("three"));
+            apply(&as_holder, json!({"op": "set_state", "items": [one], "state": "progress"})).unwrap();
+            let shown = || page(&board()[&target], &board(), None).0;
+            let button = |key: &str| format!("<div class=\"start writes-only\"><button class=\"pill\" type=\"button\" data-start=\"{key}\">Start</button>");
+            let html = shown();
+            assert!(html.contains(&button("three")) && html.contains(&button("four")), "steps a session may take up now: {html}");
+            assert!(!html.contains(&button("one")) && !html.contains(&button("two")), "not one in progress, nor one waiting on it: {html}");
+
+            assert!(refused(&as_holder, "three").contains("Start is the user's"));
+            assert!(refused(&as_user, "one").contains(&format!("step one cannot start: task {one} is in progress already")));
+            assert!(refused(&as_user, "two").contains(&format!("step two cannot start: task {two} waits on {one}, still open")));
+            assert!(refused(&as_user, "five").contains("the plan has no step five"));
+            let (note, _) = start(&as_user, "three").unwrap();
+            let data = board();
+            let comment = data[&note].comment.as_deref().unwrap();
+            assert_eq!(data[&note].description, START);
+            assert!(comment.step.as_deref() == Some("three") && comment.sent.is_some() && comment.resolved.is_none() && is_start(&data[&note]));
+            assert!(refused(&as_user, "three").contains(&format!("step three was sent Start already, in comment {note}")));
+
+            let html = shown();
+            assert!(html.contains(&format!("<p class=\"start asked\">Start sent in comment {note}: waiting for a session to take it up</p>")), "{html}");
+            assert!(!html.contains(&button("three")) && html.contains(&button("four")), "{html}");
+            let told = |actor: &Actor| crate::wake::Told::of(&home, actor.process.as_ref().unwrap());
+            let untold = |actor: &Actor| crate::wake::untold(&ekko_at(&dir, actor), actor, &told(actor), 0, false).unwrap();
+            let said = format!(
+                "Start from the user, on the page of artifact {target} (Ship the page): step three, task {three} (The page). Set its task in progress and take it up, which resolves comment {note}."
+            );
+            assert_eq!(untold(&holder), vec![said], "the session working the plan, through its step one");
+            assert!(untold(&idle).is_empty(), "no other session");
+            let read = crate::feedback::read(&board()[&target], &board(), Some(&holder));
+            assert!(
+                read.contains(&format!("Comment {note} from the user, sent alone, on step three (task {three}): Start this -- the user's Start: set its task in progress and take it up, which resolves it\n")),
+                "{read}"
+            );
+            let words = || Standing::of(&board()[&target], &board()).unwrap().words();
+            assert_eq!(words(), "approved, 0 of 4 done, 1 comment to resolve");
+
+            let notices = apply(&as_holder, json!({"op": "set_state", "items": [three], "state": "progress"})).unwrap();
+            assert!(notices.contains(&format!("comment {note}, the user's Start, is resolved: task {three} is in progress")), "{notices:?}");
+            assert!(board()[&note].comment.as_ref().unwrap().resolved.is_some());
+            assert_eq!(words(), "approved, 0 of 4 done");
+            let html = shown();
+            assert!(!html.contains("data-start=\"three\"") && !html.contains("class=\"start asked\""), "{html}");
+            let notices = apply(&as_holder, json!({"op": "set_state", "items": [one], "state": "done"})).unwrap();
+            assert!(!notices.iter().any(|notice| notice.contains("the user's Start")), "said once: {notices:?}");
+            apply(&as_holder, json!({"op": "set_state", "items": [three], "state": "unstarted"})).unwrap();
+            let (again, _) = start(&as_user, "three").expect("a Start resolved waits on nothing: the step starts again");
+            assert_ne!(again, note);
+            // Paused, a Start waits on; every state past pending and paused
+            // takes it up and resolves it.
+            let notices = apply(&as_holder, json!({"op": "set_state", "items": [three], "state": "paused"})).unwrap();
+            assert!(!notices.iter().any(|notice| notice.contains("the user's Start")) && board()[&again].comment.as_ref().unwrap().resolved.is_none(), "{notices:?}");
+            let mut sent = again;
+            for (state, word) in [("waiting", "waiting"), ("progress", "in progress"), ("done", "done"), ("cancelled", "cancelled")] {
+                let notices = apply(&as_holder, json!({"op": "set_state", "items": [three], "state": state})).unwrap();
+                assert!(notices.contains(&format!("comment {sent}, the user's Start, is resolved: task {three} is {word}")), "{state}: {notices:?}");
+                apply(&as_holder, json!({"op": "set_state", "items": [three], "state": "unstarted"})).unwrap();
+                sent = start(&as_user, "three").expect("resolved, the step starts again").0;
+            }
+
+            apply(&as_user, json!({"op": "set_state", "items": [target], "state": "cancelled"})).unwrap();
+            assert!(refused(&as_user, "four").contains(&format!("artifact {target} is cancelled")));
             std::fs::remove_dir_all(&home).ok();
         }
 

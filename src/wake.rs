@@ -227,9 +227,28 @@ pub fn untold(ekko: &Ekko, me: &Actor, told: &Told, since: u64, holding: bool) -
             let says = if own { format!(" It says: {}", agent::clip(&note.description, QUOTED)) } else { String::new() };
             lines.push(format!("Review {} from the user, on {on}: {told}{says}", note.id));
         } else if let Some(comment) = note.comment.as_deref() {
-            let at = match (&comment.quote, &comment.step) {
+            // A step's task, by the step's key, while the board holds it.
+            let task_of = |key: &str| {
+                let plan = artifact.artifact.as_deref()?;
+                let uid = plan.steps.iter().find(|step| step.key == key)?.task.as_deref()?;
+                by_uid.get(uid).copied()
+            };
+            let step = comment.step.as_deref().map(|key| match task_of(key) {
+                Some(task) => format!("step {key}, task {} ({})", task.id, agent::clip(crate::ekko::title(&task.description), TITLED)),
+                None => format!("step {key}"),
+            });
+            if crate::artifact::is_start(note) {
+                // Start on the page (task 1111): taking the task up resolves it.
+                lines.push(format!(
+                    "Start from the user, on the page of {on}: {}. Set its task in progress and take it up, which resolves comment {}.",
+                    step.unwrap_or_default(),
+                    note.id
+                ));
+                continue;
+            }
+            let at = match (&comment.quote, step) {
                 (Some(quote), _) => format!(", on \"{}\"", agent::clip(&quote.exact, TITLED)),
-                (None, Some(step)) => format!(", on step {step}"),
+                (None, Some(step)) => format!(", on {step}"),
                 (None, None) => String::new(),
             };
             lines.push(format!("Comment {} from the user, sent alone from the page of {on}{at}: {}", note.id, agent::clip(&note.description, QUOTED)));

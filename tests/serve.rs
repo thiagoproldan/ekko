@@ -944,6 +944,71 @@ fn feedback_from_the_page_is_told_in_the_next_reply_of_the_session_working_the_a
     assert!(prime.contains("1 review and 3 comments to resolve"), "{prime}");
 }
 
+/// Start on a ready step (task 1111): the served page offers Start on a
+/// step whose task a session may take up now; the person's Start sends
+/// "Start this" on the step, which the session working the plan is told in
+/// its next reply, naming the task, and the page then says it was sent.
+/// Under Claude Code, Start is refused and writes nothing, and a second one
+/// on the same step is refused too. Taking the task up resolves it.
+#[test]
+fn start_on_a_ready_step_is_told_to_the_session_working_the_plan() {
+    let home = Home::new();
+    let written = artifact(&home);
+    let (port, path) = split(written["page"].as_str().unwrap());
+    let token = runtime(&home)["token"].as_str().unwrap().to_string();
+    let post = |to: &str, body: Value, as_claude: bool| -> String {
+        let body = body.to_string();
+        let request = format!(
+            "POST {to} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: ekko_{port}={token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = fs::remove_file(home.join(if as_claude { "answer-claude" } else { "answer-person" }));
+        from_bash(&home, port, &request, as_claude)
+    };
+    let board = || -> Value { serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap() };
+    let notes = || board().as_object().unwrap().values().filter(|item| item.get("comment").is_some()).count();
+    let menus = || fs::read_to_string(home.join("menus")).unwrap_or_default().lines().map(str::to_string).collect::<Vec<_>>();
+    let page = || {
+        let (status, shown) = get(port, &path, &format!("127.0.0.1:{port}"));
+        assert_eq!(status, 200, "{shown}");
+        shown
+    };
+
+    let mut session = Session::start(&home);
+    assert!(!page().contains("data-start="), "a step with no task yet has no Start");
+    session.ask_approval(2);
+    assert!(until(10, || menus().len() == 1), "the menu came up");
+    let approved = post("/api/review", json!({"page": path, "verdict": "approve", "version": 1}), false);
+    assert!(approved.starts_with("HTTP/1.1 200 "), "{approved}");
+    session.reply(2, Duration::from_secs(5)).expect("ask returned once the page approved");
+    let uid = board()["1"]["artifact"]["steps"][0]["task"].as_str().unwrap().to_string();
+    let task = board().as_object().unwrap().values().find(|item| item["uid"] == json!(uid)).unwrap()["_id"].as_u64().unwrap();
+    let held = session.call(3, "set_state", json!({"items": [1], "state": "progress"}));
+    assert!(held.starts_with("{\"ok\":true"), "the session works the plan: {held}");
+    assert!(until(5, || page().contains("<button class=\"pill\" type=\"button\" data-start=\"one\">Start</button>")), "{}", page());
+
+    let refused = post("/api/start", json!({"page": path, "step": "one"}), true);
+    assert!(refused.starts_with("HTTP/1.1 403 "), "{refused}");
+    assert_eq!(notes(), 0, "a refused Start wrote nothing");
+    let sent = post("/api/start", json!({"page": path, "step": "one"}), false);
+    assert!(sent.starts_with("HTTP/1.1 200 "), "{sent}");
+    let note = serde_json::from_str::<Value>(sent.split_once("\r\n\r\n").unwrap().1).unwrap()["id"].as_u64().unwrap();
+    let told = session.call(4, "next", json!({}));
+    let line = format!(
+        "\n\nekko: Start from the user, on the page of artifact 1 (Ship the page): step one, task {task} (The first step). Set its task in progress and take it up, which resolves comment {note}.\n"
+    );
+    assert!(told.ends_with(&line), "{told}");
+    let again = post("/api/start", json!({"page": path, "step": "one"}), false);
+    assert!(again.starts_with("HTTP/1.1 409 ") && again.contains(&format!("sent Start already, in comment {note}")), "{again}");
+    assert!(until(5, || page().contains(&format!("Start sent in comment {note}: waiting for a session to take it up"))), "{}", page());
+
+    let taken = session.call(5, "set_state", json!({"items": [task], "state": "progress"}));
+    assert!(taken.contains(&format!("comment {note}, the user's Start, is resolved: task {task} is in progress")), "{taken}");
+    assert!(until(5, || !page().contains("class=\"start")), "{}", page());
+    let log = fs::read_to_string(state(&home).join("serve.log")).unwrap();
+    assert!(log.contains(&format!("POST /api/start: note {note} on step one of ")) && log.contains("refused POST /api/start: process "), "{log}");
+}
+
 /// A session answers the user's feedback from the page with the artifact
 /// tool alone (task 1107): its read gives a suggestion sent alone and a
 /// review with the comment it sent; one call applies the suggestion, which

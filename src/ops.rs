@@ -819,6 +819,103 @@ impl<'a> Draft<'a> {
         Ok(id)
     }
 
+    /// The person's Start on step `key` of the artifact `on` (task 1111):
+    /// the comment `artifact::START` on that step, sent at once, so it is
+    /// told to the sessions working the plan as a comment sent alone is,
+    /// and waits for the next one where none is. Refused when a session
+    /// asks, when the artifact is closed, when the step has no task here,
+    /// when its task cannot be taken up now, and when a Start already waits
+    /// on it.
+    pub fn start_step(&mut self, on: &Ref, key: &str) -> Result<u32, EkkoError> {
+        if !self.ekko.actor.as_ref().is_none_or(|actor| actor.is_person()) {
+            return Err(invalid("Start is the user's, pressed on the artifact's page"));
+        }
+        let id = self.resolve(on)?;
+        let item = &self.data[&id];
+        let Some(artifact) = item.artifact.as_deref().filter(|_| item.trashed.is_none()) else {
+            return Err(invalid(format!("{id} is not an artifact")));
+        };
+        if let Some(state) = State::of(item).filter(|state| !state.is_open()) {
+            return Err(invalid(format!("artifact {id} is {}", state.word())));
+        }
+        let Some(step) = artifact.steps.iter().find(|step| step.key == key) else {
+            return Err(invalid(format!("the plan has no step {key}")));
+        };
+        let index = crate::ekko::uid_index(&self.data);
+        let Some(task) = step.task.as_deref().and_then(|uid| index.get(uid)).and_then(|task| self.data.get(task)) else {
+            return Err(invalid(match step.task {
+                None => format!("step {key} has no task yet: approving the plan makes it"),
+                Some(_) => format!("step {key}'s task is not on this board"),
+            }));
+        };
+        crate::artifact::startable(task, &self.data).map_err(|why| invalid(format!("step {key} cannot start: {why}")))?;
+        if let Some(asked) = crate::artifact::open_start(item, key, &self.data) {
+            return Err(invalid(format!("step {key} was sent Start already, in comment {}, and waits for a session to take it up", asked.id)));
+        }
+        let comment = crate::item::Comment {
+            version: artifact.version,
+            quote: None,
+            replacement: None,
+            step: Some(key.to_string()),
+            reply_to: None,
+            sent: Some(chrono::Local::now().timestamp_millis()),
+            resolved: None,
+            applied: None,
+            theme: None,
+            color: None,
+            unknown: Default::default(),
+        };
+        let spec = Create {
+            kind: None,
+            text: crate::artifact::START.to_string(),
+            boards: Vec::new(),
+            priority: None,
+            due: None,
+            with: None,
+            phase: None,
+            blocked_by: Vec::new(),
+            attached_to: Some(Ref::Id(id)),
+            supersedes: None,
+            starred: false,
+        };
+        let note = self.create(&spec)?;
+        self.item(note).comment = Some(Box::new(comment));
+        Ok(note)
+    }
+
+    /// Each Start whose step's task left pending and paused -- in progress,
+    /// waiting, done or cancelled -- is resolved by the write that finds it
+    /// so (task 1111): it was taken up, or can no longer be, and waits on
+    /// no session.
+    /// Said to the writer, naming the task.
+    fn starts_taken_up(&mut self) -> Vec<String> {
+        let index = crate::ekko::uid_index(&self.data);
+        let by_uid = |uid: &str| index.get(uid).and_then(|id| self.data.get(id));
+        let mut taken = Vec::new();
+        for note in self.data.values().filter(|note| note.trashed.is_none() && crate::artifact::is_start(note)) {
+            let Some(comment) = note.comment.as_deref().filter(|comment| comment.resolved.is_none()) else { continue };
+            let Some(plan) = note.attached_to.as_deref().and_then(by_uid).and_then(|artifact| artifact.artifact.as_deref()) else { continue };
+            let task = plan
+                .steps
+                .iter()
+                .find(|step| comment.step.as_deref() == Some(step.key.as_str()))
+                .and_then(|step| by_uid(step.task.as_deref()?));
+            if let Some(task) = task.filter(|task| !matches!(State::of(task), None | Some(State::Pending | State::Paused))) {
+                taken.push((note.id, task.id, State::of(task).map_or("", State::word)));
+            }
+        }
+        let now = chrono::Local::now().timestamp_millis();
+        taken
+            .into_iter()
+            .map(|(note, task, state)| {
+                if let Some(comment) = self.item(note).comment.as_mut() {
+                    comment.resolved = Some(now);
+                }
+                format!("comment {note}, the user's Start, is resolved: task {task} is {state}")
+            })
+            .collect()
+    }
+
     /// The person's review of the artifact `on`, sent from its page (task
     /// 1106), as GitHub's reviews go: a note holding `text`, its summary,
     /// and the verdict, which sends every comment of theirs still pending
@@ -2206,6 +2303,7 @@ impl<'a> Draft<'a> {
         notices.extend(self.settle_holders(force)?);
         notices.extend(self.loose_notes_of_the_done());
         notices.extend(self.trailer_of_the_started());
+        notices.extend(self.starts_taken_up());
         let saved = self.ekko.save_against(&self.before, &mut self.data)?;
         notices.extend(self.ended_waits(&saved.ended));
         notices.extend(self.rests_told(&saved.rests_read));
