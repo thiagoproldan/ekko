@@ -217,6 +217,47 @@ fn a_read_conditioned_on_the_cursor_answers_in_one_line_when_nothing_moved() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// A prime asked with a cursor on a board that has not moved still reads
+/// the ground of the notes it shows (task 1422): a file edited since the
+/// session's last prime names the note it marks to recheck, once, and the
+/// file put back names it as to recheck no more; a ground that held is
+/// still answered in one line.
+#[test]
+fn a_prime_on_a_board_that_has_not_moved_names_the_notes_whose_ground_moved() {
+    let home = temp_home();
+    let app = home.join("app");
+    fs::create_dir_all(app.join("src")).unwrap();
+    let lib = app.join("src").join("lib.rs");
+    fs::write(&lib, "pub fn kept() {}\n").unwrap();
+    cli_in(&home, &app, &["init"]);
+    let mut session = Session::in_folder(&home, &app);
+    session.call("create", json!({"kind": "gotcha", "text": "Kept stays\nRests on: `src/lib.rs` \"pub fn kept\""}));
+    let full = session.call("prime", json!({}));
+    assert!(full.contains("\n   1. [gotcha] Kept stays\n"), "{full}");
+    let cursor: u64 = full.lines().next().and_then(|line| line.rsplit("cursor ").next()?.parse().ok()).unwrap_or_else(|| panic!("{full}"));
+    let unchanged = format!("unchanged since cursor {cursor}\n");
+    assert_eq!(session.call("prime", json!({"if_rev": cursor})), unchanged, "the ground held");
+
+    fs::write(&lib, "pub fn renamed() {}\n").unwrap();
+    let moved = format!("unchanged since cursor {cursor}, but for notes whose ground moved since this session's last prime:\n");
+    let how = "To recheck a note: still true, add a line \"Still true, YYYY-MM-DD: what you checked\" and name anew any path or words that moved; \
+               no longer true, supersede it.\n";
+    assert_eq!(
+        session.call("prime", json!({"if_rev": cursor})),
+        format!("{moved}   1. [gotcha, to recheck] Kept stays\n      to recheck: `src/lib.rs` no longer holds \"pub fn kept\"\n\n{how}")
+    );
+    assert_eq!(session.call("prime", json!({"if_rev": cursor})), unchanged, "told once");
+
+    fs::write(&lib, "pub fn kept() {}\n").unwrap();
+    assert_eq!(
+        session.call("prime", json!({"if_rev": cursor})),
+        format!("{moved}   1. [gotcha] Kept stays\n      to recheck no more: its ground holds again\n")
+    );
+    assert_eq!(session.call("prime", json!({"if_rev": cursor})), unchanged);
+    session.close();
+    fs::remove_dir_all(&home).ok();
+}
+
 /// Several items in one call, in the order asked; item and items together,
 /// or more than one call reads, are refused rather than half-answered.
 #[test]

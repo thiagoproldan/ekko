@@ -37,7 +37,7 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Map, Value};
 
@@ -111,11 +111,14 @@ pub struct Server {
     /// Whether a client opened with the handshake, whose revisions hear of
     /// changes untagged: a 2026-07-28 client hears only on a stream it opened.
     handshake: AtomicBool,
-    /// The day prime and next last answered in full, by tool and board -- a
-    /// linked one by name -- or for the session's own board the day the
-    /// server started, which is when the SessionStart hook handed the session
-    /// its prime: `if_rev` is answered as unchanged only on that same day.
-    answered: Mutex<HashMap<(&'static str, Option<String>), chrono::NaiveDate>>,
+    /// What prime and next last answered in full, by tool and board -- a
+    /// linked one by name. On the session's own board, the SessionStart
+    /// hook's prime stands in for it once the hook has served the session
+    /// since, and without either, one read the day the server started, when
+    /// the hook handed the session its prime: `if_rev` is answered as
+    /// unchanged only on the day of the answer the session holds, naming the
+    /// notes whose marks to recheck moved since it (task 1422).
+    answered: Mutex<HashMap<(&'static str, Option<String>), Answered>>,
     started: chrono::NaiveDate,
     /// How this process was started, to tell when an upgrade has replaced
     /// its binary (see `Launch`).
@@ -134,6 +137,17 @@ pub struct Server {
     /// The version of Claude Code the handshake's initialize named, for
     /// every request under it (task 1325); see `claude_code`.
     claude_code: Mutex<Option<String>>,
+}
+
+/// An answer of prime or next a session read in full: the day, for prime the
+/// notes it marked to recheck, and on the session's own board the record of
+/// the SessionStart hook it came after -- the conversation and when the hook
+/// wrote it.
+#[derive(Clone)]
+struct Answered {
+    on: chrono::NaiveDate,
+    rechecked: agent::Rechecked,
+    hooked: Option<(String, SystemTime)>,
 }
 
 /// A binary as a file: where its name resolves, every link followed, and
@@ -406,15 +420,45 @@ impl Server {
     fn unchanged(&self, tool: &'static str, project: Option<&str>, ekko: &Ekko, if_rev: Option<i64>) -> Result<Option<String>, ToolError> {
         let Some(held) = if_rev else { return Ok(None) };
         let revision = ekko.storage.get_counters().map_err(EkkoError::from)?.revision as i64;
-        let read = self.answered.lock().unwrap_or_else(PoisonError::into_inner).get(&(tool, project.map(str::to_string))).copied();
-        let Some(read_on) = read.or(project.is_none().then_some(self.started)) else { return Ok(None) };
+        let Some(read) = self.last_answered(tool, project, None) else { return Ok(None) };
         let today = chrono::Local::now().date_naive();
-        Ok(still_current(held, revision, read_on, today).then(|| format!("unchanged since cursor {revision}\n")))
+        Ok(still_current(held, revision, read.on, today).then(|| format!("unchanged since cursor {revision}\n")))
     }
 
-    fn answered_today(&self, tool: &'static str, project: Option<&str>) {
-        let key = (tool, project.map(str::to_string));
-        self.answered.lock().unwrap_or_else(PoisonError::into_inner).insert(key, chrono::Local::now().date_naive());
+    /// The answer of `tool` on the board `project` names that the session
+    /// last read in full: this server's, or on the session's own board --
+    /// `board`, where given -- the SessionStart hook's prime when the hook
+    /// served the session again since, as after a /clear or a compaction.
+    /// Without either, the hook's prime of the day the server started; on a
+    /// linked board, none.
+    fn last_answered(&self, tool: &'static str, project: Option<&str>, board: Option<&str>) -> Option<Answered> {
+        let ours = self.answered.lock().unwrap_or_else(PoisonError::into_inner).get(&(tool, project.map(str::to_string))).cloned();
+        if project.is_some() {
+            return ours;
+        }
+        match (ours, board.and_then(|board| self.hooked(board))) {
+            (Some(ours), Some(hooked)) if ours.hooked != hooked.hooked => Some(hooked),
+            (ours, hooked) => ours.or(hooked).or(Some(Answered { on: self.started, rechecked: agent::Rechecked::new(), hooked: None })),
+        }
+    }
+
+    /// The prime the SessionStart hook last handed this session on its own
+    /// board, `board`, as an answer read the day the hook wrote its record.
+    /// None where no hook recorded the session's conversation there.
+    fn hooked(&self, board: &str) -> Option<Answered> {
+        let conversation = self.actor.conversation()?;
+        let served = agent::served(&agent::session_state_dir(&self.home), &conversation, board)?;
+        let on = chrono::DateTime::<chrono::Local>::from(served.at).date_naive();
+        Some(Answered { on, rechecked: served.rechecked, hooked: Some((conversation, served.at)) })
+    }
+
+    /// Records `tool`'s answer in full on the board `project` names -- the
+    /// session's own one being `board`, where given -- with the notes it
+    /// marked to recheck.
+    fn answered_today(&self, tool: &'static str, project: Option<&str>, board: Option<&str>, rechecked: agent::Rechecked) {
+        let hooked = board.filter(|_| project.is_none()).and_then(|board| self.hooked(board)?.hooked);
+        let answered = Answered { on: chrono::Local::now().date_naive(), rechecked, hooked };
+        self.answered.lock().unwrap_or_else(PoisonError::into_inner).insert((tool, project.map(str::to_string)), answered);
     }
 
     /// The notifications that the resource list changed, when it has since
@@ -1084,11 +1128,24 @@ impl Server {
             "prime" => {
                 let if_rev = take(args, "if_rev", Value::as_i64, "an integer")?;
                 finish(args)?;
-                if let Some(line) = self.unchanged("prime", project, &ekko, if_rev)? {
-                    return Ok(line);
+                let board = location.label();
+                let view = agent::prime(&ekko, &board)?;
+                let rechecked = view.rechecked();
+                // A note's ground moves without a write -- a file edited, or
+                // the session's Claude Code judged where the hook's prime
+                // judged no version -- so a board unchanged since the answer
+                // held still names the notes whose marks moved (task 1422).
+                let today = chrono::Local::now().date_naive();
+                let held = if_rev.and_then(|held| Some((held, self.last_answered("prime", project, Some(&board))?)));
+                if let Some((_, last)) = held.filter(|(held, last)| still_current(*held, view.cursor, last.on, today)) {
+                    let Some(moved) = view.rechecked_since(&last.rechecked) else {
+                        return Ok(format!("unchanged since cursor {}\n", view.cursor));
+                    };
+                    self.answered_today("prime", project, Some(&board), rechecked);
+                    return Ok(format!("unchanged since cursor {}, but for notes whose ground moved since this session's last prime:\n{moved}", view.cursor));
                 }
-                let text = agent::prime(&ekko, &location.label())?.text();
-                self.answered_today("prime", project);
+                let text = view.text();
+                self.answered_today("prime", project, Some(&board), rechecked);
                 Ok(text)
             }
             "next" => {
@@ -1099,7 +1156,7 @@ impl Server {
                     return Ok(line);
                 }
                 let (entries, total) = agent::next_listed(&ekko, Some(limit.unwrap_or(agent::SEARCH_LIMIT)))?;
-                self.answered_today("next", project);
+                self.answered_today("next", project, None, agent::Rechecked::new());
                 // Work another session still runs is not work to take up, so
                 // a second session is not steered into the first one's task.
                 let (elsewhere, entries): (Vec<agent::Entry>, Vec<agent::Entry>) =
@@ -2127,6 +2184,52 @@ mod tests {
         assert!(message.contains("3 is a question a running session asked"), "{message}");
         assert!(message.contains("--force in a terminal of their own"), "{message}");
         assert!(!message.contains("--force moves it anyway"), "{message}");
+    }
+
+    /// The SessionStart hook's prime judges no version (task 1422), and it
+    /// is the prime a session holds until this server answers in full: the
+    /// session's first prime with its cursor names the notes its Claude Code
+    /// marks to recheck, and not those the hook's prime marked already, and
+    /// the next answers in one line. A /clear hands the session the hook's
+    /// prime again, and with it the hook's marks.
+    #[test]
+    fn the_hooks_prime_is_the_one_a_session_holds_until_the_server_answers() {
+        let home = crate::paths::test_dir("ekko-mcp-hooked");
+        fs::create_dir_all(&home).unwrap();
+        let mut server = Server::new(home.clone(), home.clone(), Some(home.display().to_string()), None, Mode::Board);
+        let (me, _, _) = holder::test_sessions();
+        server.actor = me.with_registry(holder::Registry::at(agent::processes_dir(&home)));
+        let call = |name: &str, args: Value| {
+            let mut args = args.as_object().cloned().unwrap_or_default();
+            server.tool(name, &mut args, Some("2.1.292".to_string())).unwrap_or_else(|error| panic!("{}: {}", error.code, error.message))
+        };
+        let lib = home.join("lib.rs");
+        fs::write(&lib, "pub fn kept() {}\n").unwrap();
+        call("create", json!({"kind": "gotcha", "text": "A trap\nRests on: Claude Code 2.1.200"}));
+        call("create", json!({"kind": "gotcha", "text": format!("Kept stays\nRests on: `{}` \"pub fn kept\"", lib.display())}));
+        fs::write(&lib, "pub fn renamed() {}\n").unwrap();
+        let (ekko, location) = server.open().unwrap();
+        let hook = |source: &str, conversation: &str| {
+            let event = agent::SessionEvent::from_hook_input(&json!({"source": source, "session_id": conversation}).to_string());
+            agent::session_start(&ekko, &location.label(), &event, &agent::session_state_dir(&home), || None, || None).unwrap()
+        };
+        let primed = hook("startup", "conversation-1");
+        assert!(primed.contains("\n   1. [gotcha] A trap\n"), "the hook judges no version: {primed}");
+        assert!(primed.contains("\n   2. [gotcha, to recheck] Kept stays\n"), "but it reads files: {primed}");
+
+        let cursor = ekko.storage.get_counters().unwrap().revision;
+        let marked = format!(
+            "unchanged since cursor {cursor}, but for notes whose ground moved since this session's last prime:\n   \
+             1. [gotcha, to recheck] A trap\n      to recheck: seen with Claude Code 2.1.200, now 2.1.292\n\n\
+             To recheck a note: still true, add a line \"Still true, YYYY-MM-DD: what you checked\" and name anew any path or words that \
+             moved; no longer true, supersede it.\n"
+        );
+        assert_eq!(call("prime", json!({"if_rev": cursor})), marked);
+        assert_eq!(call("prime", json!({"if_rev": cursor})), format!("unchanged since cursor {cursor}\n"), "told once");
+        hook("clear", "conversation-2");
+        assert_eq!(call("prime", json!({"if_rev": cursor})), marked, "after a /clear, the session holds the hook's prime");
+        assert_eq!(call("prime", json!({"if_rev": cursor})), format!("unchanged since cursor {cursor}\n"));
+        fs::remove_dir_all(&home).ok();
     }
 
     /// A cursor read yesterday is not current today, even if nothing was

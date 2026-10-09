@@ -585,6 +585,16 @@ The anchors are checked again whenever the note is read: `--prime` and `--contex
 
 Words are looked for again by their text, so a change elsewhere in the file, or the words moved, says nothing. A path gone, words their file no longer holds, and a date past each say to recheck, and so does a version older than the Claude Code reading -- to the precision written, so a note seen with 2.1 holds through every 2.1.x. That version is the one a session's client gives the MCP server; the terminal gives none, and judges no version.
 
+A mark moves without a write -- a file edited, or the session's version judged where the SessionStart hook's prime judged none -- so a session's prime asked with `if_rev` reads the ground too, though the board has not moved (task 1422). When the notes it would mark to recheck differ from those of the prime the session last had, the line saying nothing moved names each of them, marked as it is now, or as to recheck no more:
+
+```
+unchanged since cursor 41, but for notes whose ground moved since this session's last prime:
+  13. [gotcha, to recheck] Run the migrations before the tests, or half of them fail
+      to recheck: seen with Claude Code 2.1.289, now 2.1.301
+```
+
+The prime the session last had is the server's last whole one, or the hook's, whose marks the hook keeps beside the cursor it served, once the hook has served the session since -- at its start, after a /clear or a compaction; a resume the hook writes no prime for keeps the marks of the one before. Reading the ground builds the prime: on this board, a prime with `if_rev` that nothing moved took 26 ms against 0.25 ms before, by the medians (200 reads of each build, interleaved, a release build, 2026-10-09).
+
 A recheck ends one of two ways (task 1326). A note found still true takes a line that starts with `Still true`, dated by convention:
 
 ```

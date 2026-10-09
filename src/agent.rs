@@ -12,7 +12,7 @@
 //! already say: readiness, blockers, totals and the roadmap come from the
 //! same functions the board view and the dependency rule use.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -124,6 +124,9 @@ const TO_RECHECK: &str = "to recheck";
 /// recheck.
 const RECHECK_HOW: &str = "To recheck a note: still true, add a line \"Still true, YYYY-MM-DD: what you checked\" and name anew any path or \
                            words that moved; no longer true, supersede it.";
+/// The notes a prime marks to recheck, by id, each with why: what a session
+/// was shown, kept to tell it later which marks moved since (task 1422).
+pub type Rechecked = BTreeMap<u32, Vec<String>>;
 /// The words that cite an item by its number, as notes and prompts write
 /// them, in English and Portuguese, each plural before its singular.
 const CITING: [&str; 24] = [
@@ -2390,31 +2393,37 @@ pub fn session_start(
     let cap = PRIME_CAP.saturating_sub(taken.chars().count());
     let revision = ekko.storage.get_counters()?.revision as i64;
     let served = event.session_id.as_deref().and_then(|session| served_cursor(state, session, board));
-    let primed = || -> Result<String, EkkoError> {
+    // A prime written comes with the notes it marks to recheck, which the
+    // server tells the session about once their marks move (task 1422);
+    // without one, the session keeps the prime it held, and its marks.
+    let primed = || -> Result<(String, Option<Rechecked>), EkkoError> {
         let mut view = prime(ekko, board)?;
         view.repeats = repeats();
         view.doctor = doctor();
-        Ok(view.text_capped(cap))
+        Ok((view.text_capped(cap), Some(view.rechecked())))
     };
-    let text = match (event.source.as_str(), served) {
+    let (text, rechecked) = match (event.source.as_str(), served) {
         ("resume" | "fork", Some(cursor)) if cursor == revision => {
-            format!("ekko \u{b7} {board} \u{b7} cursor {revision} \u{b7} nothing moved since this session last read the board\n")
+            (format!("ekko \u{b7} {board} \u{b7} cursor {revision} \u{b7} nothing moved since this session last read the board\n"), None)
         }
         ("resume" | "fork", Some(cursor)) => {
             let moved = changes(ekko, cursor)?.text();
             if moved.chars().count() <= RESUME_CHANGES {
-                format!("ekko \u{b7} {board} \u{b7} what moved since this session last read the board\n{moved}")
+                (format!("ekko \u{b7} {board} \u{b7} what moved since this session last read the board\n{moved}"), None)
             } else {
                 primed()?
             }
         }
-        ("resume" | "fork", None) => format!(
-            "ekko \u{b7} {board} \u{b7} cursor {revision} \u{b7} the prime earlier in this session still applies; changes with its cursor lists what moved\n"
+        ("resume" | "fork", None) => (
+            format!(
+                "ekko \u{b7} {board} \u{b7} cursor {revision} \u{b7} the prime earlier in this session still applies; changes with its cursor lists what moved\n"
+            ),
+            None,
         ),
         _ => primed()?,
     };
     if let Some(session) = &event.session_id {
-        remember(state, session, board, revision);
+        remember(state, session, board, revision, rechecked);
     }
     Ok(format!("{taken}{text}"))
 }
@@ -2426,18 +2435,40 @@ fn session_file(state: &Path, session: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn served_cursor(state: &Path, session: &str, board: &str) -> Option<i64> {
-    let served: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(session_file(state, session)?).ok()?).ok()?;
+    served(state, session, board).map(|served| served.cursor)
+}
+
+/// What the SessionStart hook last served a session on a board.
+pub(crate) struct Served {
+    pub cursor: i64,
+    /// The notes the prime the session holds from it marked to recheck:
+    /// none where a hook of 0.39.1 or before served it, which kept none.
+    pub rechecked: Rechecked,
+    /// When it served it.
+    pub at: std::time::SystemTime,
+}
+
+pub(crate) fn served(state: &Path, session: &str, board: &str) -> Option<Served> {
+    let file = session_file(state, session)?;
+    let served: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).ok()?).ok()?;
     if served["board"].as_str()? != board {
         return None;
     }
-    served["cursor"].as_i64()
+    Some(Served {
+        cursor: served["cursor"].as_i64()?,
+        rechecked: serde_json::from_value(served["rechecked"].clone()).unwrap_or_default(),
+        at: std::fs::metadata(&file).and_then(|meta| meta.modified()).unwrap_or(std::time::UNIX_EPOCH),
+    })
 }
 
-/// Records the cursor served to a session, and forgets sessions older than
+/// Records the cursor served to a session, with the notes the prime it holds
+/// marks to recheck -- `rechecked`, or where the hook wrote no prime, those
+/// of the one it served before -- and forgets sessions older than
 /// `SESSION_KEPT` on the way. Best effort: the hook answers even when the
 /// state directory cannot be written.
-fn remember(state: &Path, session: &str, board: &str, cursor: i64) {
+fn remember(state: &Path, session: &str, board: &str, cursor: i64, rechecked: Option<Rechecked>) {
     let Some(file) = session_file(state, session) else { return };
+    let rechecked = rechecked.or_else(|| served(state, session, board).map(|served| served.rechecked)).unwrap_or_default();
     if std::fs::create_dir_all(state).is_err() {
         return;
     }
@@ -2454,7 +2485,7 @@ fn remember(state: &Path, session: &str, board: &str, cursor: i64) {
             }
         }
     }
-    let _ = std::fs::write(file, serde_json::json!({"board": board, "cursor": cursor}).to_string());
+    let _ = std::fs::write(file, serde_json::json!({"board": board, "cursor": cursor, "rechecked": rechecked}).to_string());
 }
 
 /// The Claude Code sessions on a board, as `ekko --sessions` shows them to
@@ -3046,11 +3077,52 @@ impl Prime {
         lists
     }
 
-    /// Whether a note this prime shows -- among the lasting notes, or under
-    /// a task -- is marked to recheck.
+    /// The notes this prime shows with their marks, as `Section::of_entries`
+    /// writes them: under the work in progress and the first ready tasks --
+    /// but one another session holds, whose notes it names by id alone --
+    /// then the lasting notes.
+    fn shown_notes(&self) -> impl Iterator<Item = &NoteRef> {
+        fn under(entries: &[Entry], with_notes: usize) -> impl Iterator<Item = &NoteRef> {
+            entries.iter().take(with_notes).filter(|entry| !entry.held.as_ref().is_some_and(Held::elsewhere)).flat_map(|entry| &entry.notes)
+        }
+        under(&self.doing, usize::MAX).chain(under(&self.ready, READY_WITH_NOTES)).chain(&self.knowledge)
+    }
+
+    /// Whether a note this prime shows is marked to recheck.
     fn rechecks(&self) -> bool {
-        let entries = [&self.doing, &self.ready, &self.blocked, &self.waiting, &self.with_someone];
-        self.knowledge.iter().chain(entries.into_iter().flatten().flat_map(|entry| &entry.notes)).any(|note| !note.recheck.is_empty())
+        self.shown_notes().any(|note| !note.recheck.is_empty())
+    }
+
+    /// The notes this prime shows marked to recheck, each with why.
+    pub fn rechecked(&self) -> Rechecked {
+        self.shown_notes().filter(|note| !note.recheck.is_empty()).map(|note| (note.id, note.recheck.clone())).collect()
+    }
+
+    /// The notes whose marks moved since a session was shown `last` (task
+    /// 1422), as this prime shows them: one marked to recheck now and not
+    /// then, or now for another reason, with why on the line under it; one
+    /// marked then and not now, as to recheck no more; and how a recheck
+    /// ends, when one is newly marked. None when no mark moved.
+    pub fn rechecked_since(&self, last: &Rechecked) -> Option<String> {
+        let mut out = String::new();
+        let mut marked = false;
+        let mut seen = HashSet::new();
+        for note in self.shown_notes().filter(|note| seen.insert(note.id)) {
+            if last.get(&note.id).map_or(&[][..], Vec::as_slice) == note.recheck.as_slice() {
+                continue;
+            }
+            let _ = writeln!(out, "{}", knowledge_line(note));
+            match recheck_line(&note.recheck, 6) {
+                Some(line) => {
+                    marked = true;
+                    let _ = writeln!(out, "{line}");
+                }
+                None => {
+                    let _ = writeln!(out, "      {TO_RECHECK} no more: its ground holds again");
+                }
+            }
+        }
+        (!out.is_empty()).then(|| with_recheck_how(out, marked))
     }
 
     /// What the board holds against itself: a block the budget always keeps.
@@ -5074,6 +5146,40 @@ mod tests {
             SessionEvent { source: "resume".to_string(), session_id: Some("s1".to_string()), transcript: None }
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The SessionStart hook keeps the notes the prime it writes marks to
+    /// recheck, for the server to name later those whose marks moved (task
+    /// 1422); a resume it writes no prime for keeps the marks of the prime
+    /// the session holds, and a /clear's prime its own.
+    #[test]
+    fn session_start_keeps_the_marks_of_the_prime_the_session_holds() {
+        let (ekko, dir) = board("session-marks");
+        let project = dir.join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        let ekko = ekko.in_folder(Some(project.clone()));
+        write(&ekko, &[serde_json::json!({"op": "create", "kind": "gotcha", "text": "Kept stays\nRests on: `src/lib.rs` \"pub fn kept\""})]);
+        std::fs::write(project.join("src/lib.rs"), "pub fn renamed() {}\n").unwrap();
+        let state = dir.join("state");
+        let event = |source: &str| SessionEvent { source: source.to_string(), session_id: Some("abc-123".to_string()), transcript: None };
+        let marks = || served(&state, "abc-123", "default board").expect("served").rechecked;
+        let moved = Rechecked::from([(1, vec!["`src/lib.rs` no longer holds \"pub fn kept\"".to_string()])]);
+
+        let started = session_start(&ekko, "default board", &event("startup"), &state, || None, || None).unwrap();
+        assert!(started.contains("   1. [gotcha, to recheck] Kept stays\n"), "{started}");
+        assert_eq!(marks(), moved);
+        std::fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        let resumed = session_start(&ekko, "default board", &event("resume"), &state, || None, || None).unwrap();
+        assert!(resumed.contains("nothing moved"), "{resumed}");
+        assert_eq!(marks(), moved, "the session holds the prime it had");
+        session_start(&ekko, "default board", &event("clear"), &state, || None, || None).unwrap();
+        assert_eq!(marks(), Rechecked::new(), "a prime of its own, which marks none");
+
+        std::fs::write(dir.join("state").join("old.json"), r#"{"board":"default board","cursor":1}"#).unwrap();
+        let old = served(&state, "old", "default board").expect("a record of 0.39.1");
+        assert_eq!((old.cursor, old.rechecked), (1, Rechecked::new()), "a hook of 0.39.1 kept no marks");
         std::fs::remove_dir_all(&dir).ok();
     }
 
