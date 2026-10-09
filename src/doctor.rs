@@ -247,8 +247,11 @@ fn named(path: &Path, store: &Path) -> String {
 /// Whether `proc`, an ekko that serves, runs the binary its names lead to
 /// now, as the server's own `REPLACED` decides: its program name, looked up
 /// on its own PATH when bare; and, for one started by its store path, the
-/// bare name `ekko` on its PATH too. A dev build started by its path is
-/// judged by that path alone: the ekko on PATH was never its.
+/// bare name `ekko` on its PATH too, when that leads into the store, as a
+/// switch moves it. A dev build started by its path is judged by that path
+/// alone: the ekko on PATH was never its. Nor is a store build judged by a
+/// dev build on PATH, which a restart would not start in its place: the
+/// NixOS wrapper's resources server stays pinned to the store (task 1572).
 fn old_binary(proc: &Proc, store: &Path) -> (Verdict, String) {
     let Some(running) = proc.running else {
         return (Verdict::Skipped, format!("/proc/{}/exe cannot be read", proc.pid));
@@ -267,7 +270,7 @@ fn old_binary(proc: &Proc, store: &Path) -> (Verdict, String) {
         return (Verdict::Fail, format!("it runs {runs}, and {} leads to {} now", program.display(), named(&now.path, store)));
     }
     if program.starts_with(store) {
-        if let Some(on_path) = Binary::resolve(OsStr::new("ekko"), proc.path_var.as_deref()) {
+        if let Some(on_path) = Binary::resolve(OsStr::new("ekko"), proc.path_var.as_deref()).filter(|on_path| on_path.path.starts_with(store)) {
             if (on_path.dev, on_path.ino) != running {
                 return (Verdict::Fail, format!("it runs {runs}, and ekko on its PATH leads to {} now", named(&on_path.path, store)));
             }
@@ -805,20 +808,23 @@ mod tests {
     }
 
     /// A server is judged as its own `REPLACED` judges it: by the name it was
-    /// started by, and, started by its store path, by ekko on its PATH too.
+    /// started by, and, started by its store path, by ekko on its PATH too,
+    /// when that is a store build.
     #[test]
     fn a_server_whose_names_lead_to_another_binary_now_fails() {
         let dir = crate::paths::test_dir("ekko-doctor-binary");
         let (old, new, dev) = (binary(&dir, "old"), binary(&dir, "new"), binary(&dir, "dev"));
-        let store = dir.join("store");
-        let pinned = binary(&store, "hash-ekko-0.38.1");
+        // Canonical, as the path ekko on PATH resolves to is.
+        let store = fs::canonicalize(&dir).unwrap().join("store");
+        let (pinned, switched) = (binary(&store, "hash-ekko-0.38.1"), binary(&store, "hash-ekko-0.39.1"));
         let on_path = new.parent().unwrap();
         let verdict = |proc: &Proc| old_binary(proc, &store).0;
 
         assert_eq!(verdict(&server(1, 0, Path::new("ekko"), &new, on_path)), Verdict::Ok, "started by name, still where it leads");
         assert_eq!(verdict(&server(2, 0, Path::new("ekko"), &old, on_path)), Verdict::Fail, "the name moved to another binary");
-        assert_eq!(verdict(&server(3, 0, &pinned, &pinned, on_path)), Verdict::Fail, "pinned in the store, and ekko on PATH moved on");
+        assert_eq!(verdict(&server(3, 0, &pinned, &pinned, switched.parent().unwrap())), Verdict::Fail, "pinned in the store, and a switch moved ekko on PATH");
         assert_eq!(verdict(&server(4, 0, &pinned, &pinned, pinned.parent().unwrap())), Verdict::Ok, "pinned, and PATH still leads to it");
+        assert_eq!(verdict(&server(10, 0, &pinned, &pinned, on_path)), Verdict::Ok, "pinned, beside a build outside the store on PATH, which a restart would not start");
         assert_eq!(verdict(&server(5, 0, &dev, &dev, on_path)), Verdict::Ok, "a dev build is judged by its path alone");
         assert_eq!(verdict(&server(6, 0, &dev, &old, on_path)), Verdict::Fail, "a dev build rebuilt in place");
         let relative = Proc { cwd: Some(dir.clone()), ..server(7, 0, Path::new("dev/ekko"), &dev, on_path) };
@@ -826,8 +832,8 @@ mod tests {
         assert_eq!(verdict(&Proc { cwd: Some(dir.clone()), ..server(8, 0, Path::new("dev/ekko"), &old, on_path) }), Verdict::Fail);
         fs::remove_file(&dev).unwrap();
         assert_eq!(verdict(&server(9, 0, &dev, &old, on_path)), Verdict::Skipped, "a name that leads nowhere now is no upgrade");
-        let (_, says) = old_binary(&server(3, 0, &pinned, &pinned, on_path), &store);
-        assert!(says.starts_with("it runs ekko-0.38.1, and ekko on its PATH leads to "), "{says}");
+        let (_, says) = old_binary(&server(3, 0, &pinned, &pinned, switched.parent().unwrap()), &store);
+        assert!(says.starts_with("it runs ekko-0.38.1, and ekko on its PATH leads to ekko-0.39.1 now"), "{says}");
         fs::remove_dir_all(&dir).ok();
     }
 
