@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::holder::{Actor, Process};
+use crate::shell::Reading;
 use crate::item::{Allowance, Cue, Item, Knowledge, Proposal};
 use crate::storage::{ItemMap, Storage};
 
@@ -237,11 +238,11 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
 
 // --- matching ------------------------------------------------------------------
 
-/// The cues the calls of `command`, run from `cwd`, hit: a call of the
-/// cue's command, in its folder or under it, whose arguments and what is
-/// fed to it hold every one of its words.
-fn hits<'a>(cues: &'a [Indexed], command: &str, cwd: &Path) -> Vec<&'a Indexed> {
-    let (calls, placed) = crate::shell::located(command, cwd);
+/// The cues the calls of `command`, run from `cwd` and read as `reading`
+/// says, hit: a call of the cue's command, in its folder or under it, whose
+/// arguments and what is fed to it hold every one of its words.
+fn hits<'a>(cues: &'a [Indexed], command: &str, cwd: &Path, reading: Reading) -> Vec<&'a Indexed> {
+    let (calls, placed) = crate::shell::located(command, cwd, reading);
     let mut found: Vec<&Indexed> = Vec::new();
     for place in &placed {
         let call = &calls[place.at];
@@ -249,7 +250,7 @@ fn hits<'a>(cues: &'a [Indexed], command: &str, cwd: &Path) -> Vec<&'a Indexed> 
             if cue.guards.as_deref().is_some_and(|folder| !under(&place.folder, folder)) {
                 continue;
             }
-            let fed = crate::shell::fed(&calls, place.at);
+            let fed = crate::shell::fed(&calls, place.at, reading);
             let held = |word: &String| call.args.iter().chain(&fed).any(|text| holds(text, word));
             if cue.cue.words.iter().all(held) && !found.iter().any(|hit| hit.board == cue.board && hit.id == cue.id) {
                 found.push(cue);
@@ -550,7 +551,7 @@ fn cue_reasons(home: &Path, index: &Index, seen: &Seen) -> Vec<String> {
     if seen.tool != "Bash" || !index.cues.iter().any(|cue| seen.call.contains(cue.cue.command.as_str())) {
         return Vec::new();
     }
-    let found = hits(&index.cues, &seen.call, Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd }));
+    let found = hits(&index.cues, &seen.call, Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd }), Reading::default());
     let folders = boards(home);
     found
         .iter()
@@ -1316,9 +1317,11 @@ mod tests {
     /// replay counts what each would have refused (task 1021, step 4): the
     /// file `EKKO_CUES` names holds [{"id", "command", "words", "folder"}],
     /// the file `EKKO_CUE_CORPUS` names a {"id", "command", "cwd"} per line,
-    /// and each call a cue hits goes to the file `EKKO_CUE_OUT` names. Run by
-    /// hand over the transcripts' commands, which no public repository may
-    /// hold: `cargo test --release -- --ignored replays_cues`.
+    /// and each call a cue hits goes to the file `EKKO_CUE_OUT` names.
+    /// `EKKO_CUE_READING` turns on parts of `Reading`, as `unwrap,messages`
+    /// (task 1074). Run by hand over the transcripts' commands, which no
+    /// public repository may hold: `cargo test --release -- --ignored
+    /// replays_cues`.
     #[test]
     #[ignore]
     fn replays_cues() {
@@ -1328,6 +1331,10 @@ mod tests {
             return;
         };
         let cues: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(cues).unwrap()).unwrap();
+        let parts = std::env::var("EKKO_CUE_READING").unwrap_or_default();
+        let parts: Vec<&str> = parts.split(',').filter(|part| !part.is_empty()).collect();
+        assert!(parts.iter().all(|part| ["unwrap", "messages"].contains(part)), "EKKO_CUE_READING: {parts:?}");
+        let reading = Reading { unwrap: parts.contains(&"unwrap"), messages: parts.contains(&"messages") };
         let indexed: Vec<Indexed> = cues
             .iter()
             .map(|cue| Indexed {
@@ -1346,7 +1353,7 @@ mod tests {
                 continue;
             }
             let cwd = call["cwd"].as_str().filter(|cwd| !cwd.is_empty()).unwrap_or("/");
-            let found: Vec<u32> = hits(&indexed, command, Path::new(cwd)).iter().map(|cue| cue.id).collect();
+            let found: Vec<u32> = hits(&indexed, command, Path::new(cwd), reading).iter().map(|cue| cue.id).collect();
             if !found.is_empty() {
                 lines.push_str(&json!({"id": call["id"], "cues": found}).to_string());
                 lines.push('\n');

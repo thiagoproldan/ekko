@@ -43,6 +43,19 @@ const PUNCTUATION: &str = "();<>|&";
 const MARK_OPEN: char = '\u{E000}';
 const MARK_CLOSE: char = '\u{E001}';
 
+/// How far a reading goes past ctx's lexer: each part is off by default, so
+/// `calls` reads as the Python does. These are the two changes of the cue
+/// gaps' plan (artifact 1071), replayed before the user decides on them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reading {
+    /// `nix develop ... -c`, `nix shell ... --command` and `direnv exec
+    /// <dir>` run the call after them, as `timeout` does.
+    pub unwrap: bool,
+    /// What reaches a call on stdin is prose when the call reads a message
+    /// there, as `git commit -F -` does: `fed` leaves it out.
+    pub messages: bool,
+}
+
 /// Where what a call prints ends up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sink {
@@ -137,15 +150,18 @@ pub fn output(calls: &[Call], at: usize) -> Sink {
 
 /// All the text that reaches `calls[at]` beyond its own arguments: its
 /// here-documents and here-strings, and the arguments and input of every
-/// call in its substitutions and of every call piped into it.
-pub fn fed(calls: &[Call], at: usize) -> Vec<String> {
+/// call in its substitutions and of every call piped into it. With
+/// `reading.messages`, a call that reads a message on stdin is fed only
+/// what its substitutions hold.
+pub fn fed(calls: &[Call], at: usize, reading: Reading) -> Vec<String> {
     let mut texts = Vec::new();
     let mut seen = vec![false; calls.len()];
-    gather(calls, at, &mut texts, &mut seen, false);
+    let stdin = !(reading.messages && reads_message(&calls[at]));
+    gather(calls, at, &mut texts, &mut seen, false, stdin);
     texts
 }
 
-fn gather(calls: &[Call], at: usize, texts: &mut Vec<String>, seen: &mut [bool], with_args: bool) {
+fn gather(calls: &[Call], at: usize, texts: &mut Vec<String>, seen: &mut [bool], with_args: bool, stdin: bool) {
     if std::mem::replace(&mut seen[at], true) {
         return;
     }
@@ -153,23 +169,48 @@ fn gather(calls: &[Call], at: usize, texts: &mut Vec<String>, seen: &mut [bool],
     if with_args {
         texts.extend(call.args.iter().cloned());
     }
-    texts.extend(call.input.iter().cloned());
+    if stdin {
+        texts.extend(call.input.iter().cloned());
+    }
     for &(start, end) in &call.substitutions {
         for inner in start..end.min(calls.len()) {
-            gather(calls, inner, texts, seen, true);
+            gather(calls, inner, texts, seen, true, true);
         }
     }
     for (from, other) in calls.iter().enumerate() {
-        if other.piped_to == Some(at) {
-            gather(calls, from, texts, seen, true);
+        if stdin && other.piped_to == Some(at) {
+            gather(calls, from, texts, seen, true, true);
         }
+    }
+}
+
+/// Whether `call` reads a message on stdin -- prose that may name commands,
+/// not one: `git commit -F -`, `gh issue comment --body-file -`, `ekko
+/// --note -`. A script fed to `python3 -` or a query to `gh api` is no
+/// message, and still counts.
+fn reads_message(call: &Call) -> bool {
+    let dash = |flags: &[&str]| {
+        call.args.windows(2).any(|pair| flags.contains(&pair[0].as_str()) && pair[1] == "-")
+            || call.args.iter().any(|arg| arg.split_once('=').is_some_and(|(flag, value)| value == "-" && flags.contains(&flag)))
+    };
+    let has = |words: &[&str]| call.args.iter().any(|arg| words.contains(&arg.as_str()));
+    match call.name.as_str() {
+        "git" => has(&["commit", "tag", "merge", "notes"]) && dash(&["-F", "--file"]),
+        "gh" => call.args.first().is_some_and(|sub| sub != "api") && dash(&["-F", "--body-file", "--notes-file"]),
+        "ekko" => has(&["--task", "--note", "--edit"]) && call.args.iter().filter(|arg| *arg == "-").count() == 1,
+        _ => false,
     }
 }
 /// Each call `command` runs, in the order written; the calls inside
 /// `$(...)`, `<(...)` and backticks come after the rest. `piped_to` and
 /// `parent` index into the same list.
 pub fn calls(command: &str) -> Vec<Call> {
-    let mut parse = Parse::default();
+    calls_read(command, Reading::default())
+}
+
+/// `calls`, read as `reading` says.
+pub fn calls_read(command: &str, reading: Reading) -> Vec<Call> {
+    let mut parse = Parse { reading, ..Parse::default() };
     parse.calls_into(command, Sink::Shown);
     let Parse { mut found, owners, spans, .. } = parse;
     for (owner, span) in owners.into_iter().zip(spans) {
@@ -192,6 +233,7 @@ struct Parse {
     /// runs: the index of the first, and the one after the last.
     owners: Vec<Option<usize>>,
     spans: Vec<Option<(usize, usize)>>,
+    reading: Reading,
 }
 
 /// What a mark in a word stands for, by its number.
@@ -392,6 +434,14 @@ impl Parse {
                 redirection = Some((word, fd.take()));
                 continue;
             }
+            // With `reading.unwrap`, the word after `nix develop -c` starts a
+            // call, as the one after `timeout 5` does.
+            let unwrapped = self.reading.unwrap
+                && !SEPARATORS.contains(&word.as_str())
+                && current.is_some_and(|at| runs_next(&self.found[at]));
+            if unwrapped {
+                current = None;
+            }
             let mut owner = None;
             if let Some(at) = current {
                 if SEPARATORS.contains(&word.as_str()) {
@@ -411,7 +461,7 @@ impl Parse {
                     self.found[at].args.push(word.clone());
                 }
             } else if SEPARATORS.contains(&word.as_str()) {
-            } else if at_command_position(prev.as_deref()) {
+            } else if unwrapped || at_command_position(prev.as_deref()) {
                 if is_assignment(&word) {
                     let (name, value) = word.split_once('=').unwrap_or((&word, ""));
                     let mut call = Call::new("=");
@@ -468,6 +518,10 @@ impl Parse {
             while let Some((_, rest)) = pieces.split_first().filter(|(first, _)| WRAPPERS.contains(&base_name(first))) {
                 pieces = rest;
             }
+            if let Some(end) = (1..pieces.len()).find(|&end| self.reading.unwrap && runs_next(&loose_call(&pieces[..end]))) {
+                self.found.push(loose_call(&pieces[..end]));
+                pieces = &pieces[end..];
+            }
             if let Some((first, rest)) = pieces.split_first() {
                 let mut call = Call::new(base_name(first));
                 call.args = rest.to_vec();
@@ -479,6 +533,27 @@ impl Parse {
         if let Some(last) = self.found.len().checked_sub(1) {
             self.claim(&pending, last);
         }
+    }
+}
+
+/// The call `pieces` make, the first naming it.
+fn loose_call(pieces: &[String]) -> Call {
+    let mut call = Call::new(base_name(&pieces[0]));
+    call.args = pieces[1..].to_vec();
+    call
+}
+
+/// Whether the word after `call`'s arguments so far starts a call of its
+/// own: after `nix develop ... -c`, `nix shell ... --command` or `direnv
+/// exec <dir>`.
+fn runs_next(call: &Call) -> bool {
+    match call.name.as_str() {
+        "nix" => {
+            call.args.iter().find(|arg| !arg.starts_with('-')).is_some_and(|sub| sub == "develop" || sub == "shell")
+                && call.args.last().is_some_and(|arg| arg == "-c" || arg == "--command")
+        }
+        "direnv" => matches!(call.args.as_slice(), [exec, _] if exec == "exec"),
+        _ => false,
     }
 }
 
@@ -959,11 +1034,11 @@ pub struct Located {
     pub folder: PathBuf,
 }
 
-/// The calls of `command`, and each one but `cd`, `pushd` and the
-/// assignments with where it runs: `cwd`, then wherever a `cd` or `pushd`
-/// before it went.
-pub fn located(command: &str, cwd: &Path) -> (Vec<Call>, Vec<Located>) {
-    let found = calls(command);
+/// The calls of `command`, read as `reading` says, and each one but `cd`,
+/// `pushd` and the assignments with where it runs: `cwd`, then wherever a
+/// `cd` or `pushd` before it went.
+pub fn located(command: &str, cwd: &Path, reading: Reading) -> (Vec<Call>, Vec<Located>) {
+    let found = calls_read(command, reading);
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let (mut folder, mut variables) = (cwd.to_path_buf(), HashMap::new());
     let mut placed = Vec::new();
@@ -1110,7 +1185,7 @@ mod tests {
         let text = |command: &str, name: &str| {
             let found = calls(command);
             let at = found.iter().position(|call| call.name == name).unwrap();
-            fed(&found, at).join("\n")
+            fed(&found, at, Reading::default()).join("\n")
         };
         let inline = "gh api graphql -f query=\"$(cat <<'EOF'\nmutation { updateProjectV2Field(input: {}) { x } }\nEOF\n)\"";
         assert!(text(inline, "gh").contains("updateProjectV2Field"));
@@ -1124,18 +1199,79 @@ mod tests {
     }
 
     #[test]
+    fn unwrapping_reads_the_call_nix_and_direnv_run() {
+        let read = |command: &str, unwrap: bool| -> Vec<(String, Vec<String>)> {
+            calls_read(command, Reading { unwrap, ..Reading::default() }).into_iter().map(|call| (call.name, call.args)).collect()
+        };
+        let fmt = "nix develop -c cargo fmt --all";
+        assert_eq!(read(fmt, false), vec![pair("nix", &["develop", "-c", "cargo", "fmt", "--all"])], "off, as ctx reads it");
+        assert_eq!(read(fmt, true), vec![pair("nix", &["develop", "-c"]), pair("cargo", &["fmt", "--all"])]);
+        assert_eq!(
+            read("nix develop /projects/x --command cargo test | tail -3", true),
+            vec![pair("nix", &["develop", "/projects/x", "--command"]), pair("cargo", &["test"]), pair("tail", &["-3"])]
+        );
+        assert_eq!(
+            read("nix shell nixpkgs#jq -c jq . f.json", true),
+            vec![pair("nix", &["shell", "nixpkgs#jq", "-c"]), pair("jq", &[".", "f.json"])]
+        );
+        assert_eq!(read("direnv exec . cargo build", true), vec![pair("direnv", &["exec", "."]), pair("cargo", &["build"])]);
+        let inner = read("nix develop -c bash -c 'git clean -fd && ls'", true);
+        assert!(inner.contains(&pair("git", &["clean", "-fd"])), "a bash -c it runs is read too: {inner:?}");
+        assert!(read("nix develop -c env FOO=1 cargo fmt --all", true).contains(&pair("cargo", &["fmt", "--all"])));
+        // Not a wrapper's end: no -c yet, another subcommand, or a dir not given.
+        assert_eq!(read("nix develop --impure", true), vec![pair("nix", &["develop", "--impure"])]);
+        assert_eq!(read("nix build -c x", true), vec![pair("nix", &["build", "-c", "x"])]);
+        assert_eq!(read("direnv allow .", true), vec![pair("direnv", &["allow", "."])]);
+        // The fallback for quotes shlex cannot pair unwraps the same way.
+        assert_eq!(read("nix develop -c cargo fmt --all 'open", true)[1], pair("cargo", &["fmt", "--all", "'open"]));
+        assert_eq!(read("nix develop -c cargo fmt --all 'open", false)[0].0, "nix");
+    }
+
+    #[test]
+    fn a_message_read_on_stdin_is_no_text_fed_with_messages() {
+        let text = |command: &str, name: &str, messages: bool| {
+            let reading = Reading { messages, ..Reading::default() };
+            let found = calls_read(command, reading);
+            let at = found.iter().position(|call| call.name == name).unwrap();
+            fed(&found, at, reading).join("\n")
+        };
+        let messages = [
+            ("git commit -q -F - <<'EOF'\nchore: git clean the tree\nEOF", "git"),
+            ("git -c user.name=x commit --file=- <<< 'git clean'", "git"),
+            ("printf 'git clean\\n' | git tag -a v1 -F -", "git"),
+            ("gh issue comment 107 -R o/r --body-file - <<'EOF'\nrun git clean\nEOF", "gh"),
+            ("gh release create v1 --notes-file - <<'EOF'\ngit clean\nEOF", "gh"),
+            ("ekko --note - <<'EOF'\nnever git clean here\nEOF", "ekko"),
+        ];
+        for (command, name) in messages {
+            assert!(text(command, name, false).contains("git clean"), "off, it counts: {command}");
+            assert!(!text(command, name, true).contains("git clean"), "on, a message is prose: {command}");
+        }
+        let still = [
+            ("gh api graphql -F query=@- <<'EOF'\nmutation { updateProjectV2Field }\nEOF", "gh"),
+            ("cat <<'EOF' | gh api graphql --input -\nupdateProjectV2Field\nEOF", "gh"),
+            ("python3 - <<'EOF'\nupdateProjectV2Field()\nEOF", "python3"),
+            ("git commit -m \"$(cat <<'EOF'\nupdateProjectV2Field\nEOF\n)\"", "git"),
+            ("git commit -F - -- \"$(echo updateProjectV2Field)\" <<'EOF'\nmsg\nEOF", "git"),
+        ];
+        for (command, name) in still {
+            assert!(text(command, name, true).contains("updateProjectV2Field"), "no message on stdin, or a substitution: {command}");
+        }
+    }
+
+    #[test]
     fn located_follows_cd_pushd_and_the_command_s_variables() {
         let root = crate::paths::test_dir("shell-located");
         std::fs::create_dir_all(root.join("repo/sub")).unwrap();
         let root = std::fs::canonicalize(&root).unwrap();
         let command = format!("git status; cd {0}/repo && ls; D={0}/repo/sub; cd \"$D\" && git log; cd nowhere; pwd", root.display());
-        let (found, placed) = located(&command, Path::new("/"));
+        let (found, placed) = located(&command, Path::new("/"), Reading::default());
         let at = |name: &str| placed.iter().filter(|p| found[p.at].name == name).map(|p| p.folder.clone()).collect::<Vec<_>>();
         assert_eq!(at("git"), vec![PathBuf::from("/"), root.join("repo/sub")]);
         assert_eq!(at("ls"), vec![root.join("repo")]);
         assert_eq!(at("pwd"), vec![root.join("repo/sub")], "a cd to a folder that is not there leaves it");
         let globbed = format!("cd {}/re* && ls", root.display());
-        let (found, placed) = located(&globbed, Path::new("/"));
+        let (found, placed) = located(&globbed, Path::new("/"), Reading::default());
         assert_eq!((found[placed[0].at].name.as_str(), placed[0].folder.clone()), ("ls", root.join("repo")));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1153,7 +1289,7 @@ mod tests {
         for line in std::fs::read_to_string(corpus).unwrap().lines() {
             let item: serde_json::Value = serde_json::from_str(line).unwrap();
             let cwd = item["cwd"].as_str().filter(|cwd| !cwd.is_empty()).unwrap_or("/");
-            let (found, placed) = located(item["command"].as_str().unwrap(), Path::new(cwd));
+            let (found, placed) = located(item["command"].as_str().unwrap(), Path::new(cwd), Reading::default());
             let calls: Vec<serde_json::Value> = (0..found.len())
                 .map(|i| {
                     let c = &found[i];
