@@ -240,7 +240,8 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
 
 /// The cues the calls of `command`, run from `cwd` and read as `reading`
 /// says, hit: a call of the cue's command, in its folder or under it, whose
-/// arguments and what is fed to it hold every one of its words.
+/// arguments and what is fed to it hold every one of its words, a message
+/// it is given aside (see `shell::heard`).
 fn hits<'a>(cues: &'a [Indexed], command: &str, cwd: &Path, reading: Reading) -> Vec<&'a Indexed> {
     let (calls, placed) = crate::shell::located(command, cwd, reading);
     let mut found: Vec<&Indexed> = Vec::new();
@@ -250,8 +251,8 @@ fn hits<'a>(cues: &'a [Indexed], command: &str, cwd: &Path, reading: Reading) ->
             if cue.guards.as_deref().is_some_and(|folder| !under(&place.folder, folder)) {
                 continue;
             }
-            let fed = crate::shell::fed(&calls, place.at, reading);
-            let held = |word: &String| call.args.iter().chain(&fed).any(|text| holds(text, word));
+            let heard = crate::shell::heard(&calls, place.at, reading);
+            let held = |word: &String| heard.iter().any(|text| holds(text, word));
             if cue.cue.words.iter().all(held) && !found.iter().any(|hit| hit.board == cue.board && hit.id == cue.id) {
                 found.push(cue);
             }
@@ -551,7 +552,7 @@ fn cue_reasons(home: &Path, index: &Index, seen: &Seen) -> Vec<String> {
     if seen.tool != "Bash" || !index.cues.iter().any(|cue| seen.call.contains(cue.cue.command.as_str())) {
         return Vec::new();
     }
-    let found = hits(&index.cues, &seen.call, Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd }), Reading::default());
+    let found = hits(&index.cues, &seen.call, Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd }), Reading::GUARD);
     let folders = boards(home);
     found
         .iter()
@@ -855,6 +856,78 @@ mod tests {
             "ls",
         ] {
             assert_eq!(at(passes), None, "{passes}");
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Each wrapper the guard sees through, as the user chose on the replay
+    /// (decision 1569, task 1076): the call it runs is refused, and a call
+    /// that only names the cue's command among the wrapper's own words is not.
+    #[test]
+    fn a_cue_refuses_the_call_a_wrapper_runs() {
+        let home = home("wrapped");
+        let (session, _, _) = test_sessions();
+        cued(&home.join(".ekko"), "Never format the whole workspace.", cue("cargo", &["fmt", "--all"], Some(Path::new("/"))));
+        let at = |command: &str| refused(&hook_reply(&home, &event(command, Path::new("/"), "t"), &session)).is_some();
+        for wrapped in [
+            "nix develop -c cargo fmt --all",
+            "nix develop --command cargo fmt --all",
+            "nix develop /projects/x#dev --impure -c cargo fmt --all",
+            "nix shell nixpkgs#cargo -c cargo fmt --all",
+            "nix shell nixpkgs#cargo nixpkgs#rustfmt --command cargo fmt --all",
+            "direnv exec . cargo fmt --all",
+            "nix develop -c bash -c 'cargo fmt --all && cargo test'",
+            "timeout 600 nix develop -c env RUST_LOG=1 cargo fmt --all 2>&1 | tail -3",
+        ] {
+            assert!(at(wrapped), "{wrapped}");
+        }
+        for named in [
+            "nix shell nixpkgs#cargo -c rustfmt --all src/main.rs",
+            "nix develop .#cargo --command make fmt --all",
+            "direnv exec ./cargo ls --all",
+            "nix develop -c cargo build --all",
+            "nix develop --command echo cargo fmt --all",
+            "nix build .#cargo --all",
+            "echo 'nix develop -c cargo fmt --all'",
+        ] {
+            assert!(!at(named), "{named}");
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A cue's words do not match a message a call is given, each way one
+    /// reaches it here (decision 1569, task 1077), while the GraphQL that a
+    /// mutation is sent with, on stdin or not, still does.
+    #[test]
+    fn a_cue_s_words_match_no_message_and_still_match_a_query() {
+        let home = home("messages");
+        let (session, _, _) = test_sessions();
+        cued(&home.join(".ekko"), "git clean takes the board's files.", cue("git", &["clean"], Some(Path::new("/"))));
+        cued(&home.join(".ekko"), "Status options.", cue("gh", &["api", "graphql", "updateProjectV2Field"], Some(Path::new("/"))));
+        cued(&home.join(".ekko"), "Never by hand.", cue("ekko", &["--prime", "--hook"], Some(Path::new("/"))));
+        let at = |command: &str| refused(&hook_reply(&home, &event(command, Path::new("/"), "t"), &session)).is_some();
+        for refused_still in [
+            "git clean -fdx",
+            "git commit -qm 'tidy' && git clean -fd",
+            "nix develop -c git clean -n",
+            "gh api graphql -F query=@- <<'EOF'\nmutation { updateProjectV2Field(input: {}) { x } }\nEOF",
+            "cat <<'EOF' | gh api graphql --input -\nupdateProjectV2Field\nEOF",
+            "gh api graphql -f query=\"$(cat <<'EOF'\nmutation { updateProjectV2Field(input: {}) { x } }\nEOF\n)\"",
+            "echo '{}' | ekko --prime --hook",
+        ] {
+            assert!(at(refused_still), "{refused_still}");
+        }
+        for message in [
+            "git commit -q -F - <<'EOF'\nfix: git clean no longer runs in a board's folder\nEOF",
+            "git commit -m 'git clean, explained'",
+            "git commit -qam \"$(cat <<'EOF'\nafter a git clean\nEOF\n)\"",
+            "nix develop -c git commit -m 'git clean'",
+            "gh issue create --title 'gh api graphql updateProjectV2Field' --body-file - <<'EOF'\nupdateProjectV2Field cleared it\nEOF",
+            "gh pr comment 3 --body 'gh api graphql updateProjectV2Field'",
+            "ekko --note 'never run ekko --prime --hook by hand'",
+            "ekko --note - <<'EOF'\nekko --prime --hook writes the session's record\nEOF",
+        ] {
+            assert!(!at(message), "{message}");
         }
         std::fs::remove_dir_all(&home).ok();
     }
@@ -1317,11 +1390,12 @@ mod tests {
     /// replay counts what each would have refused (task 1021, step 4): the
     /// file `EKKO_CUES` names holds [{"id", "command", "words", "folder"}],
     /// the file `EKKO_CUE_CORPUS` names a {"id", "command", "cwd"} per line,
-    /// and each call a cue hits goes to the file `EKKO_CUE_OUT` names.
-    /// `EKKO_CUE_READING` turns on parts of `Reading`, as `unwrap,messages`
-    /// (task 1074). Run by hand over the transcripts' commands, which no
-    /// public repository may hold: `cargo test --release -- --ignored
-    /// replays_cues`.
+    /// and each call a cue hits goes to the file `EKKO_CUE_OUT` names. The
+    /// calls are read as the guard reads them, unless `EKKO_CUE_READING`
+    /// names the parts of `Reading` to turn on, as `unwrap` -- empty, none,
+    /// as ctx reads them (task 1074). Run by hand over the transcripts'
+    /// commands, which no public repository may hold: `cargo test --release
+    /// -- --ignored replays_cues`.
     #[test]
     #[ignore]
     fn replays_cues() {
@@ -1331,10 +1405,14 @@ mod tests {
             return;
         };
         let cues: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(cues).unwrap()).unwrap();
-        let parts = std::env::var("EKKO_CUE_READING").unwrap_or_default();
-        let parts: Vec<&str> = parts.split(',').filter(|part| !part.is_empty()).collect();
-        assert!(parts.iter().all(|part| ["unwrap", "messages"].contains(part)), "EKKO_CUE_READING: {parts:?}");
-        let reading = Reading { unwrap: parts.contains(&"unwrap"), messages: parts.contains(&"messages") };
+        let reading = match std::env::var("EKKO_CUE_READING") {
+            Err(_) => Reading::GUARD,
+            Ok(parts) => {
+                let parts: Vec<&str> = parts.split(',').filter(|part| !part.is_empty()).collect();
+                assert!(parts.iter().all(|part| ["unwrap", "messages"].contains(part)), "EKKO_CUE_READING: {parts:?}");
+                Reading { unwrap: parts.contains(&"unwrap"), messages: parts.contains(&"messages") }
+            }
+        };
         let indexed: Vec<Indexed> = cues
             .iter()
             .map(|cue| Indexed {

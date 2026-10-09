@@ -793,8 +793,9 @@ pub struct Cue {
     pub command: String,
     /// Words its arguments must all hold, each as a whole argument or a
     /// whole word inside one -- a GraphQL query, say -- or in what is fed to
-    /// the call: a here-document, or the text of a `$(...)`. None guards
-    /// every call of the command.
+    /// the call: a here-document, or the text of a `$(...)`. A message the
+    /// call is given never counts (`shell::heard`). None guards every call
+    /// of the command.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<String>,
     /// The folder a call must run in or under, absolute. Absent, the folder

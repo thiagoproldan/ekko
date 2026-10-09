@@ -1885,7 +1885,7 @@ fn tool_definitions(linked: &[String]) -> Value {
         json!({
             "gotcha": item,
             "command": {"type": "string", "description": "As a call names it: gh, cargo."},
-            "words": {"type": "array", "items": {"type": "string"}, "description": "What its arguments, or what is fed to it, must all hold."},
+            "words": {"type": "array", "items": {"type": "string"}, "description": "What its arguments, or what is fed to it, must all hold -- a message it is given, as git commit -m's, never counts."},
             "folder": {"type": "string", "description": "Where it applies. Absent: this board's project folder, or the whole machine on the default board."},
             "off": {"type": "boolean", "description": "Proposes turning the gotcha's cue off instead."}
         }),

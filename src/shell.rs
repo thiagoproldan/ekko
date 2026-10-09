@@ -1,14 +1,12 @@
 //! The calls a Bash tool command runs, in order, and what reaches each one.
 //!
 //! A port of ctx's `src/lib/shell_calls.py` (ekko task 805), whose lexer was
-//! replayed on the 30,334 tool calls of this machine's transcripts (note 797):
-//! ekko cannot depend on ctx, and a guard keyed on a different reading of the
-//! same command would disagree with the one already proven. Quotes, comments,
-//! `$(...)` and backticks, `bash -c` strings and here-documents are read the
-//! way that lexer reads them, down to the tokenizer it borrows from Python's
-//! `shlex` (posix, `punctuation_chars`, `whitespace_split`). A word that only
-//! names a command, in an echo, a commit message or a here-document, is not a
-//! call.
+//! replayed on the 30,334 tool calls of this machine's transcripts (note 797),
+//! since ekko cannot depend on ctx. Quotes, comments, `$(...)` and
+//! backticks, `bash -c` strings and here-documents are read the way that
+//! lexer reads them, down to the tokenizer it borrows from Python's `shlex`
+//! (posix, `punctuation_chars`, `whitespace_split`). A word that only names a
+//! command, in an echo, a commit message or a here-document, is not a call.
 //!
 //! One addition: each call carries what is fed to it beyond its arguments, as
 //! far as the command's own text holds it -- its here-documents and
@@ -16,6 +14,12 @@
 //! arguments, and what the calls piped into it are given. A cue's words match
 //! there too, so a GraphQL mutation passed through `-f query="$(cat <<'EOF'`
 //! is seen, while a here-document written to a file still names nothing.
+//!
+//! The guard reads past that lexer in two ways, `Reading::GUARD`, which the
+//! user chose on a replay of this machine's calls (decision 1569, note 1561):
+//! it unwraps `nix develop -c` and its kin, and leaves out the message a call
+//! is given. `calls` keeps the Python's reading, which the corpus test holds
+//! the port to.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,15 +49,20 @@ const MARK_CLOSE: char = '\u{E001}';
 
 /// How far a reading goes past ctx's lexer: each part is off by default, so
 /// `calls` reads as the Python does. These are the two changes of the cue
-/// gaps' plan (artifact 1071), replayed before the user decides on them.
+/// gaps' plan (artifact 1071), which a replay can turn on one at a time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Reading {
     /// `nix develop ... -c`, `nix shell ... --command` and `direnv exec
     /// <dir>` run the call after them, as `timeout` does.
     pub unwrap: bool,
-    /// What reaches a call on stdin is prose when the call reads a message
-    /// there, as `git commit -F -` does: `fed` leaves it out.
+    /// A message a call is given -- a commit's, an issue's, an ekko note's,
+    /// as a flag's value or on stdin -- is prose: `heard` leaves it out.
     pub messages: bool,
+}
+
+impl Reading {
+    /// The guard's: both parts.
+    pub const GUARD: Reading = Reading { unwrap: true, messages: true };
 }
 
 /// Where what a call prints ends up.
@@ -98,8 +107,8 @@ pub struct Call {
     /// substitution in its arguments: see `fed` for all that reaches it.
     pub input: Vec<String>,
     /// The substitutions its arguments hold, by the index of their first
-    /// call and the index after their last.
-    substitutions: Vec<(usize, usize)>,
+    /// call, the index after their last, and the argument holding them.
+    substitutions: Vec<(usize, usize, Option<usize>)>,
 }
 
 impl Call {
@@ -150,18 +159,29 @@ pub fn output(calls: &[Call], at: usize) -> Sink {
 
 /// All the text that reaches `calls[at]` beyond its own arguments: its
 /// here-documents and here-strings, and the arguments and input of every
-/// call in its substitutions and of every call piped into it. With
-/// `reading.messages`, a call that reads a message on stdin is fed only
-/// what its substitutions hold.
-pub fn fed(calls: &[Call], at: usize, reading: Reading) -> Vec<String> {
+/// call in its substitutions and of every call piped into it. The guard
+/// reads it within `heard`.
+#[cfg(test)]
+pub fn fed(calls: &[Call], at: usize) -> Vec<String> {
     let mut texts = Vec::new();
-    let mut seen = vec![false; calls.len()];
-    let stdin = !(reading.messages && reads_message(&calls[at]));
-    gather(calls, at, &mut texts, &mut seen, false, stdin);
+    gather(calls, at, &mut texts, &mut vec![false; calls.len()], false, &Message::default());
     texts
 }
 
-fn gather(calls: &[Call], at: usize, texts: &mut Vec<String>, seen: &mut [bool], with_args: bool, stdin: bool) {
+/// What a cue's words are matched against in `calls[at]`: its arguments and
+/// all that is fed to it -- with `reading.messages`, less a message it is
+/// given, and what reaches it through one.
+pub fn heard(calls: &[Call], at: usize, reading: Reading) -> Vec<String> {
+    let message = if reading.messages { message(&calls[at]) } else { Message::default() };
+    let args = calls[at].args.iter().enumerate().filter(|(arg, _)| !message.args.contains(arg));
+    let mut texts: Vec<String> = args.map(|(_, text)| text.clone()).collect();
+    gather(calls, at, &mut texts, &mut vec![false; calls.len()], false, &message);
+    texts
+}
+
+/// Adds what reaches `calls[at]` to `texts`, its arguments too when
+/// `with_args`, but for what `message` says is its message.
+fn gather(calls: &[Call], at: usize, texts: &mut Vec<String>, seen: &mut [bool], with_args: bool, message: &Message) {
     if std::mem::replace(&mut seen[at], true) {
         return;
     }
@@ -169,37 +189,143 @@ fn gather(calls: &[Call], at: usize, texts: &mut Vec<String>, seen: &mut [bool],
     if with_args {
         texts.extend(call.args.iter().cloned());
     }
-    if stdin {
+    if !message.stdin {
         texts.extend(call.input.iter().cloned());
     }
-    for &(start, end) in &call.substitutions {
+    for &(start, end, arg) in &call.substitutions {
+        if arg.is_some_and(|arg| message.args.contains(&arg)) {
+            continue;
+        }
         for inner in start..end.min(calls.len()) {
-            gather(calls, inner, texts, seen, true, true);
+            gather(calls, inner, texts, seen, true, &Message::default());
         }
     }
     for (from, other) in calls.iter().enumerate() {
-        if stdin && other.piped_to == Some(at) {
-            gather(calls, from, texts, seen, true, true);
+        if !message.stdin && other.piped_to == Some(at) {
+            gather(calls, from, texts, seen, true, &Message::default());
         }
     }
 }
 
-/// Whether `call` reads a message on stdin -- prose that may name commands,
-/// not one: `git commit -F -`, `gh issue comment --body-file -`, `ekko
-/// --note -`. A script fed to `python3 -` or a query to `gh api` is no
-/// message, and still counts.
-fn reads_message(call: &Call) -> bool {
-    let dash = |flags: &[&str]| {
-        call.args.windows(2).any(|pair| flags.contains(&pair[0].as_str()) && pair[1] == "-")
-            || call.args.iter().any(|arg| arg.split_once('=').is_some_and(|(flag, value)| value == "-" && flags.contains(&flag)))
-    };
-    let has = |words: &[&str]| call.args.iter().any(|arg| words.contains(&arg.as_str()));
+/// The message a call is given: prose that may name commands, not run them.
+#[derive(Debug, Default, PartialEq)]
+struct Message {
+    /// The arguments that are one, by index.
+    args: Vec<usize>,
+    /// Whether what reaches it on stdin is one.
+    stdin: bool,
+}
+
+/// The message `call` is given, as the commands that take one on this
+/// machine read it (task 1077): a commit's, a tag's, a merge's, a note's or
+/// a stash's in `git`, `-m` or `-F -`; a pull request's, an issue's or a
+/// release's in `gh`, its title and body, `--body-file -` included; and an
+/// ekko task's or note's words, `-` reading them on stdin. `gh api` takes no
+/// message, so a query sent through it still counts, as a script fed to
+/// `python3 -` does.
+fn message(call: &Call) -> Message {
+    let args = &call.args;
     match call.name.as_str() {
-        "git" => has(&["commit", "tag", "merge", "notes"]) && dash(&["-F", "--file"]),
-        "gh" => call.args.first().is_some_and(|sub| sub != "api") && dash(&["-F", "--body-file", "--notes-file"]),
-        "ekko" => has(&["--task", "--note", "--edit"]) && call.args.iter().filter(|arg| *arg == "-").count() == 1,
-        _ => false,
+        "git" => {
+            let command = operand_indices(args, &["-c", "-C", "--git-dir", "--work-tree", "--namespace"]).first().map(|at| args[*at].as_str());
+            if !matches!(command, Some("commit" | "tag" | "merge" | "notes" | "stash")) {
+                return Message::default();
+            }
+            flagged(args, &["-m", "--message"], &["-F", "--file"], Some(("mFCctX", "Su")))
+        }
+        "gh" => {
+            let (said, read): (&[&str], &[&str]) = match (args.first().map(String::as_str), args.get(1).map(String::as_str)) {
+                (Some("pr" | "issue"), Some("close")) => (&["-c", "--comment"], &[]),
+                (Some("pr" | "issue"), Some("comment" | "review")) => (&["-b", "--body"], &["-F", "--body-file"]),
+                (Some("pr" | "issue"), Some("create" | "edit")) => (&["-t", "--title", "-b", "--body"], &["-F", "--body-file"]),
+                (Some("pr"), Some("merge")) => (&["-t", "--subject", "-b", "--body"], &["-F", "--body-file"]),
+                (Some("release"), Some("create" | "edit")) => (&["-t", "--title", "-n", "--notes"], &["-F", "--notes-file"]),
+                _ => return Message::default(),
+            };
+            flagged(args, said, read, None)
+        }
+        "ekko" if args.iter().any(|arg| matches!(arg.as_str(), "--task" | "-t" | "--note" | "-n" | "--edit" | "-e")) => {
+            let words = operand_indices(args, EKKO_VALUED);
+            Message { stdin: words.iter().filter(|at| args[**at] == "-").count() == 1, args: words }
+        }
+        _ => Message::default(),
     }
+}
+
+/// The options of ekko's own command line that take a value.
+const EKKO_VALUED: &[&str] = &[
+    "--project", "--ekko-dir", "--kind", "--supersedes", "--phase", "--move-to", "--context", "--refuse", "--link-project",
+    "--unlink-project", "--name", "--idle",
+];
+
+/// The message in `args` given through `said`, flags whose value is one, or
+/// through `read`, flags naming a file to read one from, which say stdin
+/// with `-`. With `cluster` -- the short flags that take a value, and those
+/// whose value can only be the rest of their word, as git's `-S[<keyid>]`
+/// -- a cluster of short flags is read as git reads `-am "..."` or `-mfix`:
+/// each letter a flag, up to the first that takes a value, which takes the
+/// rest of the word or else the next.
+fn flagged(args: &[String], said: &[&str], read: &[&str], cluster: Option<(&str, &str)>) -> Message {
+    let mut message = Message::default();
+    let mut at = 0;
+    while at < args.len() {
+        let arg = args[at].as_str();
+        if arg == "--" {
+            break;
+        }
+        let next = args.get(at + 1).map(String::as_str);
+        if said.contains(&arg) {
+            message.args.push(at + 1);
+            at += 1;
+        } else if read.contains(&arg) {
+            message.stdin |= next == Some("-");
+            at += 1;
+        } else if let Some((flag, value)) = arg.split_once('=').filter(|(flag, _)| flag.starts_with("--")) {
+            if said.contains(&flag) {
+                message.args.push(at);
+            }
+            message.stdin |= read.contains(&flag) && value == "-";
+        } else if let (Some((valued, stuck)), Some(letters)) = (cluster, arg.strip_prefix('-').filter(|rest| !rest.starts_with('-'))) {
+            let taking = letters.char_indices().find(|(_, letter)| valued.contains(*letter) || stuck.contains(*letter));
+            if let Some((place, letter)) = taking.filter(|(_, letter)| !stuck.contains(*letter)) {
+                let rest = &letters[place + letter.len_utf8()..];
+                let flag = format!("-{letter}");
+                if rest.is_empty() {
+                    if said.contains(&flag.as_str()) {
+                        message.args.push(at + 1);
+                    }
+                    message.stdin |= read.contains(&flag.as_str()) && next == Some("-");
+                    at += 1;
+                } else {
+                    if said.contains(&flag.as_str()) {
+                        message.args.push(at);
+                    }
+                    message.stdin |= read.contains(&flag.as_str()) && rest == "-";
+                }
+            }
+        }
+        at += 1;
+    }
+    message.args.retain(|at| *at < args.len());
+    message
+}
+
+/// The indices of the arguments that are not options, as `operands` finds
+/// them.
+fn operand_indices(args: &[String], valued: &[&str]) -> Vec<usize> {
+    let (mut found, mut skip, mut dashes) = (Vec::new(), false, false);
+    for (at, arg) in args.iter().enumerate() {
+        if skip {
+            skip = false;
+        } else if dashes || !arg.starts_with('-') || arg == "-" {
+            found.push(at);
+        } else if arg == "--" {
+            dashes = true;
+        } else if valued.contains(&arg.as_str()) {
+            skip = true;
+        }
+    }
+    found
 }
 /// Each call `command` runs, in the order written; the calls inside
 /// `$(...)`, `<(...)` and backticks come after the rest. `piped_to` and
@@ -214,8 +340,8 @@ pub fn calls_read(command: &str, reading: Reading) -> Vec<Call> {
     parse.calls_into(command, Sink::Shown);
     let Parse { mut found, owners, spans, .. } = parse;
     for (owner, span) in owners.into_iter().zip(spans) {
-        if let (Some(owner), Some(span)) = (owner, span) {
-            found[owner].substitutions.push(span);
+        if let (Some((owner, arg)), Some((start, end))) = (owner, span) {
+            found[owner].substitutions.push((start, end, arg));
         }
     }
     found
@@ -229,9 +355,10 @@ struct Parse {
     found: Vec<Call>,
     /// Each here-document's body, and whether a call has it yet.
     bodies: Vec<(String, bool)>,
-    /// For each substitution, the call whose words held it, and the calls it
-    /// runs: the index of the first, and the one after the last.
-    owners: Vec<Option<usize>>,
+    /// For each substitution, the call whose words held it and the argument
+    /// that did, if one did, and the calls it runs: the index of the first,
+    /// and the one after the last.
+    owners: Vec<Option<(usize, Option<usize>)>>,
     spans: Vec<Option<(usize, usize)>>,
     reading: Reading,
 }
@@ -301,8 +428,9 @@ impl Parse {
     }
 
     /// Hands what `marks` stand for to the call at `owner`: a here-document's
-    /// body to read, or a substitution among its words.
-    fn claim(&mut self, marks: &[Mark], owner: usize) {
+    /// body to read, or a substitution among its words, in its argument at
+    /// `arg` when one holds it.
+    fn claim(&mut self, marks: &[Mark], owner: usize, arg: Option<usize>) {
         for mark in marks {
             match *mark {
                 Mark::Heredoc(number) => {
@@ -313,7 +441,7 @@ impl Parse {
                 }
                 Mark::Substitution(number) => {
                     if let Some(slot) = self.owners.get_mut(number) {
-                        slot.get_or_insert(owner);
+                        slot.get_or_insert((owner, arg));
                     }
                 }
             }
@@ -420,7 +548,7 @@ impl Parse {
                 match current {
                     Some(at) => {
                         self.found[at].redirect(&operator, descriptor.as_deref(), &word);
-                        self.claim(&marks, at);
+                        self.claim(&marks, at, None);
                     }
                     None => pending.extend(marks),
                 }
@@ -442,7 +570,7 @@ impl Parse {
             if unwrapped {
                 current = None;
             }
-            let mut owner = None;
+            let (mut owner, mut arg) = (None, None);
             if let Some(at) = current {
                 if SEPARATORS.contains(&word.as_str()) {
                     piping = if word == "|" || word == "|&" { Some(at) } else { None };
@@ -456,7 +584,7 @@ impl Parse {
                             call.parent = call.parent.or(Some(at));
                         }
                     } else {
-                        owner = Some(at);
+                        (owner, arg) = (Some(at), Some(self.found[at].args.len()));
                     }
                     self.found[at].args.push(word.clone());
                 }
@@ -479,18 +607,18 @@ impl Parse {
                         current = Some(at);
                         owner = Some(at);
                         let waiting = std::mem::take(&mut pending);
-                        self.claim(&waiting, at);
+                        self.claim(&waiting, at, None);
                     }
                 }
             }
             match owner {
-                Some(at) => self.claim(&marks, at),
+                Some(at) => self.claim(&marks, at, arg),
                 None => pending.extend(marks),
             }
             prev = Some(word);
         }
         if let Some(last) = self.found.len().checked_sub(1) {
-            self.claim(&pending, last);
+            self.claim(&pending, last, None);
         }
     }
 
@@ -527,11 +655,11 @@ impl Parse {
                 call.args = rest.to_vec();
                 self.found.push(call);
                 let waiting = std::mem::take(&mut pending);
-                self.claim(&waiting, self.found.len() - 1);
+                self.claim(&waiting, self.found.len() - 1, None);
             }
         }
         if let Some(last) = self.found.len().checked_sub(1) {
-            self.claim(&pending, last);
+            self.claim(&pending, last, None);
         }
     }
 }
@@ -1185,7 +1313,7 @@ mod tests {
         let text = |command: &str, name: &str| {
             let found = calls(command);
             let at = found.iter().position(|call| call.name == name).unwrap();
-            fed(&found, at, Reading::default()).join("\n")
+            fed(&found, at).join("\n")
         };
         let inline = "gh api graphql -f query=\"$(cat <<'EOF'\nmutation { updateProjectV2Field(input: {}) { x } }\nEOF\n)\"";
         assert!(text(inline, "gh").contains("updateProjectV2Field"));
@@ -1227,35 +1355,66 @@ mod tests {
         assert_eq!(read("nix develop -c cargo fmt --all 'open", false)[0].0, "nix");
     }
 
+    /// Every way a message reaches a call here, each holding "clean" where
+    /// nothing else in the command does (task 1077): heard without it once
+    /// `messages` is on, and with it while it is off.
     #[test]
-    fn a_message_read_on_stdin_is_no_text_fed_with_messages() {
-        let text = |command: &str, name: &str, messages: bool| {
+    fn a_message_a_call_is_given_is_not_heard_with_messages() {
+        let hears = |command: &str, name: &str, messages: bool| {
             let reading = Reading { messages, ..Reading::default() };
             let found = calls_read(command, reading);
-            let at = found.iter().position(|call| call.name == name).unwrap();
-            fed(&found, at, reading).join("\n")
+            let at = found.iter().position(|call| call.name == name).unwrap_or_else(|| panic!("no {name} in {command}"));
+            heard(&found, at, reading).iter().any(|text| text.contains("clean"))
         };
         let messages = [
             ("git commit -q -F - <<'EOF'\nchore: git clean the tree\nEOF", "git"),
             ("git -c user.name=x commit --file=- <<< 'git clean'", "git"),
+            ("git commit -F- <<< clean", "git"),
             ("printf 'git clean\\n' | git tag -a v1 -F -", "git"),
+            ("git merge --no-ff topic -F - <<'EOF'\nclean\nEOF", "git"),
+            ("git commit -m 'git clean ran'", "git"),
+            ("git commit --message clean", "git"),
+            ("git -C /tmp commit --message='clean'", "git"),
+            ("git commit -m\"clean up\"", "git"),
+            ("git commit -qam \"$(cat <<'EOF'\nafter git clean\nEOF\n)\"", "git"),
+            ("git commit -S -s -m clean", "git"),
+            ("git tag -a v1 -m clean", "git"),
+            ("git notes add -m clean", "git"),
+            ("git stash push -m clean", "git"),
             ("gh issue comment 107 -R o/r --body-file - <<'EOF'\nrun git clean\nEOF", "gh"),
-            ("gh release create v1 --notes-file - <<'EOF'\ngit clean\nEOF", "gh"),
+            ("gh issue comment 107 -F - <<< 'git clean'", "gh"),
+            ("gh pr create --title 'git clean' --body \"$(cat <<'EOF'\nclean\nEOF\n)\"", "gh"),
+            ("gh pr create -t clean -b clean", "gh"),
+            ("gh issue create --title=clean --body=clean", "gh"),
+            ("gh pr merge 5 --subject clean --body clean", "gh"),
+            ("gh issue close 5 -c clean", "gh"),
+            ("gh pr review 5 --comment -b clean", "gh"),
+            ("gh release create v1 --notes-file - <<'EOF'\nclean\nEOF", "gh"),
+            ("gh release create v1 -n clean -t clean", "gh"),
             ("ekko --note - <<'EOF'\nnever git clean here\nEOF", "ekko"),
+            ("ekko --note 'never git clean here'", "ekko"),
+            ("ekko --project p -t @spec clean the tree", "ekko"),
+            ("ekko --edit 12 clean", "ekko"),
         ];
         for (command, name) in messages {
-            assert!(text(command, name, false).contains("git clean"), "off, it counts: {command}");
-            assert!(!text(command, name, true).contains("git clean"), "on, a message is prose: {command}");
+            assert!(hears(command, name, false), "off, a message counts: {command}");
+            assert!(!hears(command, name, true), "on, a message is prose: {command}");
         }
         let still = [
-            ("gh api graphql -F query=@- <<'EOF'\nmutation { updateProjectV2Field }\nEOF", "gh"),
-            ("cat <<'EOF' | gh api graphql --input -\nupdateProjectV2Field\nEOF", "gh"),
-            ("python3 - <<'EOF'\nupdateProjectV2Field()\nEOF", "python3"),
-            ("git commit -m \"$(cat <<'EOF'\nupdateProjectV2Field\nEOF\n)\"", "git"),
-            ("git commit -F - -- \"$(echo updateProjectV2Field)\" <<'EOF'\nmsg\nEOF", "git"),
+            ("gh api graphql -F query=@- <<'EOF'\nmutation { clean }\nEOF", "gh"),
+            ("cat <<'EOF' | gh api graphql --input -\nclean\nEOF", "gh"),
+            ("gh api repos/o/r/issues/1/comments -f body='clean'", "gh"),
+            ("gh pr checkout -b clean 5", "gh"),
+            ("python3 - <<'EOF'\nclean()\nEOF", "python3"),
+            ("git commit -F - -- \"$(echo clean)\" <<'EOF'\nmsg\nEOF", "git"),
+            ("git commit -m msg -- clean.txt", "git"),
+            ("git commit -c clean -m msg", "git"),
+            ("git log --grep clean -m", "git"),
+            ("git clean -fdx", "git"),
+            ("ekko --find clean", "ekko"),
         ];
         for (command, name) in still {
-            assert!(text(command, name, true).contains("updateProjectV2Field"), "no message on stdin, or a substitution: {command}");
+            assert!(hears(command, name, true), "no message, or not in one: {command}");
         }
     }
 
