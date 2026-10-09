@@ -484,6 +484,8 @@ fn run_artifact(args: &[String], json_first: bool) -> ExitCode {
     };
     let root = location.project.as_ref().and_then(|project| project.root.clone());
     let written = Ekko::at(&location).and_then(|ekko| {
+        // The page is a file beside the board, written as the board is (task 1576).
+        ekko.storage.writable()?;
         let all = ekko.storage.get_shared()?;
         let id = ekko.validate_ids(std::slice::from_ref(&cli.id), &all)?[0];
         let item = &all[&id];
@@ -744,9 +746,12 @@ fn dispatch(
         return Ok(vec![ekko.edit_description(&described(&cli.input)?)?]);
     }
     if let Some(file) = &cli.menu {
+        // A menu answers on the board: refused there, it opens on nothing (task 1576).
+        ekko.storage.writable()?;
         return menu::run_file(ekko, file);
     }
     if cli.answer {
+        ekko.storage.writable()?;
         // An id alone, in a terminal: ekko's menu on that question.
         if cli.input.len() == 1 && std::io::IsTerminal::is_terminal(&std::io::stdin().lock()) {
             return menu::run_one(ekko, &cli.input[0]);

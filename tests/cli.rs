@@ -1483,3 +1483,77 @@ fn a_copy_of_a_projects_folder_leaves_the_projects_copy_alone() {
     assert!(fs::read_to_string(&copy).unwrap().contains("from the project again"));
     fs::remove_dir_all(&dir).ok();
 }
+
+/// Each file and folder under `dir`, with its inode and its bytes: what a
+/// write anywhere in it changes.
+fn files_under(dir: &std::path::Path) -> std::collections::BTreeMap<PathBuf, (u64, Vec<u8>)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let mut found = std::collections::BTreeMap::new();
+    let mut left = vec![dir.to_path_buf()];
+    while let Some(at) = left.pop() {
+        for entry in fs::read_dir(&at).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            let bytes = if meta.is_dir() { Vec::new() } else { fs::read(&path).unwrap() };
+            if meta.is_dir() {
+                left.push(path.clone());
+            }
+            found.insert(path, (meta.ino(), bytes));
+        }
+    }
+    found
+}
+
+/// An ekko whose HOME is not the user's -- a test's, a script's -- writes
+/// nothing on a project's board it found by walking up outside that HOME,
+/// opens no menu there and writes no page beside it, and says how to name
+/// a board; it still reads (task 1576). Four times a check run that way
+/// wrote the real board. With EKKO_DIR naming the board, or from the HOME
+/// the board lies in, the same write lands.
+#[test]
+fn a_scratch_home_writes_nothing_on_a_board_it_found_outside_it() {
+    let dir = temp_ekko_dir();
+    let (site, scratch) = (dir.join("site"), dir.join("scratch"));
+    fs::create_dir_all(&site).unwrap();
+    fs::create_dir_all(&scratch).unwrap();
+    let ekko = |home: &PathBuf, named: Option<&PathBuf>, args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
+        command
+            .args(args)
+            .current_dir(&site)
+            .env("HOME", home)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("CLAUDECODE");
+        if let Some(named) = named {
+            command.env("EKKO_DIR", named);
+        }
+        let output = command.output().unwrap();
+        (output.status.success(), format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
+    };
+    assert!(ekko(&dir, None, &["init"]).0);
+    assert!(ekko(&dir, None, &["--task", "on the project's board"]).0);
+    let board = site.join(".ekko");
+    let before = files_under(&board);
+
+    let menu = scratch.join("questions.json");
+    fs::write(&menu, "[]").unwrap();
+    let writes: [&[&str]; 5] =
+        [&["--task", "from a scratch HOME"], &["--check", "1"], &["--answer", "1", "yes"], &["--menu", menu.to_str().unwrap()], &["artifact", "1", "--no-open"]];
+    for args in writes {
+        let (succeeded, said) = ekko(&scratch, None, args);
+        assert!(!succeeded, "ekko {args:?} with a scratch HOME: {said}");
+        assert!(said.contains("which is not your home") && said.contains("EKKO_DIR"), "ekko {args:?}: {said}");
+    }
+    assert_eq!(files_under(&board), before, "a scratch HOME changed the project's board");
+    let (listed, said) = ekko(&scratch, None, &["--list", "pending"]);
+    assert!(listed && said.contains("on the project's board"), "{said}");
+
+    assert!(ekko(&scratch, Some(&site), &["--task", "named with EKKO_DIR"]).0);
+    assert!(ekko(&dir, None, &["--task", "from the home it lies in"]).0);
+    let storage = fs::read_to_string(board.join("storage").join("storage.json")).unwrap();
+    assert!(storage.contains("named with EKKO_DIR") && storage.contains("from the home it lies in"), "{storage}");
+    assert!(!storage.contains("from a scratch HOME"), "{storage}");
+    fs::remove_dir_all(&dir).ok();
+}

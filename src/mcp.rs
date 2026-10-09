@@ -1415,6 +1415,8 @@ fn artifact(ekko: &Ekko, spec: &ops::ArtifactSpec, home: &Path, location: &direc
     // page given is the server's where one serves it (task 1102), with why
     // not otherwise.
     let page = |item: &crate::item::Item, data: &crate::storage::ItemMap| -> std::io::Result<(String, Option<String>)> {
+        // The page is a file beside the board, written as the board is (task 1576).
+        ekko.storage.writable().map_err(|error| std::io::Error::other(error.to_string()))?;
         let path = crate::artifact::write(ekko.storage.dir(), item, data, ekko.folder.as_deref())?;
         Ok(match crate::serve::page_address(home, location, item.uid.as_deref().unwrap_or_default()) {
             Ok(address) => (address, None),

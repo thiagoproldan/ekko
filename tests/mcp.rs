@@ -1592,6 +1592,136 @@ fn an_artifact_is_written_with_its_page_and_read_back() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// Each file and folder under `dir`, with its inode and its bytes: what a
+/// write anywhere in it changes.
+fn files_under(dir: &Path) -> std::collections::BTreeMap<PathBuf, (u64, Vec<u8>)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let mut found = std::collections::BTreeMap::new();
+    let mut left = vec![dir.to_path_buf()];
+    while let Some(at) = left.pop() {
+        for entry in fs::read_dir(&at).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            let bytes = if meta.is_dir() { Vec::new() } else { fs::read(&path).unwrap() };
+            if meta.is_dir() {
+                left.push(path.clone());
+            }
+            found.insert(path, (meta.ino(), bytes));
+        }
+    }
+    found
+}
+
+/// A server whose HOME is not the user's -- a test's -- writes nothing on a
+/// project's board it found by walking up outside that HOME: each write
+/// says how to name a board, an artifact read leaves its page unwritten,
+/// and a read still reads (task 1576). Four times a check run that way
+/// wrote the real board. From the HOME the board lies in, or with EKKO_DIR
+/// naming it, the same write lands.
+#[test]
+fn a_server_with_a_scratch_home_writes_nothing_on_the_board_it_found() {
+    let home = temp_home();
+    let site = projects(&home, &["site"]).remove(0);
+    let (board, scratch) = (site.join(".ekko"), home.join("scratch"));
+    fs::create_dir_all(&scratch).unwrap();
+    let serve = |home: &Path, named: Option<&Path>, lines: &[String]| -> HashMap<String, Value> {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
+        command
+            .arg("--mcp")
+            .current_dir(&site)
+            .env("HOME", home)
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .env_remove("XDG_STATE_HOME")
+            .env("EKKO_TERMINAL", "none");
+        if let Some(named) = named {
+            command.env("EKKO_DIR", named);
+        }
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        for line in lines {
+            writeln!(stdin, "{line}").unwrap();
+        }
+        drop(stdin);
+        let mut out = String::new();
+        child.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+        assert!(child.wait().unwrap().success(), "the server did not exit cleanly when stdin closed");
+        out.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).map(|reply| (reply["id"].to_string(), reply)).collect()
+    };
+    let init = request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}}));
+    let plan = "Ship the page\n\n## Goal\nWhy.\n## What is known\nFacts.\n## Design\nHow.\n## Risks and open questions\nNone.";
+    let made = serve(
+        &home,
+        None,
+        &[
+            init.clone(),
+            call(2, "artifact", json!({"text": plan, "steps": [{"key": "one", "text": "The first step"}]})),
+            call(3, "ask", json!({"questions": [{"quick": true, "text": "Merge now?"}]})),
+        ],
+    );
+    let question = serde_json::from_str::<Value>(text(&made["3"])).unwrap()["items"][0]["id"].to_string();
+    let made: Value = serde_json::from_str(text(&made["2"])).unwrap();
+    // A read writes the page where it is missing: here, where it may not.
+    fs::remove_file(board.join("artifacts").join(format!("{}.html", made["items"][0]["uid"].as_str().unwrap()))).unwrap();
+    let before = files_under(&board);
+
+    let replies = serve(
+        &scratch,
+        None,
+        &[
+            init.clone(),
+            call(2, "create", json!({"text": "from a scratch HOME"})),
+            call(3, "set_state", json!({"items": [1], "state": "progress"})),
+            call(4, "batch", json!({"ops": [{"op": "create", "text": "in a batch"}]})),
+            call(5, "ask", json!({"questions": [{"quick": true, "text": "Merge now?"}], "about": 1})),
+            call(6, "phases", json!({"sequence": ["setup"]})),
+            call(7, "artifact", json!({"artifact": 1})),
+            call(8, "search", json!({"text": "ship"})),
+        ],
+    );
+    for id in ["2", "3", "4", "5", "6"] {
+        let said = text(&replies[id]);
+        assert_eq!(replies[id]["result"]["isError"], true, "{id}: {said}");
+        assert!(said.starts_with("INVALID_INPUT: this ekko runs with HOME") && said.contains("EKKO_DIR"), "{id}: {said}");
+    }
+    let read = text(&replies["7"]);
+    assert!(read.contains("plan version 1") && read.contains("Its page could not be written: this ekko runs with HOME"), "{read}");
+    assert!(text(&replies["8"]).contains("Ship the page"), "{}", text(&replies["8"]));
+    // In a terminal, ekko --answer opens the menu on the question before it
+    // writes anything: refused, it opens none.
+    let mut menu = Command::new("script")
+        .args(["-qec", &format!("{} --answer {question}", env!("CARGO_BIN_EXE_ekko")), "/dev/null"])
+        .current_dir(&site)
+        .env("HOME", &scratch)
+        .env_remove("EKKO_DIR")
+        .env_remove("EKKO_PROJECT")
+        .env_remove("XDG_STATE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while menu.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = menu.kill();
+    let mut shown = String::new();
+    menu.stdout.take().unwrap().read_to_string(&mut shown).unwrap();
+    let _ = menu.wait();
+    assert!(shown.contains("which is not your home") && shown.contains("EKKO_DIR"), "ekko --answer {question} in a terminal: {shown}");
+    assert_eq!(files_under(&board), before, "a server with a scratch HOME changed the project's board");
+
+    for (from, named, words) in [(&scratch, Some(site.as_path()), "named with EKKO_DIR"), (&home, None, "from the home it lies in")] {
+        let replies = serve(from, named, &[init.clone(), call(2, "create", json!({"text": words}))]);
+        assert!(text(&replies["2"]).contains("\"ok\":true"), "{words}: {}", text(&replies["2"]));
+    }
+    let storage = fs::read_to_string(board.join("storage").join("storage.json")).unwrap();
+    assert!(storage.contains("named with EKKO_DIR") && storage.contains("from the home it lies in"), "{storage}");
+    assert!(!storage.contains("from a scratch HOME") && !storage.contains("in a batch"), "{storage}");
+    fs::remove_dir_all(&home).ok();
+}
+
 /// The answer that applies what a question proposes -- the first of the two
 /// a session writes under it, in the user's language (task 1044).
 const APPLY: &str = "Sim";

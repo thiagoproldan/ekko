@@ -68,6 +68,28 @@ pub(crate) fn test_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{next}", std::process::id()))
 }
 
+/// The user's home as the system knows it, from the passwd entry of the
+/// user this process runs as -- not `HOME`, which a test or a script may
+/// point elsewhere (task 1576).
+pub fn passwd_home() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buffer = vec![0u8; 4096];
+    // SAFETY: getpwuid_r writes the entry into `entry` and its strings into
+    // `buffer`, which outlive the reads below; `found` is null when there is
+    // no entry or the buffer is too small.
+    unsafe {
+        let mut entry: libc::passwd = std::mem::zeroed();
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        let status = libc::getpwuid_r(libc::getuid(), &mut entry, buffer.as_mut_ptr().cast(), buffer.len(), &mut found);
+        if status != 0 || found.is_null() || entry.pw_dir.is_null() {
+            return None;
+        }
+        let dir = CStr::from_ptr(entry.pw_dir).to_bytes();
+        (!dir.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
+    }
+}
+
 /// Writes `content` as an executable at `to` through a child process, so
 /// that the test process never holds a descriptor open for writing on it.
 /// A test's thread that forks while one is open hands it to its child,
@@ -122,6 +144,22 @@ mod tests {
     fn resolve_path_expands_tilde_before_resolving() {
         let resolved = resolve_path(Path::new("/home/x"), Path::new("/cwd"), "~/work");
         assert_eq!(resolved, Path::new("/home/x/work"));
+    }
+
+    /// The home passwd gives this user: /etc/passwd's, where it lists the
+    /// user, and not HOME, which a test's own runs point elsewhere (task
+    /// 1576).
+    #[test]
+    fn passwd_home_is_the_home_passwd_gives() {
+        // SAFETY: getuid cannot fail and reads no memory of ours.
+        let uid = unsafe { libc::getuid() }.to_string();
+        let listed = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+        let entry = listed.lines().map(|line| line.split(':').collect::<Vec<_>>()).find(|fields| fields.len() > 5 && fields[2] == uid);
+        let home = passwd_home().expect("this user has a home in passwd");
+        if let Some(fields) = entry {
+            assert_eq!(home, PathBuf::from(fields[5]));
+        }
+        assert!(home.is_absolute(), "{}", home.display());
     }
 
     /// Tests asking for a directory all at once never share one, however

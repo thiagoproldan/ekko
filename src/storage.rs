@@ -68,6 +68,8 @@ pub enum StorageError {
     Json(serde_json::Error),
     /// The lock, and who held it as /proc/locks told when the wait gave up.
     LockTimeout(PathBuf, Option<String>),
+    /// Why this process writes nothing on this board (task 1576).
+    Refused(String),
 }
 
 impl std::fmt::Display for StorageError {
@@ -78,6 +80,7 @@ impl std::fmt::Display for StorageError {
             StorageError::LockTimeout(path, holder) => {
                 write!(f, "{} {}", lock_timeout_advice(holder.as_deref()), path.display())
             }
+            StorageError::Refused(why) => write!(f, "{why}"),
         }
     }
 }
@@ -113,6 +116,9 @@ pub struct Storage {
     /// on stderr at the first write that would have copied it.
     not_copied: Option<String>,
     said: std::sync::atomic::AtomicBool,
+    /// Why this process writes nothing here (task 1576): every write method
+    /// and the lock refuse with it.
+    refused: Option<String>,
 }
 
 /// Proof of a held lock. Releases it on drop, including when a caller
@@ -156,6 +162,7 @@ impl Storage {
             copy_dir: None,
             not_copied: None,
             said: std::sync::atomic::AtomicBool::new(false),
+            refused: None,
         };
 
         storage.clean_temp_dir()?;
@@ -170,6 +177,21 @@ impl Storage {
             Err(why) => self.not_copied = Some(why),
         }
         self
+    }
+
+    /// This storage, refusing every write with `why` when given (task 1576).
+    pub fn refusing(mut self, why: Option<String>) -> Self {
+        self.refused = why;
+        self
+    }
+
+    /// Whether this process may write here: refused, it says why. Every
+    /// write method asks first, and the lock, which every write takes.
+    pub fn writable(&self) -> Result<(), StorageError> {
+        match &self.refused {
+            Some(why) => Err(StorageError::Refused(why.clone())),
+            None => Ok(()),
+        }
     }
 
     /// Sweeps up temp files abandoned by a crashed write (create-then-
@@ -233,6 +255,7 @@ impl Storage {
     }
 
     pub fn set(&self, data: &ItemMap) -> Result<(), StorageError> {
+        self.writable()?;
         // Nothing before the rename touches the version it replaces. Claude
         // Code's FileChanged follows storage.json by its inode, and an event
         // on it before the rename could leave that watch on the old inode for
@@ -350,6 +373,7 @@ impl Storage {
     }
 
     pub fn set_archive(&self, data: &ItemMap) -> Result<(), StorageError> {
+        self.writable()?;
         write_atomic(&self.archive_file, &self.temp_dir, data)?;
         self.copy_out(&self.archive_file);
         Ok(())
@@ -376,6 +400,7 @@ impl Storage {
     /// the same state, derived the same next id, and one silently
     /// overwrote the other. `tests/concurrency.rs` is what caught it.
     pub fn acquire_lock(&self) -> Result<LockGuard<'_>, StorageError> {
+        self.writable()?;
         Ok(LockGuard { _storage: self, _file: lock_path(&self.lock_file)? })
     }
 
@@ -503,6 +528,7 @@ impl Storage {
     /// and rename dance as everything else, so a reader never sees half a
     /// list.
     pub fn set_phases(&self, phases: &[String]) -> Result<(), StorageError> {
+        self.writable()?;
         replace_durably(&self.phases_file(), &self.temp_dir, serde_json::to_string_pretty(phases)?.as_bytes())?;
         self.copy_out(&self.phases_file());
         Ok(())
@@ -548,6 +574,7 @@ impl Storage {
 
     /// Written through the same temp-file and rename dance as everything else.
     pub fn set_moved(&self, moved: &[Moved]) -> Result<(), StorageError> {
+        self.writable()?;
         replace_durably(&self.moved_file(), &self.temp_dir, serde_json::to_string_pretty(moved)?.as_bytes())?;
         self.copy_out(&self.moved_file());
         Ok(())
@@ -595,6 +622,7 @@ impl Storage {
 
     /// Written through the same temp-file and rename dance as everything else.
     pub fn set_counters(&self, counters: &Counters) -> Result<(), StorageError> {
+        self.writable()?;
         replace_durably(&self.counters_file(), &self.temp_dir, serde_json::to_string_pretty(counters)?.as_bytes())?;
         self.copy_out(&self.counters_file());
         Ok(())
@@ -663,6 +691,7 @@ impl Storage {
 
     /// Appends one entry. Callers hold the lock.
     pub fn append_journal(&self, entry: &serde_json::Value) -> Result<(), StorageError> {
+        self.writable()?;
         self.append_journal_within(entry, JOURNAL_BYTES)?;
         self.copy_out(&self.journal_file());
         Ok(())
@@ -1517,6 +1546,92 @@ mod tests {
         storage.set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
         assert_eq!(storage.get().unwrap().len(), 1);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every public method of `Storage` that only reads, and every one that
+    /// writes the board's folder: the writes are what a refused storage
+    /// refuses (task 1576).
+    const READS: [&str; 11] = [
+        "get",
+        "get_shared",
+        "get_archive",
+        "storage_path",
+        "dir",
+        "writable",
+        "get_phases",
+        "get_moved",
+        "get_counters",
+        "read_journal",
+        "last_journal_rev",
+    ];
+    const WRITES: [&str; 7] = ["set", "set_archive", "acquire_lock", "set_phases", "set_moved", "set_counters", "append_journal"];
+
+    /// Each file and folder under `dir`, with its inode and its bytes: what a
+    /// write anywhere in it changes.
+    fn files_under(dir: &Path) -> BTreeMap<PathBuf, (u64, Vec<u8>)> {
+        let mut found = BTreeMap::new();
+        let mut left = vec![dir.to_path_buf()];
+        while let Some(at) = left.pop() {
+            for entry in fs::read_dir(&at).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = fs::symlink_metadata(&path).unwrap();
+                let bytes = if meta.is_dir() { Vec::new() } else { fs::read(&path).unwrap() };
+                if meta.is_dir() {
+                    left.push(path.clone());
+                }
+                found.insert(path, (meta.ino(), bytes));
+            }
+        }
+        found
+    }
+
+    /// A refused storage (task 1576) refuses each write with the reason it
+    /// was given, the lock included, leaves every file of the board's folder
+    /// as it was, and still reads.
+    #[test]
+    fn a_refused_storage_refuses_every_write_and_leaves_the_folder_alone() {
+        let dir = temp_ekko_dir();
+        let board = BTreeMap::from([(1, sample_item(1))]);
+        Storage::new(&dir).unwrap().set(&board).unwrap();
+        let before = files_under(&dir);
+        let refused = Storage::new(&dir).unwrap().refusing(Some("a scratch HOME".to_string()));
+        for name in WRITES {
+            let result = match name {
+                "set" => refused.set(&board),
+                "set_archive" => refused.set_archive(&board),
+                "acquire_lock" => refused.acquire_lock().map(drop),
+                "set_phases" => refused.set_phases(&["setup".to_string()]),
+                "set_moved" => refused.set_moved(&[]),
+                "set_counters" => refused.set_counters(&Counters::default()),
+                "append_journal" => refused.append_journal(&serde_json::json!({"rev": 1})),
+                other => panic!("{other} writes, and this test does not call it"),
+            };
+            assert!(matches!(&result, Err(StorageError::Refused(why)) if why == "a scratch HOME"), "{name}: {result:?}");
+        }
+        assert_eq!(files_under(&dir), before, "a refused write changed the folder");
+        assert_eq!(refused.get().unwrap(), board);
+
+        Storage::new(&dir).unwrap().refusing(None).set_phases(&["setup".to_string()]).unwrap();
+        assert_ne!(files_under(&dir), before, "the folder's listing does not see a write");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The class the test above enumerates: each public method of `Storage`
+    /// that takes `&self` is in READS or in WRITES, so a new one is put in
+    /// one before it lands, and a new write is refused (task 1576).
+    #[test]
+    fn every_public_method_of_storage_is_a_read_or_a_refused_write() {
+        let text = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("storage.rs")).unwrap();
+        let mut found: Vec<&str> = text
+            .lines()
+            .take_while(|line| *line != "mod tests {")
+            .filter_map(|line| line.trim_start().strip_prefix("pub fn "))
+            .filter_map(|rest| rest.split_once("(&self").map(|(name, _)| name))
+            .collect();
+        let mut known: Vec<&str> = READS.iter().chain(&WRITES).copied().collect();
+        found.sort_unstable();
+        known.sort_unstable();
+        assert_eq!(found, known, "a public method of Storage in neither READS nor WRITES, or one listed that is gone");
     }
 
     /// The rule `get` and `get_shared` split between them (task 844): a read

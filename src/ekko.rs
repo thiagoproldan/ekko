@@ -388,6 +388,7 @@ impl From<StorageError> for EkkoError {
     fn from(error: StorageError) -> Self {
         match error {
             StorageError::LockTimeout(path, holder) => EkkoError::LockTimeout(path.display().to_string(), holder),
+            StorageError::Refused(why) => EkkoError::InvalidInput(why),
             other => EkkoError::Storage(other),
         }
     }
@@ -725,7 +726,7 @@ impl Ekko {
     /// Opens the board wherever `directory::locate` said this invocation's
     /// board lives, copying it at every write when it is a project's.
     pub fn at(location: &crate::directory::Location) -> Result<Self, EkkoError> {
-        let mut ekko = Self::new(Storage::new(&location.dir)?.copied_to(location.copy.clone()));
+        let mut ekko = Self::new(Storage::new(&location.dir)?.copied_to(location.copy.clone()).refusing(location.refused.clone()));
         ekko.linkable = location.project.clone().map(|project| (location.home.clone(), project));
         Ok(ekko)
     }

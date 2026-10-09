@@ -726,6 +726,7 @@ $ ekko --projects
 - **A project that moved is reported as moved.** `ekko init` in its new folder records where it went; nothing is looked up and rewritten behind your back, because a read never writes.
 - **The listing says what each project holds and where it is**, counted the way the project's own stats line counts it, and marks a project its folder no longer holds, with the way back.
 - **Home is not a project.** `~/.ekko/` is the default board, and `ekko init` in home is refused.
+- **A HOME not your own writes no board it stumbles on.** An `ekko` run with a HOME that is not your home as passwd gives it -- a test's, a script's -- still reads a project's board it found by walking up from its folder, but when that board lies outside its HOME it writes nothing there: no item, no answer, no menu, no page. Each write is refused with `INVALID_INPUT`, saying to name a scratch board with `EKKO_DIR` or `--ekko-dir`, or to run with your own HOME. Four times a check run with a scratch HOME, from a worktree inside this repository, wrote the repository's real board (task 1576). Git refuses a repository it finds that another user owns, until `safe.directory` allows it; here the way through is to name the board, which no walk does by accident. A board inside the HOME it runs with, as a test's fixture is, stays that HOME's to write.
 
 #### Linked projects
 

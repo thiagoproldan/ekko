@@ -168,12 +168,15 @@ pub struct Location {
     /// The user's home, whose registry holds the links a project's board has
     /// (task 811).
     pub home: PathBuf,
+    /// Why this process writes nothing on the board (task 1576): see
+    /// `foreign`.
+    pub refused: Option<String>,
 }
 
 impl Location {
     fn new(home_dir: &Path, dir: PathBuf, project: Option<Project>, discovered: bool) -> Self {
         let copy = project::copy_dir(home_dir, &dir);
-        Location { dir, project, discovered, copy, lost: None, home: home_dir.to_path_buf() }
+        Location { dir, project, discovered, copy, lost: None, home: home_dir.to_path_buf(), refused: None }
     }
 
     /// How the prime, the sessions and the hooks name this board. On the
@@ -223,11 +226,38 @@ pub fn locate(
         return Ok(plain(retrieve_ekko_directory(home_dir, cwd, None, env_var)?));
     }
     if let Some(found) = project::discover(home_dir, cwd) {
-        return Ok(Location::new(home_dir, found.dir.clone(), Some(found), true));
+        let mut location = Location::new(home_dir, found.dir.clone(), Some(found), true);
+        location.refused = foreign(home_dir, crate::paths::passwd_home().as_deref(), &location.dir, cwd);
+        return Ok(location);
     }
     let mut location = plain(retrieve_ekko_directory(home_dir, cwd, None, None)?);
     location.lost = project::lost_at(home_dir, cwd);
     Ok(location)
+}
+
+/// Why a process whose HOME is not the user's home -- a test's, a
+/// script's -- writes nothing on `board`, a board it found by walking up
+/// from `cwd`, when that board lies outside its HOME (task 1576, decided
+/// with the user in question 1610). Four times a check run with a scratch
+/// HOME from a worktree inside the repository wrote the real board. As git
+/// refuses a repository it found whose owner does not match, until
+/// safe.directory allows it, the way here is to name the board: EKKO_DIR,
+/// --ekko-dir or a project's name, which no walk finds by accident. `None`
+/// when HOME is the user's own, or the board lies inside it, or the
+/// user's home cannot be known.
+pub fn foreign(home: &Path, user_home: Option<&Path>, board: &Path, cwd: &Path) -> Option<String> {
+    let user_home = user_home?;
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if real(home) == real(user_home) || real(board).starts_with(real(home)) {
+        return None;
+    }
+    Some(format!(
+        "this ekko runs with HOME {}, which is not your home ({}), and found {} by walking up from {}: it writes nothing there. For a test, name a scratch board with EKKO_DIR or --ekko-dir; for this board, run with your own HOME (task 1576)",
+        home.display(),
+        user_home.display(),
+        board.display(),
+        cwd.display()
+    ))
 }
 
 pub fn retrieve_ekko_directory(
@@ -380,6 +410,55 @@ mod tests {
         assert!(label.starts_with("default board -- "), "{label}");
         assert!(label.contains(&format!("{} was project site, whose board is gone: ekko init", folder.display())), "{label}");
 
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A HOME that is not the user's refuses a board it found outside it,
+    /// and says how to name one; the user's own HOME, even through a link,
+    /// a board inside the HOME, and a user whose home is not known are not
+    /// refused (task 1576).
+    #[test]
+    fn a_board_found_outside_a_home_not_the_users_is_refused() {
+        let dir = temp_dir();
+        let (user, scratch, site) = (dir.join("user"), dir.join("scratch"), dir.join("site"));
+        let (board, inside) = (site.join(EKKO_DIR_NAME), scratch.join("site").join(EKKO_DIR_NAME));
+        for folder in [&user, &board, &inside] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        std::os::unix::fs::symlink(&user, dir.join("linked")).unwrap();
+
+        let why = foreign(&scratch, Some(&user), &board, &site).expect("a scratch HOME may write a board outside it");
+        assert!(why.contains("EKKO_DIR") && why.contains(&board.display().to_string()), "{why}");
+        assert_eq!(foreign(&user, Some(&user), &board, &site), None);
+        assert_eq!(foreign(&dir.join("linked"), Some(&user), &board, &site), None);
+        assert_eq!(foreign(&scratch, Some(&user), &inside, &scratch), None);
+        assert_eq!(foreign(&scratch, None, &board, &site), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The walk from a project's folder, with the user's home as passwd
+    /// gives it: that HOME finds the board and may write it, as does the HOME
+    /// the folder lies in; a scratch HOME finds it refused, unless EKKO_DIR
+    /// names it (task 1576). Nothing here writes the user's home.
+    #[test]
+    fn the_walk_is_refused_only_to_a_scratch_home() {
+        let user = crate::paths::passwd_home().expect("this user has a home in passwd");
+        let home = temp_dir();
+        let site = home.join("site");
+        fs::create_dir_all(&site).unwrap();
+        project::init(&home, &site, None, None, 0).unwrap();
+        let board = site.join(EKKO_DIR_NAME);
+
+        for own in [&user, &home] {
+            let found = locate(own, &site, None, None, None).unwrap();
+            assert_eq!((found.dir, found.discovered, found.refused), (board.clone(), true, None), "HOME {}", own.display());
+        }
+        let scratch = home.join("scratch");
+        let found = locate(&scratch, &site, None, None, None).unwrap();
+        assert_eq!(found.dir, board);
+        assert!(found.refused.as_ref().is_some_and(|why| why.contains("EKKO_DIR")), "{:?}", found.refused);
+        let named = locate(&scratch, &site, None, Some(site.to_str().unwrap()), None).unwrap();
+        assert_eq!((named.dir, named.refused), (board, None));
         fs::remove_dir_all(&home).ok();
     }
 
