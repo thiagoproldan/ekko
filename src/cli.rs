@@ -219,6 +219,11 @@ pub struct Cli {
     /// SessionStart hook -- see `doctor`.
     #[arg(long)]
     pub doctor: bool,
+    /// With --doctor: write the board found here again, the same items as a
+    /// new version, and wait up to 5 s for every session on it to hear the
+    /// write -- see `doctor::probe`.
+    #[arg(long, requires = "doctor")]
+    pub probe: bool,
 
     /// With --prime, --memory, --tasklist, --wake or --guard: answer a Claude Code hook, whose
     /// event arrives as JSON on stdin. For --prime, a session that resumes or

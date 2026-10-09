@@ -1213,6 +1213,119 @@ fn the_prime_names_the_sessions_on_its_board_that_need_a_restart() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// `ekko --doctor --probe` writes the board again and waits for its
+/// sessions to hear it (task 1286): two stand-ins for Claude Code, scripts
+/// named `claude` (procedure 1552), run ekko's MCP server and their
+/// SessionStart hook in project `app`; one runs its wake hook when the
+/// board's file is replaced, as Claude Code's FileChanged does, the other
+/// never; a third, deaf too, runs in another project. The probe finds one of
+/// the two on its board heard it, the first passes Wake heard and the second
+/// fails it, and the board holds the same items.
+#[test]
+fn the_probe_writes_the_board_again_and_finds_the_session_that_did_not_hear_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::process::CommandExt as _;
+    let dir = temp_ekko_dir();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_ekko"), bin.join("ekko")).unwrap();
+    let (app, other) = (dir.join("app"), dir.join("other"));
+    let ekko_in = |cwd: &PathBuf, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &dir)
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("CLAUDECODE")
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .output()
+            .unwrap()
+    };
+    let ekko = |args: &[&str]| ekko_in(&app, args);
+    for project in [&app, &other] {
+        fs::create_dir_all(project).unwrap();
+        assert!(ekko_in(project, &["init"]).status.success());
+    }
+    assert!(ekko(&["--task", "something", "to", "hear"]).status.success());
+    let board = |project: &PathBuf| project.join(".ekko").join("storage").join("storage.json");
+
+    // Each stand-in records itself through its SessionStart hook, then
+    // watches the board's file by its inode, as Claude Code's FileChanged
+    // follows it, and runs its wake hook on each new one when it hears.
+    let script = "#!/bin/sh\nekko --mcp < \"$1\" > /dev/null &\nexec 3> \"$1\"\nCLAUDECODE=1 ekko --prime --hook < \"$1.start\" > /dev/null\n: > \"$1.started\"\nseen=$(stat -c %i \"$2\")\nwhile :; do\n  now=$(stat -c %i \"$2\")\n  if [ \"$now\" != \"$seen\" ]; then\n    seen=$now\n    [ \"$3\" = 1 ] && echo '{\"hook_event_name\":\"FileChanged\"}' | CLAUDECODE=1 ekko --wake --hook > /dev/null 2>&1\n  fi\n  sleep 0.05\ndone\n";
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let mut stand_ins = Vec::new();
+    // The third, on another project's board, is no session of the probe's.
+    for (name, project, hears) in [("hearing", &app, "1"), ("deaf", &app, "0"), ("elsewhere", &other, "0")] {
+        let folder = dir.join(name);
+        fs::create_dir_all(&folder).unwrap();
+        let claude = folder.join("claude");
+        fs::write(&claude, script).unwrap();
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+        let fifo = folder.join("mcp-in");
+        assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        fs::write(folder.join("mcp-in.start"), format!(r#"{{"hook_event_name":"SessionStart","source":"startup","session_id":"{name}"}}"#)).unwrap();
+        let child = Command::new(&claude)
+            .args([fifo.as_os_str(), board(project).as_os_str(), std::ffi::OsStr::new(hears)])
+            .current_dir(project)
+            .env("PATH", &path)
+            .env("HOME", &dir)
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("CLAUDECODE")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        stand_ins.push((child, folder.join("mcp-in.started")));
+    }
+    for (_, started) in &stand_ins {
+        for _ in 0..250 {
+            if started.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(started.exists(), "a stand-in's SessionStart hook did not end");
+    }
+    let items = fs::read(board(&app)).unwrap();
+    let before = fs::metadata(board(&app)).unwrap();
+    use std::os::unix::fs::MetadataExt as _;
+    let alone = ekko(&["--probe"]);
+    assert!(!alone.status.success(), "--probe ran without --doctor: {}", String::from_utf8_lossy(&alone.stdout));
+    assert_eq!(fs::metadata(board(&app)).unwrap().ino(), before.ino(), "--probe without --doctor wrote the board");
+
+    let output = ekko(&["--doctor", "--probe", "--json"]);
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let ids: Vec<u32> = stand_ins.iter().map(|(child, _)| child.id()).collect();
+    for (child, _) in &mut stand_ins {
+        let _ = Command::new("kill").args(["-TERM", "--", &format!("-{}", child.id())]).status();
+        let _ = child.wait();
+    }
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!((reply["probe"]["sessions"].as_u64(), reply["probe"]["heard"].as_u64()), (Some(2), Some(1)), "{reply}");
+    let wake = |pid: u32| -> (String, String) {
+        let check = reply["checks"].as_array().unwrap().iter().find(|check| check["check"] == "Wake heard" && check["session"]["pid"] == pid).unwrap();
+        (check["verdict"].as_str().unwrap().to_string(), check["says"].as_str().unwrap().to_string())
+    };
+    let (verdict, says) = wake(ids[0]);
+    assert_eq!(verdict, "ok", "{says}");
+    assert!(says.contains(" ms after"), "{says}");
+    let (verdict, says) = wake(ids[1]);
+    assert_eq!(verdict, "fail", "{says}");
+    assert!(says.contains("and its wake hook recorded hearing nothing"), "{says}");
+    assert!(!output.status.success(), "the exit says nothing failed: {reply}");
+    let after = fs::metadata(board(&app)).unwrap();
+    assert_ne!(after.ino(), before.ino(), "the probe wrote no new version");
+    assert_eq!(fs::read(board(&app)).unwrap(), items, "the probe changed the items");
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// The guard records each Bash call it sees in the session it runs under
 /// (task 1284): a stand-in for Claude Code, a script named `claude`, runs
 /// it as a PreToolUse hook, on a Bash call and on a Read.

@@ -62,6 +62,7 @@ const HELP: &str = r#"
       --destroy           Move a project's board to the trash
       --dismiss <IDS>     With --repeats: set fingerprints aside until they recur again
       --doctor            Check that every Claude Code session runs ekko's current binary and its hooks; exit 1 on a fail
+      --probe             With --doctor: write the board again, then wait for each session on it to hear it
       --edit, -e          Edit item description
       --find, -f          Search for items
       --force             Override the blocked-by rule or a running session's hold
@@ -119,6 +120,7 @@ const HELP: &str = r#"
       $ ekko --copy 1 2 3
       $ ekko --delete 4
       $ ekko --doctor
+      $ ekko --doctor --probe
       $ ekko --edit @3 Merge PR #42
       $ ekko --find documentation
       $ ekko --project old --destroy
@@ -238,9 +240,21 @@ fn main() -> ExitCode {
         let mode = if cli.resources { mcp::Mode::Resources } else { mcp::Mode::Board };
         return mcp::run(home_dir, cwd, ekko_dir_env, project_env, mode);
     }
-    // About every session on this machine, whatever board it is on.
+    // About every session on this machine, whatever board it is on; with
+    // --probe, after writing the board found here as any command finds it.
     if cli.doctor {
-        return doctor::run(&home_dir, json_mode);
+        let mut probe = None;
+        if cli.probe {
+            let project_name = cli.project.as_deref().or(project_env.as_deref());
+            let written = directory::locate(&home_dir, &cwd, cli.ekko_dir.as_deref(), ekko_dir_env.as_deref(), project_name)
+                .map_err(EkkoError::from)
+                .and_then(|location| doctor::probe(&Ekko::at(&location)?.storage, &home_dir));
+            match written {
+                Ok(written) => probe = Some(written),
+                Err(err) => return finish_with_error(&err, json_mode, &home_dir),
+            }
+        }
+        return doctor::run(&home_dir, json_mode, probe);
     }
 
     // Before opening anything: an old flag gets the same answer whatever

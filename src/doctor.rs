@@ -4,7 +4,8 @@
 //! after an upgrade (gotcha 194), a session whose plugin hooks did not run
 //! has no prime, no wake and no guard, and one whose FileChanged hook stopped
 //! hearing the board's file is never woken (task 1248, 1283). The checks
-//! read /proc and ekko's state directory, and write nothing; finding the
+//! read /proc and ekko's state directory, and write nothing -- `--probe`
+//! asks for one write of the board, which they judge (task 1286); finding the
 //! board of a session no hook recorded reads the config file, as every ekko
 //! command does, which writes the defaults where it is missing. Each gives
 //! ok, fail, or skipped when it cannot judge, in one line, about one
@@ -23,8 +24,10 @@ use std::process::ExitCode;
 
 use serde::Serialize;
 
+use crate::ekko::EkkoError;
 use crate::holder::{when, Process, Registry, Running};
 use crate::mcp::Binary;
+use crate::storage::Storage;
 use crate::wake::{Guarded, Heard, Told};
 
 /// Where NixOS keeps the binary a session started with after an upgrade:
@@ -90,6 +93,20 @@ pub struct Session {
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub checks: Vec<Check>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe: Option<Probe>,
+}
+
+/// What `--probe` did (plan 1279, Design 3): the board it wrote again, when
+/// that version was put in place, in milliseconds, and how many of the
+/// sessions on the board whose hooks record what they hear heard it, within
+/// `MARGIN` of the write.
+#[derive(Debug, Serialize)]
+pub struct Probe {
+    pub board: PathBuf,
+    pub written: i64,
+    pub sessions: usize,
+    pub heard: usize,
 }
 
 const OLD_BINARY: &str = "Old binary";
@@ -306,11 +323,17 @@ fn clock(millis: i64) -> String {
     if at.date_naive() == chrono::Local::now().date_naive() { at.format("%H:%M:%S").to_string() } else { at.format("%Y-%m-%d %H:%M:%S").to_string() }
 }
 
+/// Whether a wake hook's run heard `version` of the board's file: it read
+/// that version, or ran after it was written, which proves its watch alive.
+fn heard_it(heard: &Heard, version: (u64, i64, u64)) -> bool {
+    (heard.inode, heard.mtime_ns, heard.size) == version || heard.at >= version.1.div_euclid(1_000_000)
+}
+
 /// Whether a session's wake hook heard the last write to its board: given
 /// the board's version now, when its SessionStart hook last ran, what its
 /// wake hook last heard, and the version of its ekko where that records
-/// nothing. A write before the SessionStart, or newer than `MARGIN`, is not
-/// judged.
+/// nothing. A write before the SessionStart is not judged, nor one newer
+/// than `MARGIN` that the hook has not heard yet.
 fn wake_heard(board: Option<(u64, i64, u64)>, started: Option<i64>, heard: Option<&Heard>, before: Option<&str>, now: i64) -> (Verdict, String) {
     let Some((inode, mtime_ns, size)) = board else {
         return (Verdict::Skipped, "its board's file cannot be read".to_string());
@@ -319,26 +342,31 @@ fn wake_heard(board: Option<(u64, i64, u64)>, started: Option<i64>, heard: Optio
         return (Verdict::Skipped, "when its SessionStart hook ran cannot be read".to_string());
     };
     let written = mtime_ns.div_euclid(1_000_000);
-    if now - written < MARGIN {
-        return (Verdict::Skipped, format!("its board's last write, {} ms ago, is too new to judge: its hook may still be on its way", (now - written).max(0)));
-    }
     if written <= started {
         return (Verdict::Skipped, format!("nothing was written to its board since its SessionStart at {}: nothing to hear yet", clock(started)));
     }
+    // Any run after the write proves the watch alive; one that read the
+    // version written says how long the write took to reach it.
+    if let Some(heard) = heard.filter(|heard| heard_it(heard, (inode, mtime_ns, size))) {
+        let after = if (heard.inode, heard.mtime_ns, heard.size) == (inode, mtime_ns, size) { format!(", {} ms after", (heard.at - written).max(0)) } else { String::new() };
+        return (Verdict::Ok, format!("its wake hook heard the last write to its board, at {}{after}", clock(written)));
+    }
+    if let (None, Some(version)) = (heard, before) {
+        return (Verdict::Skipped, format!("its {version} records nothing of what its wake hook heard, which began after 0.39.1"));
+    }
+    if now - written < MARGIN {
+        return (Verdict::Skipped, format!("its board's last write, {} ms ago, is too new to judge: its hook may still be on its way", (now - written).max(0)));
+    }
     let missed = format!("its board was written at {}, after its SessionStart at {}", clock(written), clock(started));
-    match (heard, before) {
-        (Some(heard), _) if (heard.inode, heard.mtime_ns, heard.size) == (inode, mtime_ns, size) || heard.at >= written => {
-            (Verdict::Ok, format!("its wake hook heard the last write to its board, at {}", clock(written)))
-        }
-        (Some(heard), _) => (
+    match heard {
+        Some(heard) => (
             Verdict::Fail,
             format!(
                 "{missed}, and its wake hook last heard the version of {}: its FileChanged hook missed the write, as in task 1248; restart the session to watch the file again",
                 clock(heard.mtime_ns.div_euclid(1_000_000))
             ),
         ),
-        (None, Some(version)) => (Verdict::Skipped, format!("its {version} records nothing of what its wake hook heard, which began after 0.39.1")),
-        (None, None) => (
+        None => (
             Verdict::Fail,
             format!("{missed}, and its wake hook recorded hearing nothing: its FileChanged hook did not run; restart the session to watch the file again"),
         ),
@@ -396,12 +424,21 @@ fn guard_ran(last: Result<Option<(String, i64)>, String>, started: Option<i64>, 
     if at <= started {
         return (Verdict::Skipped, format!("no Bash call since its SessionStart at {}: nothing to judge", clock(started)));
     }
+    // A record of the guard's run for that very call passes at once, however
+    // new the call; an ekko that records nothing is no call to wait on.
+    let ran = format!("its guard ran for its last Bash call, at {}", clock(at));
+    if guarded.is_some_and(|guarded| guarded.tool_use_id == id) {
+        return (Verdict::Ok, ran);
+    }
+    if let (None, Some(version)) = (guarded, before) {
+        return (Verdict::Skipped, format!("its {version} records nothing of its guard's runs, which began after 0.39.1"));
+    }
     if now - at < MARGIN {
         return (Verdict::Skipped, format!("its last Bash call, {} ms ago, is too new to judge", (now - at).max(0)));
     }
-    match (guarded, before) {
-        (Some(guarded), _) if guarded.tool_use_id == id || guarded.at + MARGIN >= at => (Verdict::Ok, format!("its guard ran for its last Bash call, at {}", clock(at))),
-        (Some(guarded), _) => (
+    match guarded {
+        Some(guarded) if guarded.at + MARGIN >= at => (Verdict::Ok, ran),
+        Some(guarded) => (
             Verdict::Fail,
             format!(
                 "its last Bash call, at {}, came after the guard's last run there, at {}: its PreToolUse hook did not run; restart the session",
@@ -409,8 +446,7 @@ fn guard_ran(last: Result<Option<(String, i64)>, String>, started: Option<i64>, 
                 clock(guarded.at)
             ),
         ),
-        (None, Some(version)) => (Verdict::Skipped, format!("its {version} records nothing of its guard's runs, which began after 0.39.1")),
-        (None, None) => (
+        None => (
             Verdict::Fail,
             format!("its last Bash call, at {}, ran with no record of the guard: its PreToolUse hook did not run there; restart the session, and if this stays, check that the plugin is enabled", clock(at)),
         ),
@@ -495,6 +531,18 @@ fn claude_of<'a>(proc: &Proc, all: &'a [Proc]) -> Option<&'a Proc> {
     all.iter().find(|parent| parent.pid == proc.parent && parent.is_claude())
 }
 
+/// The Claude Code sessions among `all`, each with its server: the
+/// plugin's, not the resources' registered beside it. A session that runs
+/// it loaded the plugin, whose SessionStart hook records the session as it
+/// starts.
+fn sessions(all: &[Proc]) -> Vec<(&Proc, &Proc)> {
+    let mut sessions: Vec<(&Proc, &Proc)> =
+        all.iter().filter(|proc| proc.serves() == Some("ekko --mcp")).filter_map(|server| Some((claude_of(server, all)?, server))).collect();
+    sessions.sort_by_key(|(claude, _)| claude.pid);
+    sessions.dedup_by_key(|(claude, _)| claude.pid);
+    sessions
+}
+
 /// The checks over `all`, the processes running, with `registry` the
 /// SessionStart hook's records and `boot` this boot's id.
 fn checks(all: &[Proc], records: &Records) -> Vec<Check> {
@@ -521,17 +569,7 @@ fn checks(all: &[Proc], records: &Records) -> Vec<Check> {
         let brief = (verdict == Verdict::Fail).then(|| format!("it runs {runs}, replaced since"));
         found.push(Check { check: OLD_BINARY, verdict, about, session, says: format!("{what} (pid {}): {says}{mend}", proc.pid), brief });
     }
-    // The plugin's server, not the resources' registered beside it: a
-    // session that runs it loaded the plugin, whose SessionStart hook
-    // records the session as it starts.
-    let mut sessions: Vec<(&Proc, &Proc)> = served
-        .iter()
-        .filter(|proc| proc.serves() == Some("ekko --mcp"))
-        .filter_map(|server| Some((claude_of(server, all)?, *server)))
-        .collect();
-    sessions.sort_by_key(|(claude, _)| claude.pid);
-    sessions.dedup_by_key(|(claude, _)| claude.pid);
-    for (claude, server) in sessions {
+    for (claude, server) in sessions(all) {
         let process = process(claude, records);
         let record = records.registry.of(&process);
         // A server just started is ahead of the hook that records it.
@@ -622,6 +660,51 @@ fn check_all(home: &Path, boot: &str, transcripts: bool) -> Vec<Check> {
     checks(&Proc::all(), &records)
 }
 
+/// `ekko --doctor --probe` (task 1286): writes the board `storage` holds
+/// again, under its lock, as every write does -- the same items, a new
+/// version put in place by rename and kept in history -- then waits until
+/// every session on it that records what its wake hook hears, and began
+/// before the write, has heard that version, or `MARGIN` has passed. The
+/// checks after it judge each session on the probe's write.
+pub fn probe(storage: &Storage, home: &Path) -> Result<Probe, EkkoError> {
+    let board = storage.storage_path();
+    let version = {
+        let _lock = storage.acquire_lock()?;
+        let items = storage.get_shared()?;
+        storage.set(&items)?;
+        version(board).ok_or_else(|| EkkoError::InvalidInput(format!("{} cannot be read after the probe's write", board.display())))?
+    };
+    let written = version.1.div_euclid(1_000_000);
+    let (registry, told) = (Registry::at(crate::agent::processes_dir(home)), crate::wake::told_dir(home));
+    let boot = crate::holder::boot().unwrap_or_default();
+    loop {
+        let now = chrono::Local::now().timestamp_millis();
+        let records = Records { registry: &registry, told: &told, boot: &boot, store: Path::new(STORE), now, up: None, home, transcripts: false };
+        let (sessions, heard) = listening(&Proc::all(), &records, board, version);
+        if heard == sessions || now - written >= MARGIN {
+            return Ok(Probe { board: board.to_path_buf(), written, sessions, heard });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The sessions among `all` that the probe of `board` waits for, and how
+/// many of them heard `version`, the one it wrote: each whose SessionStart
+/// hook recorded it on that board before the write, and whose ekko records
+/// what its wake hook hears -- not 0.39.1 or before.
+fn listening(all: &[Proc], records: &Records, board: &Path, version: (u64, i64, u64)) -> (usize, usize) {
+    let written = version.1.div_euclid(1_000_000);
+    let waited: Vec<Process> = sessions(all)
+        .into_iter()
+        .filter(|(_, server)| server.exe.as_deref().and_then(|exe| before_records(exe, records.store)).is_none())
+        .map(|(claude, _)| process(claude, records))
+        .filter(|process| records.registry.of(process).and_then(|running| running.board).is_some_and(|theirs| same_board(&theirs, board)))
+        .filter(|process| records.registry.recorded_at(process).is_some_and(|started| started < written))
+        .collect();
+    let heard = waited.iter().filter(|process| Told::within(records.told, process).last_heard().is_some_and(|heard| heard_it(&heard, version))).count();
+    (waited.len(), heard)
+}
+
 impl Report {
     pub fn failed(&self) -> bool {
         self.checks.iter().any(|check| check.verdict == Verdict::Fail)
@@ -636,6 +719,14 @@ impl Report {
             .map(|verdict| format!("{} {}", count(verdict), verdict.word()))
             .collect();
         let _ = writeln!(out, "ekko --doctor \u{b7} {}", if counts.is_empty() { "no session runs ekko's MCP server, and no ekko serve runs: nothing to check".to_string() } else { counts.join(" \u{b7} ") });
+        if let Some(probe) = &self.probe {
+            let heard = match (probe.sessions, probe.heard) {
+                (0, _) => "no session on it records what its wake hook hears: nothing to wait for".to_string(),
+                (sessions, heard) if heard == sessions => format!("every session on it heard the write ({heard} of {sessions})"),
+                (sessions, heard) => format!("{heard} of {sessions} sessions on it heard the write within {} s", MARGIN / 1000),
+            };
+            let _ = writeln!(out, "Probe: wrote {} again at {}; {heard}", probe.board.display(), clock(probe.written));
+        }
         for name in [OLD_BINARY, HOOKS_LOADED, WAKE_HEARD, GUARD_RAN, SERVED_PAGE] {
             let of: Vec<&Check> = self.checks.iter().filter(|check| check.check == name).collect();
             if of.is_empty() {
@@ -650,10 +741,11 @@ impl Report {
     }
 }
 
-/// `ekko --doctor`: the report on every session on this machine, as text or
-/// JSON, exiting 1 when a check fails.
-pub fn run(home: &Path, json: bool) -> ExitCode {
-    let mut report = Report { checks: check_all(home, &crate::holder::boot().unwrap_or_default(), true) };
+/// `ekko --doctor`: the report on every session on this machine, after
+/// `probe` where `--probe` wrote, as text or JSON, exiting 1 when a check
+/// fails.
+pub fn run(home: &Path, json: bool, probe: Option<Probe>) -> ExitCode {
+    let mut report = Report { checks: check_all(home, &crate::holder::boot().unwrap_or_default(), true), probe };
     let served = served_page(&crate::agent::state_dir(home), env!("CARGO_PKG_VERSION"));
     let page = |(verdict, says)| Check { check: SERVED_PAGE, verdict, about: "this machine".to_string(), session: None, says, brief: None };
     report.checks.extend(served.into_iter().map(page));
@@ -661,7 +753,11 @@ pub fn run(home: &Path, json: bool) -> ExitCode {
         // The envelope of every --json answer: `ok` says the command ran,
         // and the exit says whether a check failed, as for the text.
         let failed = report.checks.iter().filter(|check| check.verdict == Verdict::Fail).count();
-        println!("{}", serde_json::json!({"ok": true, "command": "doctor", "failed": failed, "checks": report.checks}));
+        let mut reply = serde_json::json!({"ok": true, "command": "doctor", "failed": failed, "checks": report.checks});
+        if let Some(probe) = &report.probe {
+            reply["probe"] = serde_json::json!(probe);
+        }
+        println!("{reply}");
     } else {
         print!("{}", report.text());
     }
@@ -772,7 +868,7 @@ mod tests {
         assert_eq!(hooks(&young(10_000)), [(Verdict::Fail, "Claude Code pid 100".to_string())]);
         let unknown = checks(&young(1_000), &Records { up: None, ..records(&registry, &told, 0) });
         assert_eq!(unknown.iter().find(|check| check.check == HOOKS_LOADED).unwrap().verdict, Verdict::Fail);
-        let report = Report { checks: checks(&all, &records(&registry, &told, 0)) };
+        let report = Report { checks: checks(&all, &records(&registry, &told, 0)), probe: None };
         assert!(report.failed());
         assert!(report.text().starts_with("ekko --doctor \u{b7} 4 ok \u{b7} 1 fail\nOld binary\n"), "{}", report.text());
         let record = |start: u64, boot: &str| Running {
@@ -794,7 +890,7 @@ mod tests {
         assert_eq!(hooks(&all), [(Verdict::Fail, "Claude Code pid 100".to_string())]);
         registry.record(record(11, "boot-1")).unwrap();
         assert_eq!(hooks(&all), [(Verdict::Ok, "default on pts/4 \u{b7} 4461f145".to_string())]);
-        let report = Report { checks: checks(&all, &records(&registry, &told, 0)) };
+        let report = Report { checks: checks(&all, &records(&registry, &told, 0)), probe: None };
         assert!(!report.failed(), "{}", report.text());
         fs::remove_dir_all(&dir).ok();
     }
@@ -854,10 +950,13 @@ mod tests {
         heard(&Heard { inode: inode + 1, mtime_ns: 1_500_000_000_000, size, revision: 1, at: 1_500_600 });
         let (verdict, says) = wake(minute_after);
         assert_eq!(verdict, Verdict::Fail, "a hook that last heard an older version: {says}");
+        let (verdict, says) = wake(2_004_000);
+        assert_eq!((verdict, says.as_str()), (Verdict::Skipped, "its board's last write, 3750 ms ago, is too new to judge: its hook may still be on its way"));
         heard(&Heard { inode, mtime_ns, size, revision: 2, at: 2_000_600 });
         assert_eq!(wake(minute_after).0, Verdict::Ok, "a hook that heard the last write");
         let (verdict, says) = wake(2_004_000);
-        assert_eq!((verdict, says.as_str()), (Verdict::Skipped, "its board's last write, 3750 ms ago, is too new to judge: its hook may still be on its way"));
+        assert_eq!(verdict, Verdict::Ok, "a hook that heard a write too new to judge otherwise: {says}");
+        assert!(says.ends_with(", 350 ms after"), "{says}");
         at(&dir.join("processes").join("boot1-100-11.json"), 3_000_000);
         let (verdict, says) = wake(3_060_000);
         assert_eq!(verdict, Verdict::Skipped, "a write before the SessionStart: {says}");
@@ -970,6 +1069,124 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// The probe writes the board again as every write does: the same items,
+    /// a new version put in place by rename and kept in history, the
+    /// revision as it was; with no session on the board it waits for none.
+    #[test]
+    fn the_probe_writes_the_same_board_as_a_new_version() {
+        let dir = crate::paths::test_dir("ekko-doctor-probe");
+        let ekko = crate::ekko::Ekko::new(Storage::new(&dir.join(".ekko")).unwrap());
+        ekko.create_task(&["probe me".to_string()]).unwrap();
+        let storage = &ekko.storage;
+        let (items, before, revision) = (fs::read(storage.storage_path()).unwrap(), id(storage.storage_path()), storage.get_counters().unwrap().revision);
+        let started = std::time::Instant::now();
+        let probe = probe(storage, &dir.join("home")).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "it waited with no session to wait for");
+        assert_eq!((probe.sessions, probe.heard), (0, 0));
+        let after = id(storage.storage_path());
+        assert_ne!(after, before, "no new version: a write in place, which a watch on the file may not follow");
+        assert_eq!(probe.written, version(storage.storage_path()).unwrap().1.div_euclid(1_000_000));
+        assert_eq!(fs::read(storage.storage_path()).unwrap(), items, "the probe changed the items");
+        assert_eq!(storage.get_counters().unwrap().revision, revision, "the probe moved the board's revision");
+        let kept = fs::read_dir(dir.join(".ekko").join("history")).unwrap().flatten().any(|entry| id(&entry.path()) == after);
+        assert!(kept, "the probe's version is not in history");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The probe reads and writes the board under its lock, as every write
+    /// does: another's write between its read and its own would be lost.
+    #[test]
+    fn the_probe_writes_under_the_boards_lock() {
+        let dir = crate::paths::test_dir("ekko-doctor-probe-lock");
+        let ekko = crate::ekko::Ekko::new(Storage::new(&dir.join(".ekko")).unwrap());
+        ekko.create_task(&["probe me".to_string()]).unwrap();
+        let storage = &ekko.storage;
+        let before = id(storage.storage_path());
+        let held = storage.acquire_lock().unwrap();
+        std::thread::scope(|scope| {
+            let probing = scope.spawn(|| probe(storage, &dir.join("home")).unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert_eq!(id(storage.storage_path()), before, "the probe wrote while another held the board's lock");
+            drop(held);
+            probing.join().unwrap();
+        });
+        assert_ne!(id(storage.storage_path()), before, "the probe did not write once the lock was free");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The probe waits for each session its SessionStart hook recorded on
+    /// the board before the write, whose ekko records what its wake hook
+    /// hears; not one on another board, one recorded after the write, nor
+    /// one on ekko 0.39.1 or before.
+    #[test]
+    fn the_probe_waits_for_the_sessions_on_its_board_that_record_what_they_hear() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let dir = crate::paths::test_dir("ekko-doctor-listening");
+        let new = binary(&dir, "new");
+        let on_path = new.parent().unwrap();
+        let registry = Registry::at(dir.join("processes"));
+        let told = dir.join("told");
+        let file = |project: &str| dir.join(project).join(".ekko").join("storage").join("storage.json");
+        let (board, elsewhere) = (file("app"), file("other"));
+        for board in [&board, &elsewhere] {
+            fs::create_dir_all(board.parent().unwrap()).unwrap();
+            fs::write(board, "{}").unwrap();
+        }
+        let old = Path::new("/nix/store/h-ekko-0.39.1/bin/ekko");
+        // 100 heard the probe, 200 not yet; 300 began after it; 400 is on
+        // another board; 500 runs an ekko that records nothing.
+        let mut all = Vec::new();
+        for pid in [100, 200, 300, 400, 500] {
+            all.push(Proc { pid, parent: 1, start: 11, comm: "claude".into(), ..Proc::default() });
+            let server = server(pid / 10, pid, Path::new("ekko"), &new, on_path);
+            all.push(if pid == 500 { Proc { exe: Some(old.to_path_buf()), ..server } } else { server });
+        }
+        let record = |pid: u32| Running {
+            pid,
+            start: 11,
+            boot: "boot-1".into(),
+            profile: None,
+            tty: None,
+            config_dir: None,
+            board: Some(if pid == 400 { elsewhere.clone() } else { board.clone() }),
+            transcript: None,
+            conversation: format!("c-{pid}"),
+            earlier: Vec::new(),
+            since: 0,
+        };
+        for pid in [100, 200, 300, 400, 500] {
+            registry.record(record(pid)).unwrap();
+        }
+        for pid in [100, 200, 300, 400, 500] {
+            let started = if pid == 300 { 3_000_000 } else { 1_000_000 };
+            fs::File::options()
+                .write(true)
+                .open(dir.join("processes").join(format!("boot1-{pid}-11.json")))
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_millis(started))
+                .unwrap();
+        }
+        let version = (7, 2_000_000_000_000, 2);
+        fs::create_dir_all(told.join("boot1-100-11")).unwrap();
+        let heard = Heard { inode: 7, mtime_ns: 2_000_000_000_000, size: 2, revision: 1, at: 2_000_600 };
+        fs::write(told.join("boot1-100-11").join("heard"), serde_json::to_string(&heard).unwrap()).unwrap();
+        assert_eq!(listening(&all, &records(&registry, &told, 2_001_000), &board, version), (2, 1));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The report says what the probe wrote and how many sessions heard it.
+    #[test]
+    fn the_report_says_how_many_sessions_heard_the_probe() {
+        let said = |sessions: usize, heard: usize| {
+            let probe = Probe { board: PathBuf::from("/b/storage.json"), written: 0, sessions, heard };
+            Report { checks: Vec::new(), probe: Some(probe) }.text().lines().nth(1).unwrap_or_default().to_string()
+        };
+        let wrote = format!("Probe: wrote /b/storage.json again at {}; ", clock(0));
+        assert_eq!(said(2, 1), format!("{wrote}1 of 2 sessions on it heard the write within 5 s"));
+        assert_eq!(said(2, 2), format!("{wrote}every session on it heard the write (2 of 2)"));
+        assert_eq!(said(0, 0), format!("{wrote}no session on it records what its wake hook hears: nothing to wait for"));
+    }
+
     /// One board's file reached by two paths is one board, as a project's
     /// folder mounted at two paths is.
     #[test]
@@ -995,6 +1212,9 @@ mod tests {
         let board = Some((7, 2_000_000_000_000, 10));
         let (started, now) = (Some(1_000_000), 2_060_000);
         assert_eq!(wake_heard(board, started, None, Some("ekko-0.39.1"), now).0, Verdict::Skipped);
+        let (verdict, says) = wake_heard(board, started, None, Some("ekko-0.39.1"), 2_001_000);
+        assert_eq!(verdict, Verdict::Skipped);
+        assert!(says.starts_with("its ekko-0.39.1 records nothing"), "said too new of an ekko that records nothing: {says}");
         assert_eq!(wake_heard(board, started, None, None, now).0, Verdict::Fail);
         let later = Heard { inode: 6, mtime_ns: 0, size: 0, revision: 0, at: 2_000_500 };
         assert_eq!(wake_heard(board, started, Some(&later), None, now).0, Verdict::Ok, "a hook that ran after the write heard it");
@@ -1057,6 +1277,10 @@ mod tests {
         assert_eq!(verdict(call("toolu_1", 2_000_000), None, None, now), Verdict::Fail, "it never ran");
         assert_eq!(verdict(call("toolu_1", 2_000_000), None, Some("ekko-0.39.1"), now), Verdict::Skipped, "an ekko that records nothing");
         assert_eq!(verdict(call("toolu_1", 2_000_000), None, None, 2_004_000), Verdict::Skipped, "too new");
+        assert_eq!(verdict(call("toolu_1", 2_000_000), Some(&guarded("toolu_1", 2_000_100)), None, 2_004_000), Verdict::Ok, "too new, and the guard ran for it");
+        assert_eq!(verdict(call("toolu_1", 2_000_000), Some(&guarded("toolu_0", 1_999_000)), None, 2_004_000), Verdict::Skipped, "too new, and the guard ran for another");
+        let (_, says) = guard_ran(call("toolu_1", 2_000_000), started, None, Some("ekko-0.39.1"), 2_004_000);
+        assert!(says.starts_with("its ekko-0.39.1 records nothing"), "said too new of an ekko that records nothing: {says}");
         assert_eq!(verdict(call("toolu_1", 900_000), None, None, now), Verdict::Skipped, "before the SessionStart");
         assert_eq!(verdict(Ok(None), None, None, now), Verdict::Skipped, "no Bash call");
         assert_eq!(verdict(Err("unreadable".into()), None, None, now), Verdict::Skipped);
