@@ -1036,7 +1036,10 @@ impl<'a> Draft<'a> {
             return Err(invalid("applying changes nothing: the plan already says what it suggests"));
         }
         crate::ekko::fits("description", &description)?;
-        crate::ekko::retitled(&self.data[&id].description, &description)?;
+        if let Some((text, cut)) = crate::ekko::retitled(&self.data[&id].description, &description) {
+            description = text;
+            self.notices.push(cut.told(&format!("{id}'s")));
+        }
         self.item(id).description = description;
         let now = chrono::Local::now().timestamp_millis();
         for (note, version) in &applied {
@@ -1155,9 +1158,8 @@ impl<'a> Draft<'a> {
         }
         crate::ekko::fits("description", text)?;
         let kind = spec.kind.unwrap_or(if spec.attached_to.is_some() { Kind::Note } else { Kind::Task });
-        if kind == Kind::Task {
-            crate::ekko::titled(text)?;
-        }
+        let cut = if kind == Kind::Task { crate::ekko::titled(text) } else { None };
+        let text = cut.as_ref().map_or(text, |(cut, _)| cut.as_str());
         if kind != Kind::Task {
             for (field, given) in [
                 ("priority", spec.priority.is_some()),
@@ -1219,6 +1221,10 @@ impl<'a> Draft<'a> {
             let older = self.resolve(older)?;
             let names = self.names();
             supersede(&mut self.data, id, Some(older), &|id| names.name(id))?;
+        }
+        // Last, so a create refused after the cut leaves no word of it.
+        if let Some((_, cut)) = cut {
+            self.notices.push(cut.told(&format!("{id}'s")));
         }
         Ok(id)
     }
@@ -1361,7 +1367,7 @@ impl<'a> Draft<'a> {
             self.notices.push(format!("artifact {target} is {}: no task was made", state.map_or("closed", State::word)));
             return;
         }
-        let saved = self.data.clone();
+        let (saved, told) = (self.data.clone(), self.notices.len());
         match self.make_steps(target, approving) {
             Ok(made) if made.is_empty() => self.notices.push(format!("artifact {target} had no step left to make a task of")),
             Ok(made) => {
@@ -1372,7 +1378,9 @@ impl<'a> Draft<'a> {
                 ));
             }
             Err(error) => {
+                // What the tasks undone said goes with them: a title cut.
                 self.data = saved;
+                self.notices.truncate(told);
                 self.notices.push(format!("no task was made for artifact {target}'s plan: {error}"));
             }
         }
@@ -1443,7 +1451,7 @@ impl<'a> Draft<'a> {
             if let Some(why) = crate::artifact::unplanned(text) {
                 return Err(invalid(why));
             }
-            let steps = crate::artifact::steps(&[], spec.steps.as_deref().unwrap_or_default()).map_err(invalid)?;
+            let (steps, told) = crate::artifact::steps(&[], spec.steps.as_deref().unwrap_or_default()).map_err(invalid)?;
             let create = Create {
                 kind: Some(Kind::Task),
                 text: text.to_string(),
@@ -1460,6 +1468,7 @@ impl<'a> Draft<'a> {
             let id = self.create(&create)?;
             self.item(id).artifact =
                 Some(Box::new(Artifact { steps, version: 1, earlier: Vec::new(), approved_version: None, unknown: Default::default() }));
+            self.notices.extend(told);
             return Ok(id);
         };
         let id = self.resolve(target)?;
@@ -1473,10 +1482,11 @@ impl<'a> Draft<'a> {
         };
         // Steps not given stay as they are: the call answers feedback alone.
         if let Some(given) = spec.steps.as_deref() {
-            let steps = crate::artifact::steps(&plan.steps, given).map_err(invalid)?;
+            let (steps, told) = crate::artifact::steps(&plan.steps, given).map_err(invalid)?;
             if let Some(plan) = self.item(id).artifact.as_mut() {
                 plan.steps = steps;
             }
+            self.notices.extend(told);
         }
         Ok(id)
     }
@@ -1946,10 +1956,14 @@ impl<'a> Draft<'a> {
             return Err(EkkoError::MissingDesc);
         }
         crate::ekko::fits("description", &description)?;
-        if item.is_task {
-            crate::ekko::retitled(&item.description, &description)?;
+        let cut = if item.is_task { crate::ekko::retitled(&item.description, &description) } else { None };
+        match cut {
+            Some((text, cut)) => {
+                item.description = text;
+                self.notices.push(cut.told(&format!("{id}'s")));
+            }
+            None => item.description = description,
         }
-        item.description = description;
         Ok(vec![id])
     }
 
@@ -2682,46 +2696,87 @@ mod tests {
     }
 
     /// A task's first line is its title, which the lists show: past
-    /// MAX_TITLE characters it is refused on creation, and so is an edit
-    /// that makes it so. What is appended to a task goes below its title, a
-    /// note's first line runs as long as it likes, and a task written before
-    /// titles keeps its long first line through edits that leave that line
-    /// alone (task 260).
+    /// MAX_TITLE characters every write that sets one cuts it at a word
+    /// rather than refusing it, and its reply says where (decision 1504) --
+    /// create, and through it batch and an artifact's own text; an edit; a
+    /// suggestion applied from the page; an artifact's steps; and the
+    /// terminal's --task and --edit. What is appended to a task goes below
+    /// its title, a note's first line runs as long as it likes, and a task
+    /// written before titles keeps its long first line through edits that
+    /// leave that line alone (task 260).
     #[test]
-    fn a_task_starts_with_a_short_title() {
+    fn every_write_that_sets_a_title_cuts_a_long_one_and_says_where() {
+        let (me, _, _) = crate::holder::test_sessions();
         let (ekko, dir) = board("titled");
-        let long = "t".repeat(crate::ekko::MAX_TITLE + 1);
-        let refused = batch(&ekko, &[json!({"op": "create", "text": long})]);
-        assert!(
-            matches!(&refused, Err(EkkoError::InvalidInput(m)) if m.contains("at most 80 characters, and this one runs 81")),
-            "{:?}",
-            refused.err()
-        );
-        let cli = ekko.create_task(std::slice::from_ref(&long));
-        assert!(matches!(&cli, Err(EkkoError::InvalidInput(m)) if m.contains("its title")), "the terminal too: {:?}", cli.err());
+        let long = "A title past eighty characters is cut at the last space within them, and the reply says where";
+        let title = "A title past eighty characters is cut at the last space within them, and the";
+        let cut = format!("{title}\nreply says where");
+        let told = |ran: usize, whose: &str| crate::ekko::Cut { ran, title: title.to_string(), at_space: true }.told(whose);
 
-        let titled = format!("{}\n{long}", "t".repeat(crate::ekko::MAX_TITLE));
-        batch(&ekko, &[json!({"op": "create", "text": titled})]).unwrap();
-        batch(&ekko, &[json!({"op": "create", "kind": "note", "text": long})]).unwrap();
-        let longer = batch(&ekko, &[json!({"op": "edit", "item": 1, "replace": {"old": "t\n", "new": "tt\n"}})]);
-        assert!(matches!(&longer, Err(EkkoError::InvalidInput(m)) if m.contains("runs 81")), "{:?}", longer.err());
-        let whole = batch(&ekko, &[json!({"op": "edit", "item": 1, "text": long})]);
-        assert!(matches!(&whole, Err(EkkoError::InvalidInput(_))), "{:?}", whole.err());
-        let cli = ekko.edit_description(&["@1".to_string(), long.clone()]);
-        assert!(matches!(&cli, Err(EkkoError::InvalidInput(m)) if m.contains("its title")), "the terminal too: {:?}", cli.err());
+        // create, and batch, which creates through it.
+        let made = batch(&ekko, &[json!({"op": "create", "text": format!("{long}\nThe body.")})]).unwrap();
+        assert_eq!((made.data[&1].description.clone(), made.notices), (format!("{cut}\nThe body."), vec![told(93, "1's")]));
+        let note = batch(&ekko, &[json!({"op": "create", "kind": "note", "text": long})]).unwrap();
+        assert_eq!((note.data[&2].description.as_str(), note.notices.len()), (long, 0), "a note's first line is no title");
 
-        batch(&ekko, &[json!({"op": "create", "text": "short"})]).unwrap();
-        batch(&ekko, &[json!({"op": "edit", "item": 3, "append": "why it matters"})]).unwrap();
-        let grown = batch(&ekko, &[json!({"op": "edit", "item": 3, "append": "and more"})]).unwrap();
-        assert_eq!(grown.data[&3].description, "short\nwhy it matters and more");
+        // An edit of the whole text, or of the title alone.
+        batch(&ekko, &[json!({"op": "create", "text": "short"}), json!({"op": "create", "text": "short\nwhy it matters"})]).unwrap();
+        let whole = batch(&ekko, &[json!({"op": "edit", "item": 3, "text": long})]).unwrap();
+        assert_eq!((whole.data[&3].description.clone(), whole.notices), (cut.clone(), vec![told(93, "3's")]));
+        let part = batch(&ekko, &[json!({"op": "edit", "item": 4, "replace": {"old": "short", "new": long}})]).unwrap();
+        assert_eq!((part.data[&4].description.clone(), part.notices), (format!("{cut}\nwhy it matters"), vec![told(93, "4's")]));
+        let grown = batch(&ekko, &[json!({"op": "edit", "item": 4, "append": "and more"})]).unwrap();
+        assert_eq!((grown.data[&4].description.clone(), grown.notices.len()), (format!("{cut}\nwhy it matters and more"), 0));
 
-        // A task written before titles, one long line.
+        // A task written before titles, one long line, kept until its line changes.
         let mut data = ekko.storage.get().unwrap();
-        data.get_mut(&3).unwrap().description = long.clone();
+        data.get_mut(&3).unwrap().description = long.to_string();
         ekko.storage.set(&data).unwrap();
         let kept = batch(&ekko, &[json!({"op": "edit", "item": 3, "append": "more"})]).unwrap();
-        assert_eq!(kept.data[&3].description, format!("{long}\nmore"));
-        batch(&ekko, &[json!({"op": "edit", "item": 3, "replace": {"old": "more", "new": "less"}})]).unwrap();
+        assert_eq!((kept.data[&3].description.clone(), kept.notices.len()), (format!("{long}\nmore"), 0));
+        let changed = batch(&ekko, &[json!({"op": "edit", "item": 3, "replace": {"old": "where\n", "new": "where it was\n"}})]).unwrap();
+        assert_eq!((changed.data[&3].description.clone(), changed.notices), (format!("{cut} it was\nmore"), vec![told(100, "3's")]));
+
+        // The terminal's --task and --edit.
+        let Ok(crate::ekko::Outcome::Task(item, Some(said))) = ekko.create_task(&[long.to_string()]) else { panic!("--task kept or refused it") };
+        assert_eq!((item.description.as_str(), said.told("Its")), (cut.as_str(), told(93, "Its")));
+        let Ok(crate::ekko::Outcome::Edit(item, Some(said))) = ekko.edit_description(&["@4".to_string(), format!("{long}\nagain")]) else {
+            panic!("--edit kept or refused it")
+        };
+        assert_eq!((item.description.clone(), said.told("Its")), (format!("{cut}\nagain"), told(93, "Its")));
+
+        // An artifact's own text, through create, and its steps, new and
+        // written over the plan's.
+        let session = Ekko::new(Storage::new(&dir).unwrap()).acting_as(me);
+        let plan = "\n\n## Goal\nWhy.\n## What is known\nFacts.\n## Design\nHow.\n## Risks and open questions\nNone.";
+        let spec = |value: Value| -> ArtifactSpec { serde_json::from_value(value).unwrap() };
+        let mut draft = Draft::open(&session).unwrap();
+        let first = draft.artifact(&spec(json!({"text": format!("{long}{plan}"), "steps": [{"key": "one", "text": format!("{long}\nwhy")}]}))).unwrap();
+        let written = draft.commit(false).unwrap();
+        let artifact = &written.data[&first];
+        assert_eq!(artifact.description, format!("{cut}{plan}"));
+        assert_eq!(artifact.artifact.as_deref().unwrap().steps[0].text, format!("{cut}\nwhy"));
+        assert_eq!(written.notices, vec![told(93, &format!("{first}'s")), told(93, "Step one's")]);
+        let mut draft = Draft::open(&session).unwrap();
+        draft.artifact(&spec(json!({"artifact": first, "steps": [{"key": "one", "text": "First"}, {"key": "two", "text": long}]}))).unwrap();
+        let over = draft.commit(false).unwrap();
+        assert_eq!((over.data[&first].artifact.as_deref().unwrap().steps[1].text.clone(), over.notices), (cut.clone(), vec![told(93, "Step two's")]));
+
+        // A suggestion applied from the page, which reaches the title when
+        // the plan opens on a blank line, so that its words show.
+        let mut draft = Draft::open(&session).unwrap();
+        let second = draft.artifact(&spec(json!({"text": format!("Ship{plan}"), "steps": [{"key": "one", "text": "First"}]}))).unwrap();
+        draft.apply(&op(json!({"op": "edit", "item": second, "text": format!("\nShip{plan}")}))).unwrap();
+        draft.commit(false).unwrap();
+        let person = Ekko::new(Storage::new(&dir).unwrap()).acting_as(Actor::person());
+        let mut draft = Draft::open(&person).unwrap();
+        let on = Ref::Id(second);
+        let suggestion = draft.comment(&on, "", comment_on("Ship", "", "", Some(long))).unwrap();
+        let uid = draft.data[&suggestion].uid.clone().unwrap();
+        draft.send_comment(&on, &uid).unwrap();
+        draft.apply_suggestion(&on, &uid).unwrap();
+        let applied = draft.commit(false).unwrap();
+        assert_eq!((applied.data[&second].description.clone(), applied.notices), (format!("\n{cut}{plan}"), vec![told(93, &format!("{second}'s"))]));
 
         std::fs::remove_dir_all(&dir).ok();
     }

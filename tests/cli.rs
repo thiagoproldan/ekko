@@ -539,6 +539,38 @@ fn a_lone_dash_reads_the_description_from_stdin() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// A task's title past 80 characters, from --task or --edit, is cut at a
+/// word rather than refused, and the terminal says where under the message
+/// that it was written, as --json says it in notices (decision 1504).
+#[test]
+fn the_terminal_cuts_a_long_title_and_says_where() {
+    let dir = temp_ekko_dir();
+    let ekko = |args: &[&str]| -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_ekko")).args(["--ekko-dir", dir.to_str().unwrap()]).args(args).output().expect("failed to run ekko");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let long = "A title past eighty characters is cut at the last space within them, and the reply says where";
+    let title = "A title past eighty characters is cut at the last space within them, and the";
+    let said = |ran: usize| {
+        format!(
+            "Its first line ran {ran} characters, past the 80 a title takes, so it was cut at the last space within them and the rest starts the second line: the title reads \"{title}\". Edit it if it reads badly"
+        )
+    };
+
+    let created = ekko(&["--task", long]);
+    assert!(created.contains("Created task:") && created.contains(&said(93)), "{created}");
+    let edited: serde_json::Value = serde_json::from_str(&ekko(&["--json", "--edit", "@1", &format!("{long}, again")])).unwrap();
+    assert_eq!(edited["item"]["description"], format!("{title}\nreply says where, again"), "{edited}");
+    assert_eq!(edited["notices"], serde_json::json!([said(100)]), "{edited}");
+    let short = ekko(&["--task", "short"]);
+    assert!(!short.contains("first line ran"), "{short}");
+    let fits: serde_json::Value = serde_json::from_str(&ekko(&["--json", "--edit", "@2", "still short"])).unwrap();
+    assert!(fits.get("notices").is_none(), "{fits}");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// The plugin's task-list hook through the real binary, in a project found
 /// from the folder, as a session runs it: the event on stdin, Claude Code's
 /// config directory from CLAUDE_CONFIG_DIR, the list written under the

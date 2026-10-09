@@ -442,7 +442,8 @@ pub struct RestoreResult {
 /// module doesn't otherwise treat them differently.
 #[derive(Debug)]
 pub enum Outcome {
-    Task(Item),
+    /// A task, and where its title was cut, if it ran past `MAX_TITLE`.
+    Task(Item, Option<Cut>),
     Note(Item),
     /// `overridden` is what `--force` pushed past: each task completed while
     /// still blocked, with the blockers that were open. Empty whenever
@@ -468,7 +469,8 @@ pub enum Outcome {
     },
     Delete(Vec<DeleteResult>),
     Restore(Vec<RestoreResult>),
-    Edit(Item),
+    /// The item edited, and where its new title was cut, as `Task` says.
+    Edit(Item, Option<Cut>),
     Answered(Item),
     Move(Item),
     Priority(Item),
@@ -520,7 +522,7 @@ impl Outcome {
     /// never needs a separate name passed in alongside the data.
     pub fn command_name(&self) -> &'static str {
         match self {
-            Outcome::Task(_) => "task",
+            Outcome::Task(..) => "task",
             Outcome::Note(_) => "note",
             Outcome::Set { .. } => "set",
             Outcome::Check { .. } => "check",
@@ -528,7 +530,7 @@ impl Outcome {
             Outcome::Star { .. } => "star",
             Outcome::Delete(_) => "delete",
             Outcome::Restore(_) => "restore",
-            Outcome::Edit(_) => "edit",
+            Outcome::Edit(..) => "edit",
             Outcome::Answered(_) => "answer",
             Outcome::Move(_) => "move",
             Outcome::Priority(_) => "priority",
@@ -564,7 +566,12 @@ impl Outcome {
 
     pub fn render(&self, out: &mut Renderer) {
         match self {
-            Outcome::Task(item) | Outcome::Note(item) => {
+            Outcome::Task(item, cut) => {
+                out.success_create(item);
+                out.title_cut(cut.as_ref());
+                out.rests_told(item, true);
+            }
+            Outcome::Note(item) => {
                 out.success_create(item);
                 out.rests_told(item, true);
             }
@@ -609,8 +616,9 @@ impl Outcome {
                 let ids: Vec<u32> = items.iter().map(|r| r.archive_id).collect();
                 out.success_restore(&ids);
             }
-            Outcome::Edit(item) => {
+            Outcome::Edit(item, cut) => {
                 out.success_edit(item.id);
+                out.title_cut(cut.as_ref());
                 out.rests_told(item, false);
             }
             Outcome::Answered(item) => out.success_answered(item.id),
@@ -1389,16 +1397,19 @@ impl Ekko {
     ) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let created = self.parse_create_options(input)?;
-        titled(&created.description)?;
+        let (description, cut) = match titled(&created.description) {
+            Some((text, cut)) => (text, Some(cut)),
+            None => (created.description, None),
+        };
         let mut data = self.storage.get()?;
         let id = self.generate_id(&data);
-        let mut item = self.authored(Item::new_task(id, created.description, created.boards, created.priority));
+        let mut item = self.authored(Item::new_task(id, description, created.boards, created.priority));
         item.due_date = created.due_date;
         item.with = created.with;
         item.phase = phase.map(str::to_string);
         data.insert(id, item.clone());
         self.save_touching(&mut data)?;
-        Ok(Outcome::Task(item))
+        Ok(Outcome::Task(item, cut))
     }
 
     /// `kind` and `supersedes` are `--kind` and `--supersedes`: without them,
@@ -1633,13 +1644,15 @@ impl Ekko {
             return Err(EkkoError::MissingDesc);
         }
         fits("description", &new_description)?;
-        if data[&id].is_task {
-            retitled(&data[&id].description, &new_description)?;
-        }
+        let cut = if data[&id].is_task { retitled(&data[&id].description, &new_description) } else { None };
+        let (new_description, cut) = match cut {
+            Some((text, cut)) => (text, Some(cut)),
+            None => (new_description, None),
+        };
 
         data.get_mut(&id).expect("id just validated against data").description = new_description;
         self.save_touching(&mut data)?;
-        Ok(Outcome::Edit(data[&id].clone()))
+        Ok(Outcome::Edit(data[&id].clone(), cut))
     }
 
     pub fn move_boards(&self, input: &[String]) -> Result<Outcome, EkkoError> {
@@ -2665,22 +2678,62 @@ pub fn title(text: &str) -> &str {
     text.trim_start().lines().next().unwrap_or_default().trim()
 }
 
-/// Refuses a task whose title runs past `MAX_TITLE`, saying by how much.
-pub fn titled(text: &str) -> Result<(), EkkoError> {
-    let length = title(text).chars().count();
-    if length > MAX_TITLE {
-        return Err(EkkoError::InvalidInput(format!(
-            "A task's first line is its title, at most {MAX_TITLE} characters, and this one runs {length}: start with a short title, then a line break and the rest"
-        )));
-    }
-    Ok(())
+/// Where a task's first line, run past `MAX_TITLE`, was cut to make its
+/// title: how long it ran, the title left, and whether it broke at a space
+/// or, finding none within `MAX_TITLE`, inside a word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cut {
+    pub ran: usize,
+    pub title: String,
+    pub at_space: bool,
 }
 
-/// Refuses a task's new text whose title changed and runs past `MAX_TITLE`.
-/// A task written before titles keeps its long first line through edits that
-/// leave that line alone.
-pub fn retitled(old: &str, new: &str) -> Result<(), EkkoError> {
-    if title(old) == title(new) { Ok(()) } else { titled(new) }
+impl Cut {
+    /// What a reply says of the cut, `whose` naming the text cut: "Its", or
+    /// "1557's" in a reply that may write several items.
+    pub fn told(&self, whose: &str) -> String {
+        let at = if self.at_space {
+            "at the last space within them".to_string()
+        } else {
+            format!("after the {MAX_TITLE}th, with no space among them,")
+        };
+        format!(
+            "{whose} first line ran {} characters, past the {MAX_TITLE} a title takes, so it was cut {at} and the rest starts the second line: the title reads {:?}. Edit it if it reads badly",
+            self.ran, self.title
+        )
+    }
+}
+
+/// A task's text with its title cut to fit `MAX_TITLE`, and where it was
+/// cut; `None` when the title fits, the text then kept as given. Cut rather
+/// than refused (decision 1504: create refused 36 titles in 22 sessions in a
+/// month, task 1440): the first line breaks at its last space within
+/// `MAX_TITLE` characters, or at `MAX_TITLE` when it has none there, and the
+/// rest of it starts the second line, so no word is dropped.
+pub fn titled(text: &str) -> Option<(String, Cut)> {
+    let line = title(text);
+    let ran = line.chars().count();
+    if ran <= MAX_TITLE {
+        return None;
+    }
+    // A space with at most MAX_TITLE characters before it: the line is
+    // trimmed, so one never comes first.
+    let space = line.char_indices().take(MAX_TITLE + 1).filter(|(_, c)| c.is_whitespace()).last();
+    let (kept, rest) = match space {
+        Some((at, _)) => (line[..at].trim_end(), line[at..].trim_start()),
+        None => line.split_at(line.char_indices().nth(MAX_TITLE).map_or(line.len(), |(at, _)| at)),
+    };
+    // `title` takes the line from where the text's leading whitespace ends.
+    let start = text.len() - text.trim_start().len();
+    let cut = format!("{}{kept}\n{rest}{}", &text[..start], &text[start + line.len()..]);
+    Some((cut, Cut { ran, title: kept.to_string(), at_space: space.is_some() }))
+}
+
+/// `titled` for a task's new text, when its title changed: a task written
+/// before titles keeps its long first line through edits that leave that
+/// line alone.
+pub fn retitled(old: &str, new: &str) -> Option<(String, Cut)> {
+    if title(old) == title(new) { None } else { titled(new) }
 }
 
 /// `-` standing alone for the description reads it from stdin, so text with
@@ -2892,8 +2945,8 @@ mod tests {
     fn create_task_assigns_sequential_ids_and_defaults_to_my_board() {
         let (ekko, dir) = fresh_ekko();
 
-        let Outcome::Task(first) = ekko.create_task(&words(&["first task"])).unwrap() else { panic!() };
-        let Outcome::Task(second) = ekko.create_task(&words(&["@coding", "second task"])).unwrap() else { panic!() };
+        let Outcome::Task(first, _) = ekko.create_task(&words(&["first task"])).unwrap() else { panic!() };
+        let Outcome::Task(second, _) = ekko.create_task(&words(&["@coding", "second task"])).unwrap() else { panic!() };
 
         assert_eq!(first.id, 1);
         assert_eq!(first.boards, vec!["My Board".to_string()]);
@@ -2931,7 +2984,7 @@ mod tests {
     fn inline_priority_marker_is_parsed_and_stripped_from_the_description() {
         let (ekko, dir) = fresh_ekko();
 
-        let Outcome::Task(item) = ekko.create_task(&words(&["@coding", "Fix", "the", "bug", "p:3"])).unwrap() else {
+        let Outcome::Task(item, _) = ekko.create_task(&words(&["@coding", "Fix", "the", "bug", "p:3"])).unwrap() else {
             panic!()
         };
 
@@ -3017,7 +3070,7 @@ mod tests {
         ekko.set_state(&words(&["@2", "done"]), false).unwrap();
         ekko.clear().unwrap();
 
-        let Outcome::Task(item) = ekko.create_task(&words(&["c"])).unwrap() else { panic!() };
+        let Outcome::Task(item, _) = ekko.create_task(&words(&["c"])).unwrap() else { panic!() };
 
         assert_eq!(item.id, 3, "id 2 was handed out again after its item was archived");
 
@@ -3034,7 +3087,7 @@ mod tests {
         ekko.create_task(&words(&["b"])).unwrap();
         ekko.delete_items(&words(&["2"])).unwrap();
 
-        let Outcome::Task(item) = ekko.create_task(&words(&["c"])).unwrap() else { panic!() };
+        let Outcome::Task(item, _) = ekko.create_task(&words(&["c"])).unwrap() else { panic!() };
 
         assert_eq!(item.id, 3, "a new item took the trashed item's number");
         ekko.set_trashed(&words(&["2"]), false).unwrap();
@@ -3744,7 +3797,7 @@ mod tests {
         ekko.set_phases(&words(&["design"])).unwrap();
         let before = ekko.storage.get_counters().unwrap().revision;
 
-        let Outcome::Task(task) = ekko.create_task_in(&words(&["in a phase"]), Some("design")).unwrap() else { panic!() };
+        let Outcome::Task(task, _) = ekko.create_task_in(&words(&["in a phase"]), Some("design")).unwrap() else { panic!() };
         let Outcome::Note(note) = ekko.create_note_in(&words(&["a note there"]), Some("design"), None, None).unwrap() else { panic!() };
 
         assert_eq!(ekko.storage.get_counters().unwrap().revision, before + 2, "one revision per create");
@@ -4170,7 +4223,7 @@ mod tests {
     #[test]
     fn a_uid_works_wherever_a_display_id_does() {
         let (ekko, dir) = fresh_ekko();
-        let Outcome::Task(item) = ekko.create_task(&words(&["carry me"])).unwrap() else {
+        let Outcome::Task(item, _) = ekko.create_task(&words(&["carry me"])).unwrap() else {
             panic!("expected a Task outcome")
         };
         let uid = item.uid.clone().expect("a created task carries a uid");
@@ -5099,5 +5152,62 @@ mod tests {
         }
         item.created_by = Some(crate::holder::Holder { pid: None, start: None, boot: None, profile: None, tty: None, conversation: None, since: 0, unknown: BTreeMap::new() });
         assert!(is_by(&item, "user") && !is_by(&item, "default"));
+    }
+
+    /// A first line past MAX_TITLE is cut at its last space within it, for
+    /// every length from 81 to 120 and wherever its words fall: the rest of
+    /// the line starts the second, whole, and the lines after stay as they
+    /// were. With no space within MAX_TITLE it is cut at MAX_TITLE; a line
+    /// that fits is kept as given; characters are counted, not bytes
+    /// (decision 1504).
+    #[test]
+    fn a_long_title_is_cut_at_its_last_space_within_the_limit() {
+        let lengths = [1, 2, 3, 5, 8, 13, 4, 7, 11, 6];
+        for ran in MAX_TITLE + 1..=120 {
+            for shift in 0..lengths.len() {
+                let mut line = String::new();
+                for length in lengths.iter().cycle().skip(shift) {
+                    if line.len() >= ran {
+                        break;
+                    }
+                    if !line.is_empty() {
+                        line.push(' ');
+                    }
+                    line.push_str(&"w".repeat(*length));
+                }
+                line.truncate(ran);
+                if line.ends_with(' ') {
+                    line.pop();
+                    line.push('w');
+                }
+                for line in [line.clone(), line.replace('w', "ç")] {
+                    let (text, cut) = titled(&format!("{line}\nThe body.\n\nMore.")).unwrap_or_else(|| panic!("{line:?} was kept"));
+                    let (first, rest) = text.split_once('\n').unwrap();
+                    let (second, after) = rest.split_once('\n').unwrap();
+                    assert_eq!(format!("{first} {second}"), line, "the line is kept whole across the first two");
+                    assert_eq!(after, "The body.\n\nMore.");
+                    let kept = first.chars().count();
+                    assert!(kept <= MAX_TITLE, "{first:?} runs {kept}");
+                    assert!(!line.chars().skip(kept + 1).take(MAX_TITLE - kept).any(char::is_whitespace), "{line:?} was cut at {kept}, before its last space within {MAX_TITLE}");
+                    assert_eq!(cut, Cut { ran, title: first.to_string(), at_space: true });
+                }
+            }
+        }
+
+        let word = "x".repeat(100);
+        let (text, cut) = titled(&word).unwrap();
+        assert_eq!(text, format!("{}\n{}", "x".repeat(MAX_TITLE), "x".repeat(20)), "no space within: cut at {MAX_TITLE}");
+        assert!(!cut.at_space && cut.ran == 100);
+        let (text, _) = titled(&format!("{} {word}", "y".repeat(MAX_TITLE))).unwrap();
+        assert_eq!(text, format!("{}\n{word}", "y".repeat(MAX_TITLE)), "a space right after the {MAX_TITLE}th");
+        let (text, _) = titled(&format!("\n  {}  wide\nbody", "w ".repeat(45).trim_end())).unwrap();
+        assert!(text.starts_with("\n  w w") && text.ends_with(" w\nw w w w w  wide\nbody"), "what the title is read past stays: {text:?}");
+
+        for kept in ["w".repeat(MAX_TITLE), format!("short\n{word}"), format!("  {}  \nbody", "ç".repeat(MAX_TITLE))] {
+            assert_eq!(titled(&kept), None, "{kept:?} fits");
+        }
+        let old = format!("{word}\nbody");
+        assert_eq!(retitled(&old, &format!("{word}\nanother body")), None, "a title written before titles, left alone");
+        assert!(retitled(&old, &format!("{word} more\nbody")).is_some(), "a title changed is cut");
     }
 }

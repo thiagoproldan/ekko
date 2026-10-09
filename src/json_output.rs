@@ -22,7 +22,8 @@ pub fn print_error(error: &EkkoError) {
 fn success_value(outcome: &Outcome) -> Value {
     let command = outcome.command_name();
     match outcome {
-        Outcome::Task(item) | Outcome::Note(item) => json!({"ok": true, "command": command, "item": item}),
+        Outcome::Task(item, cut) => with_cut(json!({"ok": true, "command": command, "item": item}), cut.as_ref()),
+        Outcome::Note(item) => json!({"ok": true, "command": command, "item": item}),
         Outcome::Check { checked, unchecked, overridden, reopened } => with_overrides(
             json!({"ok": true, "command": command, "checked": checked, "unchecked": unchecked}),
             overridden,
@@ -41,8 +42,8 @@ fn success_value(outcome: &Outcome) -> Value {
         ),
         Outcome::Delete(items) => json!({"ok": true, "command": command, "items": items}),
         Outcome::Restore(items) => json!({"ok": true, "command": command, "items": items}),
-        Outcome::Edit(item)
-        | Outcome::Answered(item)
+        Outcome::Edit(item, cut) => with_cut(json!({"ok": true, "command": command, "item": item}), cut.as_ref()),
+        Outcome::Answered(item)
         | Outcome::Move(item)
         | Outcome::Priority(item)
         | Outcome::With(item) => {
@@ -171,6 +172,15 @@ fn error_value(error: &EkkoError) -> Value {
     };
     if let (Some((key, val)), Value::Object(map)) = (extra, &mut value) {
         map.insert(key.to_string(), val);
+    }
+    value
+}
+
+/// Adds where a task's title was cut to its reply, as `notices`, the key the
+/// MCP server's replies say it under, and only when it was cut.
+fn with_cut(mut value: Value, cut: Option<&crate::ekko::Cut>) -> Value {
+    if let (Value::Object(map), Some(cut)) = (&mut value, cut) {
+        map.insert("notices".to_string(), json!([cut.told("Its")]));
     }
     value
 }

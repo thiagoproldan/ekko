@@ -192,6 +192,46 @@ fn a_write_names_the_work_it_set_free() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// A task's title past 80 characters is cut at a word rather than refused,
+/// and the reply of each tool that writes one says where (decision 1504):
+/// create, batch, edit and the artifact tool's steps. A title that fits
+/// says nothing.
+#[test]
+fn a_long_title_is_cut_and_each_writing_tool_says_where() {
+    let home = temp_home();
+    let long = "A title past eighty characters is cut at the last space within them, and the reply says where";
+    let plan = "Ship\n\n## Goal\nWhy.\n## What is known\nFacts.\n## Design\nHow.\n## Risks and open questions\nNone.";
+    let replies = session(
+        &home,
+        &[
+            call(1, "create", json!({"text": long})),
+            call(2, "batch", json!({"ops": [{"op": "create", "text": "short"}, {"op": "edit", "item": "$1", "text": long}]})),
+            call(3, "edit", json!({"item": 1, "text": format!("{long}, again")})),
+            call(4, "artifact", json!({"text": plan, "steps": [{"key": "one", "text": long}]})),
+            call(5, "create", json!({"text": "short\nThe body."})),
+            call(6, "context", json!({"item": 1})),
+        ],
+    );
+    let reply = |id: &str| serde_json::from_str::<Value>(text(&replies[id])).unwrap();
+    let said = |ran: usize, whose: &str| {
+        format!(
+            "{whose} first line ran {ran} characters, past the 80 a title takes, so it was cut at the last space within them and the rest starts the second line: \
+             the title reads \"A title past eighty characters is cut at the last space within them, and the\". Edit it if it reads badly"
+        )
+    };
+    for (id, ran, whose) in [("1", 93, "1's"), ("2", 93, "2's"), ("3", 100, "1's"), ("4", 93, "Step one's")] {
+        assert_eq!(reply(id)["notices"], json!([said(ran, whose)]), "call {id}: {}", reply(id));
+    }
+    assert!(reply("5").get("notices").is_none(), "{}", reply("5"));
+    assert!(
+        text(&replies["6"]).contains("1. A title past eighty characters is cut at the last space within them, and the\nreply says where, again\n"),
+        "{}",
+        text(&replies["6"])
+    );
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// A read that names the cursor it holds is answered in one line while the
 /// board has not moved, and in full once a write has moved it.
 #[test]
@@ -1631,7 +1671,7 @@ fn a_link_ask_proposes_is_made_only_by_the_users_answer_in_ekkos_menu() {
 /// -- six such rewrites cost 9.6% of the handoff era of 2026-09-21 (note 258)
 /// -- so it changes on purpose, batched into a release that changes it anyway,
 /// with this fingerprint moved alongside.
-const PREFIX_FINGERPRINT: u64 = 0x91761b66e8112875;
+const PREFIX_FINGERPRINT: u64 = 0xd8e97760730c5073;
 
 #[test]
 fn the_prefix_every_session_pays_for_changes_only_on_purpose() {

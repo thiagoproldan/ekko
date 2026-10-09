@@ -113,15 +113,19 @@ pub fn unplanned(text: &str) -> Option<String> {
 
 /// The steps `given` makes of the plan's steps `old`, checked: keys a few
 /// lower-case letters, digits or dashes, each once; a text whose first line
-/// is a task's title; `after` naming earlier steps only, which keeps them
-/// in an order the work can follow. A step the user approved is a task now:
-/// it stays, as it was, and the task is where it changes; named by its key
+/// is a task's title, cut to one where it runs longer, with what the reply
+/// says of each cut; `after` naming earlier steps only, which keeps them in
+/// an order the work can follow. A step the user approved is a task now: it
+/// stays, as it was, and the task is where it changes; named by its key
 /// alone, it is kept whole.
-pub fn steps(old: &[Step], given: &[StepSpec]) -> Result<Vec<Step>, String> {
+pub fn steps(old: &[Step], given: &[StepSpec]) -> Result<(Vec<Step>, Vec<String>), String> {
     if given.len() > STEPS_MOST {
         return Err(format!("a plan holds at most {STEPS_MOST} steps, and this one gives {}: split the goal", given.len()));
     }
+    // The text a step keeps of what was given: its title cut, if need be.
+    let as_kept = |text: &str| crate::ekko::titled(text).map_or_else(|| text.to_string(), |(text, _)| text);
     let mut made: Vec<Step> = Vec::new();
+    let mut told: Vec<String> = Vec::new();
     for spec in given {
         let key = spec.key.trim();
         let well_formed = !key.is_empty()
@@ -146,7 +150,7 @@ pub fn steps(old: &[Step], given: &[StepSpec]) -> Result<Vec<Step>, String> {
         let done_when = spec.done_when.as_deref().map(str::trim).filter(|text| !text.is_empty()).map(str::to_string);
         if let Some(approved) = old.iter().find(|step| step.key == key && step.task.is_some()) {
             let text = spec.text.as_deref().map(str::trim);
-            let changed = text.is_some_and(|text| text != approved.text)
+            let changed = text.is_some_and(|text| as_kept(text) != approved.text)
                 || (spec.done_when.is_some() && done_when != approved.done_when)
                 || (!after.is_empty() && after != approved.after);
             if changed {
@@ -159,10 +163,16 @@ pub fn steps(old: &[Step], given: &[StepSpec]) -> Result<Vec<Step>, String> {
         if text.is_empty() {
             return Err(format!("step {key} needs its text: what its task will say, a title first"));
         }
-        crate::ekko::titled(text).map_err(|error| format!("step {key}: {error}"))?;
         crate::ekko::fits("step", text).map_err(|error| error.to_string())?;
+        let text = match crate::ekko::titled(text) {
+            Some((text, cut)) => {
+                told.push(cut.told(&format!("Step {key}'s")));
+                text
+            }
+            None => text.to_string(),
+        };
         let kept = old.iter().find(|step| step.key == key).map(|step| step.unknown.clone()).unwrap_or_default();
-        made.push(Step { key: key.to_string(), text: text.to_string(), done_when, after, task: None, unknown: kept });
+        made.push(Step { key: key.to_string(), text, done_when, after, task: None, unknown: kept });
     }
     if let Some(dropped) = old.iter().find(|step| step.task.is_some() && !made.iter().any(|kept| kept.key == step.key)) {
         return Err(format!(
@@ -170,7 +180,7 @@ pub fn steps(old: &[Step], given: &[StepSpec]) -> Result<Vec<Step>, String> {
             dropped.key
         ));
     }
-    Ok(made)
+    Ok((made, told))
 }
 
 /// Raises the version of each artifact among `changed` whose plan this write
@@ -6282,7 +6292,7 @@ mod tests {
 
     #[test]
     fn steps_are_keyed_once_and_wait_on_earlier_steps_only() {
-        let made = steps(&[], &[spec("a", Some("First\nwhy"), &[]), spec("b", Some("Second"), &["a"])]).unwrap();
+        let made = steps(&[], &[spec("a", Some("First\nwhy"), &[]), spec("b", Some("Second"), &["a"])]).unwrap().0;
         assert_eq!(made.iter().map(|step| (step.key.as_str(), step.after.clone())).collect::<Vec<_>>(), [("a", vec![]), ("b", vec!["a".to_string()])]);
         for (given, refusal) in [
             (vec![spec("a", Some("x"), &["b"]), spec("b", Some("y"), &[])], "not a step before it"),
@@ -6292,20 +6302,23 @@ mod tests {
             (vec![spec("-a", Some("x"), &[])], "lower-case"),
             (vec![spec("", Some("x"), &[])], "lower-case"),
             (vec![spec("a", None, &[])], "needs its text"),
-            (vec![spec("a", Some(&"long ".repeat(20)), &[])], "title"),
         ] {
             let error = steps(&[], &given).unwrap_err();
             assert!(error.contains(refusal), "{refusal}: {error}");
         }
+        let (cut, told) = steps(&[], &[spec("a", Some(&"long ".repeat(20)), &[])]).unwrap();
+        assert_eq!(cut[0].text, format!("{}\n{}", ["long"; 16].join(" "), ["long"; 4].join(" ")), "a title past 80 characters is cut, not refused");
+        assert_eq!(told.len(), 1);
+        assert!(told[0].starts_with("Step a's first line ran 99 characters"), "{told:?}");
         let many: Vec<StepSpec> = (0..=STEPS_MOST).map(|n| spec(&format!("s{n}"), Some("x"), &[])).collect();
         assert!(steps(&[], &many).unwrap_err().contains("at most"));
     }
 
     #[test]
     fn an_approved_step_stays_as_it_was() {
-        let mut old = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &[])]).unwrap();
+        let mut old = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &[])]).unwrap().0;
         old[0].task = Some("t-a".to_string());
-        let kept = steps(&old, &[spec("a", None, &[]), spec("c", Some("Third"), &["a"])]).unwrap();
+        let kept = steps(&old, &[spec("a", None, &[]), spec("c", Some("Third"), &["a"])]).unwrap().0;
         assert_eq!(kept[0], old[0], "named by key alone, it is kept whole, task and all");
         assert_eq!(kept[1].key, "c");
         assert!(steps(&old, &[spec("a", Some("First"), &[])]).is_ok(), "its own text again changes nothing");
@@ -6314,6 +6327,14 @@ mod tests {
         let finished = StepSpec { done_when: Some("Shipped".to_string()), ..spec("a", None, &[]) };
         assert!(steps(&old, &[finished]).unwrap_err().contains("step a is approved"));
         assert!(steps(&old, &[spec("b", Some("Second"), &[])]).unwrap_err().contains("keep it among the steps"));
+
+        // A long title was cut when the step was written: the same text
+        // again is the same step.
+        let long = format!("{}\nwhy", "word ".repeat(20).trim_end());
+        let mut old = steps(&[], &[spec("a", Some(&long), &[])]).unwrap().0;
+        old[0].task = Some("t-a".to_string());
+        let (again, told) = steps(&old, &[spec("a", Some(&long), &[])]).unwrap();
+        assert_eq!((again, told.len()), (old, 0), "its own long text again changes nothing");
     }
 
     fn artifact_item(id: u32, text: &str, steps: Vec<Step>) -> Item {
@@ -6324,7 +6345,7 @@ mod tests {
 
     #[test]
     fn a_write_that_changes_the_plan_raises_its_version_and_keeps_the_text_it_replaced() {
-        let made = steps(&[], &[spec("a", Some("First"), &[])]).unwrap();
+        let made = steps(&[], &[spec("a", Some("First"), &[])]).unwrap().0;
         let before: ItemMap = BTreeMap::from([(1, artifact_item(1, &plan("Ship"), made.clone()))]);
         let version = |data: &ItemMap| data[&1].artifact.as_ref().unwrap().version;
 
@@ -6370,7 +6391,7 @@ mod tests {
 
     #[test]
     fn the_standing_counts_the_steps_tasks_and_what_waits_on_the_user() {
-        let mut made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &[]), spec("c", Some("Third"), &[])]).unwrap();
+        let mut made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &[]), spec("c", Some("Third"), &[])]).unwrap().0;
         let mut all: ItemMap = BTreeMap::new();
         let draft = artifact_item(1, &plan("Ship"), made.clone());
         all.insert(1, draft.clone());
@@ -6401,7 +6422,7 @@ mod tests {
 
     #[test]
     fn the_page_shows_the_plan_its_steps_and_escapes_what_it_quotes() {
-        let made = steps(&[], &[spec("a", Some("First <step>\nwhy"), &[])]).unwrap();
+        let made = steps(&[], &[spec("a", Some("First <step>\nwhy"), &[])]).unwrap().0;
         let text = plan("Ship <it>").replace("## Goal\nText.", "## Goal\nA **bold** goal.\n\n<script>alert(1)</script>");
         let item = artifact_item(1, &text, made);
         let all: ItemMap = BTreeMap::from([(1, item.clone())]);
@@ -6462,7 +6483,7 @@ mod tests {
             &[],
             &[spec("a", Some("A"), &[]), spec("b", Some("B"), &["a"]), spec("c", Some("C"), &["a"]), spec("d", Some("D"), &["c", "b"]), spec("e", Some("E"), &[]), spec("f", Some("F"), &["a", "d"])],
         )
-        .unwrap();
+        .unwrap().0;
         let item = artifact_item(1, &plan("Ship"), made);
         let all: ItemMap = BTreeMap::from([(1, item.clone())]);
         let shown = shown(item.artifact.as_deref().unwrap(), &all);
@@ -6488,7 +6509,7 @@ mod tests {
             &[],
             &[spec("a", Some("A"), &[]), spec("b", Some("B"), &["a"]), spec("c", Some("C"), &["a"]), spec("d", Some("D"), &["c", "b"]), spec("e", Some("E"), &[]), spec("f", Some("F"), &["a", "d"])],
         )
-        .unwrap();
+        .unwrap().0;
         let item = artifact_item(1, &plan("Ship"), made);
         let all: ItemMap = BTreeMap::from([(1, item.clone())]);
         let drawn = map(&shown(item.artifact.as_deref().unwrap(), &all));
@@ -6505,7 +6526,7 @@ mod tests {
         );
 
         // Steps that wait on none are one stage: nothing to play.
-        let made = steps(&[], &[spec("a", Some("A"), &[]), spec("b", Some("B"), &[])]).unwrap();
+        let made = steps(&[], &[spec("a", Some("A"), &[]), spec("b", Some("B"), &[])]).unwrap().0;
         let item = artifact_item(1, &plan("Ship"), made);
         let all: ItemMap = BTreeMap::from([(1, item.clone())]);
         let (html, _) = page(&item, &all, None);
@@ -6597,7 +6618,7 @@ mod tests {
     #[test]
     fn the_notes_and_comments_share_a_scene() {
         use crate::item::Knowledge;
-        let made = steps(&[], &[spec("a", Some("First"), &[])]).unwrap();
+        let made = steps(&[], &[spec("a", Some("First"), &[])]).unwrap().0;
         let item = artifact_item(1, &plan("Ship"), made);
         let note = |id: u32, text: &str, kind: Option<Knowledge>| {
             let mut note = Item::new_note(id, text.to_string(), vec!["My Board".to_string()]);
@@ -6678,7 +6699,7 @@ mod tests {
     /// top always; the footer in it.
     #[test]
     fn the_close_says_what_comes_next() {
-        let mut made = steps(&[], &[spec("a", Some("First\nWhy."), &[]), spec("b", Some("Second <it>"), &["a"])]).unwrap();
+        let mut made = steps(&[], &[spec("a", Some("First\nWhy."), &[]), spec("b", Some("Second <it>"), &["a"])]).unwrap().0;
         let mut done = Item::new_task(2, "First".into(), vec![], 1);
         State::Done.write(&mut done);
         made[0].task = done.uid.clone();
@@ -6774,7 +6795,7 @@ mod tests {
 
     #[test]
     fn the_page_holds_its_parts_in_order_its_notes_and_how_its_text_changed() {
-        let made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"])]).unwrap();
+        let made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"])]).unwrap().0;
         let mut item = artifact_item(1, &plan("Ship"), made);
         item.description = item.description.replace("## Design\nText.", "## Design\nThe new design.");
         let plan_now = item.artifact.as_mut().unwrap();
@@ -6870,7 +6891,7 @@ mod tests {
 
     #[test]
     fn the_page_is_a_run_of_scenes_each_in_its_mode_and_the_index_names_them() {
-        let made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"])]).unwrap();
+        let made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"])]).unwrap().0;
         let text = plan("Ship the page")
             .replace("Ship the page\n\n", "Ship the page\n\nA lead, *before* the goal.\n\n")
             .replace("## Goal\nText.", "## Goal\nShip the page. Then `measure` it.")
@@ -7128,7 +7149,7 @@ mod tests {
 
     #[test]
     fn a_step_opens_in_place_when_it_has_more_to_show() {
-        let mut made = steps(&[], &[spec("a", Some("First\nWhy it comes first."), &[]), spec("b", Some("Second"), &["a"])]).unwrap();
+        let mut made = steps(&[], &[spec("a", Some("First\nWhy it comes first."), &[]), spec("b", Some("Second"), &["a"])]).unwrap().0;
         made[1].done_when = Some("It ships.".to_string());
         let mut done = Item::new_task(2, "First".into(), vec![], 1);
         State::Done.write(&mut done);
@@ -7142,7 +7163,7 @@ mod tests {
         );
         assert!(html.contains("<span class=\"num\">02</span><span class=\"title\">Second</span><span class=\"meta\"><span class=\"dot proposed\"></span>to approve \u{b7} after a</span></button><div class=\"after\">"), "{html}");
         assert!(html.contains("</div><div class=\"more\"><p class=\"when\"><b>Done when</b> It ships.</p></div></li>"), "{html}");
-        let bare = artifact_item(1, &plan("Ship"), steps(&[], &[spec("c", Some("Third"), &[])]).unwrap());
+        let bare = artifact_item(1, &plan("Ship"), steps(&[], &[spec("c", Some("Third"), &[])]).unwrap().0);
         let (html, _) = page(&bare, &BTreeMap::from([(1, bare.clone())]), None);
         assert!(html.contains("<li class=\"step proposed\" id=\"step-c\" data-state=\"to approve\"><div class=\"step-head\">"), "nothing more to show, nothing to open: {html}");
         assert!(!html.contains("<div class=\"more\">"), "{html}");
@@ -7150,7 +7171,7 @@ mod tests {
 
     #[test]
     fn the_steps_put_one_on_a_stage() {
-        let mut made = steps(&[], &[spec("a", Some("First\nWhy."), &[]), spec("b", Some("Second\nHow."), &["a"]), spec("c", Some("Third"), &["a", "b"])]).unwrap();
+        let mut made = steps(&[], &[spec("a", Some("First\nWhy."), &[]), spec("b", Some("Second\nHow."), &["a"]), spec("c", Some("Third"), &["a", "b"])]).unwrap().0;
         let mut done = Item::new_task(2, "First".into(), vec![], 1);
         State::Done.write(&mut done);
         made[0].task = done.uid.clone();
@@ -7183,7 +7204,7 @@ mod tests {
         );
 
         // Every step done: the first is on the stage, with no way back.
-        let mut made = steps(&[], &[spec("x", Some("X"), &[]), spec("y", Some("Y"), &[])]).unwrap();
+        let mut made = steps(&[], &[spec("x", Some("X"), &[]), spec("y", Some("Y"), &[])]).unwrap().0;
         let (mut one, mut two) = (Item::new_task(2, "X".into(), vec![], 1), Item::new_task(3, "Y".into(), vec![], 1));
         State::Done.write(&mut one);
         State::Done.write(&mut two);
@@ -7195,14 +7216,14 @@ mod tests {
         assert!(html.contains("aria-label=\"Back\" disabled><svg") && !html.contains("aria-label=\"Next\" disabled>"), "{html}");
 
         // One step is no stage.
-        let item = artifact_item(1, &plan("Ship"), steps(&[], &[spec("x", Some("X"), &[])]).unwrap());
+        let item = artifact_item(1, &plan("Ship"), steps(&[], &[spec("x", Some("X"), &[])]).unwrap().0);
         let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
         assert!(html.contains("<section class=\"scene part\" id=\"steps\"") && !html.contains("class=\"segs\""), "{html}");
     }
 
     #[test]
     fn a_pending_step_renders_folded_like_any_other() {
-        let mut made = steps(&[], &[spec("a", Some("First\nWhy it comes first."), &[])]).unwrap();
+        let mut made = steps(&[], &[spec("a", Some("First\nWhy it comes first."), &[])]).unwrap().0;
         let pending = Item::new_task(2, "First".into(), vec![], 1);
         made[0].task = pending.uid.clone();
         let item = artifact_item(1, &plan("Ship"), made);
@@ -7217,7 +7238,7 @@ mod tests {
 
     #[test]
     fn a_step_says_its_text_by_the_plans_markdown_rules() {
-        let mut made = steps(&[], &[spec("a", Some("First\nReads the `Rests on:` line, *once*.\n\n- <b>raw</b> stays words\n- [a link](javascript:alert(1)) its words"), &[])]).unwrap();
+        let mut made = steps(&[], &[spec("a", Some("First\nReads the `Rests on:` line, *once*.\n\n- <b>raw</b> stays words\n- [a link](javascript:alert(1)) its words"), &[])]).unwrap().0;
         made[0].done_when = Some("Tests for `each` anchor.".to_string());
         let item = artifact_item(1, &plan("Ship"), made);
         let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
@@ -7233,7 +7254,7 @@ mod tests {
 
     #[test]
     fn a_banner_says_what_waits_on_the_user_and_nothing_else_is_one() {
-        let made = steps(&[], &[spec("a", Some("First"), &[])]).unwrap();
+        let made = steps(&[], &[spec("a", Some("First"), &[])]).unwrap().0;
         let item = artifact_item(1, &plan("Ship"), made);
         let (html, _) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
         assert!(!html.contains("class=\"callout\""), "a draft nobody is asked about: {html}");
@@ -7266,7 +7287,7 @@ mod tests {
 
     #[test]
     fn the_first_scene_says_each_fact_once_and_its_title_in_two_tones() {
-        let mut made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"]), spec("c", Some("Third"), &[])]).unwrap();
+        let mut made = steps(&[], &[spec("a", Some("First"), &[]), spec("b", Some("Second"), &["a"]), spec("c", Some("Third"), &[])]).unwrap().0;
         let mut done = Item::new_task(2, "First".into(), vec![], 1);
         State::Done.write(&mut done);
         let open = Item::new_task(3, "Second".into(), vec![], 1);
@@ -7365,7 +7386,7 @@ mod tests {
     #[test]
     fn a_page_is_written_once_per_version_and_rewritten_when_it_changes() {
         let dir = crate::paths::test_dir("ekko-artifact-page");
-        let item = artifact_item(1, &plan("Ship"), steps(&[], &[spec("a", Some("First"), &[])]).unwrap());
+        let item = artifact_item(1, &plan("Ship"), steps(&[], &[spec("a", Some("First"), &[])]).unwrap().0);
         let mut all: ItemMap = BTreeMap::from([(1, item.clone())]);
         let path = write(&dir, &item, &all, None).unwrap();
         let uid = item.uid.clone().unwrap();
@@ -7394,7 +7415,7 @@ mod tests {
     fn the_version_is_the_hash_of_the_whole_page_but_itself() {
         // Every byte of the page, the theme, style and scripts an ekko
         // writes as much as the plan, so a new ekko's page reloads too.
-        let item = artifact_item(1, &plan("Ship"), steps(&[], &[spec("a", Some("First"), &[])]).unwrap());
+        let item = artifact_item(1, &plan("Ship"), steps(&[], &[spec("a", Some("First"), &[])]).unwrap().0);
         let (html, version) = page(&item, &BTreeMap::from([(1, item.clone())]), None);
         assert_eq!(html.matches(&version).count(), 1, "{version}: {html}");
         let (before, after) = html.split_once(&version).unwrap();
@@ -7616,14 +7637,27 @@ mod tests {
             let target = artifact(&as_session, json!({"text": plan("Ship"), "steps": steps})).unwrap();
             let asked = ask(&as_session, &home, target).unwrap();
             let mut data = as_user.storage.get().unwrap();
-            data.get_mut(&target).unwrap().artifact.as_mut().unwrap().steps[1].text = "x".repeat(81);
+            let written = &mut data.get_mut(&target).unwrap().artifact.as_mut().unwrap().steps;
+            written[0].text = format!("The step, {}", "written by hand past the length of a title ".repeat(2));
+            written[1].text = "x".repeat(crate::ekko::MAX_DESCRIPTION + 1);
             as_user.storage.set(&data).unwrap();
             let notices = answer(&as_user, asked, "Aprovar").unwrap();
             assert!(notices.iter().any(|notice| notice.contains("no task was made for artifact")), "{notices:?}");
+            assert!(!notices.iter().any(|notice| notice.contains("first line ran")), "the task undone leaves no word of its title cut: {notices:?}");
             let data = as_user.storage.get().unwrap();
             assert!(!data.values().any(|item| item.description.starts_with("The step")), "the first step's task goes with the rest");
             assert!(data[&target].blocked_by.as_ref().is_none_or(Vec::is_empty));
             assert!(data[&asked].question.as_ref().unwrap().answer.is_some(), "the answer stays recorded");
+
+            // Once every task can be made, the long title written by hand is
+            // cut as the task is made, and the answer says so.
+            let mut data = as_user.storage.get().unwrap();
+            data.get_mut(&target).unwrap().artifact.as_mut().unwrap().steps[1].text = "The other".to_string();
+            as_user.storage.set(&data).unwrap();
+            let again = ask(&as_session, &home, target).unwrap();
+            let notices = answer(&as_user, again, "Aprovar").unwrap();
+            assert!(notices.iter().any(|notice| notice.contains("first line ran 95 characters")), "{notices:?}");
+            assert!(notices.iter().any(|notice| notice.contains("plan is approved")), "{notices:?}");
             std::fs::remove_dir_all(&home).ok();
         }
 

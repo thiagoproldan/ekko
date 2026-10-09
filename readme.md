@@ -371,7 +371,7 @@ To create a new task use the `--task`/`-t` option with your task's description f
 $ ekko -t Improve documentation
 ```
 
-A task's first line is its title, at most 80 characters: the board, `--next`, the prime and Claude Code's task list show the title, and `--context` shows the whole. The rest of the text goes on the lines below it, through stdin (see below). A longer first line is refused, when the task is created and when an edit changes it; what `edit`'s `append` adds to a task goes below the title. A task written before titles keeps its long first line until an edit changes that line.
+A task's first line is its title, at most 80 characters: the board, `--next`, the prime and Claude Code's task list show the title, and `--context` shows the whole. The rest of the text goes on the lines below it, through stdin (see below). A longer first line is cut, when the task is created and when an edit changes it: at its last space within 80 characters, or at the 80th when it has none there, and the rest of it starts the second line, so no word is lost. The reply says where it was cut, so a title that reads badly can be edited. What `edit`'s `append` adds to a task goes below the title. A task written before titles keeps its long first line until an edit changes that line.
 
 ```
 $ ekko -t - <<'EOF'

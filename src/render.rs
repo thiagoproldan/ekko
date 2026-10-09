@@ -1349,6 +1349,15 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// Where a task's title was cut, under the message that it was written
+    /// (decision 1504), so a title that reads badly is edited.
+    pub fn title_cut(&mut self, cut: Option<&crate::ekko::Cut>) {
+        if let Some(cut) = cut {
+            let line = self.painter.grey(&cut.told("Its"));
+            self.emit("   ", None, &line, "");
+        }
+    }
+
     pub fn success_edit(&mut self, id: u32) {
         let suffix = self.painter.grey(&id.to_string());
         self.success("\n", "Updated description of item:", &suffix);

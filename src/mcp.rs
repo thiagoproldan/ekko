@@ -1909,7 +1909,7 @@ fn tool_definitions(linked: &[String]) -> Value {
     let step = object(
         json!({
             "key": {"type": "string", "description": "A few lower-case letters, digits or dashes, once in the plan."},
-            "text": {"type": "string", "description": "What its task will say: a title of at most 80 characters, then the rest. An approved step takes none."},
+            "text": {"type": "string", "description": "What its task will say: a title of at most 80 characters, cut at a word past them, then the rest. An approved step takes none."},
             "done_when": {"type": "string"},
             "after": {"type": "array", "items": {"type": "string"}, "description": "The keys of earlier steps it waits on."}
         }),
@@ -1956,7 +1956,7 @@ fn tool_definitions(linked: &[String]) -> Value {
         },
         {
             "name": "create",
-            "description": "Create a task or a note. The text is kept exactly as given; a task's first line is its title, at most 80 characters. A note explaining a task should be attached_to it.",
+            "description": "Create a task or a note. The text is kept exactly as given, but a task's first line is its title, at most 80 characters: a longer one is cut at a word, the rest starting the second line, and the reply says so. A note explaining a task should be attached_to it.",
             "inputSchema": object(json!({
                 "kind": {"type": "string", "enum": ["task", "note", "handoff", "decision", "gotcha", "procedure"], "default": "task", "description": "handoff: a note attached_to an open task saying where this session stopped, what it decided and why, the files and the next step; it replaces the task's earlier handoff, and the next session's prime shows it. decision (what was settled, and why), gotcha (a trap, and how to avoid it), procedure (steps that work): a note that stays true after its task is done, loose or attached_to it, written when the user settles something or a session learns it; prime lists the most cited of them and the newest gotchas and procedures by first line, so lead with the point."},
                 "text": {"type": "string"},
