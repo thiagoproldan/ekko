@@ -51,6 +51,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Typed notes**: a decision, a gotcha or a procedure, written on purpose, and `--supersedes` for the one it replaces -- what stays true after the work is done
 - **Gotchas that refuse**: a gotcha's command cue, once you turn it on in Ekko's menu, refuses the Bash calls it names, and a refused call goes through once on your answer
 - **Failures that repeat**: `ekko --repeats` reads the project's Claude Code transcripts and lists the failed tool calls seen in 2 or more sessions on 2 or more days, grouped by fingerprint with no model, for a gotcha to stop them
+- **A doctor**: `ekko --doctor` names each Claude Code session still running an ekko an upgrade replaced, or whose plugin hooks did not run, read from `/proc` and the hooks' own records
 - **Errors instead of silence** when a filter term matches nothing
 - **A `flock` lock and atomic writes**, so concurrent invocations queue rather than lose updates
 - **Stash and trash**: put finished work out of the way and keep it reachable, or remove it with 30 days to change your mind
@@ -124,6 +125,7 @@ $ ekko --help
       --delete, -d        Delete item
       --destroy           Move a project's board to the trash
       --dismiss <IDS>     With --repeats: set fingerprints aside until they recur again
+      --doctor            Check that every Claude Code session runs ekko's current binary and its hooks; exit 1 on a fail
       --edit, -e          Edit item description
       --find, -f          Search for items
       --force             Override the blocked-by rule or a running session's hold
@@ -176,6 +178,7 @@ $ ekko --help
       $ ekko --context 12
       $ ekko --copy 1 2 3
       $ ekko --delete 4
+      $ ekko --doctor
       $ ekko --edit @3 Merge PR #42
       $ ekko --find documentation
       $ ekko --project old --destroy
@@ -300,6 +303,8 @@ It replaced the `/ekko` skill, which sat in every conversation whether the board
 None of this is documented by Claude Code: the file format and the rules come from its 2.1.278 binary and from testing it, so a Claude Code that changes them breaks the drawing, never the board.
 
 **Failures that repeat.** A session that fails as an earlier one did -- `python3` not found, a title over 80 characters, an Edit before a Read -- learns nothing from the earlier one unless someone wrote it down. `ekko --repeats` finds those failures without a model (task 1442). It reads the Claude Code transcripts of the sessions begun in the project's folder or in one inside it, a worktree's included: those under `projects/` in `~/.claude`, in each `~/.claude-<profile>` and in `CLAUDE_CONFIG_DIR`, in the folder Claude Code names after the one the session began in, each character but a letter or a digit turned to `-`. Headless runs and subagents are left out. Each tool call marked as an error there counts once, by its `tool_use_id`, since a session begun from another's history repeats its rows. Each gets a fingerprint, as Sentry groups errors: the tool; for Bash, the first command the call ran, as the guard's lexer reads it, unless the message names the command, as `command not found` does; and the message -- its first two lines, or for Bash its `Exit code` line and the output's last, since what fails last prints last -- with quoted text, paths, hashes and numbers taken out. A fingerprint seen in 2 or more sessions on 2 or more days recurs. `ekko --repeats` lists each, most sessions first, with its sessions, days and times, when it was last seen and its latest failure as written; `--json` gives the same. The session at work, or you, write the gotcha from that evidence: nothing writes the board. `ekko --repeats --dismiss <id>` sets one aside until it recurs again, in 2 sessions on 2 days after. What was read is kept outside the board, under `repeats/` in ekko's state directory: each transcript's offset, so a read takes only what was written since, and each failure found, kept after its transcript is gone -- on 2026-10-09 no transcript on this machine was older than 30 days. The SessionStart hook reads too, for at most 400 ms, leaving the rest to the next start, and the prime adds a line under Needs attention when a fingerprint recurs that no prime or listing showed before. On this project's 32 transcripts, about 230 MB, the first read took 0.36 s in 15 MB of memory and the next 0.01 s, and the hook's prime 0.32 s the first time and 0.05 s after (a release build, 2026-10-09).
+
+**The doctor.** What the plugin does rests on links with Claude Code that break without an error anywhere, and `ekko --doctor` checks them from the side that consumes them (task 1282). It reads `/proc` and ekko's state directory, writes nothing, and gives each check's answer -- ok, fail, or skipped when it cannot judge -- on a line of its own with the session it is about, named as a claim names its holder; the report groups the lines by check, `--json` gives the same with each session's pid, terminal, folder and conversation, and the exit is 1 when a check fails. *Old binary*: a session's MCP server keeps the binary it started with until Claude Code restarts it, and answers by that version's rules. Each `ekko --mcp`, `ekko --mcp --resources` and `ekko serve` running must run the binary its names lead to now, looked up with its own PATH and folder, as the server's own notice that it was replaced decides: the name it was started by, and, for one started by its path in `/nix/store`, `ekko` on its PATH too, since a switch moves that name and never a store path; a dev build started by its path is judged by that path alone. *Hooks loaded*: each Claude Code process running the plugin's server must have the record its SessionStart hook writes under `processes/` in ekko's state directory; without one the plugin's hooks did not run there, and the session has no prime, no wake and no guard. A fail says what mends it: restarting the session, or `ekko serve --stop`. With a 0.38.1 server running, under a stand-in process named `claude` that no hook recorded, beside two real sessions on 0.39.1, it failed both checks for the stand-in and passed the rest, over 475 processes in 0.02 s (a release build, 2026-10-09).
 
 ### Reading the board as an agent
 

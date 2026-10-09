@@ -213,6 +213,12 @@ pub struct Cli {
     /// With --repeats: set fingerprints aside, by id, until they recur again.
     #[arg(long, num_args = 1.., value_name = "IDS", requires = "repeats")]
     pub dismiss: Option<Vec<String>>,
+    /// Whether ekko's links with Claude Code work, read from /proc and the
+    /// hooks' records: every session's ekko runs the binary its names lead
+    /// to now, and every session running ekko's MCP server ran its
+    /// SessionStart hook -- see `doctor`.
+    #[arg(long)]
+    pub doctor: bool,
 
     /// With --prime, --memory, --tasklist, --wake or --guard: answer a Claude Code hook, whose
     /// event arrives as JSON on stdin. For --prime, a session that resumes or

@@ -464,13 +464,13 @@ pub fn when(millis: i64) -> String {
 /// `pid`'s parent and its start, from /proc/<pid>/stat. The name in field 2
 /// can hold spaces and parentheses, so the fields are counted from its end:
 /// the parent is field 4 and the start field 22.
-fn stat(pid: u32) -> Option<(u32, u64)> {
+pub(crate) fn stat(pid: u32) -> Option<(u32, u64)> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let fields: Vec<&str> = stat.get(stat.rfind(')')? + 1..)?.split_whitespace().collect();
     Some((fields.get(1)?.parse().ok()?, fields.get(19)?.parse().ok()?))
 }
 
-fn boot() -> Option<String> {
+pub(crate) fn boot() -> Option<String> {
     Some(fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?.trim().to_string())
 }
 
@@ -485,7 +485,7 @@ fn profile() -> Option<String> {
 }
 
 /// The terminal `pid` reads from, as `pts/1` or `tty2`.
-fn tty(pid: u32) -> Option<String> {
+pub(crate) fn tty(pid: u32) -> Option<String> {
     let path = fs::read_link(format!("/proc/{pid}/fd/0")).ok()?;
     let name = path.to_str()?.strip_prefix("/dev/")?;
     (name.starts_with("pts/") || name.starts_with("tty")).then(|| name.to_string())

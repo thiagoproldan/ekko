@@ -7,6 +7,7 @@ mod config;
 mod dialog;
 mod directory;
 mod docs;
+mod doctor;
 mod ekko;
 mod feedback;
 mod guard;
@@ -60,6 +61,7 @@ const HELP: &str = r#"
       --delete, -d        Delete item
       --destroy           Move a project's board to the trash
       --dismiss <IDS>     With --repeats: set fingerprints aside until they recur again
+      --doctor            Check that every Claude Code session runs ekko's current binary and its hooks; exit 1 on a fail
       --edit, -e          Edit item description
       --find, -f          Search for items
       --force             Override the blocked-by rule or a running session's hold
@@ -116,6 +118,7 @@ const HELP: &str = r#"
       $ ekko --context 12
       $ ekko --copy 1 2 3
       $ ekko --delete 4
+      $ ekko --doctor
       $ ekko --edit @3 Merge PR #42
       $ ekko --find documentation
       $ ekko --project old --destroy
@@ -234,6 +237,10 @@ fn main() -> ExitCode {
     if cli.mcp {
         let mode = if cli.resources { mcp::Mode::Resources } else { mcp::Mode::Board };
         return mcp::run(home_dir, cwd, ekko_dir_env, project_env, mode);
+    }
+    // About every session on this machine, whatever board it is on.
+    if cli.doctor {
+        return doctor::run(&home_dir, json_mode);
     }
 
     // Before opening anything: an old flag gets the same answer whatever

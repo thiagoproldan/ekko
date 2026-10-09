@@ -140,16 +140,16 @@ pub struct Server {
 /// its inode there. A nix switch changes the path; a rebuild in place, the
 /// inode.
 #[derive(Debug, PartialEq)]
-struct Binary {
-    path: PathBuf,
-    dev: u64,
-    ino: u64,
+pub(crate) struct Binary {
+    pub path: PathBuf,
+    pub dev: u64,
+    pub ino: u64,
 }
 
 impl Binary {
     /// The file `program` runs: itself when it names a path, else the first
     /// executable of that name in `path_var`, as a shell would find it.
-    fn resolve(program: &OsStr, path_var: Option<&OsStr>) -> Option<Binary> {
+    pub(crate) fn resolve(program: &OsStr, path_var: Option<&OsStr>) -> Option<Binary> {
         let program = Path::new(program);
         let found = if program.components().count() > 1 {
             program.to_path_buf()

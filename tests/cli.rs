@@ -991,3 +991,94 @@ fn repeats_lists_a_failure_that_recurs_and_the_prime_tells_it_once() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// `ekko --doctor` on a real process tree (task 1282): a stand-in for Claude
+/// Code -- a script named `claude`, as /proc names a script -- runs the
+/// ekko on its PATH as an MCP server. With no SessionStart record it fails
+/// Hooks loaded; with one it passes both checks; and once the binary on its
+/// PATH is swapped it fails Old binary. Other sessions on the machine are
+/// judged too, against this test's empty HOME, so only the stand-in's lines
+/// are asserted, and the exit against the count of fails.
+#[test]
+fn the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks() {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = temp_ekko_dir();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_ekko"), bin.join("ekko")).unwrap();
+    let claude = dir.join("claude");
+    fs::write(&claude, "#!/bin/sh\nekko --mcp\nexit $?\n").unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut session = Command::new(&claude)
+        .env("PATH", &bin)
+        .env("HOME", &dir)
+        .env("EKKO_DIR", dir.join(".ekko"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = session.id();
+    let server = (0..100).find_map(|_| {
+        let found = fs::read_dir("/proc").unwrap().flatten().find(|entry| {
+            let at = entry.path();
+            let parent = fs::read_to_string(at.join("stat")).ok().and_then(|stat| stat.rsplit(')').next()?.split_whitespace().nth(1)?.parse::<u32>().ok());
+            parent == Some(pid) && fs::read(at.join("cmdline")).is_ok_and(|args| args == b"ekko\0--mcp\0")
+        });
+        if found.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        found
+    });
+    assert!(server.is_some(), "the stand-in's server did not start");
+
+    let doctor = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_ekko"))
+            .args(["--doctor", "--json"])
+            .env("HOME", &dir)
+            .env_remove("XDG_STATE_HOME")
+            .output()
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let failed = reply["failed"].as_u64().unwrap();
+        assert_eq!(output.status.success(), failed == 0, "the exit disagrees with the fails: {reply}");
+        assert_eq!(reply["ok"], true, "{reply}");
+        let mine: Vec<(String, String)> = reply["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|check| check["session"]["pid"] == pid)
+            .map(|check| (check["check"].as_str().unwrap().to_string(), check["verdict"].as_str().unwrap().to_string()))
+            .collect();
+        (mine, failed)
+    };
+    let verdicts = |old: &str, hooks: &str| vec![("Old binary".to_string(), old.to_string()), ("Hooks loaded".to_string(), hooks.to_string())];
+
+    let (mine, failed) = doctor();
+    assert_eq!(mine, verdicts("ok", "fail"), "no SessionStart record");
+    assert!(failed >= 1);
+
+    // The record the SessionStart hook writes for the process.
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let start: u64 = stat.rsplit(')').next().unwrap().split_whitespace().nth(19).unwrap().parse().unwrap();
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap().trim().to_string();
+    let processes = dir.join(".local/state/ekko/processes");
+    fs::create_dir_all(&processes).unwrap();
+    let boot8: String = boot.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+    let record = serde_json::json!({"pid": pid, "start": start, "boot": boot, "conversation": "c-1", "since": 0});
+    fs::write(processes.join(format!("{boot8}-{pid}-{start}.json")), record.to_string()).unwrap();
+    assert_eq!(doctor().0, verdicts("ok", "ok"), "a clean session");
+
+    // An upgrade puts another binary under the same name.
+    fs::copy(env!("CARGO_BIN_EXE_ekko"), bin.join("ekko.new")).unwrap();
+    fs::rename(bin.join("ekko.new"), bin.join("ekko")).unwrap();
+    let (mine, failed) = doctor();
+    assert_eq!(mine, verdicts("fail", "ok"), "the binary on its PATH was swapped");
+    assert!(failed >= 1);
+
+    session.stdin.take().unwrap().write_all(b"").unwrap();
+    let ended = session.wait().unwrap();
+    assert!(ended.success(), "{ended:?}");
+    fs::remove_dir_all(&dir).ok();
+}
