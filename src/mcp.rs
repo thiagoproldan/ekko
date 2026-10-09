@@ -80,15 +80,15 @@ const TOOLS: &[&str] = &[
 const INSTRUCTIONS: &str = "\
 Ekko is a task board shared with the user: they read and change the same board from their own terminal, between your calls. Do not treat it as yours.
 
-Each session starts with the board's prime already in context. Call prime again after a long pause or when the user may have changed things -- with if_rev set to the cursor you hold, it answers in one line when nothing moved -- and changes with that cursor lists what did.
+Each session starts with the board's prime in context. Call prime again after a long pause or when the user may have changed things -- with if_rev set to your cursor, it answers in one line when nothing moved -- and changes with that cursor lists what did.
 
 - next is the order to take work up. context gives items, several per call: blockers and the roots free to start, what they block, notes clipped unless detail is full.
-- Set a task in progress before you change anything for it: other sessions see that claim, and are refused HELD on it.
+- Set a task in progress before changing anything for it: other sessions see the claim, and are refused HELD on it.
 - Display ids are never reused; a restore from the archive renumbers an item, so hold its uid.
-- set_state is idempotent. A task blocked by open work cannot be completed (BLOCKED), and a task that completed work depends on cannot be reopened (COMPLETED_DEPENDENTS): finish the other side, or clear a wrong dependency with link. force_state overrides the rule and is only for when the user has said so.
-- Leave reasoning on the board: create a note with attached_to set to the task it explains; what stays true is kind decision, gotcha or procedure. Before a long session is cleared, create kind handoff on the task in progress: where you stopped, why, the next step. Change text with edit's replace or append instead of resending it, with if_updated_at from your last read when the user may have edited it.
-- A write's reply names the tasks it set free (nowReady) or left waiting (nowBlocked): no next or prime is needed to find them.
-- batch applies several operations in one write, all or nothing; $1, $2 name the items its first and second operations create.
+- set_state is idempotent. A task blocked by open work cannot be completed (BLOCKED), and a task that completed work depends on cannot be reopened (COMPLETED_DEPENDENTS): finish the other side, or clear a wrong dependency with link. force_state overrides the rule and is only for when the user says so.
+- Leave reasoning on the board: create a note with attached_to set to the task it explains; what stays true is kind decision, gotcha or procedure. Before a long session is cleared, create kind handoff on the task in progress: where you stopped, why, the next step. Change text with edit's replace or append, not by resending it, with if_updated_at from your last read when the user may have edited it.
+- A write's reply names the tasks it set free (nowReady) or left waiting (nowBlocked), so no next or prime is needed.
+- batch applies several operations in one write, all or nothing; $1, $2 name what its first and second operations create.
 - trash is recoverable for 30 days and still needs the user's consent. For work decided against, set_state cancelled keeps the record.
 - Ask the user through ask; it records the answer.
 - Refusals come back as CODE: message. Branch on the code; nothing was written.";
@@ -2138,12 +2138,14 @@ mod tests {
     /// linked to no other (a link adds its `project` to each), and the caps
     /// of the two SessionStart hooks, the prime and the memory page, which
     /// their own tests hold them to. Today's size and about 5%, rounded up
-    /// to 50; the instructions' 2,048 is where Claude Code cuts them (note
-    /// 167). A session that lengthens one makes every later session pay for
-    /// it, so raising a budget is the user's call, through procedure 1435's
-    /// gate.
+    /// to 50. The instructions' 2,000 is the bound evals/agent/semantics.py
+    /// holds them to, and the release with it, under the 2,048 where Claude
+    /// Code cuts them (note 167): at 2,048 here, 2,039 passed this test and
+    /// stopped the release of v0.40.0 (task 1620). A session that lengthens
+    /// one makes every later session pay for it, so raising a budget is the
+    /// user's call, through procedure 1435's gate.
     const START_BUDGETS: &[(&str, usize)] = &[
-        ("instructions", 2_048),
+        ("instructions", 2_000),
         ("prime", 9_500),
         ("memory page", 6_000),
         ("context", 850),
