@@ -45,12 +45,18 @@ fn runtime(home: &Path) -> Value {
 /// An artifact on the default board, written by the artifact tool: the
 /// tool's reply.
 fn artifact(home: &Path) -> Value {
-    let plan = "Ship the page\n\n## Goal\nWhy.\n## What is known\nFacts, in `code` and **bold**.\n## Design\nHow.\n## Risks and open questions\nNone.";
+    artifact_in(home, home)
+}
+
+/// An artifact on the board of `folder`, written by the artifact tool run
+/// there: the tool's reply.
+fn artifact_in(home: &Path, folder: &Path) -> Value {
+    let plan ="Ship the page\n\n## Goal\nWhy.\n## What is known\nFacts, in `code` and **bold**.\n## Design\nHow.\n## Risks and open questions\nNone.";
     let lines = [
         json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}}}),
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "artifact", "arguments": {"text": plan, "steps": [{"key": "one", "text": "The first step"}]}}}),
     ];
-    let mut child = ekko(home).arg("--mcp").env("EKKO_TERMINAL", "none").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let mut child = ekko(home).current_dir(folder).arg("--mcp").env("EKKO_TERMINAL", "none").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     for line in lines {
         writeln!(stdin, "{line}").unwrap();
@@ -539,6 +545,70 @@ fn a_comment_from_the_page_is_the_persons_note_on_the_artifact() {
     let _ = fs::remove_file(home.join("answer-person"));
     let answer = from_bash(&home, port, &post(&comment(1, "Facts, in code and bold.")), false);
     assert!(answer.starts_with("HTTP/1.1 200 "), "the words as the page shows them: {answer}");
+}
+
+/// A comment from a project's page is written on that project's board, found
+/// by the name its path holds, escaped, and the write copies the board under
+/// ~/.ekko/copies/ (task 1204); the default board and another project's stay
+/// as they were. The same comment on a page naming the other project, a
+/// project no one registered, or the default board is refused, and writes
+/// nowhere.
+#[test]
+fn a_comment_from_a_projects_page_is_written_on_that_projects_board_and_its_copy() {
+    let home = Home::new();
+    let site = home.join("work").join("my site");
+    let other = home.join("work").join("other");
+    let run = |folder: &Path, args: &[&str]| {
+        let out = ekko(&home).args(args).current_dir(folder).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    for folder in [&site, &other] {
+        fs::create_dir_all(folder).unwrap();
+        run(folder, &["init"]);
+    }
+    run(&other, &["--task", "The other project's task"]);
+    run(&home, &["--task", "A task on the default board"]);
+    let written = artifact_in(&home, &site);
+    let (port, path) = split(written["page"].as_str().unwrap());
+    let uid = path.strip_prefix("/project/my%20site/").and_then(|file| file.strip_suffix(".html")).unwrap_or_else(|| panic!("not the project's page: {path}"));
+    let host = format!("127.0.0.1:{port}");
+    let (code, page) = get(port, &path, &host);
+    assert!(code == 200 && page.contains("Ship the page"), "{code}: the page, read from the project's board");
+
+    let marker: Value = serde_json::from_slice(&fs::read(site.join(".ekko").join("project.json")).unwrap()).unwrap();
+    let boards = [site.join(".ekko"), home.join(".ekko").join("copies").join(marker["id"].as_str().unwrap()), home.join(".ekko"), other.join(".ekko")]
+        .map(|dir| dir.join("storage").join("storage.json"));
+    let read = || boards.iter().map(|board| fs::read(board).unwrap()).collect::<Vec<_>>();
+    let before = read();
+    assert!(before[1] == before[0], "the artifact's write copied the board");
+
+    let token = runtime(&home)["token"].as_str().unwrap().to_string();
+    let send = |page: &str| {
+        let body = json!({"page": page, "text": "Which facts?", "comment": {"version": 1, "quote": {"exact": "Facts", "prefix": "## What is known\n", "suffix": "\n## Design", "section": "What is known"}}}).to_string();
+        let request = format!(
+            "POST /api/comment HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nCookie: ekko_{port}={token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let answer = from_bash(&home, port, &request, false);
+        fs::remove_file(home.join("answer-person")).unwrap();
+        answer
+    };
+    for page in [format!("/project/other/{uid}.html"), format!("/project/nothing/{uid}.html"), format!("/default/{uid}.html")] {
+        let answer = send(&page);
+        assert!(read() == before, "{page}: a comment there writes nowhere: {answer}");
+        assert!(answer.starts_with("HTTP/1.1 409 "), "{page}: {answer}");
+    }
+
+    let answer = send(&path);
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer}");
+    let made: Value = serde_json::from_str(answer.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let after = read();
+    assert!(after[2..] == before[2..], "the default board and the other project's stay as they were");
+    let board: Value = serde_json::from_slice(&after[0]).unwrap();
+    let note = board.as_object().unwrap().values().find(|item| item["uid"] == made["uid"]).unwrap_or_else(|| panic!("no note {made} on the project's board"));
+    assert_eq!((note["description"].as_str(), note["attachedTo"].as_str()), (Some("Which facts?"), Some(uid)), "{note}");
+    assert!(note["createdBy"].get("pid").is_none(), "written by the person, no process: {note}");
+    assert!(after[1] == after[0], "the comment's write copied the board");
 }
 
 /// The person edits and deletes their comment from the page (task 1213):
