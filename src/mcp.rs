@@ -1902,7 +1902,7 @@ fn tool_definitions(linked: &[String]) -> Value {
             "cue": cue,
             "allow": {"type": "string", "description": "The code a guard's refusal gave: asks the user to let that exact call through once."},
             "link_project": {"type": "string", "description": "Proposes linking this board and that project's, both ways: once the user picks the first option in ekko's menu, a session on either reaches the other's board with project."},
-            "approve": {"type": ["integer", "string"], "description": "An artifact: asks the user to approve its plan, whose steps their first answer in ekko's menu makes tasks of."}
+            "approve": {"type": ["integer", "string"], "description": "An artifact: asks the user to approve its plan, whose steps their first answer makes tasks of, given in ekko's menu or with Approve on the plan's page."}
         }),
         &["text"],
     );
