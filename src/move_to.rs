@@ -341,7 +341,7 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
     found.extend(attached_to.as_deref().map(|uid| ("is attached to", uid)));
     found.extend(supersedes.as_deref().map(|uid| ("supersedes", uid)));
     if let Some(question) = question.as_deref() {
-        let Question { cue: proposal, approve, asked_by: _, rev: _, answer: _, allow: _, link: _, applies: _, unknown: _ } = question;
+        let Question { cue: proposal, approve, asked_by: _, rev: _, answer: _, allow: _, link: _, applies: _, aids: _, unknown: _ } = question;
         if let Some(Proposal { gotcha, cue: _, unknown: _ }) = proposal {
             found.push(("proposes a cue for", gotcha));
         }
@@ -424,7 +424,7 @@ fn arriving(item: &Item, id: u32) -> Item {
         review,
     } = item;
     let question = question.as_deref().map(|question| {
-        let Question { rev: _, answer, asked_by, cue, allow, link, applies, approve, unknown } = question;
+        let Question { rev: _, answer, asked_by, cue, allow, link, applies, approve, aids, unknown } = question;
         let answer = answer.as_ref().map(|answer| {
             let Answer { rev: _, text, by, at, unknown } = answer;
             Answer { rev: 0, text: text.clone(), by: by.clone(), at: *at, unknown: unknown.clone() }
@@ -438,6 +438,7 @@ fn arriving(item: &Item, id: u32) -> Item {
             link: link.clone(),
             applies: applies.clone(),
             approve: approve.clone(),
+            aids: aids.clone(),
             unknown: unknown.clone(),
         })
     });
@@ -662,7 +663,7 @@ mod tests {
         batch(&here, &[json!({"op": "create", "kind": "decision", "text": "settled", "attached_to": 2})]);
         write(&here, |data| {
             let answer = Answer { text: "yes".into(), by: None, at: NOW, rev: 0, unknown: BTreeMap::new() };
-            let question = Question { asked_by: None, rev: 0, answer: Some(answer), cue: None, allow: None, link: None, applies: None, approve: None, unknown: BTreeMap::new() };
+            let question = Question { asked_by: None, rev: 0, answer: Some(answer), cue: None, allow: None, link: None, applies: None, approve: None, aids: Vec::new(), unknown: BTreeMap::new() };
             data.get_mut(&3).unwrap().question = Some(Box::new(question));
         });
         let before = board(&here);
@@ -860,7 +861,7 @@ mod tests {
         );
         write(&theirs, |data| {
             let by = running.holder(NOW);
-            let question = Question { asked_by: Some(by.clone()), rev: 0, answer: None, cue: None, allow: None, link: None, applies: None, approve: None, unknown: BTreeMap::new() };
+            let question = Question { asked_by: Some(by.clone()), rev: 0, answer: None, cue: None, allow: None, link: None, applies: None, approve: None, aids: Vec::new(), unknown: BTreeMap::new() };
             data.get_mut(&2).unwrap().question = Some(Box::new(question));
             let on = data[&3].uid.clone().unwrap();
             let wait = Wait { on, until: crate::item::Until::Done, by, rev: 0, over: None, unknown: BTreeMap::new() };

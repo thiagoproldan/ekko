@@ -519,7 +519,9 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
     let _ = write!(body, "</p>{}", headline(title));
     // What waits on the user, AKQA's black banner under the title (task
     // 1368): the approval asked, with Review beside it, then each other
-    // question open. What only informs is a quiet box.
+    // question open on the artifact or on a step's task, as the menu shows
+    // it, answered here where the page writes (task 1110). What only
+    // informs is a quiet box.
     let approval = standing.as_ref().and_then(|standing| standing.waiting);
     if let Some(question) = approval {
         let answer = format!(
@@ -527,9 +529,18 @@ pub fn page(item: &Item, all: &ItemMap, folder: Option<&Path>) -> (String, Strin
         );
         banner(&mut body, &format!("Waiting on you: question {question}"), &answer, "<button class=\"pill writes-only\" type=\"button\" data-review>Review</button>");
     }
-    for question in notes.iter().filter(|note| note.question.as_ref().is_some_and(|question| question.answer.is_none()) && Some(note.id) != approval) {
-        let answer = format!("{}: answer it in ekko's menu, or with <code>ekko --answer {}</code> in a terminal.", esc(crate::ekko::title(&question.description)), question.id);
-        banner(&mut body, &format!("Waiting on you: question {}", question.id), &answer, "");
+    for (question, step) in asked_here(item, all, &steps) {
+        if Some(question.id) == approval {
+            continue;
+        }
+        // Another question asking to approve a plan, on a board holding
+        // more than one: Review answers the newest, the menu the others.
+        if question.question.as_ref().is_some_and(|asked| asked.approve.is_some()) {
+            let answer = format!("{}: answer it in ekko's menu, or with <code>ekko --answer {}</code> in a terminal.", esc(crate::ekko::title(&question.description)), question.id);
+            banner(&mut body, &format!("Waiting on you: question {}", question.id), &answer, "");
+            continue;
+        }
+        question_card(&mut body, question, step);
     }
     if let (Some(artifact), Some(true)) = (artifact, standing.as_ref().map(|standing| standing.changed)) {
         let changed = format!("The plan changed after version {} was approved: History shows how.", artifact.approved_version.unwrap_or_default());
@@ -1280,6 +1291,115 @@ fn callout(body: &mut String, head: &str, text: &str) {
 /// one.
 fn banner(body: &mut String, head: &str, text: &str, act: &str) {
     let _ = write!(body, "<div class=\"callout waits\"><div class=\"said\"><b>{}</b>{text}</div>{act}</div>", esc(head));
+}
+
+/// The questions open on artifact `item` or on one of its steps' tasks, in
+/// the order they were asked, as the prime lists them: each with the key
+/// of the step whose task it is about, if it is about one.
+fn asked_here<'a>(item: &Item, all: &'a ItemMap, steps: &[Shown<'_>]) -> Vec<(&'a Item, Option<String>)> {
+    let Some(uid) = item.uid.as_deref() else { return Vec::new() };
+    let mut asked: Vec<(&Item, Option<String>)> = all
+        .values()
+        .filter(|note| !note.is_task && note.trashed.is_none() && note.stashed.is_none())
+        .filter(|note| note.question.as_ref().is_some_and(|question| question.answer.is_none()))
+        .filter_map(|note| {
+            let on = note.attached_to.as_deref()?;
+            if on == uid {
+                return Some((note, None));
+            }
+            let step = steps.iter().find(|step| step.step.task.as_deref() == Some(on))?;
+            Some((note, Some(step.step.key.clone())))
+        })
+        .collect();
+    asked.sort_by_key(|(note, _)| (note.timestamp, note.id));
+    asked
+}
+
+/// A question waiting on the user, as ekko's menu shows it (task 1110):
+/// its text and explanation, its options numbered, the recommended one
+/// marked, and beside them -- under them, on a narrow window -- why one
+/// would pick the option in focus, an example of it and its preview, which
+/// the board keeps for it. The menu opens on the recommended option, and so
+/// does the card. Where the page writes, an option is picked here, or
+/// several where the question allows, "Other answer…" writes another, a
+/// note may go with it, and Answer records it as the menu would.
+fn question_card(body: &mut String, note: &Item, step: Option<String>) {
+    let posed = crate::menu::posed(note);
+    let id = note.id;
+    let free = posed.options.is_empty();
+    let about = step.map(|key| format!(" \u{b7} about step {key}")).unwrap_or_default();
+    let _ = write!(
+        body,
+        "<div class=\"callout waits asks\" id=\"question-{id}\" data-question=\"{}\"{}{}><div class=\"said\"><b>{}</b><p class=\"asked\">{}</p>",
+        esc(&posed.uid),
+        if posed.multiple { " data-multiple" } else { "" },
+        if free { " data-free" } else { "" },
+        esc(&format!("Waiting on you: question {id}{about}")),
+        esc(posed.text.trim())
+    );
+    for paragraph in posed.explain.as_deref().unwrap_or_default().split("\n\n").map(str::trim).filter(|paragraph| !paragraph.is_empty()) {
+        let _ = write!(body, "<p class=\"explain\">{}</p>", esc(paragraph));
+    }
+    if posed.multiple {
+        body.push_str("<p class=\"any\">Any number of them</p>");
+    }
+    body.push_str("</div>");
+    if !free {
+        let role = if posed.multiple { "checkbox" } else { "radio" };
+        let focused = posed.options.iter().position(|option| option.recommended).unwrap_or(0);
+        let prose = |text: &Option<String>| text.as_deref().map(str::trim).filter(|text| !text.is_empty()).map(esc);
+        let preview = |option: &crate::ops::Choice| option.preview.as_deref().filter(|preview| !preview.trim().is_empty()).map(esc);
+        let aided = posed.options.iter().any(|option| prose(&option.why).is_some() || prose(&option.example).is_some() || preview(option).is_some());
+        let _ = write!(
+            body,
+            "<div class=\"choose{}\"><div class=\"options\" role=\"{}\" aria-label=\"Answers to question {id}\">",
+            if aided { " aided" } else { "" },
+            if posed.multiple { "group" } else { "radiogroup" }
+        );
+        for (n, option) in posed.options.iter().enumerate() {
+            // Picked to begin with: the recommended option, as the menu's
+            // Enter takes it; where several may be, each recommended one.
+            let picked = if posed.multiple { option.recommended } else { n == focused };
+            let recommended = if option.recommended { "<span class=\"tag\">recommended</span>" } else { "" };
+            let description = option.description.as_deref().map(str::trim).filter(|description| !description.is_empty());
+            let _ = write!(
+                body,
+                "<button class=\"option\" type=\"button\" role=\"{role}\" aria-checked=\"{picked}\" data-n=\"{n}\" data-label=\"{}\"{}><span class=\"n\">{}</span><span class=\"label\">{}{recommended}</span>{}</button>",
+                esc(option.label.trim()),
+                if n == focused { "" } else { " tabindex=\"-1\"" },
+                n + 1,
+                esc(option.label.trim()),
+                description.map(|description| format!("<span class=\"desc\">{}</span>", esc(description))).unwrap_or_default()
+            );
+        }
+        let _ = write!(
+            body,
+            "<button class=\"option other writes-only\" type=\"button\" role=\"{role}\" aria-checked=\"false\" tabindex=\"-1\" data-other><span class=\"n\">{}</span><span class=\"label\">Other answer\u{2026}</span></button></div>",
+            posed.options.len() + 1
+        );
+        if aided {
+            body.push_str("<div class=\"aids\">");
+            for (n, option) in posed.options.iter().enumerate() {
+                let _ = write!(body, "<div class=\"aid\" data-for=\"{n}\"{}>", if n == focused { "" } else { " hidden" });
+                let parts = [
+                    prose(&option.why).map(|why| format!("<p class=\"why\">{why}</p>")),
+                    prose(&option.example).map(|example| format!("<p class=\"example\"><span>Example:</span> {example}</p>")),
+                    preview(option).map(|preview| format!("<pre class=\"preview\">{preview}</pre>")),
+                ];
+                let said: String = parts.into_iter().flatten().collect();
+                body.push_str(if said.is_empty() { "<p class=\"none\">(no preview)</p>" } else { &said });
+                body.push_str("</div>");
+            }
+            body.push_str("</div>");
+        }
+        body.push_str("</div>");
+    }
+    let written = if free { "Your answer" } else { "Your other answer" };
+    let _ = write!(
+        body,
+        "<div class=\"reply writes-only\"><textarea class=\"other-text\" rows=\"2\" placeholder=\"{written}\" aria-label=\"{written} to question {id}\"{}></textarea><input class=\"note-text\" type=\"text\" placeholder=\"A note with the answer, if any\" aria-label=\"A note with the answer to question {id}\"><button class=\"pill\" type=\"button\" data-answer>Answer</button><p class=\"why-not\" role=\"status\"></p></div><p class=\"how\">Answer it <span class=\"writes-only\">here, </span>in ekko's menu, or with <code>ekko --answer {id}</code> in a terminal.</p></div>",
+        if free { "" } else { " hidden" }
+    );
 }
 
 /// Where an artifact stands, in the word the first scene's chip gives.
@@ -3339,6 +3459,144 @@ const SCRIPT: &str = r##"(function () {
     });
   })();
 
+  // The questions waiting on the user (task 1110), as ekko's menu shows
+  // them: beside the options, why pick the one in focus or under the
+  // pointer, else the one picked, an example and its preview. The arrow
+  // keys move along the options, picking as they go where one answer is
+  // taken. Where the page writes, an option is picked, or several where the
+  // question allows, "Other answer..." writes another, a note may go with
+  // it, and Answer records it with POST /api/answer, as the menu would;
+  // what was picked and written is kept across a reload.
+  (function () {
+    var cards = Array.prototype.slice.call(document.querySelectorAll(".asks[data-question]"));
+    if (!cards.length) return;
+    var checked = function (option) { return option.getAttribute("aria-checked") === "true"; };
+    var parts = function (card) {
+      return { options: Array.prototype.slice.call(card.querySelectorAll(".option")), other: card.querySelector(".option.other"),
+        text: card.querySelector(".other-text"), note: card.querySelector(".note-text") };
+    };
+    // The other answer's field, shown while "Other answer..." is picked,
+    // and always on a question without options.
+    function fold(card) {
+      var got = parts(card);
+      if (got.other) got.text.hidden = !checked(got.other);
+    }
+    cards.forEach(function (card) {
+      var got = parts(card), options = got.options, other = got.other, text = got.text, note = got.note;
+      var multiple = "multiple" in card.dataset, free = "free" in card.dataset;
+      var button = card.querySelector("[data-answer]"), status = card.querySelector(".why-not"), sending = false;
+      var show = function (option) {
+        var n = option ? option.dataset.n : undefined;
+        if (n === undefined) {
+          var first = options.filter(function (each) { return checked(each) && each.dataset.n !== undefined; })[0];
+          if (!first) return;
+          n = first.dataset.n;
+        }
+        card.querySelectorAll(".aid").forEach(function (aid) { aid.hidden = aid.dataset.for !== n; });
+      };
+      // A page that reads only shows the aids, and picks nothing.
+      var pick = function (option) {
+        if (!writes()) return;
+        if (multiple) option.setAttribute("aria-checked", checked(option) ? "false" : "true");
+        else options.forEach(function (each) { each.setAttribute("aria-checked", each === option ? "true" : "false"); });
+        fold(card);
+        status.textContent = "";
+      };
+      options.forEach(function (option) {
+        option.addEventListener("click", function () {
+          pick(option);
+          show(option);
+          if (option === other && !text.hidden) text.focus();
+        });
+        option.addEventListener("focus", function () { show(option); });
+        option.addEventListener("mouseenter", function () { show(option); });
+        option.addEventListener("keydown", function (event) {
+          var by = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[event.key];
+          if (!by) return;
+          event.preventDefault();
+          var shown = options.filter(function (each) { return each.getClientRects().length; });
+          var next = shown[(shown.indexOf(option) + by + shown.length) % shown.length];
+          options.forEach(function (each) { each.tabIndex = each === next ? 0 : -1; });
+          next.focus();
+          if (!multiple && next !== other) pick(next);
+        });
+      });
+      var group = card.querySelector(".options");
+      if (group) group.addEventListener("mouseleave", function () { if (!group.contains(document.activeElement)) show(null); });
+      var say = function (words) { status.textContent = words; };
+      function answer() {
+        if (sending) return;
+        var labels = options.filter(function (each) { return checked(each) && each !== other; }).map(function (each) { return each.dataset.label; });
+        var otherOn = free || (other && checked(other)), written = otherOn ? text.value.trim() : "";
+        if (otherOn && !written) { text.focus(); return say(free ? "Write the answer first." : "Write the other answer first."); }
+        if (!labels.length && !written) return say("Pick an answer first.");
+        var posted = { page: location.pathname, question: card.dataset.question, picked: labels, other: written || undefined, note: note.value.trim() || undefined };
+        sending = true;
+        button.disabled = true;
+        say("");
+        fetch("/api/answer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(posted) })
+          .then(function (reply) {
+            return reply.text().then(function (body) {
+              var got = {};
+              try { got = JSON.parse(body); } catch (e) { got = { why: body.trim() }; }
+              if (!reply.ok) throw new Error(got.why || "the server answered " + reply.status);
+              return got;
+            });
+          })
+          .then(function (got) {
+            card.classList.add("answered");
+            say("Answered: " + got.answer);
+          })
+          .catch(function (error) {
+            button.disabled = false;
+            say("Not answered: " + (window.ekkoUnreached ? ekkoUnreached(error) : error.message));
+          })
+          .then(function () { sending = false; });
+      }
+      button.addEventListener("click", answer);
+      [text, note].forEach(function (field) {
+        field.addEventListener("keydown", function (event) {
+          if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+            event.preventDefault();
+            answer();
+          }
+        });
+      });
+    });
+    // A reload keeps, for each question still open, what was picked and
+    // written (task 1378, as the bar keeps its words).
+    keepers.questions = {
+      keep: function () {
+        var kept = {};
+        cards.forEach(function (card) {
+          if (card.classList.contains("answered")) return;
+          var got = parts(card);
+          kept[card.dataset.question] = {
+            picked: got.options.filter(checked).map(function (each) { return each === got.other ? null : each.dataset.label; }),
+            other: got.text.value, note: got.note.value
+          };
+        });
+        return kept;
+      },
+      back: function (kept) {
+        cards.forEach(function (card) {
+          var was = kept && kept[card.dataset.question];
+          if (!was) return;
+          var got = parts(card);
+          got.options.forEach(function (each) {
+            var on = was.picked.indexOf(each === got.other ? null : each.dataset.label) >= 0;
+            each.setAttribute("aria-checked", on ? "true" : "false");
+          });
+          got.text.value = was.other || "";
+          got.note.value = was.note || "";
+          fold(card);
+          var first = got.options.filter(checked)[0];
+          if (first && first.dataset.n !== undefined) card.querySelectorAll(".aid").forEach(function (aid) { aid.hidden = aid.dataset.for !== first.dataset.n; });
+        });
+      }
+    };
+  })();
+
   // AKQA's bar (task 1223, measured on akqa.com): a pill a click unfolds
   // into a panel, which finds a part, a step, a note or a comment of the
   // page, and runs the page's commands. The surface's width and radius, its
@@ -5318,6 +5576,46 @@ body:not([data-writes]) .writes-only { display: none !important; }
 .callout.waits b { margin: 0 0 6px; font: 400 13px/16px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: inherit; opacity: 0.7; }
 .prose .callout.waits code { background: rgba(127, 127, 127, 0.25); color: inherit; }
 .callout.waits .pill { background: var(--bg); color: var(--fg-strong); }
+/* A question waiting on the user, as ekko's menu shows it (task 1110): its
+   options numbered, the recommended one marked, and beside them -- under
+   them, on a narrow window -- why pick the one in focus, an example and its
+   preview; where the page writes, the fields that answer it. */
+.callout.waits.asks { display: block; }
+.callout.waits.asks p { margin: 0; color: inherit; }
+.callout.waits.asks .asked { font: 400 20px/28px var(--serif); white-space: pre-line; }
+.callout.waits.asks .explain { margin-top: 12px; font: 400 16px/24px var(--sans); white-space: pre-line; opacity: 0.85; }
+.callout.waits.asks .any { margin-top: 12px; font: 400 13px/16px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.7; }
+.asks .choose { display: grid; gap: 20px 32px; margin-top: 20px; }
+.asks .choose.aided { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.asks .options { display: flex; flex-direction: column; border-top: 1px solid rgba(127, 127, 127, 0.35); }
+.asks .option { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 2px 12px; align-items: start; padding: 12px 8px; border: 0; border-bottom: 1px solid rgba(127, 127, 127, 0.35); background: none; color: inherit; font: 400 16px/24px var(--sans); text-align: left; cursor: pointer; transition: background-color 0.2s ease; }
+.asks .option .n { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin-top: 0; border: 1px solid currentColor; border-radius: 50%; font: 400 12px/1 var(--sans); opacity: 0.7; }
+.asks .option[role="checkbox"] .n { border-radius: 7px; }
+.asks .option[aria-checked="true"] .n { border-color: var(--bg); background: var(--bg); color: var(--fg-strong); opacity: 1; }
+.asks .option .label { font-weight: 600; overflow-wrap: anywhere; }
+.asks .option .tag { display: inline-block; margin-left: 8px; padding: 0 8px; border-radius: 999px; background: rgba(127, 127, 127, 0.3); font: 400 12px/20px var(--sans); letter-spacing: 0.02em; vertical-align: 1px; }
+.asks .option .desc { grid-column: 2; font-size: 15px; line-height: 22px; opacity: 0.75; }
+.asks .option:hover { background: rgba(127, 127, 127, 0.16); }
+.asks .option:focus-visible { outline: 2px solid var(--bg); outline-offset: -2px; }
+.asks .aids { padding: 0 0 0 24px; border-left: 1px solid rgba(127, 127, 127, 0.35); }
+.callout.waits.asks .aid > * + * { margin-top: 12px; }
+.callout.waits.asks .aid .why { font: 400 18px/26px var(--serif); }
+.callout.waits.asks .aid .example { font: 400 15px/22px var(--sans); }
+.asks .aid .example span { font-weight: 600; }
+.asks .aid .preview { max-height: 320px; margin: 0; padding: 12px 16px; overflow: auto; border-radius: 12px; background: rgba(127, 127, 127, 0.2); color: inherit; font: 400 13px/20px var(--mono); }
+.callout.waits.asks .aid .none { font: 400 15px/22px var(--sans); opacity: 0.6; }
+.asks .reply { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 20px; }
+.asks .reply textarea, .asks .reply input { box-sizing: border-box; min-height: 40px; padding: 8px 16px; border: 1px solid rgba(127, 127, 127, 0.45); border-radius: 20px; background: rgba(127, 127, 127, 0.12); color: inherit; font: 400 15px/22px var(--sans); }
+.asks .reply textarea { flex: 1 1 100%; min-height: 64px; resize: vertical; }
+.asks .reply input { flex: 1 1 240px; }
+.asks .reply :is(textarea, input)::placeholder { color: inherit; opacity: 0.6; }
+.asks .reply :is(textarea, input):focus-visible { outline: 2px solid var(--bg); outline-offset: 1px; }
+.asks .reply .pill:disabled { opacity: 0.5; cursor: default; }
+.callout.waits.asks .why-not { flex: 1 1 100%; font: 400 14px/20px var(--sans); }
+.asks .why-not:empty { display: none; }
+.callout.waits.asks .how { margin-top: 16px; font: 400 14px/20px var(--sans); opacity: 0.75; }
+.asks.answered :is(.choose, .reply > :not(.why-not)) { opacity: 0.5; pointer-events: none; }
+@media (max-width: 760px) { .asks .choose.aided { grid-template-columns: minmax(0, 1fr); } .asks .aids { padding: 16px 0 0; border-left: 0; border-top: 1px solid rgba(127, 127, 127, 0.35); } }
 .hero .lead { margin-top: 40px; }
 
 /* ---- openers, as AKQA's: capitals, weight 400, tight, line two grey --- */
@@ -6949,7 +7247,11 @@ mod tests {
         let all: ItemMap = BTreeMap::from([(1, item.clone()), (2, asked), (3, answered)]);
         let (html, _) = page(&item, &all, None);
         assert_eq!(html.matches("class=\"callout").count(), 1, "the open question only: {html}");
-        assert!(html.contains("<div class=\"callout waits\"><div class=\"said\"><b>Waiting on you: question 2</b>Which comes first?: answer it in ekko's menu, or with <code>ekko --answer 2</code> in a terminal.</div></div>"), "a banner, without Review, which does not answer it: {html}");
+        assert!(
+            html.contains("<div class=\"said\"><b>Waiting on you: question 2</b><p class=\"asked\">Which comes first?\nThe page or the server.</p></div><div class=\"reply writes-only\">")
+                && html.contains("<p class=\"how\">Answer it <span class=\"writes-only\">here, </span>in ekko's menu, or with <code>ekko --answer 2</code> in a terminal.</p></div>"),
+            "a banner, without Review, which does not answer it: {html}"
+        );
         assert!(html.contains("<div class=\"note open\" id=\"note-2\" data-kind=\"Open question\">") && html.contains("<span class=\"answer\">\u{2713} The docs</span>"), "{html}");
 
         let mut changed = item.clone();
@@ -7546,6 +7848,125 @@ mod tests {
             assert!(page.contains("And a line more.") && page.contains("data-version=\"2\""), "an edit through any path rewrites it: {page}");
             apply(&as_user, json!({"op": "create", "text": "Unrelated"})).unwrap();
             assert_eq!(std::fs::read_to_string(&path).unwrap(), page, "a write that changes nothing it shows leaves it");
+            std::fs::remove_dir_all(&home).ok();
+        }
+
+        /// The questions about a plan or about a step's task, on its page
+        /// (task 1110): each as ekko's menu shows it, the board keeping the
+        /// why, example and preview of its options for it, in the order they
+        /// were asked; answered there by the person, as the menu records an
+        /// answer. The approval is Review's, and a question about anything
+        /// else is not the page's to answer.
+        #[test]
+        fn the_page_shows_each_question_about_the_plan_as_the_menu_does_and_answers_it() {
+            let home = crate::paths::test_dir("ekko-artifact-questions");
+            let dir = home.join(".ekko");
+            let (session, _, _) = test_sessions();
+            let (as_session, as_user) = (ekko_at(&dir, &session), ekko_at(&dir, &Actor::person()));
+            let steps = json!([{"key": "field", "text": "The field"}, {"key": "tool", "text": "The tool", "after": ["field"]}]);
+            let target = artifact(&as_session, json!({"text": plan("Ship the page"), "steps": steps})).unwrap();
+            let board = || as_user.storage.get().unwrap();
+            let on_page = |question: u32, picked: &[&str], other: Option<&str>, note: Option<&str>| -> Result<String, EkkoError> {
+                let uid = board()[&question].uid.clone().unwrap();
+                let picked: Vec<String> = picked.iter().map(|label| label.to_string()).collect();
+                let mut draft = Draft::open(&as_user)?;
+                let id = draft.answer_on_page(&Ref::Id(target), &uid, &picked, other, note)?;
+                let committed = draft.commit(false)?;
+                Ok(committed.data[&id].question.as_ref().and_then(|question| question.answer.as_ref()).unwrap().text.clone())
+            };
+            let approval = ask(&as_session, &home, target).unwrap();
+            let proposing = board()[&approval].question.as_ref().unwrap().aids.clone();
+            assert_eq!(proposing.iter().map(|aid| aid.why.as_deref().unwrap_or_default()).collect::<Vec<_>>(), ["as tarefas nascem", "nada muda"], "a question that proposes keeps them too");
+            let refused = on_page(approval, &["Aprovar"], None, None).unwrap_err().to_string();
+            assert!(refused.contains(&format!("question {approval} asks to approve a plan: Review answers it")), "{refused}");
+            answer(&as_user, approval, "Aprovar").unwrap();
+            let tool = board()[&target].artifact.as_ref().unwrap().steps[1].task.clone().expect("the approval made the step's task");
+            let asked = |about: Ref, question: Value| -> u32 {
+                let mut draft = Draft::open(&as_session).unwrap();
+                let (id, _) = draft.ask_inquiry(&serde_json::from_value::<Inquiry>(question).unwrap(), Some(&about), &home).unwrap();
+                draft.commit(false).unwrap();
+                id
+            };
+            let which = asked(
+                Ref::Id(target),
+                json!({"text": "Which store?", "explain": "Where the page keeps its state.\n\nIt changes how a reload behaves.", "options": [
+                    {"label": "Disk", "description": "a file", "recommended": true, "why": "it outlives the browser", "example": "~/.ekko/state", "preview": "<b>state</b>\n  kept"},
+                    {"label": "Memory", "why": "nothing to clean", "example": "a Map"},
+                    {"label": "Nowhere"}
+                ]}),
+            );
+            let several = asked(
+                Ref::Text(tool.clone()),
+                json!({"text": "Which flags?", "explain": "What the tool takes.", "multiple": true, "options": [
+                    {"label": "--fast", "recommended": true, "why": "speed", "example": "ekko --fast"},
+                    {"label": "--safe", "recommended": true, "why": "safety", "example": "ekko --safe"},
+                    {"label": "--loud", "why": "noise", "example": "ekko --loud"}
+                ]}),
+            );
+            let free = asked(Ref::Id(target), json!({"text": "What should the page say?", "quick": true}));
+            apply(&as_user, json!({"op": "create", "text": "Other work"})).unwrap();
+            let other = board().values().find(|item| item.description == "Other work").unwrap().id;
+            let elsewhere = asked(Ref::Id(other), json!({"text": "And this?", "quick": true}));
+
+            // The board keeps each option's aids beside the note's text, for
+            // the options that have any, and nothing for a question without.
+            let data = board();
+            let kept = &data[&which].question.as_ref().unwrap().aids;
+            assert_eq!(kept.iter().map(|aid| aid.label.as_str()).collect::<Vec<_>>(), ["Disk", "Memory"], "{kept:?}");
+            assert_eq!(kept[0].preview.as_deref(), Some("<b>state</b>\n  kept"));
+            let stored = serde_json::to_value(&data[&free]).unwrap();
+            assert_eq!(stored["question"].get("aids"), None, "a question without aids is stored as before: {stored}");
+            let posed = crate::menu::posed(&data[&which]);
+            assert_eq!(posed.options[0].why.as_deref(), Some("it outlives the browser"), "ekko --answer shows what the menu showed");
+            assert_eq!((posed.options[1].example.as_deref(), posed.options[2].why.as_deref()), (Some("a Map"), None));
+
+            let (html, _) = page(&data[&target], &data, None);
+            let uid = |id: u32| data[&id].uid.clone().unwrap();
+            assert!(!html.contains(&format!("Waiting on you: question {approval}</b>")), "the approval answered waits no more: {html}");
+            assert!(
+                html.contains(&format!(
+                    "<div class=\"callout waits asks\" id=\"question-{which}\" data-question=\"{}\"><div class=\"said\"><b>Waiting on you: question {which}</b><p class=\"asked\">Which store?</p><p class=\"explain\">Where the page keeps its state.</p><p class=\"explain\">It changes how a reload behaves.</p></div>",
+                    uid(which)
+                )),
+                "the question and its explanation: {html}"
+            );
+            assert!(
+                html.contains("<button class=\"option\" type=\"button\" role=\"radio\" aria-checked=\"true\" data-n=\"0\" data-label=\"Disk\"><span class=\"n\">1</span><span class=\"label\">Disk<span class=\"tag\">recommended</span></span><span class=\"desc\">a file</span></button>")
+                    && html.contains("<button class=\"option\" type=\"button\" role=\"radio\" aria-checked=\"false\" data-n=\"1\" data-label=\"Memory\" tabindex=\"-1\"><span class=\"n\">2</span><span class=\"label\">Memory</span></button>"),
+                "the options numbered, the recommended one marked and picked to begin with: {html}"
+            );
+            assert!(
+                html.contains("<div class=\"aid\" data-for=\"0\"><p class=\"why\">it outlives the browser</p><p class=\"example\"><span>Example:</span> ~/.ekko/state</p><pre class=\"preview\">&lt;b&gt;state&lt;/b&gt;\n  kept</pre></div><div class=\"aid\" data-for=\"1\" hidden><p class=\"why\">nothing to clean</p><p class=\"example\"><span>Example:</span> a Map</p></div><div class=\"aid\" data-for=\"2\" hidden><p class=\"none\">(no preview)</p></div>"),
+                "beside them the aids, the recommended option's shown, a preview as written: {html}"
+            );
+            assert!(
+                html.contains(&format!("<b>Waiting on you: question {several} \u{b7} about step tool</b><p class=\"asked\">Which flags?</p><p class=\"explain\">What the tool takes.</p><p class=\"any\">Any number of them</p>"))
+                    && html.contains("role=\"checkbox\" aria-checked=\"true\" data-n=\"1\" data-label=\"--safe\"")
+                    && html.contains("role=\"checkbox\" aria-checked=\"false\" data-n=\"2\" data-label=\"--loud\""),
+                "a step's question, its recommended options picked: {html}"
+            );
+            assert!(
+                html.contains(&format!("id=\"question-{free}\" data-question=\"{}\" data-free>", uid(free)))
+                    && html.contains(&format!("<textarea class=\"other-text\" rows=\"2\" placeholder=\"Your answer\" aria-label=\"Your answer to question {free}\"></textarea>")),
+                "a question without options is answered in words: {html}"
+            );
+            assert!(!html.contains(&format!("question-{elsewhere}")), "a question about other work is not the page's: {html}");
+            let at = |id: u32| html.find(&format!("id=\"question-{id}\"")).unwrap();
+            assert!(at(which) < at(several) && at(several) < at(free), "in the order they were asked");
+
+            let refused = on_page(elsewhere, &[], Some("yes"), None).unwrap_err().to_string();
+            assert!(refused.contains(&format!("question {elsewhere} is about neither artifact {target} nor one of its steps' tasks")), "{refused}");
+            let refused = on_page(which, &["Disk", "Memory"], None, None).unwrap_err().to_string();
+            assert!(refused.contains(&format!("question {which} takes one answer")), "{refused}");
+            assert_eq!(on_page(which, &["Memory"], None, Some(" for now ")).unwrap(), "Memory \u{2014} note: for now");
+            assert!(on_page(which, &["Disk"], None, None).unwrap_err().to_string().contains("already answered"));
+            assert_eq!(on_page(several, &["--loud", "--fast"], Some("--dry"), None).unwrap(), "--fast, --loud, --dry", "in the options' order, the other last");
+            assert_eq!(on_page(free, &[], Some("Say hello"), None).unwrap(), "Say hello");
+            let data = board();
+            let by = data[&which].question.as_ref().and_then(|question| question.answer.as_ref()).and_then(|answer| answer.by.clone()).unwrap();
+            assert!(by.pid.is_none(), "the person's answer: {by:?}");
+            let (html, _) = page(&data[&target], &data, None);
+            assert!(!html.contains("callout waits asks"), "answered, nothing waits: {html}");
             std::fs::remove_dir_all(&home).ok();
         }
     }

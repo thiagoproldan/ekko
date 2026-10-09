@@ -459,6 +459,13 @@ pub struct Question {
     /// makes tasks of.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approve: Option<Approving>,
+    /// What the menu shows beside each option ask was given (task 1110):
+    /// why one would pick it, an example and a preview, which the note's
+    /// text does not hold. Kept so `ekko --answer` and the artifact's page
+    /// show what the menu showed. Absent unless an option had one, so a
+    /// board without them is stored exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aids: Vec<Aid>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -472,6 +479,31 @@ impl Question {
     pub fn proposes(&self) -> bool {
         self.cue.is_some() || self.allow.is_some() || self.link.is_some() || self.approve.is_some()
     }
+
+    /// The aids kept for the option labelled `label`, if it had any.
+    pub fn aid(&self, label: &str) -> Option<&Aid> {
+        self.aids.iter().find(|aid| aid.label == label.trim())
+    }
+}
+
+/// What the menu shows beside one option of a question (task 1110), found
+/// by the option's label, which the note's text lists.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Aid {
+    pub label: String,
+    /// Why one would pick it, and how it differs from the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// What picking it looks like in practice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<String>,
+    /// A mockup, a snippet or a config, shown as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 /// The plan of an artifact a question asks the user to approve: the steps
@@ -1861,7 +1893,8 @@ mod tests {
                 "answer": {"text": "Allow once", "by": {"since": 1790488577665_i64}, "at": 1790488577665_i64, "rev": 902},
                 "cue": {"gotcha": "18d917b69b8bd112-ffdc4", "cue": {"command": "git", "words": ["reset", "--hard"], "folder": "/tmp"}},
                 "allow": {"code": "bv762s", "tool": "Bash", "call": "git reset --hard", "cwd": "/tmp", "reasons": ["a gotcha"],
-                    "used": {"toolUseId": "toolu_01Ptw84Fh7BCgVdBoivkzhZd", "at": 1790488580406_i64}}
+                    "used": {"toolUseId": "toolu_01Ptw84Fh7BCgVdBoivkzhZd", "at": 1790488580406_i64}},
+                "aids": [{"label": "Allow once", "why": "the call runs this once", "example": "git reset --hard, now", "preview": "$ git reset --hard"}]
             },
             "wait": {"on": "18d917d885e497e8-ffdc4", "until": "answered", "by": holder, "rev": 903,
                 "over": {"how": "answered", "by": holder, "at": 1790488580406_i64, "rev": 904}},
@@ -1932,9 +1965,9 @@ mod tests {
         assert!(missing.is_empty(), "no `unknown`, and no reason given here for none: {missing:?}");
         checked.sort();
         let expected = [
-            "Allowance", "Anchor", "Answer", "Approving", "Artifact", "Comment", "Counters", "Cue", "Earlier", "Failure", "Holder", "Item", "Linking",
-            "Moved", "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Seen", "State", "Step", "StillTrue",
-            "Unread", "Use", "Used", "Wait",
+            "Aid", "Allowance", "Anchor", "Answer", "Approving", "Artifact", "Comment", "Counters", "Cue", "Earlier", "Failure", "Holder", "Item",
+            "Linking", "Moved", "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Seen", "State", "Step",
+            "StillTrue", "Unread", "Use", "Used", "Wait",
         ];
         assert_eq!(checked, expected, "the scan finds the structs it should");
     }

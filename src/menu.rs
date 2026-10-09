@@ -16,8 +16,9 @@
 //! once the menu has been up, or back in focus, for a second and the keyboard
 //! has been quiet, so typing meant for another window never answers.
 //!
-//! The file holds the questions, why, example and preview included, which
-//! the board does not keep. The menu writes its pid beside it: a pid gone with the answers not
+//! The file holds the questions as ask was given them, why, example and
+//! preview included, which the board keeps beside each note's text too
+//! (task 1110). The menu writes its pid beside it: a pid gone with the answers not
 //! on the board means the user closed the menu, and no pid at all, that the
 //! menu never opened. `ekko --answer <id>` alone opens the same menu on one
 //! question, read back from the board, in whatever terminal it runs.
@@ -370,11 +371,7 @@ impl Page {
 
     /// The answer as the board records it: with the note, if there is one.
     fn recorded(&self) -> Option<String> {
-        let answer = self.answer.as_ref()?;
-        Some(match &self.note {
-            Some(note) => format!("{answer}{NOTE}{note}"),
-            None => answer.clone(),
-        })
+        Some(with_note(self.answer.as_ref()?, self.note.as_deref()))
     }
 }
 
@@ -491,7 +488,7 @@ impl Menu {
             page.marked[page.cursor] = true;
         }
         let labels = page.posed.options.iter().zip(&page.marked).filter(|(_, marked)| **marked).map(|(option, _)| option.label.trim().to_string());
-        let answer = labels.chain(page.other.clone()).collect::<Vec<_>>().join(", ");
+        let answer = chosen(labels.chain(page.other.clone()));
         self.settle(answer)
     }
 
@@ -821,9 +818,41 @@ pub fn run_one(ekko: &Ekko, reference: &str) -> Result<Vec<Outcome>, EkkoError> 
         Some(asked) if asked.answer.is_some() => return Err(EkkoError::InvalidInput(format!("{} was already answered", item.id))),
         Some(_) => {}
     }
-    let (text, explain, options, multiple) = parse(&item.description);
+    run(ekko, vec![posed(item)])
+}
+
+/// A question on the board as the menu shows it: the text, explanation and
+/// options its note holds, each option with the why, example and preview
+/// the board keeps beside the note (task 1110), so `ekko --answer` and the
+/// artifact's page show what the menu ask opened showed.
+pub fn posed(item: &crate::item::Item) -> Posed {
+    let (text, explain, mut options, multiple) = parse(&item.description);
+    if let Some(asked) = &item.question {
+        for option in &mut options {
+            if let Some(aid) = asked.aid(&option.label) {
+                option.why.clone_from(&aid.why);
+                option.example.clone_from(&aid.example);
+                option.preview.clone_from(&aid.preview);
+            }
+        }
+    }
     let uid = item.uid.clone().unwrap_or_else(|| item.id.to_string());
-    run(ekko, vec![Posed { uid, id: item.id, text, explain, options, multiple }])
+    Posed { uid, id: item.id, text, explain, options, multiple }
+}
+
+/// What the menu records for the options chosen, by label, and the other
+/// answer written, in that order: one answer, several joined. The
+/// artifact's page records the same (task 1110).
+pub fn chosen(labels: impl IntoIterator<Item = String>) -> String {
+    labels.into_iter().collect::<Vec<_>>().join(", ")
+}
+
+/// An answer with the note added to it, as the board records the two.
+pub fn with_note(answer: &str, note: Option<&str>) -> String {
+    match note {
+        Some(note) => format!("{answer}{NOTE}{note}"),
+        None => answer.to_string(),
+    }
 }
 
 fn run(ekko: &Ekko, questions: Vec<Posed>) -> Result<Vec<Outcome>, EkkoError> {

@@ -635,11 +635,12 @@ fn route(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
         ("POST", "/api/comment/send") => comment(shared, request, socket, "send"),
         ("POST", "/api/comment/apply") => comment(shared, request, socket, "apply"),
         ("POST", "/api/review") => review(shared, request, socket),
+        ("POST", "/api/answer") => answer(shared, request, socket),
         ("GET", path) => match query.split('&').find_map(|pair| pair.strip_prefix("token=")) {
             Some(token) if path.starts_with("/default/") || path.starts_with("/project/") => opened(shared, path, token),
             _ => font(path).or_else(|| page(shared, path)).unwrap_or_else(|| Answer::text(404, "no artifact's page is here")),
         },
-        _ => Answer::text(405, "the server answers GET, and POST to /stop, /api/who, /api/comment and /api/review"),
+        _ => Answer::text(405, "the server answers GET, and POST to /stop, /api/who, /api/comment, /api/review and /api/answer"),
     }
 }
 
@@ -720,7 +721,7 @@ fn comment(shared: &Shared, request: &Request, socket: Option<u64>, how: &str) -
                 _ => "trashed note",
             };
             log(&shared.home, &format!("POST /api/comment: {did} {id} on {uid}, by the user, {person}"));
-            json(200, serde_json::json!({"id": id, "uid": note}))
+            json(200, serde_json::json!({"id": id, "uid": note.and_then(|note| note.uid)}))
         }
         Err(why) => json(409, serde_json::json!({"why": why})),
     }
@@ -757,7 +758,52 @@ fn review(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
     match written {
         Ok((id, note, notices)) => {
             log(&shared.home, &format!("POST /api/review: {} in note {id} on {uid}, by the user, {person}", posted.verdict));
-            json(200, serde_json::json!({"id": id, "uid": note, "notices": notices}))
+            json(200, serde_json::json!({"id": id, "uid": note.and_then(|note| note.uid), "notices": notices}))
+        }
+        Err(why) => json(409, serde_json::json!({"why": why})),
+    }
+}
+
+/// `POST /api/answer`: the person's answer, from an artifact's page, to a
+/// question open there (task 1110) -- one about the artifact or one of its
+/// steps' tasks -- as JSON naming the page's path, the question by uid,
+/// the options picked by label, the other answer written and the note
+/// that goes with it, each as the question allows. It is recorded as
+/// ekko's menu records it, as `Draft::answer_on_page` does: as the
+/// person's, so an ask waiting on the question returns it and closes its
+/// menu. The reply holds the answer as recorded.
+fn answer(shared: &Shared, request: &Request, socket: Option<u64>) -> Answer {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Posted {
+        page: String,
+        question: String,
+        #[serde(default)]
+        picked: Vec<String>,
+        #[serde(default)]
+        other: Option<String>,
+        #[serde(default)]
+        note: Option<String>,
+    }
+    let person = match writer(shared, request, socket) {
+        Ok(person) => person,
+        Err(why) => return Answer::refuse(why, true),
+    };
+    let posted: Posted = match serde_json::from_slice(&request.body) {
+        Ok(posted) => posted,
+        Err(error) => return json(400, serde_json::json!({"why": format!("not an answer: {error}")})),
+    };
+    let Some((project, uid)) = board_of(&posted.page) else {
+        return json(404, serde_json::json!({"why": format!("{} is no artifact's page", posted.page)}));
+    };
+    let written = as_person(shared, project.as_deref(), |draft| {
+        draft.answer_on_page(&crate::ops::Ref::Text(uid.clone()), &posted.question, &posted.picked, posted.other.as_deref(), posted.note.as_deref())
+    });
+    match written {
+        Ok((id, note, notices)) => {
+            log(&shared.home, &format!("POST /api/answer: question {id} on {uid}, by the user, {person}"));
+            let answer = note.as_ref().and_then(|note| note.question.as_ref()?.answer.as_ref()).map(|answer| answer.text.clone());
+            json(200, serde_json::json!({"id": id, "uid": note.and_then(|note| note.uid), "answer": answer, "notices": notices}))
         }
         Err(why) => json(409, serde_json::json!({"why": why})),
     }
@@ -769,16 +815,19 @@ fn json(code: u16, value: serde_json::Value) -> Answer {
 }
 
 /// Writes `write` on the board of the project named, or on the default
-/// board, as the person: the item it names, its uid, and the write's
+/// board, as the person: the item it names, as written, and the write's
 /// notices; or why nothing was written.
-fn as_person(shared: &Shared, project: Option<&str>, write: impl FnOnce(&mut crate::ops::Draft) -> Result<u32, crate::ekko::EkkoError>) -> Result<(u32, String, Vec<String>), String> {
+fn as_person(
+    shared: &Shared,
+    project: Option<&str>,
+    write: impl FnOnce(&mut crate::ops::Draft) -> Result<u32, crate::ekko::EkkoError>,
+) -> Result<(u32, Option<crate::item::Item>, Vec<String>), String> {
     let location = crate::directory::locate(&shared.home, &shared.home, None, None, project).map_err(|error| error.to_string())?;
     let ekko = crate::ekko::Ekko::at(&location).map_err(|error| error.to_string())?.acting_as(crate::holder::Actor::person());
     let mut draft = crate::ops::Draft::open(&ekko).map_err(|error| error.to_string())?;
     let id = write(&mut draft).map_err(|error| error.to_string())?;
     let committed = draft.commit(false).map_err(|error| error.to_string())?;
-    let uid = committed.data.get(&id).and_then(|note| note.uid.clone()).unwrap_or_default();
-    Ok((id, uid, committed.notices))
+    Ok((id, committed.data.get(&id).cloned(), committed.notices))
 }
 
 /// The board and the artifact a page's path names: the project's name, or

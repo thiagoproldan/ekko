@@ -23,7 +23,7 @@ use crate::ekko::{
     Linked,
 };
 use crate::holder::Whose;
-use crate::item::{Answer, Approving, Artifact, Cue, CueOn, How, Item, Knowledge, Linking, Proposal, Question, Review, Setting, State, Until, Wait};
+use crate::item::{Aid, Answer, Approving, Artifact, Cue, CueOn, How, Item, Knowledge, Linking, Proposal, Question, Review, Setting, State, Until, Wait};
 use crate::storage::{ItemMap, LockGuard};
 
 /// An item as a caller names it: a display id, a uid, or `$N` for the item
@@ -384,6 +384,47 @@ pub struct Choice {
     /// What picking it looks like in practice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub example: Option<String>,
+}
+
+/// What the board keeps of `options` beside the note's text (task 1110):
+/// each option's why, example and preview, for the options that have any.
+fn aids(options: &[Choice]) -> Vec<Aid> {
+    let prose = |text: &Option<String>| text.as_deref().map(str::trim).filter(|text| !text.is_empty()).map(str::to_string);
+    options
+        .iter()
+        .map(|option| Aid {
+            label: option.label.trim().to_string(),
+            why: prose(&option.why),
+            example: prose(&option.example),
+            preview: option.preview.clone().filter(|preview| !preview.trim().is_empty()),
+            unknown: Default::default(),
+        })
+        .filter(|aid| aid.why.is_some() || aid.example.is_some() || aid.preview.is_some())
+        .collect()
+}
+
+/// The answer the options `picked` on an artifact's page, by label, and the
+/// `other` answer written there make to the question `posed`, as ekko's
+/// menu makes it (task 1110): the option picked, or those picked in the
+/// options' order and the other answer after them; or why they answer
+/// nothing, worded to follow "question N".
+fn composed(posed: &crate::menu::Posed, picked: &[String], other: Option<&str>) -> Result<String, String> {
+    let other = other.map(str::trim).filter(|other| !other.is_empty());
+    let offered = |label: &str| posed.options.iter().any(|option| option.label.trim() == label.trim());
+    if let Some(unknown) = picked.iter().find(|label| !offered(label)) {
+        return Err(format!("offers no option {}", unknown.trim()));
+    }
+    let labels: Vec<String> =
+        posed.options.iter().map(|option| option.label.trim().to_string()).filter(|label| picked.iter().any(|picked| picked.trim() == label)).collect();
+    match (posed.options.is_empty(), posed.multiple, labels.as_slice(), other) {
+        (true, _, _, Some(other)) => Ok(other.to_string()),
+        (true, _, _, None) => Err("is answered in words: write the answer".to_string()),
+        (false, false, [label], None) => Ok(label.clone()),
+        (false, false, [], Some(other)) => Ok(other.to_string()),
+        (false, false, _, _) => Err("takes one answer: an option, or another answer written".to_string()),
+        (false, true, [], None) => Err("takes one or more of its options, or another answer written".to_string()),
+        (false, true, _, _) => Ok(crate::menu::chosen(labels.into_iter().chain(other.map(str::to_string)))),
+    }
 }
 
 /// The user's answer to a question.
@@ -1204,7 +1245,7 @@ impl<'a> Draft<'a> {
         let asked_by = self.ekko.actor.as_ref().filter(|actor| !actor.is_person()).map(|actor| actor.holder(now));
         // The revision is the write's own, stamped as it is saved.
         self.item(id).question =
-            Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, link: None, applies: None, approve: None, unknown: Default::default() }));
+            Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, link: None, applies: None, approve: None, aids: Vec::new(), unknown: Default::default() }));
         Ok(id)
     }
 
@@ -1255,6 +1296,40 @@ impl<'a> Draft<'a> {
             self.settle_approval(id, &approving, applies.as_deref(), text);
         }
         Ok(id)
+    }
+
+    /// Records the person's answer, from artifact `artifact`'s page, to the
+    /// question `question` names by uid (task 1110): one open on the
+    /// artifact or on one of its steps' tasks. The option picked, or those
+    /// picked where several may be, and the other answer written are joined
+    /// and noted as ekko's menu records them, so the answer reads as one
+    /// given there. A question asking to approve a plan is Review's.
+    pub fn answer_on_page(&mut self, artifact: &Ref, question: &str, picked: &[String], other: Option<&str>, note: Option<&str>) -> Result<u32, EkkoError> {
+        let target = self.resolve(artifact)?;
+        let item = &self.data[&target];
+        let Some(plan) = item.artifact.as_deref() else {
+            return Err(invalid(format!("{target} is not an artifact: the page answers the questions about one")));
+        };
+        let uid = item.uid.clone().unwrap_or_default();
+        let tasks: Vec<&str> = plan.steps.iter().filter_map(|step| step.task.as_deref()).collect();
+        let Some(asked) = self.data.values().find(|item| item.uid.as_deref() == Some(question) && item.trashed.is_none()) else {
+            return Err(invalid(format!("no question {question} on this board")));
+        };
+        let id = asked.id;
+        let Some(open) = asked.question.as_deref() else {
+            return Err(invalid(format!("{id} is not a question")));
+        };
+        if !asked.attached_to.as_deref().is_some_and(|on| on == uid || tasks.contains(&on)) {
+            return Err(invalid(format!(
+                "question {id} is about neither artifact {target} nor one of its steps' tasks: ekko's menu answers it, or ekko --answer {id}"
+            )));
+        }
+        if open.approve.is_some() {
+            return Err(invalid(format!("question {id} asks to approve a plan: Review answers it on the artifact's page")));
+        }
+        let text = composed(&crate::menu::posed(asked), picked, other).map_err(|why| invalid(format!("question {id} {why}")))?;
+        let note = note.map(str::trim).filter(|note| !note.is_empty());
+        self.answer(&Ref::Id(id), &crate::menu::with_note(&text, note))
     }
 
     /// Makes tasks of the steps question `id` asked the user to approve
@@ -1478,6 +1553,9 @@ impl<'a> Draft<'a> {
             (None, None) => {
                 let noted = crate::dialog::noted(&inquiry.text, inquiry.explain.as_deref(), &inquiry.options, inquiry.multiple);
                 let id = self.ask(&noted, about)?;
+                if let Some(question) = self.item(id).question.as_mut() {
+                    question.aids = aids(&inquiry.options);
+                }
                 return Ok((id, inquiry.clone()));
             }
             (Some(_), Some(_)) => return Err(invalid(ONE_PROPOSAL)),
@@ -1538,6 +1616,7 @@ impl<'a> Draft<'a> {
         let applies = inquiry.options.first().map(|option| option.label.trim().to_string());
         if let Some(question) = self.item(id).question.as_mut() {
             question.applies = applies;
+            question.aids = aids(&inquiry.options);
             propose(question);
         }
         Ok((id, Inquiry { explain: Some(explain), quick: false, cue: None, allow: None, link_project: None, approve: None, ..inquiry.clone() }))
@@ -2432,6 +2511,82 @@ mod tests {
             draft.apply(&op(value.clone()))?;
         }
         draft.commit(false)
+    }
+
+    /// The rule over every kind of answer (task 1110): what an artifact's
+    /// page picks and writes is recorded as the menu records the same keys
+    /// -- an option, another answer, a note, several options and another,
+    /// words alone -- so an answer reads the same wherever it was given.
+    #[test]
+    fn a_page_records_what_the_menu_records_for_each_kind_of_answer() {
+        use crate::menu::{Key, Menu, Posed};
+        let options = || ["A", "B", "C"].map(|label| Choice { label: label.into(), ..Choice::default() }).to_vec();
+        let posed = |options: Vec<Choice>, multiple: bool| Posed { uid: "u".into(), id: 7, text: "Which?".into(), explain: None, options, multiple };
+        let typed = |text: &str| text.chars().map(Key::Char).collect::<Vec<_>>();
+        // The keys pressed in the menu, and what the page picks and writes.
+        struct Case<'a> {
+            kind: &'a str,
+            posed: Posed,
+            keys: Vec<Key>,
+            picked: &'a [&'a str],
+            other: Option<&'a str>,
+            note: Option<&'a str>,
+        }
+        let cases = [
+            Case { kind: "an option", posed: posed(options(), false), keys: vec![Key::Char('2')], picked: &["B"], other: None, note: None },
+            Case {
+                kind: "another answer",
+                posed: posed(options(), false),
+                keys: [vec![Key::Char('4')], typed("my words"), vec![Key::Enter]].concat(),
+                picked: &[],
+                other: Some("my words"),
+                note: None,
+            },
+            Case {
+                kind: "an option and a note",
+                posed: posed(options(), false),
+                keys: [vec![Key::Tab], typed("why so"), vec![Key::Enter, Key::Char('1')]].concat(),
+                picked: &["A"],
+                other: None,
+                note: Some("why so"),
+            },
+            Case {
+                kind: "several and another",
+                posed: posed(options(), true),
+                keys: [vec![Key::Char('3'), Key::Char('1'), Key::Char('4')], typed("W"), vec![Key::Enter, Key::Enter]].concat(),
+                picked: &["C", "A"],
+                other: Some("W"),
+                note: None,
+            },
+            Case {
+                kind: "words alone",
+                posed: posed(Vec::new(), false),
+                keys: [typed("free words"), vec![Key::Enter]].concat(),
+                picked: &[],
+                other: Some("free words"),
+                note: None,
+            },
+        ];
+        for case in cases {
+            let mut menu = Menu::new(vec![case.posed.clone()]);
+            for key in case.keys {
+                menu.press(key);
+            }
+            let kind = case.kind;
+            let in_menu = menu.answers().pop().unwrap_or_else(|| panic!("{kind}: the menu recorded nothing")).1;
+            let picked: Vec<String> = case.picked.iter().map(|label| label.to_string()).collect();
+            let on_page = crate::menu::with_note(&composed(&case.posed, &picked, case.other).unwrap(), case.note);
+            assert_eq!(on_page, in_menu, "{kind}");
+        }
+        let single = posed(options(), false);
+        let refused = |picked: &[&str], other: Option<&str>| composed(&single, &picked.iter().map(|label| label.to_string()).collect::<Vec<_>>(), other).unwrap_err();
+        assert_eq!(refused(&["D"], None), "offers no option D");
+        assert_eq!(refused(&["A", "B"], None), "takes one answer: an option, or another answer written");
+        assert_eq!(refused(&["A"], Some("and words")), "takes one answer: an option, or another answer written");
+        assert_eq!(refused(&[], Some("  ")), "takes one answer: an option, or another answer written", "blank words are none");
+        assert_eq!(composed(&posed(options(), true), &[], None).unwrap_err(), "takes one or more of its options, or another answer written");
+        assert_eq!(composed(&posed(Vec::new(), false), &["A".to_string()], Some("x")).unwrap_err(), "offers no option A");
+        assert_eq!(composed(&posed(Vec::new(), false), &[], None).unwrap_err(), "is answered in words: write the answer");
     }
 
     /// Nothing in the text is read as a board, a priority or a date: the words

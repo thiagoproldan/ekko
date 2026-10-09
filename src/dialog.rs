@@ -266,7 +266,8 @@ pub fn refuse(options: &[Choice]) -> Option<String> {
 /// The question as the board records it: the text, its explanation, and the
 /// options offered under it, the recommended one marked, so a session reading
 /// it later knows what the user chose among, and whether several could be
-/// chosen. Why and example stay with the menu, as previews do.
+/// chosen. Why, example and preview go beside the text, on the question's
+/// aids (task 1110).
 pub fn noted(text: &str, explain: Option<&str>, options: &[Choice], multiple: bool) -> String {
     let mut noted = text.trim_end().to_string();
     if let Some(explain) = explain.map(str::trim).filter(|explain| !explain.is_empty()) {

@@ -822,6 +822,72 @@ fn a_review_from_the_page_returns_the_ask_that_waits_on_it() {
     assert!(log.contains("POST /api/review: approve in note ") && log.contains("refused POST /api/review: process "), "{log}");
 }
 
+/// An answer from the page returns the ask that waits on it (task 1110):
+/// the served page shows the question as the menu does, with the why,
+/// example and preview of its options; an answer under Claude Code is
+/// refused and writes nothing, and so is one the question does not take;
+/// the person's is recorded as the menu records it, returns the call and
+/// closes the menu.
+#[test]
+fn an_answer_from_the_page_returns_the_ask_that_waits_on_it() {
+    let home = Home::new();
+    let written = artifact(&home);
+    let (port, path) = split(written["page"].as_str().unwrap());
+    let token = runtime(&home)["token"].as_str().unwrap().to_string();
+    let send = |body: Value, as_claude: bool| {
+        let body = body.to_string();
+        let request = format!(
+            "POST /api/answer HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: ekko_{port}={token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = fs::remove_file(home.join(if as_claude { "answer-claude" } else { "answer-person" }));
+        from_bash(&home, port, &request, as_claude)
+    };
+    let board = || -> Value { serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap() };
+    let menus = || fs::read_to_string(home.join("menus")).unwrap_or_default().lines().map(str::to_string).collect::<Vec<_>>();
+
+    let mut session = Session::start(&home);
+    let options = json!([
+        {"label": "Disk", "recommended": true, "why": "it outlives the browser", "example": "~/.ekko/state", "preview": "<state>\n  kept"},
+        {"label": "Memory", "why": "nothing to clean", "example": "a Map"}
+    ]);
+    let question = json!({"text": "Which store?", "explain": "Where the page keeps its state.", "options": options});
+    session.send(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "ask", "arguments": {"questions": [question], "about": 1}}}));
+    assert!(until(10, || menus().len() == 1), "the menu came up");
+    assert_eq!(session.reply(2, Duration::from_millis(1500)), None, "ask waits on the menu");
+    let asked = board().as_object().unwrap().values().find(|item| item.get("question").is_some()).cloned().unwrap();
+    let (id, uid) = (asked["_id"].as_u64().unwrap(), asked["uid"].as_str().unwrap().to_string());
+
+    let (status, shown) = get(port, &path, &format!("127.0.0.1:{port}"));
+    assert_eq!(status, 200, "{shown}");
+    assert!(
+        shown.contains(&format!("id=\"question-{id}\" data-question=\"{uid}\""))
+            && shown.contains("<p class=\"why\">it outlives the browser</p>")
+            && shown.contains("<pre class=\"preview\">&lt;state&gt;\n  kept</pre>"),
+        "the question as the menu shows it: {shown}"
+    );
+
+    let unanswered = || board()[id.to_string()]["question"].get("answer").is_none();
+    let refused = send(json!({"page": path, "question": uid, "picked": ["Memory"]}), true);
+    assert!(refused.starts_with("HTTP/1.1 403 "), "{refused}");
+    assert!(unanswered(), "a refused answer wrote nothing");
+    let wrong = send(json!({"page": path, "question": uid, "picked": ["Disk", "Memory"]}), false);
+    assert!(wrong.starts_with("HTTP/1.1 409 ") && wrong.contains("takes one answer"), "{wrong}");
+    assert!(unanswered(), "nor one the question does not take");
+
+    let sent = send(json!({"page": path, "question": uid, "picked": ["Memory"], "note": "for now"}), false);
+    assert!(sent.starts_with("HTTP/1.1 200 "), "{sent}");
+    let reply: Value = serde_json::from_str(sent.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(reply["answer"], json!("Memory \u{2014} note: for now"), "{reply}");
+    let returned = session.reply(2, Duration::from_secs(5)).expect("ask returned once the page answered");
+    let text = returned["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(serde_json::from_str::<Value>(text).unwrap()["answers"][0]["answer"], json!("Memory \u{2014} note: for now"), "{text}");
+    let menu = menus()[0].clone();
+    assert!(until(5, || fs::metadata(format!("/proc/{menu}")).is_err()), "the menu closed");
+    let log = fs::read_to_string(state(&home).join("serve.log")).unwrap();
+    assert!(log.contains(&format!("POST /api/answer: question {id} on ")) && log.contains("refused POST /api/answer: process "), "{log}");
+}
+
 /// The user's feedback from the page reaches the session working the
 /// artifact in its next ekko reply, once (task 1108): a comment sent alone
 /// with Send now, then a review that sends the others with it. The prime
