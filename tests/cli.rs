@@ -1829,6 +1829,8 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     let prompt = command.last().unwrap();
     assert!(prompt.starts_with("ekko agents started this session to do task 1 on"), "{prompt}");
     assert!(prompt.contains("Before you change anything, set task 1 in progress"), "{prompt}");
+    assert!(prompt.contains("write its closing note with ekko's create, attached_to 1 -- a note of its own"), "{prompt}");
+    assert!(prompt.contains("write a handoff instead, with ekko's create, kind handoff, attached_to 1"), "{prompt}");
     assert!(prompt.contains(&format!("{}, on its branch task-1", worktree.display())), "{prompt}");
 
     // Two tasks share one session, in a window beside the first.
@@ -1842,6 +1844,7 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert_eq!(assigned(&command, "EKKO_AGENT_TASK"), Some(format!("{},{}", agents.uid(2), agents.uid(3)).as_str()));
     assert!(!command.iter().any(|arg| arg == "--effort"), "no effort was given: {command:?}");
     assert!(command.last().unwrap().contains("to do tasks 2 and 3 on"), "{command:?}");
+    assert!(command.last().unwrap().contains("When each task is done, write its closing note with ekko's create, attached_to that task"), "{command:?}");
 
     // A task with a window is refused, and nothing more is opened.
     let refused = agents.json(&["agents", "start", "3", "--model", "haiku", "--json"]);

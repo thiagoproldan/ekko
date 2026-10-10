@@ -229,18 +229,22 @@ fn claude() -> OsString {
 /// A born session's first prompt: what it was started for, that it claims
 /// its tasks before it changes anything (design item 1), and how it ends --
 /// a closing note on each task and the task done, or else a handoff and the
-/// task back to pending (design item 3).
+/// task back to pending (design item 3). Each note is named by the tool and
+/// argument that write it: told only to attach a closing note, both
+/// sessions of one live run appended it to the task's own text with edit
+/// (task 1644), where the four sessions before them had attached one.
 fn first_prompt(ids: &[u32], branch: &str, worktree: &Path) -> String {
-    let (tasks, them, each) = match ids {
-        [id] => (format!("task {id}"), "it", format!("task {id}")),
-        _ => (format!("tasks {}", listed(ids)), "them", "each task".to_string()),
+    let (tasks, them, each, attached) = match ids {
+        [id] => (format!("task {id}"), "it", format!("task {id}"), format!("attached_to {id}")),
+        _ => (format!("tasks {}", listed(ids)), "them", "each task".to_string(), "attached_to that task".to_string()),
     };
     format!(
         "ekko agents started this session to do {tasks} on this project's ekko board, and nothing else. \
          Before you change anything, set {tasks} in progress with ekko's set_state, then read {them} in full with ekko's context. \
          Work in this worktree, {}, on its branch {branch}, and commit there; do not push, merge into another branch, release, or start other sessions. \
-         When {each} is done, attach a closing note to it -- what you did, the files you changed, the tests you ran and their outcomes, the commit, and what is left -- then set it done. \
-         If you stop short of that, write a handoff on the task instead, and set it back to unstarted.",
+         When {each} is done, write its closing note with ekko's create, {attached} -- a note of its own, not an edit of the task's text: \
+         what you did, the files you changed, the tests you ran and their outcomes, the commit, and what is left -- then set it done. \
+         If you stop short of that, write a handoff instead, with ekko's create, kind handoff, {attached}, and set the task back to unstarted.",
         worktree.display()
     )
 }
