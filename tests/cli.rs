@@ -2639,6 +2639,88 @@ fn ekko_agents_merge_takes_a_tested_branch_in_and_hands_a_failing_one_back() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// A task's session starts, and its branch goes in, only once the branches
+/// of its done blockers are in main (task 1728): the session starts from
+/// main, and main takes a blocker's work first. Each refusal changes
+/// nothing and names the merge to run. A cancelled blocker holds nothing
+/// back; a blocker merged does, whether its branch went or `--keep` kept
+/// it; a group's branch counts for each task it was made for.
+#[test]
+fn a_task_starts_and_merges_only_after_its_blockers_branches_are_in_main() {
+    let agents = Agents::new();
+    let app = fs::canonicalize(&agents.app).unwrap();
+    for text in ["Base", "On the base", "Also on the base", "After a dropped one", "Dropped", "Group one", "Group two", "After the group"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    // 7 waits on 6 too, whose work is on the same branch.
+    for (blocked, by) in [("@2", "1"), ("@3", "1"), ("@4", "5"), ("@7", "6"), ("@8", "7")] {
+        assert!(agents.ekko(&["--blocked-by", blocked, by]).status.success());
+    }
+    assert!(agents.ekko(&["agents", "test", "true"]).status.success());
+    assert!(agents.ekko(&["agents", "limit", "9"]).status.success());
+    // Each branch as start makes it, with its session's commit.
+    let made = |branch: &str, file: &str| {
+        let worktree = agents.worktree(branch);
+        agents.git(&app, &["worktree", "add", "-q", "-b", branch, worktree.to_str().unwrap(), "HEAD"]);
+        fs::write(worktree.join(file), format!("{file} of {branch}\n")).unwrap();
+        agents.git(&worktree, &["add", file]);
+        agents.git(&worktree, &["commit", "-q", "-m", branch]);
+    };
+    made("task-1", "base.txt");
+    made("task-3", "three.txt");
+    made("task-5", "five.txt");
+    made("task-6-7", "group.txt");
+    assert!(agents.ekko(&["--check", "1", "3", "6", "7"]).status.success());
+    assert!(agents.ekko(&["--set", "cancelled", "5"]).status.success());
+    let main = || agents.git(&app, &["rev-parse", "main"]);
+    let before = main();
+    let refused_start = |id: &str| -> String {
+        let opened = agents.opened().len();
+        let reply = agents.json(&["agents", "start", id, "--model", "haiku", "--json"]);
+        assert_eq!(reply["code"], "INVALID_INPUT", "{reply}");
+        assert_eq!(agents.opened().len(), opened, "a refused start opened a window");
+        assert!(!agents.worktree(&format!("task-{id}")).exists(), "a worktree for task {id}");
+        reply["error"].as_str().unwrap().to_string()
+    };
+    let started = |id: &str| {
+        let reply = agents.json(&["agents", "start", id, "--model", "haiku", "--json"]);
+        assert_eq!(reply["ok"], true, "{reply}");
+    };
+
+    let said = refused_start("2");
+    assert_eq!(
+        said,
+        "task 2 waits on task 1, whose work is on branch task-1, not in main yet: merge it first with ekko agents merge 1, as task 2's session starts from main"
+    );
+    let output = agents.merging(&["--json", "agents", "merge", "3"]);
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let said = reply["error"].as_str().unwrap_or_else(|| panic!("{reply}"));
+    assert!(
+        said.starts_with("task 3 waits on task 1, whose work is on branch task-1, not in main yet: merge it first with ekko agents merge 1, so main takes task 3's work after it"),
+        "{said}"
+    );
+    assert_eq!((main(), agents.git(&app, &["rev-parse", "task-3^"])), (before.clone(), before.clone()), "main and task-3 as they were");
+    // A group's branch, for each task it was made for.
+    assert!(refused_start("8").contains("whose work is on branch task-6-7, not in main yet: merge it first with ekko agents merge 6 7,"));
+    // A cancelled blocker's branch holds nothing back.
+    started("4");
+
+    // Merged, its branch kept: the blocked start, and merge, go ahead.
+    let kept = agents.merging(&["--json", "agents", "merge", "1", "--keep"]);
+    assert!(kept.status.success(), "{}", String::from_utf8_lossy(&kept.stdout));
+    assert!(agents.has_branch("task-1"));
+    started("2");
+    let merged = agents.merging(&["--json", "agents", "merge", "3"]);
+    assert!(merged.status.success(), "{}", String::from_utf8_lossy(&merged.stdout));
+    assert_eq!(agents.git(&app, &["ls-tree", "--name-only", "main"]), "base.txt\nthree.txt");
+    // Merged, its branch gone.
+    let merged = agents.merging(&["--json", "agents", "merge", "6", "7"]);
+    assert!(merged.status.success(), "{}", String::from_utf8_lossy(&merged.stdout));
+    assert!(!agents.has_branch("task-6-7"));
+    started("8");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// `ekko agents merge` waits while a session of the tasks closes itself,
 /// and refuses, changing nothing, while one stays: someone talks to it, and
 /// its worktree is not to move under it (task 1714). Nor does what is not

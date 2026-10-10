@@ -154,8 +154,9 @@ pub struct Started {
 /// and the model in the multiplexer's session `ekko`, told by its first
 /// prompt to claim them before it changes anything. Refused, opening
 /// nothing, for a task the page's Start would refuse -- done, in progress,
-/// in the trash, with someone, waiting on open work -- and for one that has
-/// a window already; and while as many sessions run for the project as its
+/// in the trash, with someone, waiting on open work -- for one whose done
+/// blocker's branch is not merged yet (task 1728), and for one that has a
+/// window already; and while as many sessions run for the project as its
 /// limit lets run at once (task 1727).
 pub fn start(
     ekko: &Ekko,
@@ -189,6 +190,21 @@ pub fn start(
     let ids = ekko.validate_ids(raw_ids, &all)?;
     for id in &ids {
         refusal(&all[id], &all).map_err(refused)?;
+    }
+    // Its blockers' work first (task 1728): the worktree starts from HEAD.
+    let top = PathBuf::from(
+        git(root, &["rev-parse", "--show-toplevel"])
+            .map_err(|why| refused(format!("{} is in no git repository, and a born session works in a worktree of its own: {why}", root.display())))?,
+    );
+    for id in &ids {
+        if let Some((blocker, branch, made_for)) = unmerged_blocker(&top, "HEAD", &all[id], &all, &ids).map_err(refused)? {
+            let on = git(&top, &["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_else(|_| "the checkout's HEAD".to_string());
+            return Err(refused(format!(
+                "task {id} waits on task {blocker}, whose work is on branch {branch}, not in {on} yet: merge it first with ekko agents merge {}, \
+                 as task {id}'s session starts from {on}",
+                joined(&made_for, " ")
+            )));
+        }
     }
 
     let environment = starting_environment().map_err(refused)?;
@@ -909,6 +925,60 @@ pub(crate) fn worktree(root: &Path, branch: &str) -> Result<Worktree, String> {
     };
     made.map_err(|why| format!("no worktree was made at {}: {why}", path.display()))?;
     Ok(Worktree { path, top, made: true })
+}
+
+/// A done blocker of `task` whose work a born session left on a branch that
+/// `into` does not have yet (task 1728): the blocker, the branch -- `task-N`,
+/// or `task-N-M` for a group -- and the tasks the branch was made for. A
+/// task's session starts from main, and its branch goes in after its
+/// blockers', as Zuul and Mergify hold a change whose Depends-On has not
+/// merged. A cancelled blocker holds nothing back, nor does one done
+/// without a branch, nor one of `beside`, whose work goes in with the
+/// task's, on one branch.
+pub(crate) fn unmerged_blocker(top: &Path, into: &str, task: &Item, all: &ItemMap, beside: &[u32]) -> Result<Option<(u32, String, Vec<u32>)>, String> {
+    let index = crate::ekko::uid_index(all);
+    let blockers: Vec<u32> = task
+        .blocked_by
+        .iter()
+        .flatten()
+        .filter_map(|uid| index.get(uid.as_str()).copied())
+        .filter(|id| !beside.contains(id) && all.get(id).is_some_and(|blocker| State::of(blocker) == Some(State::Done)))
+        .collect();
+    if blockers.is_empty() {
+        return Ok(None);
+    }
+    for branch in git(top, &["for-each-ref", "--format=%(refname:short)", "refs/heads/task-*"])?.lines() {
+        let made_for = branch_tasks(branch);
+        let Some(blocker) = blockers.iter().find(|id| made_for.contains(id)) else { continue };
+        if has(top, into, branch)? {
+            continue;
+        }
+        return Ok(Some((*blocker, branch.to_string(), made_for)));
+    }
+    Ok(None)
+}
+
+/// The tasks a branch `start` made was made for, as its name says them:
+/// `task-12` and `task-12-13`; none for a name not wholly that.
+pub(crate) fn branch_tasks(branch: &str) -> Vec<u32> {
+    let Some(ids) = branch.strip_prefix("task-") else { return Vec::new() };
+    ids.split('-').map(str::parse::<u32>).collect::<Result<_, _>>().unwrap_or_default()
+}
+
+/// Whether `into` has every commit of `branch`.
+fn has(top: &Path, into: &str, branch: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(top)
+        .args(["merge-base", "--is-ancestor", branch, into])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("git could not be run: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!("git merge-base --is-ancestor {branch} {into} failed: {}", String::from_utf8_lossy(&output.stderr).trim())),
+    }
 }
 
 /// `git -C dir args`: what it printed, trimmed, or else what it said.

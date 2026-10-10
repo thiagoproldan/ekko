@@ -126,7 +126,8 @@ enum Back {
 /// is rebased; leaves the worktree and the branch, once merged, only where
 /// `keep` asks. Refused, changing nothing, for tasks not all finished, or
 /// none done, for a branch that is not there, for a session of theirs that
-/// still runs, and while another merge runs on the repository.
+/// still runs, while another merge runs on the repository, and for a task
+/// whose done blocker's branch is not merged yet (task 1728).
 pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, raw_ids: &[String], test: &Test, keep: bool) -> Result<Outcome, EkkoError> {
     let refused = EkkoError::InvalidInput;
     let Some(project) = location.project.as_ref() else {
@@ -164,6 +165,16 @@ pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, ra
         .map_err(|_| refused(format!("the project's checkout, {}, is on no branch: ekko agents merge fast-forwards the branch it is on", top.display())))?;
     if into == branch {
         return Err(refused(format!("the project's checkout, {}, is on {branch} itself: put it back on the branch {branch} goes into", top.display())));
+    }
+    // Its blockers' work goes in first (task 1728).
+    for id in &done {
+        if let Some((blocker, theirs, made_for)) = agents::unmerged_blocker(&top, &into, &all[id], &all, &ids).map_err(refused)? {
+            return Err(refused(format!(
+                "task {id} waits on task {blocker}, whose work is on branch {theirs}, not in {into} yet: merge it first with ekko agents merge {}, \
+                 so {into} takes task {id}'s work after it. {into} and {branch} are as they were",
+                agents::joined(&made_for, " ")
+            )));
+        }
     }
     let worktree = worktree_of(root, &top, &branch).map_err(refused)?;
     let under = std::fs::canonicalize(root).ok().and_then(|real| real.strip_prefix(std::fs::canonicalize(&top).ok()?).ok().map(Path::to_path_buf));
