@@ -106,6 +106,12 @@ pub enum Agents {
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
     },
+    /// Put every session it opened side by side in one window, the wall.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Wall,
+    /// Put each session on the wall back in a window of its own.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Unwall,
 }
 
 #[derive(Parser, Debug, Default)]

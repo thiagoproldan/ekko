@@ -1640,16 +1640,19 @@ fn a_scratch_home_writes_nothing_on_a_board_it_found_outside_it() {
 /// recorded as every call is, with the commands after it, unless a file
 /// `refuse` says the multiplexer takes no such option (task 1675). The
 /// panes of the session `ekko`, listed with their options, are the file
-/// `born-panes` (task 1676).
+/// `born-panes` (task 1676). A file `wall` says the window @9 is the wall,
+/// and pane %7 on it; a window made for the wall is @9, its pane %9; the
+/// commands that build the wall and take it down succeed (task 1677).
 const MUX: &str = r#"#!/bin/sh
 state="$(dirname "$0")/mux-state"
 mkdir -p "$state"
 for arg in "$@"; do printf '%s\037' "$arg"; done >> "$state/calls"
 printf '\n' >> "$state/calls"
 case "$1" in -L|-S) shift 2 ;; esac
+all="$*"
 case "$1" in
   has-session) [ -e "$state/session" ] ;;
-  list-windows) cat "$state/windows" ;;
+  list-windows) case "$all" in *ekko_wall*) [ -e "$state/wall" ] && echo '@9 1'; true ;; *) cat "$state/windows" ;; esac ;;
   new-session|new-window)
     touch "$state/session"
     while [ $# -gt 0 ]; do
@@ -1657,12 +1660,13 @@ case "$1" in
       shift
     done
     env > "$state/env"
-    echo %7 ;;
-  list-panes) if [ "$2" = -s ]; then cat "$state/born-panes" 2>/dev/null; else [ -e "$state/dead" ] || echo '%7 0'; fi ;;
+    case "$all" in *'#{window_id} #{pane_id}'*) echo '@9 %9' ;; *) echo %7 ;; esac ;;
+  list-panes) if [ "$2" = -s ]; then cat "$state/born-panes" 2>/dev/null; true; else [ -e "$state/dead" ] || echo '%7 0'; fi ;;
   kill-pane) touch "$state/dead" ;;
-  display-message) cat "$state/name" ;;
+  display-message) case "$all" in *ekko_wall*) [ -e "$state/wall" ] && echo 1; true ;; *) cat "$state/name" ;; esac ;;
   rename-window) eval "name=\${$#}"; printf '%s\n' "$name" > "$state/name" ;;
   set-option) if [ -e "$state/refuse" ]; then echo 'unknown flag -p' >&2; exit 1; fi ;;
+  join-pane|select-layout|break-pane|select-window) ;;
   *) exit 1 ;;
 esac
 "#;
@@ -2297,7 +2301,15 @@ fn a_born_session_waiting_on_the_user_says_so_on_its_task_and_window_until_it_mo
     let named = |calls: Vec<Vec<String>>| -> Vec<Vec<String>> {
         calls.into_iter().filter(|call| call[..2] == ["-S", socket.to_str().unwrap()] && call[2] != "set-option").map(|call| call[2..].to_vec()).collect()
     };
-    assert_eq!(named(agents.calls()), [vec!["display-message", "-p", "-t", "%7", "#{window_name}"], vec!["rename-window", "-t", "%7", "1 \u{b7} haiku \u{b7} waiting on you"]]);
+    // Whether the pane is on the wall first (task 1677).
+    assert_eq!(
+        named(agents.calls()),
+        [
+            vec!["display-message", "-p", "-t", "%7", "#{@ekko_wall}"],
+            vec!["display-message", "-p", "-t", "%7", "#{window_name}"],
+            vec!["rename-window", "-t", "%7", "1 \u{b7} haiku \u{b7} waiting on you"]
+        ]
+    );
 
     assert_eq!(session.ran(), "", "a PostToolUse hook prints nothing");
     let context = agents.context("1");
@@ -2494,6 +2506,127 @@ fn a_born_session_with_background_work_in_flight_waits_on_no_one_at_idle_prompt(
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// The wall (task 1677): `ekko agents wall` makes a window for it, joins
+/// every born session that runs into it, tiled, takes away the window's own
+/// pane, and titles each pane's border from its options; a dead pane and a
+/// pane start did not open stay where they are, and a session already on
+/// it is not moved again. Each joins after the last on the wall, so that
+/// the wall keeps the order of their windows. `ekko agents unwall` breaks
+/// each back out into a window named as start named it, which sheds every
+/// option the wall set: start's status line, the rest unset. start refuses
+/// a task whose session is on the wall, though it has no window of its own.
+#[test]
+fn the_wall_takes_every_running_born_session_and_unwall_gives_each_its_window_back() {
+    let agents = Agents::new();
+    for task in ["Write hello", "Write the docs", "Write the tests"] {
+        assert!(agents.ekko(&["--task", task]).status.success());
+    }
+    let mux = agents.home.join("mux-state");
+    fs::create_dir_all(&mux).unwrap();
+    fs::write(mux.join("session"), "").unwrap();
+    let panes = |one: &str, two: &str| {
+        let lines = [
+            format!("%1\t0\t{one}\t1 \u{b7} haiku\t1\tWrite hello\thaiku\tlow\tworking\t1\t"),
+            format!("%2\t0\t{two}\t2 \u{b7} sonnet\t2\tWrite the docs\tsonnet\t\twaiting\t1\tClaude needs your permission"),
+            "%3\t1\t@3\t3 \u{b7} haiku\t3\tWrite the tests\thaiku\t\tidle\t1\t".to_string(),
+            "%4\t0\t@4\tzsh\t\t\t\t\t\t\t".to_string(),
+        ];
+        fs::write(mux.join("born-panes"), lines.join("\n") + "\n").unwrap();
+    };
+    let calls = |from: usize| -> Vec<Vec<String>> { agents.calls().into_iter().skip(from).collect() };
+    panes("@1", "@2");
+    let output = agents.ekko(&["agents", "wall"]);
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && said.trim() == "On the wall, window @9 of session ekko: 1 (%1), 2 (%2)", "{said}{}", String::from_utf8_lossy(&output.stderr));
+    let commands: Vec<Vec<String>> = calls(0).into_iter().flat_map(|call| call.split(|arg| arg == ";").map(<[String]>::to_vec).collect::<Vec<_>>()).collect();
+    let at = |command: &[&str]| commands.iter().position(|seen| seen == command).unwrap_or_else(|| panic!("{command:?} not in {commands:?}"));
+    let made = at(&["new-window", "-d", "-t", "=ekko:", "-n", "wall", "-P", "-F", "#{window_id} #{pane_id}"]);
+    let one = at(&["join-pane", "-d", "-s", "%1", "-t", "%9"]);
+    let two = at(&["join-pane", "-d", "-s", "%2", "-t", "%1"]);
+    let placeholder = at(&["kill-pane", "-t", "%9"]);
+    let marked = at(&["set-option", "-w", "-t", "@9", "@ekko_wall", "1"]);
+    assert!(made < one && one < two && two < placeholder && placeholder < marked, "{commands:?}");
+    assert_eq!(commands.iter().filter(|command| command[0] == "join-pane").count(), 2, "{commands:?}");
+    assert_eq!(commands.iter().filter(|command| command[..] == ["select-layout", "-t", "@9", "tiled"]).count(), 3, "{commands:?}");
+    at(&["set-option", "-w", "-t", "@9", "pane-border-status", "top"]);
+    let border = commands.iter().find(|command| command.starts_with(&["set-option".to_string(), "-w".into(), "-t".into(), "@9".into(), "pane-border-format".into()])).unwrap();
+    for part in ["#{@ekko_tasks} \u{b7} #{@ekko_model} \u{b7} #{@ekko_title}", "\u{25cf} waiting on you", "\u{2699} working", "\u{25cb} idle"] {
+        assert!(border[5].contains(part), "{part} in {border:?}");
+    }
+    // In the status line, a symbol for each pane on the wall.
+    for option in ["window-status-format", "window-status-current-format"] {
+        let status = commands.iter().find(|command| command.starts_with(&["set-option".to_string(), "-w".into(), "-t".into(), "@9".into(), option.into()])).unwrap();
+        assert!(status[5].starts_with("#I:#W #{P:") && ["\u{25cf}", "\u{2699}", "\u{25cb}"].iter().all(|symbol| status[5].contains(symbol)), "{status:?}");
+    }
+    assert!(marked < at(&["select-window", "-t", "@9"]), "{commands:?}");
+    let walled: Vec<String> = commands.iter().filter(|command| command.len() == 6 && command[..4] == ["set-option", "-w", "-t", "@9"]).map(|command| command[4].clone()).collect();
+
+    // On the wall already: nothing moves.
+    fs::write(mux.join("wall"), "").unwrap();
+    panes("@9", "@9");
+    let before = agents.calls().len();
+    let said = String::from_utf8(agents.ekko(&["agents", "wall"]).stdout).unwrap();
+    assert_eq!(said.trim(), "Every session is on the wall already, in window @9 of session ekko");
+    assert!(calls(before).iter().all(|call| call[0] != "join-pane" && call[0] != "new-window"), "{:?}", calls(before));
+
+    // One started since joins the wall there is, after its last pane.
+    let born = fs::read_to_string(mux.join("born-panes")).unwrap();
+    fs::write(mux.join("born-panes"), format!("{born}%5\t0\t@5\t3 \u{b7} haiku\t3\tWrite the tests\thaiku\t\tworking\t1\t\n")).unwrap();
+    let before = agents.calls().len();
+    let said = String::from_utf8(agents.ekko(&["agents", "wall"]).stdout).unwrap();
+    assert_eq!(said.trim(), "On the wall, window @9 of session ekko: 3 (%5)");
+    let joins: Vec<Vec<String>> = calls(before).into_iter().flat_map(|call| call.split(|arg| arg == ";").map(<[String]>::to_vec).collect::<Vec<_>>()).filter(|command| command[0] == "join-pane" || command[0] == "new-window").collect();
+    assert_eq!(joins, [["join-pane", "-d", "-s", "%5", "-t", "%2"].map(str::to_string).to_vec()]);
+    fs::write(mux.join("born-panes"), born).unwrap();
+
+    // start refuses a task whose session is on the wall.
+    let refused = agents.ekko(&["agents", "start", "2", "--model", "haiku"]);
+    let why = String::from_utf8_lossy(&refused.stderr).to_string() + &String::from_utf8_lossy(&refused.stdout);
+    assert!(!refused.status.success() && why.contains("task 2 has a session already, in pane %2 of window 2 \u{b7} sonnet in session ekko"), "{why}");
+
+    let before = agents.calls().len();
+    let said = String::from_utf8(agents.ekko(&["agents", "unwall"]).stdout).unwrap();
+    assert_eq!(said.trim(), "Back in windows of their own: 1 (%1), 2 (%2)");
+    let commands: Vec<Vec<String>> = calls(before).into_iter().flat_map(|call| call.split(|arg| arg == ";").map(<[String]>::to_vec).collect::<Vec<_>>()).collect();
+    let broken: Vec<&Vec<String>> = commands.iter().filter(|command| command[0] == "break-pane").collect();
+    assert_eq!(broken, [&["break-pane", "-d", "-s", "%1", "-n", "1 \u{b7} haiku"].map(str::to_string).to_vec(), &["break-pane", "-d", "-s", "%2", "-n", "2 \u{b7} sonnet"].map(str::to_string).to_vec()]);
+    // Every option the wall set, as the wall's window is the last pane's
+    // once it is alone there: start's status line, or unset.
+    assert!(walled.len() >= 5, "{walled:?}");
+    for pane in ["%1", "%2"] {
+        for option in &walled {
+            let shed = commands.iter().any(|command| match &command[..] {
+                [set, flag, t, target, name] => (set, flag, t, target, name) == (&"set-option".into(), &"-wu".into(), &"-t".into(), &pane.to_string(), option),
+                [set, flag, t, target, name, value] => (set, flag, t, target, name) == (&"set-option".into(), &"-w".into(), &"-t".into(), &pane.to_string(), option) && value.starts_with("#I:#{?#{==:#{@ekko_state},waiting},"),
+                _ => false,
+            });
+            assert!(shed, "{option} of {pane}'s window: {commands:?}");
+        }
+    }
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A session waiting on the user while it is on the wall (task 1677) is
+/// marked on the board, and drawn on its pane's border, but the wall,
+/// whose name is every session's on it, is not renamed.
+#[test]
+fn a_born_session_on_the_wall_waits_without_renaming_the_wall() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    agents.name_window("wall");
+    fs::write(agents.home.join("mux-state/wall"), "").unwrap();
+    let session = agents.session(&agents.uid(1));
+    session.ekko(&["--begin", "1"], "");
+    session.asks();
+    assert!(agents.logged("marked on task 1; its window not renamed: it is on the wall, whose name is not its own"), "{:?}", fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")));
+    assert!(agents.context("1").contains("waiting on you since"));
+    session.ran();
+    assert!(agents.logged("cleared on task 1; its window was not renamed"));
+    assert_eq!(agents.window(), "wall");
+    assert!(agents.calls().iter().all(|call| !call.contains(&"rename-window".to_string())));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// `ekko agents view --once` (task 1676): the sessions the multiplexer
 /// lists in the session ekko, by the state on their panes, titled from the
 /// board, and below them the tasks born sessions finished today, by
@@ -2517,10 +2650,10 @@ fn agents_view_shows_the_sessions_by_state_and_what_they_finished_today() {
     fs::write(mux.join("session"), "").unwrap();
     let since = now.timestamp();
     let panes = [
-        format!("%1\t0\t1 \u{b7} haiku\t1\tFix ##3 in the parser\thaiku\tlow\twaiting\t{since}\tClaude needs your permission -- Bash: echo ##3 > stamp.txt"),
-        format!("%2\t0\t2 \u{b7} sonnet\t2\tWrite the docs\tsonnet\t\tworking\t{since}\t"),
-        format!("%3\t0\t3 \u{b7} haiku\t3\tReview the plan\thaiku\t\tidle\t{since}\t"),
-        "%9\t0\tzsh\t\t\t\t\t\t\t".to_string(),
+        format!("%1\t0\t@1\t1 \u{b7} haiku\t1\tFix ##3 in the parser\thaiku\tlow\twaiting\t{since}\tClaude needs your permission -- Bash: echo ##3 > stamp.txt"),
+        format!("%2\t0\t@2\t2 \u{b7} sonnet\t2\tWrite the docs\tsonnet\t\tworking\t{since}\t"),
+        format!("%3\t0\t@3\t3 \u{b7} haiku\t3\tReview the plan\thaiku\t\tidle\t{since}\t"),
+        "%9\t0\t@9\tzsh\t\t\t\t\t\t\t".to_string(),
     ];
     fs::write(mux.join("born-panes"), panes.join("\n") + "\n").unwrap();
     let output = agents.ekko(&["agents", "view", "--once"]);

@@ -51,6 +51,8 @@ const HELP: &str = r#"
     $ ekko serve [--idle <seconds>] [--stop]
     $ ekko agents start <task>... --model <model> [--effort <level>] [--project <name>]
     $ ekko agents view [--once] [--project <name>]
+    $ ekko agents wall
+    $ ekko agents unwall
 
     Options
         none              Display board view
@@ -585,6 +587,24 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
             return match shown {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => finish_with_error(&err, json_first, &home_dir),
+            };
+        }
+        // The wall, and back (task 1677).
+        command @ (cli::Agents::Wall | cli::Agents::Unwall) => {
+            let walling = matches!(command, cli::Agents::Wall);
+            let moved = if walling { agents::wall() } else { agents::unwall() };
+            return match moved {
+                Ok(moved) => {
+                    let sessions: Vec<String> = moved.panes.iter().map(|(pane, tasks)| format!("{} ({pane})", tasks.iter().map(u32::to_string).collect::<Vec<_>>().join(","))).collect();
+                    match (walling, sessions.is_empty()) {
+                        (true, true) => println!("Every session is on the wall already, in window {} of session {}", moved.wall.unwrap_or_default(), agents::SESSION),
+                        (true, false) => println!("On the wall, window {} of session {}: {}", moved.wall.unwrap_or_default(), agents::SESSION, sessions.join(", ")),
+                        (false, true) => println!("No session ekko agents started is on the wall"),
+                        (false, false) => println!("Back in windows of their own: {}", sessions.join(", ")),
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(why) => finish_with_error(&EkkoError::InvalidInput(why), json_first, &home_dir),
             };
         }
     };

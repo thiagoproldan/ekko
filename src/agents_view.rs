@@ -368,6 +368,7 @@ mod tests {
         BornPane {
             pane: id.to_string(),
             dead: false,
+            window_id: format!("@{}", tasks[0]),
             window: format!("{} \u{b7} haiku", tasks[0]),
             tasks: tasks.to_vec(),
             title: "from the pane".to_string(),

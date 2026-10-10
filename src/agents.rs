@@ -137,6 +137,13 @@ pub fn start(
             return Err(refused(format!("task {id} has a window already, {name} in session {SESSION}: step into it there")));
         }
     }
+    // A session on the wall has no window of its own (task 1677): its pane
+    // says what it is for.
+    for pane in mux.born_panes().map_err(refused)?.into_iter().filter(|pane| !pane.dead) {
+        if let Some(id) = ids.iter().find(|id| pane.tasks.contains(id)) {
+            return Err(refused(format!("task {id} has a session already, in pane {} of window {} in session {SESSION}: step into it there", pane.pane, pane.window)));
+        }
+    }
     let branch = format!("task-{}", joined(&ids, "-"));
     let worktree = worktree(root, &branch).map_err(refused)?;
     let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -400,7 +407,7 @@ impl Mux {
         if !self.has_session()? {
             return Ok(Vec::new());
         }
-        let fields = ["#{pane_id}", "#{pane_dead}", "#{window_name}"]
+        let fields = ["#{pane_id}", "#{pane_dead}", "#{window_id}", "#{window_name}"]
             .into_iter()
             .map(str::to_string)
             .chain([TASKS_OPTION, TITLE_OPTION, MODEL_OPTION, EFFORT_OPTION, STATE_OPTION, SINCE_OPTION, WAITS_OPTION].map(|option| format!("#{{{option}}}")))
@@ -448,13 +455,31 @@ impl Mux {
         }
         let output = self.run(&args)?;
         if !output.status.success() {
-            return Err(self.failed("set-option", &output));
+            return Err(self.failed(args.first().copied().unwrap_or_default(), &output));
         }
         Ok(())
     }
 
     fn has_session(&self) -> Result<bool, String> {
         Ok(self.run(&["has-session", "-t", &format!("={SESSION}")])?.status.success())
+    }
+
+    /// The window of the session `ekko` that WALL_OPTION marks, if one does
+    /// (task 1677).
+    fn wall_window(&self) -> Result<Option<String>, String> {
+        if !self.has_session()? {
+            return Ok(None);
+        }
+        let output = self.run(&["list-windows", "-t", &format!("={SESSION}"), "-F", &format!("#{{window_id}} #{{{WALL_OPTION}}}")])?;
+        if !output.status.success() {
+            return Err(self.failed("list-windows", &output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).lines().find_map(|line| line.strip_suffix(" 1").map(str::to_string)))
+    }
+
+    /// Whether `pane` is on the wall, in a window whose name is not its own.
+    fn on_wall(&self, pane: &str) -> bool {
+        self.run(&["display-message", "-p", "-t", pane, &format!("#{{{WALL_OPTION}}}")]).is_ok_and(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1")
     }
 
     /// The names of the windows in the session `ekko`; none without it.
@@ -546,6 +571,7 @@ impl Mux {
 pub(crate) struct BornPane {
     pub pane: String,
     pub dead: bool,
+    pub window_id: String,
     pub window: String,
     pub tasks: Vec<u32>,
     pub title: String,
@@ -562,7 +588,7 @@ impl BornPane {
     /// value holds (`shown`); none for a pane `start` did not open.
     fn parse(line: &str) -> Option<BornPane> {
         let fields: Vec<&str> = line.split('\t').collect();
-        let [pane, dead, window, tasks, title, model, effort, state, since, waits] = fields.as_slice() else { return None };
+        let [pane, dead, window_id, window, tasks, title, model, effort, state, since, waits] = fields.as_slice() else { return None };
         let tasks: Vec<u32> = tasks.split(',').map(|id| id.trim().parse::<u32>()).collect::<Result<_, _>>().unwrap_or_default();
         if tasks.is_empty() {
             return None;
@@ -571,6 +597,7 @@ impl BornPane {
         Some(BornPane {
             pane: pane.to_string(),
             dead: *dead == "1",
+            window_id: window_id.to_string(),
             window: window.to_string(),
             tasks,
             title: given(title).unwrap_or_default(),
@@ -581,6 +608,127 @@ impl BornPane {
             waits: given(waits),
         })
     }
+}
+
+/// The window option that marks the session's wall (task 1677).
+pub const WALL_OPTION: &str = "@ekko_wall";
+
+/// The wall's name, as its window is named in the status line.
+pub const WALL: &str = "wall";
+
+/// How each pane on the wall is titled on its top border: its state as
+/// the status line draws it (STATUS_FORMAT), then its tasks, model and
+/// title, from the options `start` set on it.
+pub const WALL_BORDER: &str = concat!(
+    " #{?#{==:#{@ekko_state},waiting},#[fg=black#,bg=yellow#,bold]\u{25cf} waiting on you#[default],",
+    "#{?#{==:#{@ekko_state},working},\u{2699} working,",
+    "#{?#{==:#{@ekko_state},idle},#[dim]\u{25cb} idle#[default],}}}",
+    " #{@ekko_tasks} \u{b7} #{@ekko_model} \u{b7} #{@ekko_title} "
+);
+
+/// How the wall is drawn in the status line: its name, then each pane's
+/// state, one symbol a pane as STATUS_FORMAT draws it, so that a session
+/// that waits on the user shows when another pane is the active one.
+pub const WALL_STATUS: &str = concat!(
+    "#I:#W ",
+    "#{P:#{?#{==:#{@ekko_state},waiting},#[fg=black#,bg=yellow#,bold]\u{25cf}#[default],",
+    "#{?#{==:#{@ekko_state},working},\u{2699},",
+    "#{?#{==:#{@ekko_state},idle},#[dim]\u{25cb}#[default],}}}}",
+    "#{?window_flags,#{window_flags}, }"
+);
+
+/// The options `wall` sets on the wall's window, each with its value there
+/// and its value on a window of a session's own as `start` leaves it, none
+/// for an option it leaves unset.
+const WALL_OPTIONS: [(&str, &str, Option<&str>); 5] = [
+    (WALL_OPTION, "1", None),
+    ("pane-border-status", "top", None),
+    ("pane-border-format", WALL_BORDER, None),
+    ("window-status-format", WALL_STATUS, Some(STATUS_FORMAT)),
+    ("window-status-current-format", WALL_STATUS, Some(STATUS_FORMAT)),
+];
+
+/// What `wall` and `unwall` moved: each session's pane and the tasks it is
+/// for.
+pub struct Moved {
+    pub panes: Vec<(String, Vec<u32>)>,
+    pub wall: Option<String>,
+}
+
+/// `ekko agents wall` (task 1677): every born session that runs, side by
+/// side in one window of the session ekko, tiled, each pane titled on its
+/// border; the wall window is the one WALL_OPTION marks, made now if there
+/// is none. Each session goes on running in its pane, and typing there
+/// still talks to it.
+pub fn wall() -> Result<Moved, String> {
+    let mux = Mux::here();
+    let panes: Vec<BornPane> = mux.born_panes()?.into_iter().filter(|pane| !pane.dead).collect();
+    if panes.is_empty() {
+        return Err(format!("no session ekko agents started runs in the session {SESSION}"));
+    }
+    let (wall, placeholder) = match mux.wall_window()? {
+        Some(wall) => (wall, None),
+        None => {
+            let output = mux.run(&["new-window", "-d", "-t", &format!("={SESSION}:"), "-n", WALL, "-P", "-F", "#{window_id} #{pane_id}"])?;
+            let made = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let Some((window, pane)) = made.split_once(' ').filter(|_| output.status.success()) else {
+                return Err(mux.failed("new-window", &output));
+            };
+            (window.to_string(), Some(pane.to_string()))
+        }
+    };
+    // Each joins after the last pane on the wall, where join-pane puts it
+    // in the window's list of panes, which the tiled layout follows: the
+    // wall keeps the sessions in the order of their windows.
+    let mut last = placeholder.clone().or_else(|| panes.iter().rfind(|pane| pane.window_id == wall).map(|pane| pane.pane.clone())).unwrap_or_else(|| wall.clone());
+    let mut moved = Vec::new();
+    for pane in panes.iter().filter(|pane| pane.window_id != wall) {
+        // Tiled after each, so that the next has room to split.
+        mux.batch(&[
+            ["join-pane", "-d", "-s", &pane.pane, "-t", &last].map(str::to_string).to_vec(),
+            ["select-layout", "-t", &wall, "tiled"].map(str::to_string).to_vec(),
+        ])?;
+        last = pane.pane.clone();
+        moved.push((pane.pane.clone(), pane.tasks.clone()));
+    }
+    let mut dressed: Vec<Vec<String>> = Vec::new();
+    if let Some(placeholder) = placeholder {
+        dressed.push(["kill-pane", "-t", &placeholder].map(str::to_string).to_vec());
+        dressed.push(["select-layout", "-t", &wall, "tiled"].map(str::to_string).to_vec());
+    }
+    for (option, value, _) in WALL_OPTIONS {
+        dressed.push(["set-option", "-w", "-t", &wall, option, value].map(str::to_string).to_vec());
+    }
+    // The wall is what one attached to the session ekko sees next.
+    dressed.push(["select-window", "-t", &wall].map(str::to_string).to_vec());
+    mux.batch(&dressed)?;
+    Ok(Moved { panes: moved, wall: Some(wall) })
+}
+
+/// `ekko agents unwall`: each born session on the wall back in a window of
+/// its own, named as `start` named it, its status line drawn as `start`
+/// draws it. A pane on the wall that no session `start` opened stays there.
+pub fn unwall() -> Result<Moved, String> {
+    let mux = Mux::here();
+    let Some(wall) = mux.wall_window()? else {
+        return Err(format!("there is no wall in the session {SESSION}"));
+    };
+    let mut moved = Vec::new();
+    for pane in mux.born_panes()?.into_iter().filter(|pane| pane.window_id == wall) {
+        let name = format!("{} \u{b7} {}", joined(&pane.tasks, ","), pane.model);
+        let mut commands = vec![["break-pane", "-d", "-s", &pane.pane, "-n", &name].map(str::to_string).to_vec()];
+        // break-pane gives the last pane on the wall the wall's own window,
+        // renamed: each window given back sheds what the wall set on it.
+        for (option, _, own) in WALL_OPTIONS {
+            commands.push(match own {
+                Some(value) => ["set-option", "-w", "-t", &pane.pane, option, value].map(str::to_string).to_vec(),
+                None => ["set-option", "-wu", "-t", &pane.pane, option].map(str::to_string).to_vec(),
+            });
+        }
+        mux.batch(&commands)?;
+        moved.push((pane.pane, pane.tasks));
+    }
+    Ok(Moved { panes: moved, wall: None })
 }
 
 /// What born sessions did today, by `born.log`: each line written since
@@ -1044,6 +1192,11 @@ fn wait_on_user(home: &Path, cwd: &Path, tasks: &str, session: &str, kind: &str,
     };
     let pane = Mux::of_this_pane().zip(set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned()));
     let renamed = pane.ok_or_else(|| "in no multiplexer's pane".to_string()).and_then(|(mux, pane)| {
+        // The wall's name is every session's on it (task 1677): its border
+        // says this one waits.
+        if mux.on_wall(&pane) {
+            return Err("it is on the wall, whose name is not its own".to_string());
+        }
         let name = mux.window_name(&pane)?;
         if name.ends_with(WAITING_ON_YOU) {
             return Ok(name);
