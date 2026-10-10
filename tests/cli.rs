@@ -2423,6 +2423,37 @@ fn a_multiplexer_that_refuses_the_options_still_runs_the_session() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// A turn over with background work in flight is no wait on the user (task
+/// 1686): the work's end wakes the session itself, so idle_prompt marks
+/// nothing, though a permission prompt still does; once a turn ends with
+/// none, idle_prompt marks it.
+#[test]
+fn a_born_session_with_background_work_in_flight_waits_on_no_one_at_idle_prompt() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    agents.name_window("1 \u{b7} haiku");
+    let session = agents.session(&agents.uid(1));
+    session.ekko(&["--begin", "1"], "");
+    let stop = |background: serde_json::Value| session.hook("Stop", serde_json::json!({"background_tasks": background, "session_crons": []}));
+    let idle = || session.hook("Notification", serde_json::json!({"notification_type": "idle_prompt", "message": "Claude is waiting for your input"}));
+    stop(serde_json::json!([{"id": "b-1", "type": "shell", "status": "running"}]));
+    idle();
+    assert!(agents.logged("does not wait on you (idle_prompt): background work was in flight at its turn's end"));
+    assert!(!agents.context("1").contains("waiting on you") && agents.window() == "1 \u{b7} haiku");
+    session.asks();
+    assert!(agents.logged("waits on you (permission_prompt)") && agents.context("1").contains("waiting on you since"));
+    session.ran();
+    assert!(!agents.context("1").contains("waiting on you"));
+    // The pane's state left as it is, the turn's end still keeps whether
+    // background work was in flight.
+    fs::write(agents.home.join("mux-state/refuse"), "").unwrap();
+    stop(serde_json::json!([]));
+    idle();
+    assert!(agents.logged("waits on you (idle_prompt): Claude is waiting for your input; marked on task 1"));
+    assert!(agents.context("1").contains("waiting on you since"));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// A permission prompt answered clears the mark then, not when the tool it
 /// let run ends (task 1679): no hook fires as the user answers, so the hook
 /// starts a watcher of Claude Code's own record of the session,

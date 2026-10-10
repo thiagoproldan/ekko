@@ -727,6 +727,11 @@ struct Born {
     /// multiplexer is called only as it changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     state: Option<String>,
+    /// Whether the last turn's end found background work in flight (task
+    /// 1686): a turn over a minute ago is then no wait on the user, since
+    /// the work's end wakes the session itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    background: bool,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -806,6 +811,10 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
         }
         "Notification" => {
             let kind = input["notification_type"].as_str().unwrap_or_default();
+            if kind == "idle_prompt" && born.background && born.waiting.is_none() {
+                log(home, session, &tasks, "does not wait on you (idle_prompt): background work was in flight at its turn's end");
+                return std::process::ExitCode::SUCCESS;
+            }
             if WAITS_ON_USER.contains(&kind) && born.waiting.is_none() {
                 let mut what = input["message"].as_str().map(str::trim).filter(|what| !what.is_empty()).unwrap_or(kind).to_string();
                 if let Some(asked) = born.asked.as_ref().filter(|_| kind == "permission_prompt") {
@@ -852,16 +861,18 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
         }
         "Stop" => {
             let busy = |key: &str| input[key].as_array().is_some_and(|work| !work.is_empty());
+            let background = busy("background_tasks") || busy("session_crons");
             let stays = match finished(home, cwd, &tasks) {
                 Err(why) => Some(why),
                 Ok(()) if born.talked => Some("a prompt reached it after its tasks were finished".to_string()),
-                Ok(()) if busy("background_tasks") || busy("session_crons") => Some("background work is in flight".to_string()),
+                Ok(()) if background => Some("background work is in flight".to_string()),
                 Ok(()) => None,
             };
             if let Some(why) = stays {
                 log(home, session, &tasks, &format!("stays: {why}"));
-                let state = if busy("background_tasks") || busy("session_crons") { WORKING } else { IDLE };
-                if show_state(home, session, &tasks, &mut born, state, None) {
+                let shown = show_state(home, session, &tasks, &mut born, if background { WORKING } else { IDLE }, None);
+                if shown || born.background != background {
+                    born.background = background;
                     write_born(home, session, &born);
                 }
                 return std::process::ExitCode::SUCCESS;
