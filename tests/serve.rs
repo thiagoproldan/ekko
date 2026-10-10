@@ -5,6 +5,8 @@
 //! server, its serve.json and its board are its own, and the server ends with
 //! the home once its serve.json is gone.
 
+mod common;
+
 use std::fs;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -20,7 +22,7 @@ use serde_json::{json, Value};
 /// which keeps it until its own exec, and running the file in that window
 /// fails with ETXTBSY, "Text file busy" (task 1579).
 fn write_executable(to: &Path, content: &str) {
-    let mut child = Command::new("sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(to).stdin(Stdio::piped()).spawn().unwrap();
+    let mut child = common::command("sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(to).stdin(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(content.as_bytes()).unwrap();
     assert!(child.wait().unwrap().success(), "{} was not written", to.display());
 }
@@ -28,7 +30,7 @@ fn write_executable(to: &Path, content: &str) {
 /// Copies the executable `from` to `to` through a child process, for the
 /// reason `write_executable` gives.
 fn copy_executable(from: &str, to: &Path) {
-    assert!(Command::new("cp").arg(from).arg(to).status().unwrap().success(), "{} was not copied", to.display());
+    assert!(common::command("cp").arg(from).arg(to).status().unwrap().success(), "{} was not copied", to.display());
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -46,8 +48,8 @@ fn temp_home() -> PathBuf {
 /// ekko, run in `home` as its user's whole world: its board the default one,
 /// its state under it.
 fn ekko(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
-    command.env("HOME", home).env_remove("EKKO_DIR").env_remove("EKKO_PROJECT").env_remove("EKKO_AGENT_TASK").env_remove("XDG_STATE_HOME").current_dir(home);
+    let mut command = common::ekko();
+    command.env("HOME", home).current_dir(home);
     command
 }
 
@@ -338,7 +340,7 @@ fn a_board_the_server_cannot_name_keeps_its_file_page() {
     artifact(&home);
     let copy = home.join("copy");
     fs::create_dir_all(&copy).unwrap();
-    let copied = Command::new("cp").arg("-r").arg(home.join(".ekko")).arg(&copy).status().unwrap();
+    let copied = common::command("cp").arg("-r").arg(home.join(".ekko")).arg(&copy).status().unwrap();
     assert!(copied.success());
     let out = ekko(&home).args(["artifact", "1", "--no-open"]).env("EKKO_DIR", copy.join(".ekko")).output().unwrap();
     assert!(out.status.success());
@@ -367,18 +369,18 @@ fn from_bash(home: &Path, port: u16, request: &str, as_claude: bool) -> String {
     let out = home.join(if as_claude { "answer-claude" } else { "answer-person" });
     let script = format!("exec 3<>/dev/tcp/127.0.0.1/{port}; printf '%s' \"$REQUEST\" >&3; cat <&3 > \"$OUT.part\"; mv \"$OUT.part\" \"$OUT\"");
     let mut command = if as_claude {
-        let bash = String::from_utf8(Command::new("sh").args(["-c", "command -v bash"]).output().unwrap().stdout).unwrap();
+        let bash = String::from_utf8(common::command("sh").args(["-c", "command -v bash"]).output().unwrap().stdout).unwrap();
         let claude = home.join("claude");
         // Copied once: the copy keeps the store's read-only mode, which
         // refuses a second copy over it.
         if !claude.exists() {
             copy_executable(bash.trim(), &claude);
         }
-        let mut command = Command::new(claude);
+        let mut command = common::command(claude);
         command.arg("-c").arg(script);
         command
     } else {
-        let mut command = Command::new("bash");
+        let mut command = common::command("bash");
         command.arg("-c").arg(format!("(sleep 0.5; {script}) > /dev/null 2>&1 &"));
         command
     };
@@ -697,7 +699,6 @@ impl Session {
         let mut child = ekko(home)
             .arg("--mcp")
             .env("EKKO_TERMINAL", &script)
-            .env_remove("CLAUDECODE")
             .env("XDG_RUNTIME_DIR", home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

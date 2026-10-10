@@ -3,6 +3,8 @@
 //! tests, which drive the library side and never touch a file descriptor
 //! they did not create.
 
+mod common;
+
 use std::fs;
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -31,7 +33,7 @@ fn temp_ekko_dir() -> PathBuf {
 /// fails with ETXTBSY, "Text file busy" (task 1579).
 fn write_executable(to: &std::path::Path, content: &str) {
     use std::io::Write as _;
-    let mut child = Command::new("sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(to).stdin(Stdio::piped()).spawn().unwrap();
+    let mut child = common::command("sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(to).stdin(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(content.as_bytes()).unwrap();
     assert!(child.wait().unwrap().success(), "{} was not written", to.display());
 }
@@ -39,7 +41,7 @@ fn write_executable(to: &std::path::Path, content: &str) {
 /// Copies the executable `from` to `to` through a child process, for the
 /// reason `write_executable` gives.
 fn copy_executable(from: &str, to: &std::path::Path) {
-    assert!(Command::new("cp").arg(from).arg(to).status().unwrap().success(), "{} was not copied", to.display());
+    assert!(common::command("cp").arg(from).arg(to).status().unwrap().success(), "{} was not copied", to.display());
 }
 
 /// Every executable the integration tests run is put in place by a child
@@ -54,11 +56,123 @@ fn no_test_here_writes_an_executable_it_runs() {
     }
 }
 
+/// Every process an integration test starts, it starts through
+/// tests/common/mod.rs (task 1666), which keeps from it what the
+/// environment running the tests holds for ekko.
+#[test]
+fn every_test_starts_its_processes_through_common() {
+    let started = concat!("Command", "::new(");
+    let mut files = 0;
+    for entry in fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "rs") {
+            files += 1;
+            let source = fs::read_to_string(&path).unwrap();
+            assert!(!source.contains(started), "{} starts a process with {started}: use common::command or common::ekko (task 1666)", path.display());
+        }
+    }
+    assert!(files >= 4, "read {files} test files");
+}
+
+/// Every variable ekko's sources read by name is one tests/common/mod.rs
+/// keeps from the tests, sets for them, or lets through on purpose, and
+/// each it lists is one ekko reads (task 1666): a variable read anew fails
+/// here until it is placed. A read through a name only known when it runs
+/// is listed here, as the file and the call.
+#[test]
+fn every_variable_ekko_reads_is_one_the_tests_keep_set_or_let_through() {
+    let mut read = std::collections::BTreeSet::new();
+    let mut unnamed = Vec::new();
+    for entry in fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        let source = fs::read_to_string(&path).unwrap();
+        // `const TASKS_VAR: &str = "EKKO_AGENT_TASK";`, and the like.
+        let named = |constant: &str| {
+            source.split(&format!("const {constant}: &str = \"")).nth(1).and_then(|rest| rest.split('"').next()).map(str::to_string)
+        };
+        let variable = |word: &str| word.starts_with(|c: char| c.is_ascii_uppercase()) && word.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        for call in ["env::var(", "env::var_os(", "env::vars_os(", "env::home_dir(", " set("] {
+            for after in source.split(call).skip(1) {
+                let argument = after.split(')').next().unwrap();
+                match argument.strip_prefix('"').and_then(|name| name.strip_suffix('"')) {
+                    Some(name) if variable(name) => {
+                        read.insert(name.to_string());
+                    }
+                    _ if call == "env::home_dir(" => {
+                        read.insert("HOME".to_string());
+                    }
+                    _ if call == " set(" => {}
+                    _ => match named(argument) {
+                        Some(name) => {
+                            read.insert(name);
+                        }
+                        None => unnamed.push(format!("{file}: {call}{argument})")),
+                    },
+                }
+            }
+        }
+    }
+    unnamed.sort();
+    let known = [
+        // `set`, whose names are read above.
+        "agents.rs: env::var_os(name)",
+        // The environment a born session starts with, passed on whole.
+        "agents.rs: env::vars_os()",
+        "agents.rs: env::vars_os()",
+        // EKKO_DIR and EKKO_PROJECT, passed on to the menu.
+        "menu.rs: env::var(name)",
+        // A command's own $VARIABLES, which place it.
+        "shell.rs: env::var(name)",
+    ];
+    assert_eq!(unnamed, known, "ekko reads a variable through a name only known when it runs: place what it can be in tests/common/mod.rs, then list the call here");
+    let placed: std::collections::BTreeSet<String> =
+        common::SESSION_VARIABLES.iter().chain(common::INHERITED).chain(&["HOME"]).map(|name| name.to_string()).collect();
+    let unplaced: Vec<&String> = read.difference(&placed).collect();
+    assert!(unplaced.is_empty(), "ekko reads {unplaced:?}: place each in tests/common/mod.rs, kept from the tests or let through for a reason");
+    let unread: Vec<&String> = placed.difference(&read).collect();
+    assert!(unread.is_empty(), "tests/common/mod.rs places {unread:?}, which ekko does not read");
+}
+
+/// What ekko keeps of sessions goes under XDG_STATE_HOME when it is set,
+/// and under the home's .local/state otherwise: the unit tests, which keep
+/// theirs under their own homes whatever it says, cannot show it (task
+/// 1666).
+#[test]
+fn what_ekko_keeps_of_sessions_goes_under_xdg_state_home_or_else_the_home() {
+    use std::io::Write as _;
+    let home = temp_ekko_dir();
+    let state = home.join("state");
+    let start = |state_home: Option<&std::path::Path>| {
+        let mut command = common::ekko();
+        command.args(["--prime", "--hook"]).current_dir(&home).env("HOME", &home).stdin(Stdio::piped()).stdout(Stdio::null());
+        if let Some(state_home) = state_home {
+            command.env("XDG_STATE_HOME", state_home);
+        }
+        let mut child = command.spawn().unwrap();
+        let input = serde_json::json!({"session_id": "s-1", "source": "startup", "hook_event_name": "SessionStart", "cwd": home});
+        child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success());
+    };
+    let kept = |under: &std::path::Path| under.join("ekko/sessions/s-1.json").is_file();
+    start(None);
+    assert!(kept(&home.join(".local/state")), "not under the home's .local/state");
+    assert!(!kept(&state));
+    fs::remove_dir_all(home.join(".local")).unwrap();
+    start(Some(&state));
+    assert!(kept(&state), "not under XDG_STATE_HOME");
+    assert!(!kept(&home.join(".local/state")));
+    fs::remove_dir_all(&home).ok();
+}
+
 /// The readme shows the help `ekko --help` prints, word for word (task
 /// 1654): a flag added to one and not the other is a test that fails.
 #[test]
 fn the_readme_shows_the_help_ekko_prints() {
-    let output = Command::new(env!("CARGO_BIN_EXE_ekko")).arg("--help").output().unwrap();
+    let output = common::ekko().arg("--help").output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     let readme = include_str!("../readme.md");
@@ -93,7 +207,7 @@ fn a_reader_that_goes_away_does_not_produce_a_panic() {
     let dir = temp_ekko_dir();
     seed_large_board(&dir, 600);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+    let mut child = common::ekko()
         .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -126,7 +240,7 @@ fn output_that_is_read_to_the_end_still_succeeds() {
     let dir = temp_ekko_dir();
     seed_large_board(&dir, 20);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ekko"))
+    let output = common::ekko()
         .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
         .output()
         .expect("failed to run ekko");
@@ -147,7 +261,7 @@ fn an_old_flag_name_is_answered_with_the_new_one() {
     let dir = temp_ekko_dir();
 
     for (old, new) in [("--anchor", "--attached-to"), ("--path", "--roadmap")] {
-        let output = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let output = common::ekko()
             .args(["--ekko-dir", dir.to_str().unwrap(), "--json", old])
             .output()
             .expect("failed to run ekko");
@@ -170,7 +284,7 @@ fn an_old_flag_name_is_answered_with_the_new_one() {
 fn the_removed_ui_flag_says_it_was_removed() {
     let dir = temp_ekko_dir();
     let ekko = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(["--ekko-dir", dir.to_str().unwrap()])
             .args(args)
             .output()
@@ -206,13 +320,10 @@ fn init_makes_a_folder_a_project_that_ekko_finds_from_inside_it() {
         fs::create_dir_all(dir).unwrap();
     }
     let ekko = |cwd: &PathBuf, args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(args)
             .current_dir(cwd)
             .env("HOME", &home)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko")
     };
@@ -254,13 +365,10 @@ fn a_board_cleaned_out_of_its_folder_comes_back_with_init() {
     fs::create_dir_all(app.join(".git")).unwrap();
     fs::create_dir_all(&gone).unwrap();
     let ekko = |cwd: &PathBuf, args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(args)
             .current_dir(cwd)
             .env("HOME", &home)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko")
     };
@@ -303,7 +411,7 @@ fn a_board_cleaned_out_of_its_folder_comes_back_with_init() {
 fn a_blocked_task_needs_force_and_force_needs_a_task_to_complete() {
     let dir = temp_ekko_dir();
     let ekko = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
             .args(args)
             .output()
@@ -339,7 +447,7 @@ fn a_blocked_task_needs_force_and_force_needs_a_task_to_complete() {
 fn with_says_who_a_task_is_with_and_the_list_finds_it() {
     let dir = temp_ekko_dir();
     let ekko = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
             .args(args)
             .output()
@@ -378,7 +486,7 @@ fn with_says_who_a_task_is_with_and_the_list_finds_it() {
 fn a_typed_note_takes_its_kind_from_the_flags_beside_note() {
     let dir = temp_ekko_dir();
     let ekko = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
             .args(args)
             .output()
@@ -415,14 +523,11 @@ fn the_terminal_says_what_a_notes_rests_on_line_does_not_hold() {
     fs::create_dir_all(app.join("src")).unwrap();
     fs::write(app.join("src").join("lib.rs"), "pub fn kept() {}\n").unwrap();
     let ekko = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(args)
             .current_dir(&app)
             .env("HOME", &home)
             .env("EKKO_TERMINAL", "none")
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko")
     };
@@ -478,14 +583,11 @@ fn the_terminal_says_to_recheck_a_note_whose_ground_moved() {
     fs::create_dir_all(app.join("src")).unwrap();
     fs::write(app.join("src").join("lib.rs"), "pub fn kept() {}\n").unwrap();
     let ekko = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let out = common::ekko()
             .args(args)
             .current_dir(&app)
             .env("HOME", &home)
             .env("EKKO_TERMINAL", "none")
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko");
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -516,14 +618,11 @@ fn a_still_true_line_at_the_terminal_answers_a_date_and_says_it_knows_no_version
     let app = home.join("app");
     fs::create_dir_all(&app).unwrap();
     let ekko = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let out = common::ekko()
             .args(args)
             .current_dir(&app)
             .env("HOME", &home)
             .env("EKKO_TERMINAL", "none")
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko");
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -554,7 +653,7 @@ fn a_lone_dash_reads_the_description_from_stdin() {
     use std::io::Write as _;
     let dir = temp_ekko_dir();
     let ekko = |args: &[&str], stdin: &str| -> serde_json::Value {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let mut child = common::ekko()
             .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
             .args(args)
             .stdin(Stdio::piped())
@@ -594,7 +693,7 @@ fn a_lone_dash_reads_the_description_from_stdin() {
 fn the_terminal_cuts_a_long_title_and_says_where() {
     let dir = temp_ekko_dir();
     let ekko = |args: &[&str]| -> String {
-        let output = Command::new(env!("CARGO_BIN_EXE_ekko")).args(["--ekko-dir", dir.to_str().unwrap()]).args(args).output().expect("failed to run ekko");
+        let output = common::ekko().args(["--ekko-dir", dir.to_str().unwrap()]).args(args).output().expect("failed to run ekko");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
         String::from_utf8(output.stdout).unwrap()
     };
@@ -634,15 +733,11 @@ fn the_tasklist_hook_writes_the_sessions_list() {
     fs::create_dir_all(&app).unwrap();
     let config = dir.join("claude");
     let ekko = |args: &[&str], stdin: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let mut child = common::ekko()
             .args(args)
             .current_dir(&app)
             .env("HOME", &dir)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .env("CLAUDE_CONFIG_DIR", &config)
-            .env_remove("CLAUDE_CODE_TASK_LIST_ID")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -680,13 +775,10 @@ fn the_memory_hook_gives_a_starting_session_the_project_page() {
     let app = dir.join("app");
     fs::create_dir_all(&app).unwrap();
     let ekko = |args: &[&str], stdin: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let mut child = common::ekko()
             .args(args)
             .current_dir(&app)
             .env("HOME", &dir)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -728,14 +820,10 @@ fn the_guard_answers_a_pre_tool_use_event_and_stays_silent_otherwise() {
     use std::io::Write as _;
     let home = temp_ekko_dir();
     let ekko = |args: &[&str], stdin: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let mut child = common::ekko()
             .args(args)
             .current_dir(&home)
             .env("HOME", &home)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
-            .env_remove("CLAUDECODE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -786,14 +874,10 @@ fn move_to_takes_items_to_another_board_and_the_old_id_says_where() {
     let notes = home.join("work").join("notes");
     fs::create_dir_all(&notes).unwrap();
     let ekko = |cwd: &PathBuf, args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(args)
             .current_dir(cwd)
             .env("HOME", &home)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
-            .env_remove("CLAUDECODE")
             .output()
             .expect("failed to run ekko")
     };
@@ -864,7 +948,7 @@ fn docs_are_written_from_the_board_and_only_over_their_own_files() {
         fs::create_dir_all(dir).unwrap();
     }
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = common::command("git")
             .arg("-C")
             .arg(&app)
             .args(["-c", "user.name=ekko", "-c", "user.email=ekko@example.com", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
@@ -878,14 +962,11 @@ fn docs_are_written_from_the_board_and_only_over_their_own_files() {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     };
     let ekko = |cwd: &PathBuf, args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(args)
             .current_dir(cwd)
             .env("HOME", &home)
             .env("TZ", "UTC")
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko")
     };
@@ -1011,15 +1092,10 @@ fn repeats_lists_a_failure_that_recurs_and_the_prime_tells_it_once() {
     let app = dir.join("app");
     fs::create_dir_all(&app).unwrap();
     let ekko = |cwd: &PathBuf, args: &[&str], stdin: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let mut child = common::ekko()
             .args(args)
             .current_dir(cwd)
             .env("HOME", &dir)
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1095,7 +1171,7 @@ fn the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks() {
     copy_executable(env!("CARGO_BIN_EXE_ekko"), &bin.join("ekko"));
     let claude = dir.join("claude");
     write_executable(&claude, "#!/bin/sh\nekko --mcp\nexit $?\n");
-    let mut session = Command::new(&claude)
+    let mut session = common::command(&claude)
         .env("PATH", &bin)
         .env("HOME", &dir)
         .env("EKKO_DIR", dir.join(".ekko"))
@@ -1119,10 +1195,9 @@ fn the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks() {
     assert!(server.is_some(), "the stand-in's server did not start");
 
     let doctor = || {
-        let output = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let output = common::ekko()
             .args(["--doctor", "--json"])
             .env("HOME", &dir)
-            .env_remove("XDG_STATE_HOME")
             .output()
             .unwrap();
         let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -1188,16 +1263,10 @@ fn the_prime_names_the_sessions_on_its_board_that_need_a_restart() {
     fs::create_dir_all(&bin).unwrap();
     copy_executable(env!("CARGO_BIN_EXE_ekko"), &bin.join("ekko"));
     let ekko = |cwd: &PathBuf, args: &[&str], stdin: &str| -> String {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let mut child = common::ekko()
             .args(args)
             .current_dir(cwd)
             .env("HOME", &dir)
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("CLAUDECODE")
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1219,21 +1288,15 @@ fn the_prime_names_the_sessions_on_its_board_that_need_a_restart() {
     // Its server reads a FIFO the stand-in holds open until it ends; each
     // event file named on the stand-in's stdin runs as its SessionStart hook.
     let fifo = dir.join("mcp-in");
-    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    assert!(common::command("mkfifo").arg(&fifo).status().unwrap().success());
     let claude = dir.join("claude");
     let script = "#!/bin/sh\nekko --mcp < \"$1\" > /dev/null &\nexec 3> \"$1\"\nwhile read event; do\n  CLAUDECODE=1 ekko --prime --hook < \"$event\" > \"$event.out\"\n  : > \"$event.done\"\ndone\n";
     write_executable(&claude, script);
-    let mut session = Command::new(&claude)
+    let mut session = common::command(&claude)
         .arg(&fifo)
         .current_dir(&app)
         .env("PATH", &bin)
         .env("HOME", &dir)
-        .env_remove("XDG_STATE_HOME")
-        .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CONFIG_DIR")
-        .env_remove("EKKO_DIR")
-        .env_remove("EKKO_PROJECT")
-        .env_remove("EKKO_AGENT_TASK")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1314,15 +1377,10 @@ fn the_probe_writes_the_board_again_and_finds_the_session_that_did_not_hear_it()
     copy_executable(env!("CARGO_BIN_EXE_ekko"), &bin.join("ekko"));
     let (app, other) = (dir.join("app"), dir.join("other"));
     let ekko_in = |cwd: &PathBuf, args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(args)
             .current_dir(cwd)
             .env("HOME", &dir)
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("CLAUDECODE")
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .output()
             .unwrap()
     };
@@ -1347,19 +1405,13 @@ fn the_probe_writes_the_board_again_and_finds_the_session_that_did_not_hear_it()
         let claude = folder.join("claude");
         write_executable(&claude, script);
         let fifo = folder.join("mcp-in");
-        assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        assert!(common::command("mkfifo").arg(&fifo).status().unwrap().success());
         fs::write(folder.join("mcp-in.start"), format!(r#"{{"hook_event_name":"SessionStart","source":"startup","session_id":"{name}"}}"#)).unwrap();
-        let child = Command::new(&claude)
+        let child = common::command(&claude)
             .args([fifo.as_os_str(), board(project).as_os_str(), std::ffi::OsStr::new(hears)])
             .current_dir(project)
             .env("PATH", &path)
             .env("HOME", &dir)
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("CLAUDECODE")
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1388,7 +1440,7 @@ fn the_probe_writes_the_board_again_and_finds_the_session_that_did_not_hear_it()
     let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let ids: Vec<u32> = stand_ins.iter().map(|(child, _)| child.id()).collect();
     for (child, _) in &mut stand_ins {
-        let _ = Command::new("kill").args(["-TERM", "--", &format!("-{}", child.id())]).status();
+        let _ = common::command("kill").args(["-TERM", "--", &format!("-{}", child.id())]).status();
         let _ = child.wait();
     }
     assert_eq!(reply["ok"], true, "{reply}");
@@ -1432,13 +1484,10 @@ fn the_guard_records_each_bash_call_it_sees_for_its_session() {
     };
     let guarded = |tool: &str, id: &str| -> Option<serde_json::Value> {
         let event = event(tool, id);
-        let mut session = Command::new(&claude)
+        let mut session = common::command(&claude)
             .arg(&event)
             .env("EKKO", env!("CARGO_BIN_EXE_ekko"))
             .env("HOME", &dir)
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("EKKO_DIR")
-            .env_remove("CLAUDECODE")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1484,15 +1533,10 @@ fn a_copy_of_a_projects_folder_leaves_the_projects_copy_alone() {
     let (site, elsewhere) = (dir.join("site"), dir.join("elsewhere"));
     fs::create_dir_all(&site).unwrap();
     let ekko = |cwd: &PathBuf, args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(args)
             .current_dir(cwd)
             .env("HOME", &dir)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("CLAUDECODE")
             .output()
             .unwrap()
     };
@@ -1501,7 +1545,7 @@ fn a_copy_of_a_projects_folder_leaves_the_projects_copy_alone() {
     let copies = dir.join(".ekko").join("copies");
     let copy = fs::read_dir(&copies).unwrap().next().unwrap().unwrap().path().join("storage").join("storage.json");
     let kept = fs::read(&copy).unwrap();
-    assert!(Command::new("cp").arg("-r").arg(&site).arg(&elsewhere).status().unwrap().success());
+    assert!(common::command("cp").arg("-r").arg(&site).arg(&elsewhere).status().unwrap().success());
 
     let output = ekko(&elsewhere, &["--task", "from a copy of the folder"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
@@ -1550,16 +1594,11 @@ fn a_scratch_home_writes_nothing_on_a_board_it_found_outside_it() {
     fs::create_dir_all(&site).unwrap();
     fs::create_dir_all(&scratch).unwrap();
     let ekko = |home: &PathBuf, named: Option<&PathBuf>, args: &[&str]| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
+        let mut command = common::ekko();
         command
             .args(args)
             .current_dir(&site)
-            .env("HOME", home)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("CLAUDECODE");
+            .env("HOME", home);
         if let Some(named) = named {
             command.env("EKKO_DIR", named);
         }
@@ -1646,7 +1685,7 @@ impl Agents {
     }
 
     fn git(&self, folder: &std::path::Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = common::command("git")
             .arg("-C")
             .arg(folder)
             .args(["-c", "user.name=ekko", "-c", "user.email=ekko@example.com", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
@@ -1668,7 +1707,7 @@ impl Agents {
 
     /// `program` with `args`, as `command` runs ekko.
     fn running(&self, program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Command {
-        let mut command = Command::new(program);
+        let mut command = common::command(program);
         command
             .args(args)
             .current_dir(&self.app)
@@ -1676,14 +1715,7 @@ impl Agents {
             .env("EKKO_MUX", &self.mux)
             .env("EKKO_CLAUDE", "/stand-in/claude")
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
-            .env_remove("EKKO_MUX_SOCKET")
-            .env_remove("CLAUDECODE")
-            .env_remove("TMUX")
-            .env_remove("XDG_STATE_HOME");
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
         command
     }
 

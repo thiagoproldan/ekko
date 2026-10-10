@@ -2449,9 +2449,12 @@ impl SessionEvent {
 
 /// Where ekko keeps what it knows of sessions: the XDG state directory,
 /// outside every board, so that reading a board still writes nothing to it.
+/// Unit tests keep theirs under the home each is given: they share one
+/// process, whose XDG_STATE_HOME is the state of whoever runs them (task
+/// 1666).
 pub(crate) fn state_dir(home: &Path) -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
-        .filter(|dir| !dir.is_empty())
+        .filter(|dir| !dir.is_empty() && !cfg!(test))
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local").join("state"))
         .join("ekko")

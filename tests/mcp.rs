@@ -1,11 +1,13 @@
 //! `ekko --mcp` spoken to the way a client speaks to it: the real binary,
 //! newline-delimited JSON-RPC in on stdin, replies read back from stdout.
 
+mod common;
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -16,7 +18,7 @@ use serde_json::{json, Value};
 /// which keeps it until its own exec, and running the file in that window
 /// fails with ETXTBSY, "Text file busy" (task 1579).
 fn write_executable(to: &Path, content: &str) {
-    let mut child = Command::new("sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(to).stdin(Stdio::piped()).spawn().unwrap();
+    let mut child = common::command("sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(to).stdin(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(content.as_bytes()).unwrap();
     assert!(child.wait().unwrap().success(), "{} was not written", to.display());
 }
@@ -52,19 +54,15 @@ fn session_in(home: &PathBuf, folder: &Path, lines: &[String]) -> HashMap<String
 }
 
 fn served(home: &PathBuf, folder: Option<&Path>, lines: &[String]) -> Vec<Value> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
+    let mut command = common::ekko();
     match folder {
-        Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
+        Some(folder) => command.current_dir(folder),
         None => command.env("EKKO_DIR", home).current_dir(home),
     };
     let mut child = command
         .arg("--mcp")
         .env("HOME", home)
-        // A server the artifact tool starts keeps its files under this home.
-        .env_remove("XDG_STATE_HOME")
         .env("EKKO_TERMINAL", "none")
-        .env_remove("EKKO_PROJECT")
-        .env_remove("EKKO_AGENT_TASK")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -395,12 +393,10 @@ fn a_modern_client_is_served_per_request_and_refused_a_version_it_does_not_share
 #[test]
 fn every_2026_07_28_result_holds_the_fields_its_type_requires() {
     let home = temp_home();
-    let written = Command::new(env!("CARGO_BIN_EXE_ekko"))
+    let written = common::ekko()
         .args(["--task", "port", "the", "parser"])
         .env("HOME", &home)
         .env("EKKO_DIR", &home)
-        .env_remove("EKKO_PROJECT")
-        .env_remove("EKKO_AGENT_TASK")
         .output()
         .unwrap();
     assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stderr));
@@ -801,17 +797,15 @@ impl Live {
 
     /// The same, in a project's `folder`, whose board it works on.
     fn start_in(home: &PathBuf, folder: Option<&Path>, args: &[&str]) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
+        let mut command = common::ekko();
         match folder {
-            Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
+            Some(folder) => command.current_dir(folder),
             None => command.env("EKKO_DIR", home).current_dir(home),
         };
         let mut child = command
             .args(args)
             .env("HOME", home)
             .env("EKKO_TERMINAL", "none")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -897,12 +891,10 @@ fn the_board_is_served_as_resources_by_a_server_of_their_own() {
     assert_eq!(live.ask(request(8, "resources/templates/list", json!({})))["result"]["resourceTemplates"], json!([]));
 
     // A write from a terminal, which this server takes no part in.
-    let written = Command::new(env!("CARGO_BIN_EXE_ekko"))
+    let written = common::ekko()
         .args(["--task", "made", "from", "a", "terminal"])
         .env("HOME", &home)
         .env("EKKO_DIR", &home)
-        .env_remove("EKKO_PROJECT")
-        .env_remove("EKKO_AGENT_TASK")
         .output()
         .unwrap();
     assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stderr));
@@ -911,7 +903,7 @@ fn the_board_is_served_as_resources_by_a_server_of_their_own() {
     assert_eq!(uris(&live.ask(request(9, "resources/list", json!({})))), ["prime://board", "item://1", "item://4", "item://5"]);
 
     // A write that leaves the list as it was is not announced.
-    let starred = Command::new(env!("CARGO_BIN_EXE_ekko")).args(["--star", "1"]).env("HOME", &home).env("EKKO_DIR", &home).env_remove("EKKO_AGENT_TASK").output().unwrap();
+    let starred = common::ekko().args(["--star", "1"]).env("HOME", &home).env("EKKO_DIR", &home).output().unwrap();
     assert!(starred.status.success(), "{}", String::from_utf8_lossy(&starred.stderr));
     assert_eq!(live.next(std::time::Duration::from_secs(5)), None, "the list did not change, yet the client was told it did");
 
@@ -1091,24 +1083,19 @@ impl Held {
         let prelude = "spec=; exe=; prev=\nfor a in \"$@\"; do\n  [ \"$prev\" = --menu ] && spec=$a\n  [ \"$a\" = --menu ] && exe=$prev\n  case \"$a\" in EKKO_DIR=*|EKKO_PROJECT=*) export \"$a\";; esac\n  prev=$a\ndone\npid=\"${spec%.json}.pid\"\n";
         let log = home.join("terminal.log");
         write_executable(&script, &format!("#!/bin/sh\necho \"$@\" >> \"{}\"\n{prelude}{terminal}\n", log.display()));
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
+        let mut command = common::ekko();
         match folder {
-            Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
+            Some(folder) => command.current_dir(folder),
             None => command.env("EKKO_DIR", home).current_dir(home),
         };
-        match born {
-            Some(born) => command.env("EKKO_AGENT_TASK", born),
-            None => command.env_remove("EKKO_AGENT_TASK"),
-        };
+        if let Some(born) = born {
+            command.env("EKKO_AGENT_TASK", born);
+        }
         let mut child = command
             .arg("--mcp")
             .env("HOME", home)
             .env("EKKO_TERMINAL", &script)
-            // As in a session of its own: the command line is what removes it
-            // from the menu, and the fake terminal skips the command line.
-            .env_remove("CLAUDECODE")
             .env("XDG_RUNTIME_DIR", home)
-            .env_remove("EKKO_PROJECT")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1231,7 +1218,7 @@ fn questions_left_in_ekkos_menu_stay_open() {
     let menu = fs::read_to_string(&menu_pid).unwrap().trim().to_string();
     let gone = (0..40).any(|_| {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        !Command::new("kill").args(["-0", &menu]).stderr(Stdio::null()).status().unwrap().success()
+        !common::command("kill").args(["-0", &menu]).stderr(Stdio::null()).status().unwrap().success()
     });
     assert!(gone, "the cancelled call's menu is closed");
     assert!(!cancelled.seen.iter().any(|m| m["id"] == 2), "a cancelled call is not answered: {:?}", cancelled.seen);
@@ -1338,7 +1325,7 @@ fn a_modern_client_hears_of_changes_on_the_stream_it_opened() {
     let home = temp_home();
     let meta = json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}});
     let write = |words: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_ekko")).args(words).env("HOME", &home).env("EKKO_DIR", &home).env_remove("EKKO_PROJECT").env_remove("EKKO_AGENT_TASK").output().unwrap();
+        let out = common::ekko().args(words).env("HOME", &home).env("EKKO_DIR", &home).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     };
     let listen = |id: &str| {
@@ -1393,13 +1380,10 @@ fn no_tool_reaches_another_projects_board() {
     let other = home.join("other");
     fs::create_dir_all(&other).unwrap();
     for args in [&["init"][..], &["--task", "a secret of the other project"]] {
-        let out = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let out = common::ekko()
             .args(args)
             .current_dir(&other)
             .env("HOME", &home)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .output()
             .unwrap();
         assert!(out.status.success(), "ekko {args:?}: {}", String::from_utf8_lossy(&out.stderr));
@@ -1434,7 +1418,7 @@ fn no_tool_reaches_another_projects_board() {
     assert!(replies["99"]["error"]["message"].as_str().unwrap().contains("Unknown tool: projects"), "{}", replies["99"]);
     let searched = text(&replies["100"]);
     assert!(!searched.contains("secret"), "the session's board holds the other project's task: {searched}");
-    let own = Command::new(env!("CARGO_BIN_EXE_ekko")).arg("--list").current_dir(&other).env("HOME", &home).env_remove("EKKO_DIR").env_remove("EKKO_PROJECT").env_remove("EKKO_AGENT_TASK").output().unwrap();
+    let own = common::ekko().arg("--list").current_dir(&other).env("HOME", &home).output().unwrap();
     let own = String::from_utf8(own.stdout).unwrap();
     assert!(own.contains("a secret of the other project") && own.lines().filter(|line| line.contains("secret")).count() == 1, "the other board changed: {own}");
 
@@ -1444,14 +1428,10 @@ fn no_tool_reaches_another_projects_board() {
 /// The CLI in `folder`, as the user runs it in a terminal of their own: its
 /// output, once it succeeded.
 fn cli_in(home: &PathBuf, folder: &Path, args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_ekko"))
+    let out = common::ekko()
         .args(args)
         .current_dir(folder)
         .env("HOME", home)
-        .env_remove("EKKO_DIR")
-        .env_remove("EKKO_PROJECT")
-        .env_remove("EKKO_AGENT_TASK")
-        .env_remove("CLAUDECODE")
         .output()
         .unwrap();
     assert!(out.status.success(), "ekko {args:?}: {}", String::from_utf8_lossy(&out.stderr));
@@ -1595,13 +1575,10 @@ fn an_artifact_is_written_with_its_page_and_read_back() {
     assert!(text(&replies["8"]).contains("2 is not an artifact"), "{}", text(&replies["8"]));
 
     let terminal = |id: &str| {
-        Command::new(env!("CARGO_BIN_EXE_ekko"))
+        common::ekko()
             .args(["artifact", id, "--no-open"])
             .env("EKKO_DIR", &home)
             .env("HOME", &home)
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
-            .env_remove("XDG_STATE_HOME")
             .current_dir(&home)
             .output()
             .unwrap()
@@ -1648,15 +1625,11 @@ fn a_server_with_a_scratch_home_writes_nothing_on_the_board_it_found() {
     let (board, scratch) = (site.join(".ekko"), home.join("scratch"));
     fs::create_dir_all(&scratch).unwrap();
     let serve = |home: &Path, named: Option<&Path>, lines: &[String]| -> HashMap<String, Value> {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
+        let mut command = common::ekko();
         command
             .arg("--mcp")
             .current_dir(&site)
             .env("HOME", home)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
-            .env_remove("XDG_STATE_HOME")
             .env("EKKO_TERMINAL", "none");
         if let Some(named) = named {
             command.env("EKKO_DIR", named);
@@ -1713,14 +1686,10 @@ fn a_server_with_a_scratch_home_writes_nothing_on_the_board_it_found() {
     assert!(text(&replies["8"]).contains("Ship the page"), "{}", text(&replies["8"]));
     // In a terminal, ekko --answer opens the menu on the question before it
     // writes anything: refused, it opens none.
-    let mut menu = Command::new("script")
+    let mut menu = common::command("script")
         .args(["-qec", &format!("{} --answer {question}", env!("CARGO_BIN_EXE_ekko")), "/dev/null"])
         .current_dir(&site)
         .env("HOME", &scratch)
-        .env_remove("EKKO_DIR")
-        .env_remove("EKKO_PROJECT")
-        .env_remove("EKKO_AGENT_TASK")
-        .env_remove("XDG_STATE_HOME")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1890,17 +1859,14 @@ impl Session {
     fn spawn(home: &PathBuf, folder: Option<&Path>) -> Session {
         // Not exec'd: the shell stays, as the server's parent, until the
         // server exits.
-        let mut command = Command::new("sh");
+        let mut command = common::command("sh");
         command
             .arg("-c")
             .arg(format!("'{}' --mcp; true", env!("CARGO_BIN_EXE_ekko")))
             .env("HOME", home)
-            .env("EKKO_TERMINAL", "none")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
-            .env_remove("XDG_STATE_HOME");
+            .env("EKKO_TERMINAL", "none");
         match folder {
-            Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
+            Some(folder) => command.current_dir(folder),
             None => command.env("EKKO_DIR", home).current_dir(home),
         };
         let mut child = command
@@ -2052,7 +2018,7 @@ fn commits_name_their_tasks_and_context_lists_them() {
     let repo = home.join("repo");
     fs::create_dir_all(&repo).unwrap();
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = common::command("git")
             .arg("-C")
             .arg(&repo)
             .args(["-c", "user.name=ekko", "-c", "user.email=ekko@example.com", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
@@ -2066,13 +2032,10 @@ fn commits_name_their_tasks_and_context_lists_them() {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     };
     let ekko = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_ekko"))
+        let out = common::ekko()
             .args(args)
             .current_dir(&repo)
             .env("HOME", &home)
-            .env_remove("EKKO_DIR")
-            .env_remove("EKKO_PROJECT")
-            .env_remove("EKKO_AGENT_TASK")
             .output()
             .unwrap();
         assert!(out.status.success(), "ekko {args:?}: {}", String::from_utf8_lossy(&out.stderr));
@@ -2176,16 +2139,11 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
     // The artifact, 11, made by a session of its own: a server whose client
     // is not this test's process, which every other server here has.
     let plan = "Ship the page\n\n## Goal\nWhy.\n## What is known\nFacts.\n## Design\nHow.\n## Risks and open questions\nNone.";
-    let mut maker = Command::new("sh")
+    let mut maker = common::command("sh")
         .args(["-c", "\"$0\" --mcp; exit $?", env!("CARGO_BIN_EXE_ekko")])
         .current_dir(site)
         .env("HOME", &home)
         .env("EKKO_TERMINAL", "none")
-        .env_remove("EKKO_DIR")
-        .env_remove("EKKO_PROJECT")
-        .env_remove("EKKO_AGENT_TASK")
-        .env_remove("EKKO_AGENT_TASK")
-        .env_remove("XDG_STATE_HOME")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

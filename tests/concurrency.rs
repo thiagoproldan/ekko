@@ -20,11 +20,13 @@
 //! rework of the locking has to keep passing these even if every unit test
 //! around it is rewritten.
 
+mod common;
+
 use std::collections::HashSet;
 use std::os::fd::AsRawFd;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A counter beside the clock: tests run in parallel, and two can read the
@@ -52,7 +54,7 @@ struct Run {
 /// Starts `ekko --ekko-dir <dir> <args>`, its output kept for `finish`.
 fn spawn(exe: &str, dir: &std::path::Path, args: &[&str]) -> Run {
     let args: Vec<String> = ["--ekko-dir", dir.to_str().unwrap()].iter().chain(args).map(|arg| arg.to_string()).collect();
-    let child = Command::new(exe).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("failed to spawn ekko");
+    let child = common::command(exe).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("failed to spawn ekko");
     Run { args, child }
 }
 
@@ -72,7 +74,7 @@ fn finish(exe: &str, run: Run) {
         if output.status.success() || !String::from_utf8_lossy(&output.stdout).contains("waiting for the ekko storage lock") {
             break;
         }
-        output = Command::new(exe).args(&run.args).output().expect("failed to run ekko");
+        output = common::command(exe).args(&run.args).output().expect("failed to run ekko");
     }
     let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     assert!(output.status.success(), "ekko {} exited {}: {said}", run.args.join(" "), output.status);
@@ -204,7 +206,7 @@ fn readers_never_observe_a_torn_storage_file() {
     for i in 0..25 {
         writers.push(run_task_create(exe, &dir, &format!("writer {i}")));
         readers.push(
-            Command::new(exe)
+            common::command(exe)
                 .args(["--ekko-dir", dir.to_str().unwrap(), "--json"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -251,7 +253,7 @@ fn a_lock_holder_killed_outright_does_not_wedge_later_writers() {
     // flock itself -- a `flock` is held by the open file description, which
     // fork duplicates -- and this test would be asserting the opposite of
     // what it means to.
-    let mut holder = Command::new("flock")
+    let mut holder = common::command("flock")
         .args(["-x", "-o", lock_file.to_str().unwrap(), "sleep", "10"])
         .spawn()
         .expect("flock(1) from util-linux is required by this test");
@@ -309,7 +311,7 @@ fn destroying_a_project_waits_for_a_writer_to_finish() {
 
     let folder = home.join("work").join("doomed");
     fs::create_dir_all(&folder).unwrap();
-    let create = process::Command::new(exe)
+    let create = common::command(exe)
         .args(["init", folder.to_str().unwrap()])
         .env("HOME", &home)
         .output()
@@ -318,7 +320,7 @@ fn destroying_a_project_waits_for_a_writer_to_finish() {
 
     // A write, not just the init: the lock file is made on first acquire,
     // and init only writes the project's marker.
-    let seeded = process::Command::new(exe)
+    let seeded = common::command(exe)
         .args(["--project", "doomed", "--task", "something to lose"])
         .env("HOME", &home)
         .output()
@@ -330,7 +332,7 @@ fn destroying_a_project_waits_for_a_writer_to_finish() {
 
     // `-o` closes the locked descriptor before running the command, so the
     // sleep does not inherit it and the holder is the flock(1) process.
-    let mut holder = process::Command::new("flock")
+    let mut holder = common::command("flock")
         .args(["-x", "-o", project_lock.to_str().unwrap(), "sleep", "30"])
         .spawn()
         .expect("failed to spawn the lock holder");
@@ -341,7 +343,7 @@ fn destroying_a_project_waits_for_a_writer_to_finish() {
     }
     assert!(!can_lock(&project_lock), "the flock(1) holder never took the lock");
 
-    let destroy = process::Command::new(exe)
+    let destroy = common::command(exe)
         .args(["--project", "doomed", "--json", "--destroy"])
         .env("HOME", &home)
         .output()
@@ -376,7 +378,7 @@ fn a_follower_of_changes_never_misses_a_write_made_while_it_reads() {
     let exe = env!("CARGO_BIN_EXE_ekko");
     let total = 40;
 
-    let mut server = Command::new(exe)
+    let mut server = common::command(exe)
         .args(["--mcp"])
         .env("EKKO_DIR", &dir)
         .env("HOME", &dir)
