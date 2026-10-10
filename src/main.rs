@@ -621,14 +621,9 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
         }
     };
     let json_mode = json_first || json;
-    let ekko_dir_env = std::env::var("EKKO_DIR").ok();
-    let project_env = std::env::var("EKKO_PROJECT").ok();
-    let project_name = project.as_deref().or(project_env.as_deref());
-    let location = match directory::locate(&home_dir, &cwd, None, ekko_dir_env.as_deref(), project_name) {
-        Ok(location) => location,
-        Err(err) => return finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
-    };
-    let started = Ekko::at(&location).and_then(|ekko| agents::start(&ekko, &location, &home_dir, &ids, &model, effort.as_deref()));
+    // As the session that runs it, whose notes the start's are.
+    let started = agents_board(&home_dir, &cwd, project.as_deref())
+        .and_then(|(location, ekko)| agents::start(&ekko, &location, &home_dir, &ids, &model, effort.as_deref()));
     let started = match started {
         Ok(started) => started,
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
@@ -648,9 +643,13 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
             "made": started.made,
             "attach": started.attach,
             "drawn": started.undrawn.is_none(),
+            "notes": started.notes,
         });
         if let Some(why) = &started.undrawn {
             out["undrawn"] = serde_json::json!(why);
+        }
+        if let Some(why) = &started.unnoted {
+            out["unnoted"] = serde_json::json!(why);
         }
         println!("{out}");
         return ExitCode::SUCCESS;
@@ -669,11 +668,17 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
     if let Some(why) = &started.undrawn {
         println!("  its state is not drawn in the status line: {why}");
     }
+    match (started.notes.as_slice(), &started.unnoted) {
+        (_, Some(why)) => println!("  how it was started is not noted on the board: {why}"),
+        ([note], None) => println!("  note {note} on {tasks} says how it was started"),
+        (notes, None) => println!("  notes {} say how it was started", notes.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")),
+    }
     ExitCode::SUCCESS
 }
 
-/// The board `ekko agents merge` and `test` work on, found as every command
-/// finds it, acting for the session that runs them, or for the user.
+/// The board `ekko agents start`, `merge`, `test` and `limit` work on,
+/// found as every command finds it, acting for the session that runs them,
+/// or for the user.
 fn agents_board(home_dir: &Path, cwd: &Path, project: Option<&str>) -> Result<(directory::Location, Ekko), EkkoError> {
     let ekko_dir_env = std::env::var("EKKO_DIR").ok();
     let project_env = std::env::var("EKKO_PROJECT").ok();

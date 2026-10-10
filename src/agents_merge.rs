@@ -464,7 +464,7 @@ fn left_said(left: &Left, branch: &str) -> String {
 }
 
 /// Attaches a note holding `text` to each of `tasks`: the notes' ids.
-fn noted(ekko: &Ekko, tasks: &[u32], text: &str) -> Result<Vec<u32>, EkkoError> {
+pub(crate) fn noted(ekko: &Ekko, tasks: &[u32], text: &str) -> Result<Vec<u32>, EkkoError> {
     let mut draft = Draft::open(ekko)?;
     let notes = tasks.iter().map(|id| draft.create(&note(*id, text))).collect::<Result<Vec<_>, _>>()?;
     draft.commit(false)?;

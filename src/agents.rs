@@ -146,6 +146,12 @@ pub struct Started {
     /// Why the pane's options and its window's status line could not be
     /// set, if they could not: the session runs all the same.
     pub undrawn: Option<String>,
+    /// The note on each task saying how its session was started (task
+    /// 1647): the model, the effort, the window and the branch.
+    pub notes: Vec<u32>,
+    /// Why those notes could not be written, if they could not: the session
+    /// runs all the same.
+    pub unnoted: Option<String>,
 }
 
 /// Opens a session of Claude Code for the tasks `raw_ids` of the board at
@@ -157,7 +163,8 @@ pub struct Started {
 /// in the trash, with someone, waiting on open work -- for one whose done
 /// blocker's branch is not merged yet (task 1728), and for one that has a
 /// window already; and while as many sessions run for the project as its
-/// limit lets run at once (task 1727).
+/// limit lets run at once (task 1727). Once the session runs, a note on
+/// each task records how it was started.
 pub fn start(
     ekko: &Ekko,
     location: &Location,
@@ -276,7 +283,19 @@ pub fn start(
             cwd.display()
         )));
     }
-    Ok(Started { tasks: ids, window, pane, worktree: worktree.path, branch, made: worktree.made, attach: mux.attach(), undrawn })
+    // What the orchestrator chose for the tasks, on each, to learn from
+    // (design item 5): the pane's options go with the pane.
+    let text = format!(
+        "Started by ekko agents start: a session on {model}{}, in window \"{window}\" of session {SESSION}, on branch {branch} in {} ({}).",
+        effort.map(|effort| format!(" at effort {effort}")).unwrap_or_else(|| " at its default effort".to_string()),
+        worktree.path.display(),
+        if worktree.made { "made for it" } else { "an earlier start's, taken up again" },
+    );
+    let (notes, unnoted) = match crate::agents_merge::noted(ekko, &ids, &text) {
+        Ok(notes) => (notes, None),
+        Err(why) => (Vec::new(), Some(why.to_string())),
+    };
+    Ok(Started { tasks: ids, window, pane, worktree: worktree.path, branch, made: worktree.made, attach: mux.attach(), undrawn, notes, unnoted })
 }
 
 /// The command that sets the user option `option` of `pane` to `value`, as
@@ -440,15 +459,18 @@ fn claude() -> OsString {
 
 /// A born session's first prompt: what it was started for, that it claims
 /// its tasks before it changes anything (design item 1), and how it ends --
-/// a closing note on each task and the task done, or else a handoff and the
-/// task back to pending (design item 3). Each note is named by the tool and
-/// argument that write it: told only to attach a closing note, both
-/// sessions of one live run appended it to the task's own text with edit
-/// (task 1644), where the four sessions before them had attached one.
+/// a closing note on each task and the task done, or else a handoff, the
+/// task still held, and the turn ended (design item 3, as task 1647 left
+/// it): its hook then marks it waiting on the user, which wakes the
+/// orchestrator waiting on the task (task 1715), as a task set back to
+/// pending would not. Each note is named by the tool and argument that
+/// write it: told only to attach a closing note, both sessions of one live
+/// run appended it to the task's own text with edit (task 1644), where the
+/// four sessions before them had attached one.
 fn first_prompt(ids: &[u32], branch: &str, worktree: &Path) -> String {
-    let (tasks, them, each, attached) = match ids {
-        [id] => (format!("task {id}"), "it", format!("task {id}"), format!("attached_to {id}")),
-        _ => (format!("tasks {}", listed(ids)), "them", "each task".to_string(), "attached_to that task".to_string()),
+    let (tasks, them, each, attached, the) = match ids {
+        [id] => (format!("task {id}"), "it", format!("task {id}"), format!("attached_to {id}"), "the task"),
+        _ => (format!("tasks {}", listed(ids)), "them", "each task".to_string(), "attached_to that task".to_string(), "the tasks"),
     };
     format!(
         "ekko agents started this session to do {tasks} on this project's ekko board, and nothing else. \
@@ -457,7 +479,8 @@ fn first_prompt(ids: &[u32], branch: &str, worktree: &Path) -> String {
          kill or respawn the multiplexer's panes, windows or sessions, or change the board's phases. \
          When {each} is done, write its closing note with ekko's create, {attached} -- a note of its own, not an edit of the task's text: \
          what you did, the files you changed, the tests you ran and their outcomes, the commit, and what is left -- then set it done. \
-         If you stop short of that, write a handoff instead, with ekko's create, kind handoff, {attached}, and set the task back to unstarted.",
+         If you cannot finish, write a handoff instead, with ekko's create, kind handoff, {attached}, saying what stops you; \
+         leave {the} in progress and end your turn: the user is told that this session waits on them.",
         worktree.display()
     )
 }

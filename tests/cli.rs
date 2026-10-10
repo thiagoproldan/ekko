@@ -2055,7 +2055,18 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert!(prompt.contains("Before you change anything, set task 1 in progress"), "{prompt}");
     assert!(prompt.contains("write its closing note with ekko's create, attached_to 1 -- a note of its own"), "{prompt}");
     assert!(prompt.contains("write a handoff instead, with ekko's create, kind handoff, attached_to 1"), "{prompt}");
+    // Stopped short, it keeps its task and waits on the user, whose mark
+    // wakes the orchestrator (task 1647).
+    assert!(prompt.ends_with("saying what stops you; leave the task in progress and end your turn: the user is told that this session waits on them."), "{prompt}");
     assert!(prompt.contains(&format!("{}, on its branch task-1", worktree.display())), "{prompt}");
+    // How it was started, on the task (task 1647).
+    let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
+    let note = &board[reply["notes"][0].as_u64().unwrap().to_string()];
+    assert_eq!(note["attachedTo"].as_str(), Some(agents.uid(1).as_str()), "{note}");
+    assert_eq!(
+        note["description"].as_str().unwrap(),
+        format!("Started by ekko agents start: a session on haiku at effort low, in window \"1 \u{b7} haiku\" of session ekko, on branch task-1 in {} (made for it).", worktree.display())
+    );
 
     // Two tasks share one session, in a window beside the first.
     let reply = agents.json(&["agents", "start", "2", "3", "--model", "sonnet", "--json"]);
@@ -2069,6 +2080,21 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert!(!command.iter().any(|arg| arg == "--effort"), "no effort was given: {command:?}");
     assert!(command.last().unwrap().contains("to do tasks 2 and 3 on"), "{command:?}");
     assert!(command.last().unwrap().contains("When each task is done, write its closing note with ekko's create, attached_to that task"), "{command:?}");
+    assert!(command.last().unwrap().contains("leave the tasks in progress and end your turn"), "{command:?}");
+    // A note on each, the effort its default.
+    let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
+    let notes: Vec<(&str, &str)> = reply["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            let note = &board[id.as_u64().unwrap().to_string()];
+            (note["attachedTo"].as_str().unwrap(), note["description"].as_str().unwrap())
+        })
+        .collect();
+    let (two, three) = (agents.uid(2), agents.uid(3));
+    assert_eq!(notes.iter().map(|(on, _)| *on).collect::<Vec<_>>(), [two.as_str(), three.as_str()]);
+    assert!(notes.iter().all(|(_, text)| text.starts_with("Started by ekko agents start: a session on sonnet at its default effort, in window \"2,3 \u{b7} sonnet\"")), "{notes:?}");
 
     // A task with a window is refused, and nothing more is opened.
     let refused = agents.json(&["agents", "start", "3", "--model", "haiku", "--json"]);

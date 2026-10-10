@@ -56,7 +56,9 @@
         # binary pinned by store path, so the plugin can never drive a
         # different revision of ekko than the one it was built with -- the
         # skill it replaces went stale exactly that way, once. Every hook
-        # command in plugin.json starts with `ekko `, and each is pinned.
+        # command in plugin.json starts with `ekko `, and each is pinned. The
+        # skills under plugin/skills, /ekko:agents among them (task 1647), go
+        # in as they are.
         packages.plugin =
           let
             ekko = self.packages.${system}.default;
@@ -70,7 +72,11 @@
               ) manifest.hooks;
             };
           in
-          pkgs.writeTextDir ".claude-plugin/plugin.json" (builtins.toJSON pinned);
+          pkgs.runCommand "ekko-plugin" { } ''
+            mkdir -p $out/.claude-plugin
+            cp ${pkgs.writeText "plugin.json" (builtins.toJSON pinned)} $out/.claude-plugin/plugin.json
+            cp -r ${./plugin/skills} $out/skills
+          '';
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
