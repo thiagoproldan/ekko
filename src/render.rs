@@ -480,14 +480,20 @@ impl<'a> Renderer<'a> {
     /// by hand. Empty when there is nothing outstanding, which is what keeps
     /// every pre-existing board byte-identical.
     /// Who holds a task in progress, when someone does: a Claude Code session
-    /// or the user, and whether that session is gone. Empty otherwise, which
-    /// keeps every board nobody claims work on byte-identical.
+    /// or the user, and whether that session is gone, or waits on the user
+    /// (task 1645), which is in yellow, as what is due today is. Empty
+    /// otherwise, which keeps every board nobody claims work on
+    /// byte-identical.
     fn get_held(&self, item: &Item) -> String {
         let Some(holder) = item.held_by.as_ref().filter(|_| State::of(item) == Some(State::Progress)) else {
             return String::new();
         };
         let gone = if holder.alive() { "" } else { ", gone" };
-        self.painter.grey(&format!("held by {}{gone}", holder.label_in(self.registry.as_ref())))
+        let held = self.painter.grey(&format!("held by {}{gone}", holder.label_in(self.registry.as_ref())));
+        match holder.waits() {
+            Some(_) => format!("{held}{}", self.painter.yellow(", waiting on you")),
+            None => held,
+        }
     }
 
     /// `with rodrigo` on a task with someone; empty otherwise, which keeps

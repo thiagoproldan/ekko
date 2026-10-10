@@ -609,6 +609,7 @@ impl<'a> Reader<'a> {
             since: holder.since,
             yours: self.me.as_ref().is_some_and(|me| me.is(holder)),
             gone: !holder.alive(),
+            waits_on_user: holder.waits().cloned(),
         })
     }
 
@@ -1186,6 +1187,10 @@ pub struct Held {
     pub yours: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub gone: bool,
+    /// What the holding session waits on the user for, while it runs: a
+    /// session ekko agents started, stopped at a prompt (task 1645).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waits_on_user: Option<crate::holder::OnUser>,
 }
 
 impl Held {
@@ -1195,11 +1200,22 @@ impl Held {
     }
 
     fn text(&self) -> String {
+        format!("{}{}", self.who(), self.waiting())
+    }
+
+    fn who(&self) -> String {
         match (self.yours, self.gone) {
             (true, _) => "yours".to_string(),
             (false, true) => format!("held by {}, gone", self.by),
             (false, false) => format!("held by {}", self.by),
         }
+    }
+
+    /// `, waiting on you since 14:02: <what>` while the holding session
+    /// waits on the user; empty otherwise.
+    fn waiting(&self) -> String {
+        let Some(on) = &self.waits_on_user else { return String::new() };
+        format!(", waiting on you since {}: {}", crate::holder::when(on.since), on.what)
     }
 }
 
@@ -2700,7 +2716,13 @@ pub fn sessions(ekko: &Ekko, board: &str) -> Result<Sessions, EkkoError> {
     for item in items {
         let line = || SessionItem { id: item.id, text: headline(&item.description, item.is_task, TASK_CLIP) };
         match (State::of(item), &item.held_by, &item.done_by) {
-            (Some(State::Progress), Some(holder), _) => listed.push((session_of(holder), 0, line())),
+            (Some(State::Progress), Some(holder), _) => {
+                let mut held = line();
+                if let Some(on) = holder.waits() {
+                    held.text = format!("{} \u{b7} waiting on you since {}: {}", held.text, crate::holder::when(on.since), on.what);
+                }
+                listed.push((session_of(holder), 0, held));
+            }
             (Some(State::Done), _, Some(by)) if done_today(item) => listed.push((session_of(by), 1, line())),
             _ => {}
         }
@@ -3735,7 +3757,7 @@ impl Context {
             (Some(state), _, _) => format!("task, {}", state.word()),
         }];
         if let Some(held) = &item.held {
-            facts[0] = format!("{}, {} since {}", facts[0], held.text(), crate::holder::when(held.since));
+            facts[0] = format!("{}, {} since {}{}", facts[0], held.who(), crate::holder::when(held.since), held.waiting());
         }
         if let (Some(_), Some(state)) = (&self.artifact, item.state) {
             facts[0] = format!("artifact, a task {}", state.word());

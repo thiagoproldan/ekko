@@ -1967,8 +1967,8 @@ mod tests {
         checked.sort();
         let expected = [
             "Aid", "Allowance", "Anchor", "Answer", "Approving", "Artifact", "Born", "Comment", "Counters", "Cue", "Earlier", "Failure", "Holder", "Item",
-            "Linking", "Moved", "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Seen", "State", "Step",
-            "StillTrue", "Unread", "Use", "Used", "Wait",
+            "Linking", "Moved", "OnUser", "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Seen", "State", "Step",
+            "StillTrue", "Unread", "Use", "Used", "Wait", "Waiting",
         ];
         assert_eq!(checked, expected, "the scan finds the structs it should");
     }

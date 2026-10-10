@@ -5143,6 +5143,7 @@ mod tests {
             tty: Some("pts/1".into()),
             conversation: Some("874cd2ed-5f00-4a1b-9c3d-000000000000".into()),
             since: 0,
+            waits_on_user: None,
             unknown: BTreeMap::new(),
         });
         for name in ["trabalho", "TRABALHO", "874cd2ed", "874c"] {
@@ -5151,7 +5152,7 @@ mod tests {
         for name in ["874", "user", "default", "pts/1"] {
             assert!(!is_by(&item, name), "{name} named the session");
         }
-        item.created_by = Some(crate::holder::Holder { pid: None, start: None, boot: None, profile: None, tty: None, conversation: None, since: 0, unknown: BTreeMap::new() });
+        item.created_by = Some(crate::holder::Holder { pid: None, start: None, boot: None, profile: None, tty: None, conversation: None, since: 0, waits_on_user: None, unknown: BTreeMap::new() });
         assert!(is_by(&item, "user") && !is_by(&item, "default"));
     }
 

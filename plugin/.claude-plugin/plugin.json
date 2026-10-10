@@ -1,6 +1,6 @@
 {
   "name": "ekko",
-  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes; the board's resume view added to context when a session starts, with the project's memory page when the board's folder holds one; the board drawn in the session's task list under the spinner; a session woken when what it waits on is over; the Bash calls a gotcha's cue names refused, once the user turns the cue on; and a session ekko agents started closed once its tasks are finished.",
+  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes; the board's resume view added to context when a session starts, with the project's memory page when the board's folder holds one; the board drawn in the session's task list under the spinner; a session woken when what it waits on is over; the Bash calls a gotcha's cue names refused, once the user turns the cue on; and a session ekko agents started marked, on the board and in its window, while it waits on the user, and closed once its tasks are finished.",
   "homepage": "https://github.com/thiagoproldan/ekko",
   "license": "MIT",
   "mcpServers": {
@@ -46,6 +46,55 @@
           {
             "type": "command",
             "command": "ekko --tasklist --hook"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ekko --born --hook"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ekko --born --hook"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ekko --born --hook"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|elicitation_dialog|elicitation_url_dialog|idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ekko --born --hook"
+          }
+        ]
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ekko --born --hook"
           }
         ]
       }

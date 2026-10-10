@@ -1579,7 +1579,8 @@ fn a_scratch_home_writes_nothing_on_a_board_it_found_outside_it() {
 /// and the environment it opens a window with, and answers as tmux would
 /// for the session `ekko`: whether it is there, its windows' names, a new
 /// window's pane, and that pane running unless a file `dead` says it ended,
-/// which kill-pane writes.
+/// which kill-pane writes. The window of pane %7 is named by the file
+/// `name`, which rename-window writes (task 1645).
 const MUX: &str = r#"#!/bin/sh
 state="$(dirname "$0")/mux-state"
 mkdir -p "$state"
@@ -1599,6 +1600,8 @@ case "$1" in
     echo %7 ;;
   list-panes) [ -e "$state/dead" ] || echo '%7 0' ;;
   kill-pane) touch "$state/dead" ;;
+  display-message) cat "$state/name" ;;
+  rename-window) eval "name=\${$#}"; printf '%s\n' "$name" > "$state/name" ;;
   *) exit 1 ;;
 esac
 "#;
@@ -1708,6 +1711,15 @@ impl Agents {
     /// its hook, as Claude Code does, until something ends it or 30 s pass.
     /// The stand-in, and what the hook printed, once it has returned.
     fn born(&self, tasks: Option<&str>, session: &str, event: &str, extra: serde_json::Value) -> (process::Child, String) {
+        let mut stand_in = self.born_start(tasks, session, event, extra);
+        let mut said = String::new();
+        stand_in.stdout.take().unwrap().read_to_string(&mut said).unwrap();
+        (stand_in, said)
+    }
+
+    /// `born`, not waiting for the hook: the stand-in, whose output closes
+    /// as the hook returns.
+    fn born_start(&self, tasks: Option<&str>, session: &str, event: &str, extra: serde_json::Value) -> process::Child {
         use std::io::Write as _;
         let claude = self.home.join("claude");
         if !claude.exists() {
@@ -1727,9 +1739,7 @@ impl Agents {
         let mut input = serde_json::json!({"session_id": session, "hook_event_name": event});
         input.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         writeln!(stand_in.stdin.take().unwrap(), "{input}").unwrap();
-        let mut said = String::new();
-        stand_in.stdout.take().unwrap().read_to_string(&mut said).unwrap();
-        (stand_in, said)
+        stand_in
     }
 
     /// A prompt reaching the session: the hook runs, and its stand-in goes.
@@ -1754,6 +1764,106 @@ impl Agents {
             }
             found
         })
+    }
+
+    /// A born session that stays (task 1645): a stand-in Claude Code -- a
+    /// process named claude, started for `tasks` in the pane %7 -- that runs
+    /// each step `Stays::ekko` hands it, one at a time, as Claude Code runs
+    /// its hooks, its tools and its MCP server, so the claims, waits and
+    /// hooks of every step are this one process's.
+    fn session(&self, tasks: &str) -> Stays {
+        let dir = self.home.join(format!("stays-{}", self.home.read_dir().unwrap().count()));
+        fs::create_dir_all(&dir).unwrap();
+        let claude = dir.join("claude");
+        write_executable(
+            &claude,
+            "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\nexport CLAUDECODE=1\nn=0\nwhile :; do\n  n=$((n + 1))\n  while [ ! -e \"$dir/$n.go\" ]; do sleep 0.02; done\n  sh \"$dir/$n.go\" < \"$dir/$n.in\" > \"$dir/$n.out\" 2> \"$dir/$n.err\"\n  touch \"$dir/$n.done\"\ndone\n",
+        );
+        let child = self
+            .running(&claude, &[])
+            .env("EKKO_PROJECT", "app")
+            .env("EKKO_AGENT_TASK", tasks)
+            .env("TMUX", format!("{},1,0", self.home.join("tmux-socket").display()))
+            .env("TMUX_PANE", "%7")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        Stays { child, dir, steps: std::cell::Cell::new(0) }
+    }
+
+    /// The name the stand-in multiplexer gives the window of pane %7.
+    fn window(&self) -> String {
+        fs::read_to_string(self.home.join("mux-state/name")).unwrap().trim_end().to_string()
+    }
+
+    fn name_window(&self, name: &str) {
+        fs::create_dir_all(self.home.join("mux-state")).unwrap();
+        fs::write(self.home.join("mux-state/name"), format!("{name}\n")).unwrap();
+    }
+
+    fn context(&self, id: &str) -> String {
+        String::from_utf8(self.ekko(&["--context", id]).stdout).unwrap()
+    }
+}
+
+/// A born session that stays, as `Agents::session` starts it; ended as it
+/// is dropped.
+struct Stays {
+    child: process::Child,
+    dir: PathBuf,
+    steps: std::cell::Cell<u32>,
+}
+
+impl Stays {
+    /// Runs ekko with `args` in the session, reading `input`, as its own
+    /// child: what it printed.
+    fn ekko(&self, args: &[&str], input: &str) -> String {
+        let step = self.steps.get() + 1;
+        self.steps.set(step);
+        fs::write(self.dir.join(format!("{step}.in")), input).unwrap();
+        let quoted: Vec<String> = std::iter::once(env!("CARGO_BIN_EXE_ekko")).chain(args.iter().copied()).map(|arg| format!("'{}'", arg.replace('\'', "'\\''"))).collect();
+        let go = self.dir.join(format!("{step}.go"));
+        fs::write(go.with_extension("new"), format!("exec {}\n", quoted.join(" "))).unwrap();
+        fs::rename(go.with_extension("new"), &go).unwrap();
+        let done = self.dir.join(format!("{step}.done"));
+        let ended = (0..200).any(|_| {
+            let ended = done.exists();
+            if !ended {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            ended
+        });
+        assert!(ended, "step {step} did not end within 10 s: {args:?}");
+        fs::read_to_string(self.dir.join(format!("{step}.out"))).unwrap()
+    }
+
+    /// The hook on `event`, as Claude Code runs it in this session.
+    fn hook(&self, event: &str, extra: serde_json::Value) -> String {
+        let mut input = serde_json::json!({"session_id": "s-1", "hook_event_name": event});
+        input.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        self.ekko(&["--born", "--hook"], &input.to_string())
+    }
+
+    /// A permission prompt left unanswered, as Claude Code 2.1.295 tells
+    /// it: the request, then the notification, six seconds on, whose
+    /// message names no tool. What the notification's hook printed.
+    fn asks(&self) -> String {
+        assert_eq!(self.hook("PermissionRequest", serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "date > stamp.txt", "description": "Write the date"}})), "", "a PermissionRequest hook prints nothing");
+        self.hook("Notification", serde_json::json!({"notification_type": "permission_prompt", "message": "Claude needs your permission", "title": "Permission needed"}))
+    }
+
+    /// A tool that ran, once the user let it.
+    fn ran(&self) -> String {
+        self.hook("PostToolUse", serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "true"}, "tool_response": {"stdout": ""}}))
+    }
+}
+
+impl Drop for Stays {
+    fn drop(&mut self) {
+        self.child.kill().ok();
+        self.child.wait().ok();
     }
 }
 
@@ -2052,5 +2162,153 @@ fn a_prompt_mid_task_does_not_keep_a_born_session_but_one_as_it_closes_does() {
     assert!(agents.ekko(&["--check", "3"]).status.success(), "reopened");
     assert!(still_runs(&mut stand_in), "closed with its task reopened in its last second");
     assert!(agents.logged(&format!("{three} stays: task 3 is pending")));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A born session waiting on the user (task 1645, design item 4): a
+/// permission prompt left unanswered marks the task it holds with what it
+/// waits for -- which the task's context, the board and `--sessions` say --
+/// and ends its window's name with "waiting on you"; the tool that ran once
+/// the user let it clears both. Each event after that finds nothing to
+/// clear, and says nothing to the multiplexer or the board.
+#[test]
+fn a_born_session_waiting_on_the_user_says_so_on_its_task_and_window_until_it_moves_on() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    agents.name_window("1 \u{b7} haiku");
+    let session = agents.session(&agents.uid(1));
+    session.ekko(&["--begin", "1"], "");
+
+    assert_eq!(session.asks(), "", "a Notification hook prints nothing");
+    let context = agents.context("1");
+    assert!(context.contains(", waiting on you since ") && context.contains(": Claude needs your permission -- Bash: date > stamp.txt \u{b7} priority 1"), "{context}");
+    let read = agents.json(&["--context", "1", "--json"]);
+    let held = &read["context"]["item"]["held"];
+    assert_eq!(held["waitsOnUser"]["what"], "Claude needs your permission -- Bash: date > stamp.txt", "{read}");
+    let board = String::from_utf8(agents.ekko(&[]).stdout).unwrap();
+    assert!(board.contains(", waiting on you"), "{board}");
+    let sessions = String::from_utf8(agents.ekko(&["--sessions"]).stdout).unwrap();
+    assert!(sessions.contains("1. Write hello \u{b7} waiting on you since "), "{sessions}");
+    assert_eq!(agents.window(), "1 \u{b7} haiku \u{b7} waiting on you");
+    assert!(agents.logged("waits on you (permission_prompt): Claude needs your permission -- Bash: date > stamp.txt; marked on task 1; its window named \"1 \u{b7} haiku \u{b7} waiting on you\""));
+    let socket = agents.home.join("tmux-socket");
+    let said: Vec<Vec<String>> = agents.calls().into_iter().filter(|call| call[..2] == ["-S", socket.to_str().unwrap()]).map(|call| call[2..].to_vec()).collect();
+    assert_eq!(said, [vec!["display-message", "-p", "-t", "%7", "#{window_name}"], vec!["rename-window", "-t", "%7", "1 \u{b7} haiku \u{b7} waiting on you"]]);
+
+    assert_eq!(session.ran(), "", "a PostToolUse hook prints nothing");
+    let context = agents.context("1");
+    assert!(context.contains("task, in progress, held by ") && !context.contains("waiting on you"), "{context}");
+    let read = agents.json(&["--context", "1", "--json"]);
+    assert!(read["context"]["item"]["held"].is_object() && read["context"]["item"]["held"].get("waitsOnUser").is_none(), "{read}");
+    assert_eq!(agents.window(), "1 \u{b7} haiku");
+    assert!(agents.logged("waits on you no more (PostToolUse): cleared on task 1; its window named \"1 \u{b7} haiku\" again"));
+
+    let (calls, board) = (agents.calls().len(), fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap());
+    for event in ["PostToolUse", "PostToolUseFailure", "ElicitationResult", "UserPromptSubmit", "Stop"] {
+        session.hook(event, serde_json::json!({"background_tasks": [], "session_crons": []}));
+    }
+    assert_eq!(agents.calls().len(), calls, "the multiplexer was spoken to with nothing to clear");
+    assert_eq!(fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap(), board, "the board was written with nothing to clear");
+
+    // A permission granted within the six seconds leaves nothing behind: a
+    // notification with no request before it -- a sandboxed command's
+    // network request has none -- says what Claude Code said, and no more.
+    session.hook("PermissionRequest", serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "rm -r target"}}));
+    session.ran();
+    session.hook("Notification", serde_json::json!({"notification_type": "permission_prompt", "message": "Claude needs your permission"}));
+    assert!(agents.logged("waits on you (permission_prompt): Claude needs your permission; marked on task 1;"), "{:?}", fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// The edges of waiting on the user (task 1645): a turn over while the
+/// session waits on the board, through ekko's wait, is no wait on the user,
+/// and marks nothing; a permission prompt still does. A window the user
+/// renamed meanwhile keeps their name. A session holding none of its tasks
+/// has its window renamed alone. And once its process has ended, its task
+/// no longer says it waits on anyone.
+#[test]
+fn a_born_session_waiting_on_the_board_holding_nothing_or_gone_is_no_wait_on_the_user() {
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs", "Write the tests"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    // Task 2, the session's too, is the user's to hold.
+    assert!(agents.ekko(&["--begin", "2"]).status.success());
+    agents.name_window("1,2 \u{b7} haiku");
+    let session = agents.session(&format!("{},{}", agents.uid(1), agents.uid(2)));
+    session.ekko(&["--begin", "1"], "");
+    let lines = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "wait", "arguments": {"item": 3, "text": "check the tests once they are written"}}}),
+    ];
+    let said = session.ekko(&["--mcp"], &lines.map(|line| format!("{line}\n")).concat());
+    assert!(said.contains("\"id\":2") && !said.contains("\"isError\":true"), "{said}");
+
+    session.hook("Notification", serde_json::json!({"notification_type": "idle_prompt", "message": "Claude is waiting for your input"}));
+    assert!(agents.logged("does not wait on you (idle_prompt): it waits on the board, through note 4"));
+    assert!(!agents.context("1").contains("waiting on you"));
+    assert_eq!(agents.window(), "1,2 \u{b7} haiku");
+
+    session.asks();
+    assert!(agents.logged("marked on task 1;"), "a permission prompt is the user's, whatever the session waits on");
+    assert!(agents.context("1").contains("waiting on you since"));
+    assert!(!agents.context("2").contains("waiting on you"), "the user's own claim was marked");
+    agents.name_window("mine");
+    session.hook("UserPromptSubmit", serde_json::json!({"prompt": "go on"}));
+    assert!(agents.logged("waits on you no more (UserPromptSubmit): cleared on task 1; its window kept the name it was given meanwhile, \"mine\""));
+    assert_eq!(agents.window(), "mine");
+
+    agents.name_window("1 \u{b7} haiku");
+    assert!(agents.ekko(&["--check", "1"]).status.success());
+    session.asks();
+    assert!(agents.logged("no task of its own in progress to mark on the board; its window named \"1 \u{b7} haiku \u{b7} waiting on you\""));
+    session.ran();
+    assert!(agents.logged("waits on you no more (PostToolUse): nothing to clear on the board; its window named \"1 \u{b7} haiku\" again"));
+
+    assert!(agents.ekko(&["--check", "1"]).status.success(), "reopened");
+    session.ekko(&["--begin", "1"], "");
+    session.asks();
+    assert!(agents.context("1").contains("waiting on you since"));
+    drop(session);
+    let context = agents.context("1");
+    assert!(context.contains("task, in progress, held by ") && context.contains(", gone since "), "{context}");
+    assert!(!context.contains("waiting on you"), "a session that has ended waits on no one: {context}");
+    assert!(!String::from_utf8(agents.ekko(&[]).stdout).unwrap().contains("waiting on you"));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// The born hook's runs for one session take turns (task 1645): Claude Code
+/// fires PostToolUse for tools that ran side by side at once, and a prompt
+/// typed while they run, and each run reads what it keeps of the session
+/// and writes it back -- a run that wrote back what it read before
+/// another's write would lose the prompt that one counted, which keeps a
+/// session the user talks to. In a loop, as a race wants.
+#[test]
+fn the_born_hook_counts_every_prompt_while_tools_end_beside_it() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    let uid = agents.uid(1);
+    agents.name_window("1 \u{b7} haiku");
+    let kept = agents.home.join(".local/state/ekko/born/s-1.json");
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    for round in 1..=10 {
+        let mut born: serde_json::Value = fs::read_to_string(&kept).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or(serde_json::json!({"prompts": 0, "talked": false}));
+        born["waiting"] = serde_json::json!({"since": 0, "what": "Claude needs your permission to use Bash", "window": "1 \u{b7} haiku \u{b7} waiting on you"});
+        fs::write(&kept, born.to_string()).unwrap();
+        let mut runs = vec![agents.born_start(Some(&uid), "s-1", "UserPromptSubmit", serde_json::json!({"prompt": "go on"}))];
+        for _ in 0..4 {
+            runs.push(agents.born_start(Some(&uid), "s-1", "PostToolUse", serde_json::json!({"tool_name": "Read", "tool_input": {}})));
+        }
+        for run in &mut runs {
+            let mut said = String::new();
+            run.stdout.take().unwrap().read_to_string(&mut said).unwrap();
+            run.kill().ok();
+            run.wait().ok();
+        }
+        let born: serde_json::Value = serde_json::from_str(&fs::read_to_string(&kept).unwrap()).unwrap();
+        assert_eq!(born["prompts"], round, "round {round}: {born}");
+        assert!(born.get("waiting").is_none(), "round {round}: {born}");
+    }
     fs::remove_dir_all(&agents.home).ok();
 }

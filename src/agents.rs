@@ -3,7 +3,9 @@
 //! multiplexer, with the model and effort chosen for those tasks, in a
 //! worktree of its own. It lives for its tasks; the user sees its window,
 //! and may step into it and talk to it. Its hook (task 1643) closes it once
-//! its tasks are finished, unless the user talks to it after that.
+//! its tasks are finished, unless the user talks to it after that, and says
+//! on the board and in its window's name when it waits on the user (task
+//! 1645).
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -373,6 +375,24 @@ impl Mux {
         Ok(self.panes()?.iter().any(|line| line.split(' ').next() == Some(pane)))
     }
 
+    /// The name of the window `pane` is in.
+    fn window_name(&self, pane: &str) -> Result<String, String> {
+        let output = self.run(&["display-message", "-p", "-t", pane, "#{window_name}"])?;
+        if !output.status.success() {
+            return Err(self.failed("display-message", &output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim_end_matches('\n').to_string())
+    }
+
+    /// Names the window `pane` is in `name`.
+    fn rename(&self, pane: &str, name: &str) -> Result<(), String> {
+        let output = self.run(&["rename-window", "-t", pane, name])?;
+        if !output.status.success() {
+            return Err(self.failed("rename-window", &output));
+        }
+        Ok(())
+    }
+
     fn attach(&self) -> String {
         let binary = Path::new(&self.binary).file_name().unwrap_or(self.binary.as_os_str()).to_string_lossy().into_owned();
         let server: String = self.server.iter().map(|arg| format!(" {}", arg.to_string_lossy())).collect();
@@ -465,49 +485,126 @@ const GRACE: Duration = Duration::from_secs(1);
 const GONE_WITHIN: Duration = Duration::from_secs(10);
 
 /// What the hook keeps of a born session between its events, in ekko's
-/// state directory: how many prompts reached it, and whether one reached it
-/// once its tasks were finished.
+/// state directory: how many prompts reached it, whether one reached it
+/// once its tasks were finished, what it waits on the user for, and what
+/// the permission it asks for is for.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Born {
     prompts: u64,
     talked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    waiting: Option<Waiting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    asked: Option<String>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
     unknown: BTreeMap<String, serde_json::Value>,
 }
 
-/// The hook of a born session (task 1643), on Claude Code's
-/// UserPromptSubmit and Stop; nothing in a session `start` did not open,
-/// which has no EKKO_AGENT_TASK. Each prompt is counted, and whether the
-/// session's tasks were all finished -- done or cancelled -- when it came:
-/// the user talking to a session whose work is over makes it theirs (design
-/// item 2). A prompt typed while a turn runs counts when it is typed, which
-/// is when Claude Code 2.1.295 fires the event for it, into the turn that
-/// runs. At the end of a turn, a session whose tasks are all finished, that
-/// no prompt reached since, with no background work in flight, is closed by
-/// a process of its own, which outlives the hook.
+/// A born session waiting on the user (task 1645): since when, for what,
+/// and the name its window was given then, if it was.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Waiting {
+    since: i64,
+    what: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window: Option<String>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// The notifications that say a born session waits on the user, as Claude
+/// Code 2.1.295 names them (its hooks page): a permission prompt, or an MCP
+/// server's dialog -- ekko's ask among them -- unanswered for about six
+/// seconds, and a turn over a minute ago with nothing typed since.
+const WAITS_ON_USER: &[&str] = &["permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "idle_prompt"];
+
+/// What a born session's window name ends with while it waits on the user.
+pub const WAITING_ON_YOU: &str = " \u{b7} waiting on you";
+
+/// The events of Claude Code the born hook acts on, each of which the
+/// plugin runs it on: the prompts and the turn's end (task 1643), the
+/// permission asked for, the notifications that the session waits on the
+/// user, and the events that say it moved on (task 1645).
+pub const EVENTS: &[&str] = &["UserPromptSubmit", "Stop", "PermissionRequest", "Notification", "PostToolUse", "PostToolUseFailure", "ElicitationResult"];
+
+/// The hook of a born session (tasks 1643 and 1645), on each event of
+/// `EVENTS`; nothing in a session `start` did not open, which has no
+/// EKKO_AGENT_TASK. One run at a time for a session, as Claude Code fires
+/// PostToolUse for tools that ran side by side at once.
+///
+/// A notification that the session waits on the user marks it so (design
+/// item 4), with what it waits for -- for a permission, the tool and what
+/// it was to do, as the request for it said: on the board, on each of its
+/// tasks it holds, and in its window's name. Whichever event comes next --
+/// a tool that ran once the user let it, the user's prompt, the turn's
+/// end, a dialog answered -- says it moved on, and clears both.
+///
+/// Each prompt is counted, and whether the session's tasks were all
+/// finished -- done or cancelled -- when it came: the user talking to a
+/// session whose work is over makes it theirs (design item 2). A prompt
+/// typed while a turn runs counts when it is typed, which is when Claude
+/// Code 2.1.295 fires the event for it, into the turn that runs. At the end
+/// of a turn, a session whose tasks are all finished, that no prompt
+/// reached since, with no background work in flight, is closed by a process
+/// of its own, which outlives the hook.
 pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
     let Some(tasks) = std::env::var(TASKS_VAR).ok().filter(|tasks| !tasks.trim().is_empty()) else {
         return std::process::ExitCode::SUCCESS;
     };
     let input: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
     let session = input["session_id"].as_str().unwrap_or_default();
-    let finished = finished(home, cwd, &tasks);
-    match input["hook_event_name"].as_str().unwrap_or_default() {
+    let event = input["hook_event_name"].as_str().unwrap_or_default();
+    if !EVENTS.contains(&event) {
+        return std::process::ExitCode::SUCCESS;
+    }
+    let _alone = lock_born(home, session);
+    let mut born = read_born(home, session);
+    match event {
+        // Kept for the notification that may follow, whose message names
+        // no tool: "Claude needs your permission", in Claude Code 2.1.295.
+        "PermissionRequest" => {
+            born.asked = Some(asked_for(&input["tool_name"], &input["tool_input"]));
+            write_born(home, session, &born);
+            return std::process::ExitCode::SUCCESS;
+        }
+        "Notification" => {
+            let kind = input["notification_type"].as_str().unwrap_or_default();
+            if WAITS_ON_USER.contains(&kind) && born.waiting.is_none() {
+                let mut what = input["message"].as_str().map(str::trim).filter(|what| !what.is_empty()).unwrap_or(kind).to_string();
+                if let Some(asked) = born.asked.as_ref().filter(|_| kind == "permission_prompt") {
+                    what = format!("{what} -- {asked}");
+                }
+                let what = crate::agent::clip(&what, 200);
+                born.waiting = wait_on_user(home, cwd, &tasks, session, kind, &what);
+                write_born(home, session, &born);
+            }
+            return std::process::ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
+    if born.waiting.is_some() || born.asked.is_some() {
+        born.asked = None;
+        if let Some(waiting) = born.waiting.take() {
+            answered(home, cwd, &tasks, session, event, &waiting);
+        }
+        write_born(home, session, &born);
+    }
+    match event {
         "UserPromptSubmit" => {
-            let mut born = read_born(home, session);
             born.prompts += 1;
-            if finished.is_ok() && !born.talked {
+            if finished(home, cwd, &tasks).is_ok() && !born.talked {
                 born.talked = true;
                 log(home, session, &tasks, "a prompt reached it after its tasks were finished: it stays, the user's now");
             }
             write_born(home, session, &born);
         }
         "Stop" => {
-            let born = read_born(home, session);
             let busy = |key: &str| input[key].as_array().is_some_and(|work| !work.is_empty());
-            let stays = match finished {
+            let stays = match finished(home, cwd, &tasks) {
                 Err(why) => Some(why),
                 Ok(()) if born.talked => Some("a prompt reached it after its tasks were finished".to_string()),
                 Ok(()) if busy("background_tasks") || busy("session_crons") => Some("background work is in flight".to_string()),
@@ -532,13 +629,145 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
+/// What a permission request is for, as a person reads it: the tool, and
+/// the command, the file, the address or the pattern it was given, else
+/// its input whole, on one line, clipped.
+fn asked_for(tool: &serde_json::Value, input: &serde_json::Value) -> String {
+    let tool = tool.as_str().unwrap_or("a tool");
+    let given = ["command", "file_path", "notebook_path", "url", "path", "pattern"].iter().find_map(|key| input[key].as_str().map(str::to_string));
+    let given = given.unwrap_or_else(|| if input.is_null() { String::new() } else { input.to_string() });
+    let asked = if given.is_empty() { tool.to_string() } else { format!("{tool}: {given}") };
+    crate::agent::clip(&asked, 100)
+}
+
+/// Marks that the session waits on the user, for `what`: on the board, on
+/// each of its tasks its process holds in progress, and at the end of its
+/// window's name. A turn over with nothing typed since is no wait on the
+/// user while the session waits on the board, through ekko's wait: then
+/// nothing is marked. What it marked, to clear.
+fn wait_on_user(home: &Path, cwd: &Path, tasks: &str, session: &str, kind: &str, what: &str) -> Option<Waiting> {
+    let since = chrono::Local::now().timestamp_millis();
+    let board = match crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of) {
+        None => "not marked on the board: no Claude Code process is among its ancestors".to_string(),
+        Some(process) => {
+            let ekko = board(home, cwd);
+            if kind == "idle_prompt" {
+                if let Some(note) = ekko.as_ref().ok().and_then(|ekko| waits_on_board(ekko, &process)) {
+                    log(home, session, tasks, &format!("does not wait on you ({kind}): it waits on the board, through note {note}"));
+                    return None;
+                }
+            }
+            let on = crate::holder::OnUser { since, what: what.to_string(), unknown: BTreeMap::new() };
+            match ekko.and_then(|ekko| mark_holds(&ekko, tasks, &process, Some(on))) {
+                Ok(ids) if ids.is_empty() => "no task of its own in progress to mark on the board".to_string(),
+                Ok(ids) => format!("marked on task {}", listed(&ids)),
+                Err(why) => format!("not marked on the board: {why}"),
+            }
+        }
+    };
+    let pane = Mux::of_this_pane().zip(set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned()));
+    let renamed = pane.ok_or_else(|| "in no multiplexer's pane".to_string()).and_then(|(mux, pane)| {
+        let name = mux.window_name(&pane)?;
+        if name.ends_with(WAITING_ON_YOU) {
+            return Ok(name);
+        }
+        let renamed = format!("{name}{WAITING_ON_YOU}");
+        mux.rename(&pane, &renamed).map(|()| renamed)
+    });
+    let window = match &renamed {
+        Ok(name) => format!("its window named \"{name}\""),
+        Err(why) => format!("its window not renamed: {why}"),
+    };
+    log(home, session, tasks, &format!("waits on you ({kind}): {what}; {board}; {window}"));
+    Some(Waiting { since, what: what.to_string(), window: renamed.ok(), unknown: BTreeMap::new() })
+}
+
+/// Clears what `wait_on_user` marked, now that `event` says the session
+/// moved on. A window the user renamed meanwhile keeps their name.
+fn answered(home: &Path, cwd: &Path, tasks: &str, session: &str, event: &str, waiting: &Waiting) {
+    let board = match crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of) {
+        None => "left on the board: no Claude Code process is among its ancestors".to_string(),
+        Some(process) => match board(home, cwd).and_then(|ekko| mark_holds(&ekko, tasks, &process, None)) {
+            Ok(ids) if ids.is_empty() => "nothing to clear on the board".to_string(),
+            Ok(ids) => format!("cleared on task {}", listed(&ids)),
+            Err(why) => format!("left on the board: {why}"),
+        },
+    };
+    let window = match (&waiting.window, Mux::of_this_pane(), set("TMUX_PANE")) {
+        (None, _, _) => "its window was not renamed".to_string(),
+        (Some(renamed), Some(mux), Some(pane)) => {
+            let pane = pane.to_string_lossy();
+            let named = renamed.strip_suffix(WAITING_ON_YOU).unwrap_or(renamed);
+            match mux.window_name(&pane) {
+                Ok(now) if now == *renamed => match mux.rename(&pane, named) {
+                    Ok(()) => format!("its window named \"{named}\" again"),
+                    Err(why) => format!("its window not renamed back: {why}"),
+                },
+                Ok(now) => format!("its window kept the name it was given meanwhile, \"{now}\""),
+                Err(why) => format!("its window not renamed back: {why}"),
+            }
+        }
+        (Some(_), _, _) => "its window not renamed back: in no multiplexer's pane".to_string(),
+    };
+    log(home, session, tasks, &format!("waits on you no more ({event}): {board}; {window}"));
+}
+
+/// The board this session works on: the project EKKO_PROJECT names, as
+/// `start` gave it.
+fn board(home: &Path, cwd: &Path) -> Result<Ekko, String> {
+    let (ekko_dir, project) = (std::env::var("EKKO_DIR").ok(), std::env::var("EKKO_PROJECT").ok());
+    let location = crate::directory::locate(home, cwd, None, ekko_dir.as_deref(), project.as_deref()).map_err(|error| EkkoError::from(error).to_string())?;
+    Ekko::at(&location).map_err(|error| error.to_string())
+}
+
+/// The note through which `process` waits on an item, with ekko's wait,
+/// while it does.
+fn waits_on_board(ekko: &Ekko, process: &Process) -> Option<u32> {
+    let all = ekko.storage.get_shared().ok()?;
+    let mut waits: Vec<u32> = all
+        .values()
+        .filter(|note| note.trashed.is_none() && note.stashed.is_none())
+        .filter(|note| note.wait.as_ref().is_some_and(|wait| wait.over.is_none() && wait.by.process().as_ref() == Some(process)))
+        .map(|note| note.id)
+        .collect();
+    waits.sort_unstable();
+    waits.first().copied()
+}
+
+/// Sets `on` -- what the session waits on the user for, or `None` to clear
+/// it -- on each of the tasks `named` that `process` holds in progress, in
+/// one write. A task marked already keeps the mark it has. The ids it
+/// changed.
+fn mark_holds(ekko: &Ekko, named: &str, process: &Process, on: Option<crate::holder::OnUser>) -> Result<Vec<u32>, String> {
+    let _lock = ekko.storage.acquire_lock().map_err(|error| EkkoError::from(error).to_string())?;
+    let before = ekko.storage.get_shared().map_err(|error| EkkoError::from(error).to_string())?;
+    let mut data = ItemMap::clone(&before);
+    let index = crate::ekko::uid_index(&before);
+    let mut changed = Vec::new();
+    for name in named.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        let Some(task) = index.get(name).copied().or_else(|| name.parse::<u32>().ok()).and_then(|id| data.get_mut(&id)) else { continue };
+        if State::of(task) != Some(State::Progress) {
+            continue;
+        }
+        let Some(holder) = task.held_by.as_mut().filter(|holder| holder.process().as_ref() == Some(process)) else { continue };
+        if holder.waits_on_user.is_some() == on.is_some() {
+            continue;
+        }
+        holder.waits_on_user = on.clone();
+        changed.push(task.id);
+    }
+    if !changed.is_empty() {
+        ekko.save_against(&before, &mut data).map_err(|error| error.to_string())?;
+    }
+    changed.sort_unstable();
+    Ok(changed)
+}
+
 /// Whether the tasks `named` -- EKKO_AGENT_TASK's uids, or display ids where
 /// a task has none -- are all finished, done or cancelled, on the board this
 /// session works on; why not, if not.
 fn finished(home: &Path, cwd: &Path, named: &str) -> Result<(), String> {
-    let (ekko_dir, project) = (std::env::var("EKKO_DIR").ok(), std::env::var("EKKO_PROJECT").ok());
-    let location = crate::directory::locate(home, cwd, None, ekko_dir.as_deref(), project.as_deref()).map_err(|error| EkkoError::from(error).to_string())?;
-    let all = Ekko::at(&location).and_then(|ekko| ekko.storage.get_shared().map_err(EkkoError::from)).map_err(|error| error.to_string())?;
+    let all = board(home, cwd)?.storage.get_shared().map_err(|error| EkkoError::from(error).to_string())?;
     let index = crate::ekko::uid_index(&all);
     for name in named.split(',').map(str::trim).filter(|name| !name.is_empty()) {
         let id = index.get(name).copied().or_else(|| name.parse::<u32>().ok());
@@ -665,6 +894,14 @@ fn born_file(home: &Path, session: &str) -> PathBuf {
     born_dir(home).join(format!("{}.json", if name.is_empty() { "unknown" } else { &name }))
 }
 
+/// The lock that has the hook's runs for `session` take turns, held until
+/// it is dropped; none where it cannot be taken, which leaves the runs as
+/// they were before there was one.
+fn lock_born(home: &Path, session: &str) -> Option<std::fs::File> {
+    std::fs::create_dir_all(born_dir(home)).ok()?;
+    crate::storage::lock_path(&born_file(home, session).with_extension("lock")).ok()
+}
+
 fn read_born(home: &Path, session: &str) -> Born {
     std::fs::read_to_string(born_file(home, session)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
 }
@@ -710,5 +947,51 @@ mod tests {
         assert_eq!(listed(&[1]), "1");
         assert_eq!(listed(&[1, 2]), "1 and 2");
         assert_eq!(listed(&[1, 2, 3]), "1, 2 and 3");
+    }
+
+    /// What a permission is asked for reads as the tool and what it was
+    /// given -- its command, file, address or pattern, else its input --
+    /// on one line, and short.
+    #[test]
+    fn a_permission_is_asked_for_a_tool_and_what_it_was_given() {
+        let asked = |tool: &str, input: serde_json::Value| asked_for(&serde_json::json!(tool), &input);
+        assert_eq!(asked("Bash", serde_json::json!({"command": "date > stamp.txt", "description": "Write the date"})), "Bash: date > stamp.txt");
+        assert_eq!(asked("Write", serde_json::json!({"file_path": "/a/b.rs", "content": "x"})), "Write: /a/b.rs");
+        assert_eq!(asked("WebFetch", serde_json::json!({"url": "https://example.com", "prompt": "p"})), "WebFetch: https://example.com");
+        assert_eq!(asked("mcp__ekko__trash", serde_json::json!({"items": [3]})), "mcp__ekko__trash: {\"items\":[3]}");
+        assert_eq!(asked_for(&serde_json::Value::Null, &serde_json::Value::Null), "a tool");
+        let long = asked("Bash", serde_json::json!({"command": format!("cat <<'EOF'\n{}\nEOF", "word ".repeat(40))}));
+        assert!(!long.contains('\n') && long.ends_with(" chars)") && long.chars().count() < 120, "{long}");
+    }
+
+    /// The plugin runs the born hook on every event it acts on, for every
+    /// tool where the event has tools, and on Notification for each kind
+    /// that says the session waits on the user: an event or a kind left out
+    /// of plugin.json is one the hook never hears of (task 1645).
+    #[test]
+    fn the_plugin_runs_the_born_hook_on_every_event_it_acts_on() {
+        let plugin = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/.claude-plugin/plugin.json")).unwrap();
+        let plugin: serde_json::Value = serde_json::from_str(&plugin).unwrap();
+        let born = |entry: &&serde_json::Value| entry["hooks"].as_array().is_some_and(|hooks| hooks.iter().any(|hook| hook["command"] == "ekko --born --hook"));
+        let mut events = Vec::new();
+        for (event, entries) in plugin["hooks"].as_object().unwrap() {
+            for entry in entries.as_array().unwrap().iter().filter(born) {
+                events.push(event.as_str());
+                let matcher = entry["matcher"].as_str();
+                if event == "Notification" {
+                    let mut kinds: Vec<&str> = matcher.unwrap_or_default().split('|').collect();
+                    let mut waits = WAITS_ON_USER.to_vec();
+                    kinds.sort_unstable();
+                    waits.sort_unstable();
+                    assert_eq!(kinds, waits, "the kinds of Notification the plugin sends the born hook");
+                } else {
+                    assert_eq!(matcher, None, "{event} reaches the born hook for some tools only");
+                }
+            }
+        }
+        let mut expected = EVENTS.to_vec();
+        events.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(events, expected, "the events the plugin runs the born hook on");
     }
 }

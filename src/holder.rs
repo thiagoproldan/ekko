@@ -139,6 +139,7 @@ impl Actor {
             tty: self.tty.clone(),
             conversation: self.conversation(),
             since,
+            waits_on_user: None,
             unknown: BTreeMap::new(),
         }
     }
@@ -198,6 +199,26 @@ pub struct Holder {
     pub conversation: Option<String>,
     /// When the claim was made, in milliseconds.
     pub since: i64,
+    /// What the holding session waits on the user for, while it does: a
+    /// session ekko agents started, stopped at a permission prompt, a
+    /// dialog, or the end of a turn the user has not answered (task 1645).
+    /// Its hook marks it and clears it; it goes with the claim, and means
+    /// nothing once the process has ended. Absent unless set.
+    #[serde(rename = "waitsOnUser", default, skip_serializing_if = "Option::is_none")]
+    pub waits_on_user: Option<OnUser>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// What a session holding a task waits on the user for (task 1645).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OnUser {
+    /// When it began to wait, in milliseconds.
+    pub since: i64,
+    /// In Claude Code's words: `Claude needs your permission to use Bash`.
+    pub what: String,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -207,6 +228,11 @@ pub struct Holder {
 impl Holder {
     pub fn process(&self) -> Option<Process> {
         Some(Process { pid: self.pid?, start: self.start?, boot: self.boot.clone()? })
+    }
+
+    /// What the holding session waits on the user for, while it still runs.
+    pub fn waits(&self) -> Option<&OnUser> {
+        self.waits_on_user.as_ref().filter(|_| self.process().is_some_and(|process| process.alive()))
     }
 
     /// Whether the claim still stands: a person's lasts until the task
@@ -333,6 +359,7 @@ impl Running {
             tty: self.tty.clone(),
             conversation: Some(self.conversation.clone()),
             since: self.since,
+            waits_on_user: None,
             unknown: BTreeMap::new(),
         };
         holder.label()

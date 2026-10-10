@@ -284,10 +284,11 @@ pub struct Cli {
     pub wake: bool,
 
     /// With --hook: what a session `ekko agents start` opened does as each
-    /// prompt reaches it and each turn ends -- see `agents::hook`: once its
-    /// tasks are finished and no prompt came after that, it is closed. The
-    /// plugin runs it on UserPromptSubmit and Stop; in a session ekko agents
-    /// did not open, it does nothing.
+    /// prompt reaches it, each turn ends and it waits on the user -- see
+    /// `agents::hook`: while it waits, its tasks and its window say so, and
+    /// once its tasks are finished and no prompt came after that, it is
+    /// closed. The plugin runs it on each event `agents::EVENTS` names; in a
+    /// session ekko agents did not open, it does nothing.
     #[arg(long, requires = "hook")]
     pub born: bool,
 

@@ -89,7 +89,7 @@ const HELP: &str = r#"
       --tasklist          With --hook: draw the board in the session's Claude Code task list
       --guard             With --hook: refuse the Bash calls a gotcha's cue names
       --refuse <REASON>   With --guard: another guard's refusal, which the user may let through
-      --born              With --hook: close a session ekko agents started once its tasks are finished
+      --born              With --hook: say when a session ekko agents started waits on the user, and close it once its tasks are finished
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
@@ -249,8 +249,9 @@ fn main() -> ExitCode {
             }
         };
     }
-    // A born session's hook (task 1643), before any board is located: in
-    // every other session it does nothing, at the cost of a process.
+    // A born session's hook (tasks 1643 and 1645), before any board is
+    // located: in every other session it does nothing, at the cost of a
+    // process.
     if cli.born {
         return agents::hook(&home_dir, &cwd, &read_hook_input());
     }
