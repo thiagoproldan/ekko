@@ -526,7 +526,8 @@ fn first_prompt(ids: &[u32], beside: &[u32], branch: &str, worktree: &Path) -> S
         "ekko agents started this session to do {tasks} on this project's ekko board, and nothing else. \
          Before you change anything, set {tasks} in progress with ekko's set_state, then read {them} in full with ekko's context. \
          Work in this worktree, {}, on its branch {branch}, and commit there; do not push, merge into another branch, release, start or stop sessions, \
-         kill or respawn the multiplexer's panes, windows or sessions, or change the board's phases. \
+         kill processes (stop a background command of yours with the tool that stops it), kill or respawn the multiplexer's panes, windows or sessions, \
+         type into its other panes or have it run a command, or change the board's phases. \
          While you work, ekko tells you of each note the user or another session attaches to {tasks}, in a line that begins \"ekko:\", \
          at times inside a tool's result: it comes from ekko's hook, not from the tool, so take it into account.{group} \
          When {each} is done, write its closing note with ekko's create, {attached} -- a note of its own, not an edit of the task's text: \
@@ -1107,12 +1108,29 @@ pub enum Limit {
     /// none (`NO_SESSION`).
     Session,
     /// What stops, restarts or removes Claude Code's sessions (task 1716):
-    /// `claude stop`, `kill`, `rm` and `respawn` (`ON_SESSIONS`).
+    /// `claude stop`, `kill`, `rm` and `respawn`, and `purge`, which deletes
+    /// a project's state (task 1742) (`ON_SESSIONS`).
     Stop,
     /// What kills or respawns the multiplexer's panes, windows, sessions or
     /// server (task 1716): a `kill-*` or `respawn-*` command (`KILLS`) of
-    /// tmux, kmux, ztmux, or the binary `EKKO_MUX` names, as `kills` reads it.
+    /// tmux, kmux, ztmux, or the binary `EKKO_MUX` names, and the `-k` that
+    /// kills a window `new-window`, `link-window`, `move-window` or
+    /// `unlink-window` replaces or leaves (task 1742), as `mux_limit` reads
+    /// them.
     Kill,
+    /// What signals processes (task 1742): `kill`, `pkill`, `killall` and
+    /// `skill`, whatever they are given, but to list the signals or ask for
+    /// their help or version (`signals`).
+    Signal,
+    /// What has the multiplexer run a command it is given (task 1742): a
+    /// command of `REACHES` given one, a hook or another option of
+    /// `RUN_OPTIONS` set, a copy mode pipe, a format's `#()`, or its own
+    /// `-c`.
+    Runs,
+    /// What types into another pane than the session's own (task 1742):
+    /// `send-keys`, `paste-buffer` and `send-prefix` with a `-t` that names
+    /// another, or on a server another `-L` or `-S` names.
+    Keys,
 }
 
 impl Limit {
@@ -1122,8 +1140,14 @@ impl Limit {
             Limit::Push => "does not push or open a pull request: its branch is the orchestrator's to merge, and what reaches a remote is the user's to send",
             Limit::Release => "does not release or deploy: that waits on the user's word",
             Limit::Session => "does not start sessions: the orchestrator starts them, each with a context and a cost of its own",
-            Limit::Stop => "does not stop, respawn or remove Claude Code's sessions: they are the orchestrator's and the user's to end",
+            Limit::Stop => "does not stop, respawn or remove Claude Code's sessions, nor purge their state: they are the orchestrator's and the user's to end",
             Limit::Kill => "does not kill or respawn the multiplexer's panes, windows, sessions or server: the orchestrator, the user and the other born sessions run there",
+            Limit::Signal => "does not signal processes with kill, pkill or killall: the orchestrator's, the user's and the other born sessions' run on this machine too",
+            Limit::Runs => {
+                "does not have the multiplexer run a command for it -- run-shell, if-shell, a key binding, a hook, a popup, a new window's command, a file of commands, \
+                 a format's #(): the guard does not see what that command does"
+            }
+            Limit::Keys => "does not type into another pane than its own: the others are the orchestrator's, the user's and the other born sessions'",
         }
     }
 }
@@ -1144,15 +1168,15 @@ const CLAUDE_VALUED: &[&str] = &[
 /// end one are `ON_SESSIONS`; its others -- `agents`, `attach`,
 /// `ultrareview` -- start or open one, and any other first operand is a
 /// prompt.
-const NO_SESSION: &[&str] = &[
-    "auth", "auto-mode", "doctor", "gateway", "import", "install", "logs", "mcp", "plugin", "plugins", "purge", "setup-token", "update",
-    "upgrade",
-];
+const NO_SESSION: &[&str] =
+    &["auth", "auto-mode", "doctor", "gateway", "import", "install", "logs", "mcp", "plugin", "plugins", "setup-token", "update", "upgrade"];
 
 /// Claude Code's commands that stop, restart or remove its background
 /// sessions, as `claude --help` lists them (2.1.296): `stop` and its alias
-/// `kill`, `rm`, and `respawn`, which restarts one or, with `--all`, all.
-const ON_SESSIONS: &[&str] = &["stop", "kill", "rm", "respawn"];
+/// `kill`, `rm`, and `respawn`, which restarts one or, with `--all`, all;
+/// and `purge`, which deletes a project's transcripts, tasks, file history
+/// and config entry, or every project's (task 1742), but with `--dry-run`.
+const ON_SESSIONS: &[&str] = &["stop", "kill", "rm", "respawn", "purge"];
 
 /// The multiplexers ekko agents speaks to by name; the binary `EKKO_MUX`
 /// names is one too.
@@ -1169,20 +1193,192 @@ const KILLS: &[(&str, Option<&str>)] = &[
     ("respawn-window", Some("respawnw")),
 ];
 
+/// What tmux's other commands do that a born session leaves to others
+/// (task 1742, the user's answer 1740), as their usage lines in `list-commands`
+/// read: tmux 3.7c's, and kmux 3.7.47's, which takes a value after more
+/// options and has two commands more.
+struct Reach {
+    name: &'static str,
+    /// The options it takes a value after, in tmux or kmux: either refuses
+    /// an option it does not know, and runs nothing.
+    valued: &'static str,
+    /// Kills, given `-k`, the window it would replace or leave.
+    kills_with_k: bool,
+    /// Runs a command it is given (`Limit::Runs`): the operand past this
+    /// many, or the value of this option.
+    runs_past: Option<usize>,
+    runs_by: Option<char>,
+    /// Sets the option its first operand names, which may hold a command
+    /// (`RUN_OPTIONS`).
+    sets: bool,
+    /// Types into the pane its `-t` names (`Limit::Keys`).
+    types: bool,
+}
+
+impl Reach {
+    const fn of(name: &'static str, valued: &'static str) -> Reach {
+        Reach { name, valued, kills_with_k: false, runs_past: None, runs_by: None, sets: false, types: false }
+    }
+
+    const fn runs(name: &'static str, valued: &'static str, past: usize) -> Reach {
+        Reach { runs_past: Some(past), ..Reach::of(name, valued) }
+    }
+}
+
+/// Each command whose usage takes a command to run -- a `command`, a
+/// `shell-command`, a `template` -- or, for `source-file`, a file of them;
+/// those whose `-k` kills a window; those that set an option; and those that
+/// type into a pane.
+const REACHES: &[Reach] = &[
+    Reach::runs("bind-key", "TN", 1),
+    Reach::runs("choose-buffer", "FfKOt", 0),
+    Reach::runs("choose-client", "FfKOt", 0),
+    Reach::runs("choose-tree", "FfKOt", 0),
+    Reach::runs("command-prompt", "IptT", 0),
+    Reach::runs("confirm-before", "cpt", 0),
+    Reach { runs_by: Some('E'), ..Reach::of("detach-client", "Est") },
+    Reach::runs("display-menu", "bcCHsStTxy", 2),
+    Reach::runs("display-panes", "dt", 0),
+    Reach::runs("display-popup", "bcdehsStTwxy", 0),
+    Reach::runs("if-shell", "t", 0),
+    Reach { kills_with_k: true, ..Reach::of("link-window", "st") },
+    Reach { kills_with_k: true, ..Reach::of("move-window", "st") },
+    Reach::runs("new-pane", "BceFlmpsSRTxyXYt", 0),
+    Reach::runs("new-session", "ceFfnstxy", 0),
+    Reach { kills_with_k: true, ..Reach::runs("new-window", "ceFnt", 0) },
+    Reach { types: true, ..Reach::of("paste-buffer", "sbt") },
+    Reach::runs("pipe-pane", "t", 0),
+    Reach::runs("run-shell", "cdt", 0),
+    Reach { types: true, ..Reach::of("send-keys", "cNt") },
+    Reach { types: true, ..Reach::of("send-prefix", "t") },
+    Reach::runs("set-hook", "t", 1),
+    Reach { sets: true, ..Reach::of("set-option", "t") },
+    Reach { sets: true, ..Reach::of("set-window-option", "t") },
+    Reach::runs("source-file", "t", 0),
+    Reach::runs("split-window", "ceFlmpsSRTt", 0),
+    Reach::runs("switch-mode", "Ft", 0),
+    Reach { kills_with_k: true, ..Reach::of("unlink-window", "t") },
+    Reach::runs("znative", "", 0),
+];
+
+/// The options whose value tmux runs, as `show-hooks -g`, `-gw`, `show -s`
+/// and `show -g` list them (3.7c; kmux 3.7.47 the same): its hooks, which
+/// `set-option` sets as `set-hook` does, and those that hold a command or a
+/// shell to run. A format's `#()` runs one too, in any option or argument.
+const RUN_OPTIONS: &str = "after-bind-key after-capture-pane after-copy-mode after-display-message after-display-panes \
+    after-kill-pane after-list-buffers after-list-clients after-list-keys after-list-panes after-list-sessions \
+    after-list-windows after-load-buffer after-lock-server after-new-session after-new-window after-paste-buffer \
+    after-pipe-pane after-queue after-refresh-client after-rename-session after-rename-window after-resize-pane \
+    after-resize-window after-save-buffer after-select-layout after-select-pane after-select-window after-send-keys \
+    after-set-buffer after-set-environment after-set-hook after-set-option after-show-environment after-show-messages \
+    after-show-options after-split-window after-unbind-key alert-activity alert-bell alert-silence client-active \
+    client-attached client-detached client-focus-in client-focus-out client-resized client-session-changed \
+    client-light-theme client-dark-theme command-error session-closed session-created session-renamed \
+    session-window-changed window-linked window-unlinked pane-died pane-exited pane-focus-in pane-focus-out \
+    pane-mode-changed pane-set-clipboard pane-title-changed window-layout-changed window-pane-changed window-renamed \
+    window-resized \
+    command-alias copy-command default-client-command default-command default-shell editor lock-command";
+
+/// tmux's commands, each with its alias, as `tmux list-commands -F
+/// '#{command_list_name}:#{command_list_alias}'` lists them (3.7c), and the
+/// two kmux 3.7.47 has more, switch-mode and znative: what a word of their
+/// command line may name.
+const TMUX_COMMANDS: &str = "attach-session:attach bind-key:bind break-pane:breakp capture-pane:capturep choose-buffer: \
+    choose-client: choose-tree: clear-history:clearhist clear-prompt-history:clearphist clock-mode: command-prompt: \
+    confirm-before:confirm copy-mode: customize-mode: delete-buffer:deleteb detach-client:detach display-menu:menu \
+    display-message:display display-popup:popup display-panes:displayp find-window:findw has-session:has if-shell:if \
+    join-pane:joinp kill-pane:killp kill-server: kill-session: kill-window:killw last-pane:lastp last-window:last \
+    link-window:linkw list-buffers:lsb list-clients:lsc list-commands:lscm list-keys:lsk list-panes:lsp list-sessions:ls \
+    list-windows:lsw load-buffer:loadb lock-client:lockc lock-server:lock lock-session:locks move-pane:movep \
+    move-window:movew new-pane:newp new-session:new new-window:neww next-layout:nextl next-window:next \
+    paste-buffer:pasteb pipe-pane:pipep previous-layout:prevl previous-window:prev refresh-client:refresh \
+    rename-session:rename rename-window:renamew resize-pane:resizep resize-window:resizew respawn-pane:respawnp \
+    respawn-window:respawnw rotate-window:rotatew run-shell:run save-buffer:saveb select-layout:selectl \
+    select-pane:selectp select-window:selectw send-keys:send send-prefix: server-access: set-buffer:setb \
+    set-environment:setenv set-hook: set-option:set set-window-option:setw show-buffer:showb show-environment:showenv \
+    show-hooks: show-messages:showmsgs show-options:show show-prompt-history:showphist show-window-options:showw \
+    source-file:source split-window:splitw start-server:start suspend-client:suspendc swap-pane:swapp \
+    swap-window:swapw switch-client:switchc switch-mode: unbind-key:unbind unlink-window:unlinkw wait-for:wait znative:";
+
+/// tmux's command aliases as it starts (3.7c's command-alias option), which
+/// it reads before its commands' names: each, and the words it stands for.
+/// One the user adds is not known here.
+const TMUX_ALIASES: &[(&str, &[&str])] = &[
+    ("split-pane", &["split-window"]),
+    ("splitp", &["split-window"]),
+    ("server-info", &["show-messages", "-JT"]),
+    ("info", &["show-messages", "-JT"]),
+    ("choose-window", &["choose-tree", "-w"]),
+    ("choose-session", &["choose-tree", "-s"]),
+];
+
 /// The options tmux takes a value after, before its command: tmux.c's
-/// getopt string is "2c:CDdf:hlL:NqS:T:uUvV".
+/// getopt string is "2c:CDdf:hlL:NqS:T:uUvV". Its `-c` runs a shell command.
 const MUX_VALUED: &str = "cfLST";
 
-/// Whether a multiplexer given `args` runs a command that kills or
-/// respawns (`KILLS`), read as tmux reads its command line: its options as
-/// getopt reads them, then a command and its arguments, and another command
-/// after each argument that ends in a `;` not escaped -- `\;` in the shell.
-/// A word names a command as tmux's `cmd_find` reads it: by its alias, or
-/// by the start of its name; a start that more commands share names none,
-/// and runs nothing, so a start of a `KILLS` name is refused whichever
-/// it is.
-fn kills(args: &[String]) -> bool {
+/// The command tmux runs for `word`, as its `cmd_find` finds one: by its
+/// alias, by its name, or by a start of its name that no other name has.
+/// None for a start several names share, which tmux refuses as ambiguous.
+fn tmux_command(word: &str) -> Option<&'static str> {
+    let table = || TMUX_COMMANDS.split_whitespace().filter_map(|entry| entry.split_once(':'));
+    if let Some((name, _)) = table().find(|(_, alias)| *alias == word) {
+        return Some(name);
+    }
+    let starting: Vec<&'static str> = table().map(|(name, _)| name).filter(|name| name.starts_with(word)).collect();
+    match starting.as_slice() {
+        [one] => Some(one),
+        _ => starting.iter().find(|name| **name == word).copied(),
+    }
+}
+
+/// A command's arguments as tmux's getopt reads them, `valued` the options
+/// it takes a value after: its flags, its options' values, and its operands,
+/// from the first word that is no option, or after `--`.
+fn getopt<'a>(args: &[&'a str], valued: &str) -> (Vec<char>, Vec<(char, &'a str)>, Vec<&'a str>) {
+    let (mut flags, mut values) = (Vec::new(), Vec::new());
     let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        at += 1;
+        if *arg == "--" {
+            break;
+        }
+        let Some(cluster) = arg.strip_prefix('-').filter(|cluster| !cluster.is_empty()) else {
+            at -= 1;
+            break;
+        };
+        for (index, flag) in cluster.char_indices() {
+            if valued.contains(flag) {
+                // The rest of its word, or else the next word.
+                let rest = &cluster[index + flag.len_utf8()..];
+                let value = if rest.is_empty() {
+                    at += 1;
+                    args.get(at - 1).copied().unwrap_or_default()
+                } else {
+                    rest
+                };
+                values.push((flag, value));
+                break;
+            }
+            flags.push(flag);
+        }
+    }
+    (flags, values, args.get(at..).unwrap_or_default().to_vec())
+}
+
+/// What a born session leaves to others that a multiplexer given `args`
+/// would do, from the pane `own` (TMUX_PANE), read as tmux reads its
+/// command line: its options as getopt reads them, then a command and its
+/// arguments, and another command after each argument that ends in a `;`
+/// not escaped -- `\;` in the shell. A word names the command `tmux_command`
+/// finds for it, after tmux's own aliases. Each command is read by what
+/// its usage says it takes (`REACHES`): a command it kills (`KILLS`), a
+/// window its `-k` kills, a command it is given to run -- as an operand, an
+/// option's value, an option it sets, a copy mode pipe, a format's `#()` --
+/// a pane other than `own` it types into -- any pane, on a server another
+/// `-L` or `-S` names.
+fn mux_limit(args: &[String], own: Option<&str>) -> Option<Limit> {
+    let mut at = 0;
+    let mut elsewhere = false;
     while let Some(arg) = args.get(at) {
         at += 1;
         if arg == "--" {
@@ -1194,25 +1390,92 @@ fn kills(args: &[String]) -> bool {
         };
         // An option that takes a value takes the rest of its word, or else
         // the next word.
-        if flags.find(|flag| MUX_VALUED.contains(flag)).is_some_and(|valued| valued == flags.len() - 1) {
-            at += 1;
+        if let Some(valued) = flags.find(|flag| MUX_VALUED.contains(flag)) {
+            match flags.as_bytes()[valued] {
+                b'c' => return Some(Limit::Runs),
+                b'L' | b'S' => elsewhere = true,
+                _ => {}
+            }
+            if valued == flags.len() - 1 {
+                at += 1;
+            }
         }
     }
-    let mut command = true;
+    let mut command: Vec<&str> = Vec::new();
     for arg in args.iter().skip(at) {
         let ends = arg.ends_with(';') && !arg.ends_with("\\;");
         let word = if ends { &arg[..arg.len() - 1] } else { arg.as_str() };
-        if command && !word.is_empty() && KILLS.iter().any(|(name, alias)| *alias == Some(word) || name.starts_with(word)) {
-            return true;
+        if !word.is_empty() || !ends {
+            command.push(word);
         }
-        command = ends;
+        if ends {
+            if let Some(limit) = command_limit(&command, elsewhere, own) {
+                return Some(limit);
+            }
+            command.clear();
+        }
     }
-    false
+    command_limit(&command, elsewhere, own)
+}
+
+/// What one tmux command, `words` its name and arguments, would do that a
+/// born session leaves to others; see `mux_limit`.
+fn command_limit(words: &[&str], elsewhere: bool, own: Option<&str>) -> Option<Limit> {
+    let (first, rest) = words.split_first()?;
+    let expanded: Vec<&str>;
+    let (name, rest) = match TMUX_ALIASES.iter().find(|(alias, _)| alias == first) {
+        Some((_, stands)) => {
+            expanded = stands[1..].iter().copied().chain(rest.iter().copied()).collect();
+            (stands[0], expanded.as_slice())
+        }
+        None => (tmux_command(first)?, rest),
+    };
+    if KILLS.iter().any(|(kill, _)| *kill == name) {
+        return Some(Limit::Kill);
+    }
+    // A format's `#()` runs its shell command wherever the format is
+    // expanded.
+    if rest.iter().any(|word| word.contains("#(")) {
+        return Some(Limit::Runs);
+    }
+    let reach = REACHES.iter().find(|reach| reach.name == name)?;
+    let (flags, values, operands) = getopt(rest, reach.valued);
+    if reach.kills_with_k && flags.contains(&'k') {
+        return Some(Limit::Kill);
+    }
+    let option = operands.first().filter(|_| reach.sets).map(|option| option.split('[').next().unwrap_or_default());
+    // send-keys -X runs a copy mode command, and copy-pipe and its kin pipe
+    // to the command they are given.
+    let pipes = reach.types && flags.contains(&'X') && operands.first().is_some_and(|command| command.contains("pipe")) && operands.len() > 1;
+    if reach.runs_past.is_some_and(|past| operands.len() > past)
+        || reach.runs_by.is_some_and(|by| values.iter().any(|(flag, _)| *flag == by))
+        || option.is_some_and(|option| RUN_OPTIONS.split_whitespace().any(|runs| runs == option))
+        || pipes
+    {
+        return Some(Limit::Runs);
+    }
+    let target = values.iter().rev().find(|(flag, _)| *flag == 't').map(|(_, target)| *target);
+    (reach.types && (elsewhere || target.is_some_and(|target| Some(target) != own))).then_some(Limit::Keys)
+}
+
+/// Whether a `kill`, `pkill`, `killall` or `skill` given `args` signals a
+/// process (`Limit::Signal`): any but one that lists the signals -- `kill`
+/// whose first argument is `-l`, `killall -l` -- or asks for its help or its
+/// version. One with no argument is refused too, as `xargs kill` is: xargs
+/// gives it the pids or names the guard does not see. pkill's `-l` lists
+/// what it kills.
+fn signals(name: &str, args: &[String]) -> bool {
+    let only = |harmless: &[&str]| !args.is_empty() && args.iter().all(|arg| harmless.contains(&arg.as_str()));
+    match name {
+        "kill" => !args.first().is_some_and(|first| matches!(first.as_str(), "-l" | "-L" | "--list" | "--table" | "-h" | "--help" | "-V" | "--version")),
+        "killall" => !only(&["-l", "--list", "-h", "--help", "-V", "--version"]),
+        _ => !only(&["-h", "--help", "-V", "--version"]),
+    }
 }
 
 /// The limit the call `call`, run in `folder`, reaches, if any, in a session
-/// whose `EKKO_MUX` names the binary `mux`.
-pub fn limit_of(call: &crate::shell::Call, folder: &Path, mux: Option<&str>) -> Option<Limit> {
+/// whose `EKKO_MUX` names the binary `mux`, in the multiplexer's pane `own`.
+pub fn limit_of(call: &crate::shell::Call, folder: &Path, mux: Option<&str>, own: Option<&str>) -> Option<Limit> {
     let operands = |valued: &[&str]| crate::shell::operands(&call.args, valued);
     match call.name.as_str() {
         "git" => crate::claims::git_command(&call.args, folder).filter(|(git, _, _)| *git == "push").map(|_| Limit::Push),
@@ -1240,6 +1503,7 @@ pub fn limit_of(call: &crate::shell::Call, folder: &Path, mux: Option<&str>) -> 
             let asks = call.args.iter().any(|arg| matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h"));
             match operands(CLAUDE_VALUED).first() {
                 _ if asks => None,
+                Some(&"purge") if call.args.iter().any(|arg| arg == "--dry-run") => None,
                 Some(command) if ON_SESSIONS.contains(command) => Some(Limit::Stop),
                 Some(command) if NO_SESSION.contains(command) => None,
                 _ => Some(Limit::Session),
@@ -1250,7 +1514,8 @@ pub fn limit_of(call: &crate::shell::Call, folder: &Path, mux: Option<&str>) -> 
             script.filter(|script| script.starts_with("release")).map(|_| Limit::Release)
         }
         name if name.starts_with("release") => Some(Limit::Release),
-        name if MUXES.contains(&name) || mux == Some(name) => kills(&call.args).then_some(Limit::Kill),
+        name @ ("kill" | "pkill" | "killall" | "skill") => signals(name, &call.args).then_some(Limit::Signal),
+        name if MUXES.contains(&name) || mux == Some(name) => mux_limit(&call.args, own),
         _ => None,
     }
 }
@@ -1268,10 +1533,10 @@ fn mux_name() -> Option<String> {
 /// here-document.
 pub fn limits(command: &str, cwd: &Path) -> Vec<String> {
     let (calls, placed) = crate::shell::located(command, cwd, crate::shell::Reading::GUARD);
-    let mux = mux_name();
+    let (mux, own) = (mux_name(), set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned()));
     let mut found: Vec<Limit> = Vec::new();
     for place in &placed {
-        if let Some(limit) = limit_of(&calls[place.at], &place.folder, mux.as_deref()).filter(|limit| !found.contains(limit)) {
+        if let Some(limit) = limit_of(&calls[place.at], &place.folder, mux.as_deref(), own.as_deref()).filter(|limit| !found.contains(limit)) {
             found.push(limit);
         }
     }
@@ -1912,7 +2177,7 @@ mod tests {
     fn a_value_of_claude_s_options_is_never_taken_for_its_command() {
         let limit = |args: &[&str]| {
             let (calls, placed) = crate::shell::located(&format!("claude {}", args.join(" ")), Path::new("/"), crate::shell::Reading::GUARD);
-            limit_of(&calls[placed[0].at], Path::new("/"), None)
+            limit_of(&calls[placed[0].at], Path::new("/"), None, None)
         };
         for option in CLAUDE_VALUED {
             assert_eq!(limit(&[option, "value", "mcp", "list"]), None, "{option}");
@@ -1926,39 +2191,26 @@ mod tests {
             assert_eq!(limit(&[command, "4f2a"]), Some(Limit::Stop), "{command}");
             assert_eq!(limit(&[command, "--help"]), None, "{command}");
         }
+        // Purging deletes what it names, but for a dry run (task 1742).
+        assert_eq!(limit(&["purge"]), Some(Limit::Stop));
+        assert_eq!(limit(&["purge", "--all", "-y"]), Some(Limit::Stop));
+        assert_eq!(limit(&["purge", "--dry-run", "/projects/x"]), None);
         for command in ["agents", "attach", "ultrareview"] {
             assert_eq!(limit(&[command]), Some(Limit::Session), "{command}");
         }
     }
 
-    /// tmux 3.7c's commands, each with its alias, as `tmux list-commands -F
-    /// '#{command_list_name}:#{command_list_alias}'` lists them.
-    const TMUX_COMMANDS: &str = "attach-session:attach bind-key:bind break-pane:breakp capture-pane:capturep choose-buffer: \
-        choose-client: choose-tree: clear-history:clearhist clear-prompt-history:clearphist clock-mode: command-prompt: \
-        confirm-before:confirm copy-mode: customize-mode: delete-buffer:deleteb detach-client:detach display-menu:menu \
-        display-message:display display-popup:popup display-panes:displayp find-window:findw has-session:has if-shell:if \
-        join-pane:joinp kill-pane:killp kill-server: kill-session: kill-window:killw last-pane:lastp last-window:last \
-        link-window:linkw list-buffers:lsb list-clients:lsc list-commands:lscm list-keys:lsk list-panes:lsp list-sessions:ls \
-        list-windows:lsw load-buffer:loadb lock-client:lockc lock-server:lock lock-session:locks move-pane:movep \
-        move-window:movew new-pane:newp new-session:new new-window:neww next-layout:nextl next-window:next \
-        paste-buffer:pasteb pipe-pane:pipep previous-layout:prevl previous-window:prev refresh-client:refresh \
-        rename-session:rename rename-window:renamew resize-pane:resizep resize-window:resizew respawn-pane:respawnp \
-        respawn-window:respawnw rotate-window:rotatew run-shell:run save-buffer:saveb select-layout:selectl \
-        select-pane:selectp select-window:selectw send-keys:send send-prefix: server-access: set-buffer:setb \
-        set-environment:setenv set-hook: set-option:set set-window-option:setw show-buffer:showb show-environment:showenv \
-        show-hooks: show-messages:showmsgs show-options:show show-prompt-history:showphist show-window-options:showw \
-        source-file:source split-window:splitw start-server:start suspend-client:suspendc swap-pane:swapp \
-        swap-window:swapw switch-client:switchc unbind-key:unbind unlink-window:unlinkw wait-for:wait";
-
     /// Every word tmux would run as a command that kills or respawns is
-    /// refused, and none it would run as another (task 1716): each command's
-    /// name, its alias and every start of its name, found as tmux's
-    /// `cmd_find` finds one, for each multiplexer and for the binary
-    /// `EKKO_MUX` names; a start more commands share runs none, either way.
+    /// refused as a kill (task 1716), and none it would run as another but
+    /// one that types, here into a pane of the server another `-L` names
+    /// (task 1742): each command's name, its alias and every start of its
+    /// name, found as tmux's `cmd_find` finds one, for each multiplexer and
+    /// for the binary `EKKO_MUX` names; a start more commands share runs
+    /// none, either way.
     #[test]
     fn a_multiplexer_command_that_kills_or_respawns_is_refused_as_tmux_finds_it() {
         let table: Vec<(&str, &str)> = TMUX_COMMANDS.split_whitespace().map(|entry| entry.split_once(':').unwrap()).collect();
-        assert_eq!(table.len(), 91);
+        assert_eq!(table.len(), 93);
         let kill = |name: &str| name.starts_with("kill-") || name.starts_with("respawn-");
         assert_eq!(KILLS.len(), table.iter().filter(|(name, _)| kill(name)).count());
         for (name, alias) in KILLS {
@@ -1977,7 +2229,7 @@ mod tests {
         };
         let limit = |command: &str, mux: Option<&str>| {
             let (calls, placed) = crate::shell::located(command, Path::new("/"), crate::shell::Reading::GUARD);
-            limit_of(&calls[placed[0].at], Path::new("/"), mux)
+            limit_of(&calls[placed[0].at], Path::new("/"), mux, None)
         };
         let mut words: Vec<String> = table.iter().filter(|(_, alias)| !alias.is_empty()).map(|(_, alias)| alias.to_string()).collect();
         for (name, _) in &table {
@@ -1988,8 +2240,13 @@ mod tests {
             let Some(runs) = found(word) else { continue };
             for binary in MUXES.iter().copied().chain(["/opt/mux/bin/mymux"]) {
                 let mux = binary.contains('/').then_some("mymux");
-                let expected = kill(runs).then_some(Limit::Kill);
-                assert_eq!(limit(&format!("{binary} -L ekko {word} -t 3"), mux), expected, "{binary} {word}, which runs {runs}");
+                // Typing names a pane on the server -L names: another's.
+                let expected = if kill(runs) {
+                    Some(Limit::Kill)
+                } else {
+                    ["send-keys", "paste-buffer", "send-prefix"].contains(&runs).then_some(Limit::Keys)
+                };
+                assert_eq!(limit(&format!("{binary} -L ekko {word} -t%3"), mux), expected, "{binary} {word}, which runs {runs}");
                 refused += usize::from(expected.is_some());
             }
         }
@@ -1997,38 +2254,242 @@ mod tests {
         assert_eq!(limit("mymux kill-server", None), None, "a binary EKKO_MUX does not name");
     }
 
-    /// tmux's command line, as `kills` reads it: getopt's options, each
+    /// tmux's command line, as `mux_limit` reads it: getopt's options, each
     /// value taken whole or from the next word, then commands, one after
     /// each argument ending in a `;` that is not escaped.
     #[test]
     fn a_kill_is_found_past_tmux_s_options_and_in_each_command_of_a_sequence() {
-        let kills = |args: &[&str]| kills(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
-        for refused in [
-            &["kill-server"][..],
-            &["-L", "ekko", "kill-session", "-t", "ekko"],
-            &["-Lekko", "kill-pane"],
-            &["-uL", "ekko", "-f", "/dev/null", "kill-window"],
-            &["-2", "-S", "/tmp/s", "-T", "RGB", "killp"],
-            &["--", "kill-server"],
-            &["new-window", ";", "kill-pane", "-t", "%3"],
-            &["new-window", "-n", "x;", "respawn-pane", "-k"],
-            &["display", "-p", "hi", ";", ";", "killw"],
-            &["kill-server;"],
-        ] {
-            assert!(kills(refused), "{refused:?}");
+        let reached = |args: &[&str]| mux_limit(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(), None);
+        let read: &[(&[&str], Option<Limit>)] = &[
+            (&["kill-server"], Some(Limit::Kill)),
+            (&["-L", "ekko", "kill-session", "-t", "ekko"], Some(Limit::Kill)),
+            (&["-Lekko", "kill-pane"], Some(Limit::Kill)),
+            (&["-uL", "ekko", "-f", "/dev/null", "kill-window"], Some(Limit::Kill)),
+            (&["-2", "-S", "/tmp/s", "-T", "RGB", "killp"], Some(Limit::Kill)),
+            (&["--", "kill-server"], Some(Limit::Kill)),
+            (&["new-window", ";", "kill-pane", "-t", "%3"], Some(Limit::Kill)),
+            (&["new-window", "-n", "x;", "respawn-pane", "-k"], Some(Limit::Kill)),
+            (&["display", "-p", "hi", ";", ";", "killw"], Some(Limit::Kill)),
+            (&["kill-server;"], Some(Limit::Kill)),
+            // tmux's own -c runs a shell command, as a new window's does.
+            (&["-c", "kill-server"], Some(Limit::Runs)),
+            (&["-uc", "kill-server"], Some(Limit::Runs)),
+            (&["new-window", "kill-server"], Some(Limit::Runs)),
+            (&[], None),
+            (&["-L", "kill-server", "ls"], None),
+            (&["-f", "kill-pane", "new-session"], None),
+            (&["display", "-p", "kill-pane"], None),
+            (&["display", "-p", r"a\;", "kill-pane"], None),
+            (&["list-panes", "-a"], None),
+            (&["-V"], None),
+            // kmux's own verbs, which it runs before tmux's commands, go
+            // unread (task 1746).
+            (&["revive"], None),
+            (&["bcast", "kill-server"], None),
+        ];
+        for (args, limit) in read {
+            assert_eq!(reached(args), *limit, "{args:?}");
         }
-        for through in [
-            &[][..],
-            &["-L", "kill-server", "ls"],
-            &["-f", "kill-pane", "new-session"],
-            &["-c", "kill-server"],
-            &["new-window", "kill-server"],
-            &["display", "-p", "kill-pane"],
-            &["display", "-p", "a\\;", "kill-pane"],
-            &["list-panes", "-a"],
-            &["-V"],
+    }
+
+    /// The commands that run one they are given, read from their usage
+    /// lines as `list-commands` prints them (tmux 3.7c and kmux 3.7.47):
+    /// each whose operands take a `command`, a `shell-command` or a
+    /// `template` -- but list-commands, whose names one -- or whose option
+    /// takes one, and source-file, whose path is a file of them. `REACHES`
+    /// holds each, past as many operands or by that option, and none other;
+    /// each of its commands takes a value after the options either binary
+    /// takes one after. Read: run past them, given a value after each such
+    /// option, and not short of them.
+    #[test]
+    fn each_mux_command_that_runs_one_it_is_given_is_read_from_its_usage() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let runs = ["command", "shell-command", "template"];
+        // A command's options with a value, and the operand past which, or
+        // the option by which, it takes one to run.
+        type Read = (std::collections::BTreeSet<char>, Option<usize>, Option<char>);
+        let mut usage: std::collections::BTreeMap<String, Read> = Default::default();
+        for (file, commands) in [("tmux-3.7c-list-commands.txt", 91), ("kmux-3.7.47-list-commands.txt", 93)] {
+            let listed = std::fs::read_to_string(fixtures.join(file)).unwrap();
+            assert_eq!(listed.lines().count(), commands, "{file}");
+            for line in listed.lines() {
+                let (name, mut rest) = line.split_once(' ').unwrap_or((line, ""));
+                if let Some(aliased) = rest.strip_prefix('(') {
+                    rest = aliased.split_once(") ").map_or("", |(_, rest)| rest);
+                }
+                let (valued, past, by) = usage.entry(name.to_string()).or_default();
+                let mut operands: Vec<&str> = Vec::new();
+                while let Some(word) = Some(rest.trim_start()).filter(|word| !word.is_empty()) {
+                    if let Some(group) = word.strip_prefix("[-") {
+                        let (inner, after) = group.split_once(']').unwrap();
+                        if let Some((flag, placeholder)) = inner.split_once(' ') {
+                            let flag = flag.chars().next().unwrap();
+                            valued.insert(flag);
+                            if runs.contains(&placeholder) {
+                                *by = Some(flag);
+                            }
+                        }
+                        rest = after;
+                    } else {
+                        let (operand, after) = word.split_once(' ').unwrap_or((word, ""));
+                        operands.push(operand.trim_matches(['[', ']']));
+                        rest = after;
+                    }
+                }
+                *past = match name {
+                    "list-commands" => None,
+                    "source-file" => Some(0),
+                    _ => operands.iter().position(|operand| runs.contains(operand)),
+                };
+            }
+        }
+        let mut taken = 0;
+        for (name, (valued, past, by)) in &usage {
+            let reach = REACHES.iter().find(|reach| reach.name == name);
+            if KILLS.iter().any(|(kill, _)| kill == name) || (past.is_none() && by.is_none()) {
+                assert!(reach.is_none_or(|reach| reach.runs_past.is_none() && reach.runs_by.is_none()), "{name} runs none it is given");
+                if let Some(reach) = reach {
+                    assert_eq!(reach.valued.chars().collect::<std::collections::BTreeSet<char>>(), *valued, "{name}'s options with a value");
+                }
+                continue;
+            }
+            let reach = reach.unwrap_or_else(|| panic!("{name} runs one it is given"));
+            assert_eq!((reach.runs_past, reach.runs_by), (*past, *by), "{name}");
+            assert_eq!(reach.valued.chars().collect::<std::collections::BTreeSet<char>>(), *valued, "{name}'s options with a value");
+            taken += 1;
+            let words = |count: usize| (0..count).map(|at| format!("w{at}"));
+            for named in std::iter::once(name.as_str()).chain(TMUX_COMMANDS.split_whitespace().filter_map(|entry| entry.split_once(':')).filter(|(listed, alias)| listed == name && !alias.is_empty()).map(|(_, alias)| alias)) {
+                let short = past.unwrap_or_default();
+                let call = |options: Vec<String>, count: usize| mux_limit(&std::iter::once(named.to_string()).chain(options).chain(words(count)).collect::<Vec<_>>(), None);
+                assert_eq!(call(Vec::new(), short), None, "{named} short of a command");
+                if past.is_some() {
+                    assert_eq!(call(Vec::new(), short + 1), Some(Limit::Runs), "{named} given a command");
+                }
+                for flag in valued.iter().filter(|flag| Some(**flag) != *by) {
+                    assert_eq!(call(vec![format!("-{flag}"), "value".into()], short), None, "{named} -{flag} value, short of a command");
+                }
+                if let Some(by) = by {
+                    assert_eq!(call(vec![format!("-{by}"), "true".into()], 0), Some(Limit::Runs), "{named} -{by}");
+                }
+            }
+        }
+        assert_eq!(REACHES.iter().filter(|reach| reach.runs_past.is_some() || reach.runs_by.is_some()).count(), taken);
+        assert_eq!(taken, 21, "the commands that run one they are given");
+    }
+
+    /// The options whose value tmux runs: each hook, as `show-hooks` lists
+    /// them, and each option that holds a command or a shell, set by any
+    /// name of set-option, its window form or an item of the array; none
+    /// other but by its format's `#()`, which runs anywhere.
+    #[test]
+    fn an_option_whose_value_tmux_runs_is_refused_and_a_format_s_shell_command() {
+        let hooks = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tmux-3.7c-hooks.txt")).unwrap();
+        let mut hooks: Vec<&str> = hooks.lines().collect();
+        let mut held: Vec<&str> = RUN_OPTIONS.split_whitespace().collect();
+        let holding = held.split_off(held.len() - 7);
+        assert_eq!(holding, ["command-alias", "copy-command", "default-client-command", "default-command", "default-shell", "editor", "lock-command"]);
+        hooks.sort_unstable();
+        held.sort_unstable();
+        assert_eq!(held, hooks, "every hook, and none other");
+        let reached = |args: &[&str]| mux_limit(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(), None);
+        for option in RUN_OPTIONS.split_whitespace() {
+            for set in ["set-option", "set", "set-window-option", "setw"] {
+                assert_eq!(reached(&[set, "-g", option, "kill-server"]), Some(Limit::Runs), "{set} {option}");
+                assert_eq!(reached(&[set, "-t", "ekko", &format!("{option}[2]"), "x"]), Some(Limit::Runs), "{set} {option}[2]");
+            }
+        }
+        for (option, value) in [("status-style", "bg=red"), ("mouse", "on"), ("@ekko_tasks", "kill-server"), ("pane-border-format", "#{pane_id}"), ("status-right", "#(date)")] {
+            let expected = value.contains("#(").then_some(Limit::Runs);
+            assert_eq!(reached(&["set", "-g", option, value]), expected, "{option} {value}");
+        }
+        assert_eq!(reached(&["display", "-p", "#(pkill claude)"]), Some(Limit::Runs));
+        assert_eq!(reached(&["neww", "-n", "#(date)"]), Some(Limit::Runs));
+        assert_eq!(reached(&["display", "-p", "#{pane_id} (#S)"]), None);
+        assert_eq!(reached(&["set-hook", "-gu", "pane-died"]), None, "a hook unset runs nothing");
+    }
+
+    /// The `-k` of the four commands that kill the window it replaces or
+    /// leaves, and typing into a pane: refused into another than the
+    /// session's own, the last `-t` named, or into any on another server;
+    /// and a copy mode command piping to one it is given.
+    #[test]
+    fn a_window_s_k_and_keys_typed_into_another_s_pane_are_refused() {
+        let reached = |args: &[&str], own: Option<&str>| mux_limit(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(), own);
+        for command in ["new-window", "neww", "link-window", "linkw", "move-window", "movew", "unlink-window", "unlinkw"] {
+            assert_eq!(reached(&[command, "-k", "-t", "ekko:3"], None), Some(Limit::Kill), "{command} -k");
+            assert_eq!(reached(&[command, "-dk"], None), Some(Limit::Kill), "{command} -dk");
+            assert_eq!(reached(&[command, "-d", "-t", "ekko:3"], None), None, "{command} -d");
+        }
+        assert_eq!(reached(&["neww", "-n", "k"], None), None, "a value k");
+        assert_eq!(reached(&["neww", "-nk"], None), None, "a value k");
+        assert_eq!(reached(&["neww", "--", "-k"], None), Some(Limit::Runs), "a command after --");
+        assert_eq!(reached(&["break-pane", "-k"], None), None, "a command whose -k kills no window");
+        let own = Some("%7");
+        for command in ["send-keys", "send", "paste-buffer", "pasteb", "send-prefix"] {
+            assert_eq!(reached(&[command, "-t", "%9"], own), Some(Limit::Keys), "{command} -t %9");
+            assert_eq!(reached(&[command, "-t%9"], own), Some(Limit::Keys), "{command} -t%9");
+            assert_eq!(reached(&[command, "-t", "ekko:3"], own), Some(Limit::Keys), "{command} -t ekko:3");
+            assert_eq!(reached(&[command, "-t", "%9", "-t", "%7"], own), None, "{command}, the last -t its own");
+            assert_eq!(reached(&[command, "-t", "%7"], own), None, "{command} -t its own");
+            assert_eq!(reached(&[command], own), None, "{command} with no -t");
+            assert_eq!(reached(&["-L", "other", command], own), Some(Limit::Keys), "{command} on another server");
+            assert_eq!(reached(&["-S", "/tmp/other", command, "-t", "%7"], own), Some(Limit::Keys), "{command} on another server");
+            assert_eq!(reached(&[command, "-t", "%7"], None), Some(Limit::Keys), "{command} out of a pane");
+        }
+        assert_eq!(reached(&["send-keys", "-X", "copy-pipe", "sh -c 'pkill claude'"], own), Some(Limit::Runs));
+        assert_eq!(reached(&["send", "-X", "-t", "%7", "copy-pipe-and-cancel", "x"], own), Some(Limit::Runs));
+        assert_eq!(reached(&["send-keys", "-X", "copy-pipe"], own), None, "the user's copy-command");
+        assert_eq!(reached(&["send-keys", "-X", "cancel"], own), None);
+        assert_eq!(reached(&["send-keys", "copy-pipe", "x"], own), None, "keys typed");
+    }
+
+    /// kill(1), pkill, killall and skill, as the guard reads calls: refused
+    /// whatever they are given -- a pid, a job, a name, nothing, as `xargs`
+    /// gives them theirs -- under any wrapper or shell, but to list the
+    /// signals or ask for their help or version; named only, none.
+    #[test]
+    fn a_program_that_signals_processes_is_refused_but_to_list_the_signals() {
+        let reached = |command: &str| -> Vec<Limit> {
+            let (calls, placed) = crate::shell::located(command, Path::new("/"), crate::shell::Reading::GUARD);
+            placed.iter().filter_map(|place| limit_of(&calls[place.at], &place.folder, None, None)).collect()
+        };
+        for command in [
+            "kill 4242",
+            "kill -9 4242",
+            "kill -s HUP 4242",
+            "kill %1",
+            "kill",
+            "kill -9 4242 -l",
+            "/bin/kill -TERM 4242",
+            "builtin kill %1",
+            "command kill 4242",
+            "timeout 5 kill 4242",
+            "pgrep claude | xargs kill",
+            "pgrep claude | xargs -r kill -9",
+            "sh -c 'pkill -f claude'",
+            "pkill -f claude",
+            "pkill",
+            "/usr/bin/pkill -u roldant",
+            "killall claude",
+            "killall",
+            "skill -9 claude",
         ] {
-            assert!(!kills(through), "{through:?}");
+            assert_eq!(reached(command), [Limit::Signal], "{command}");
+        }
+        for command in [
+            "kill -l",
+            "kill -l 9",
+            "kill -L",
+            "kill --help",
+            "killall -l",
+            "killall --version",
+            "pkill --help",
+            "pkill -V",
+            "pgrep -f claude",
+            "echo kill 4242",
+            "git commit -m 'kill 4242'",
+        ] {
+            assert_eq!(reached(command), [], "{command}");
         }
     }
 

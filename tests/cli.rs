@@ -3472,7 +3472,7 @@ fn the_born_hook_counts_every_prompt_while_tools_end_beside_it() {
 }
 
 /// What a session ekko agents started leaves to the orchestrator and the
-/// user (tasks 1646 and 1716), each kind in the forms the guard reads,
+/// user (tasks 1646, 1716 and 1742), each kind in the forms the guard reads,
 /// beside calls that only name one or look like one: the guard refuses each
 /// there, and in the orchestrator -- a session ekko agents did not start --
 /// none. And at the terminal, a write to a task the session was not born
@@ -3485,6 +3485,9 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     const SESSION: &str = "does not start sessions";
     const STOP: &str = "does not stop, respawn or remove Claude Code's sessions";
     const KILL: &str = "does not kill or respawn the multiplexer's panes, windows, sessions or server";
+    const SIGNAL: &str = "does not signal processes with kill, pkill or killall";
+    const RUNS: &str = "does not have the multiplexer run a command for it";
+    const KEYS: &str = "does not type into another pane than its own";
     let agents = Agents::new();
     // The stand-in multiplexer, which the guard's EKKO_MUX names, as the
     // session's names the one `start` used.
@@ -3544,6 +3547,39 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         ("timeout 5 tmux kill-server", &[KILL]),
         ("bash -c 'kmux kill-server'", &[KILL]),
         ("tmux kill-session -t ekko && claude stop 4f2a && claude -p 'again'", &[SESSION, STOP, KILL]),
+        ("claude purge", &[STOP]),
+        ("claude purge --all -y", &[STOP]),
+        ("kill 4242", &[SIGNAL]),
+        ("kill -9 %1", &[SIGNAL]),
+        ("/bin/kill -TERM 4242", &[SIGNAL]),
+        ("pkill -f claude", &[SIGNAL]),
+        ("killall claude", &[SIGNAL]),
+        ("pgrep claude | xargs kill", &[SIGNAL]),
+        ("sh -c 'pkill -f claude'", &[SIGNAL]),
+        ("tmux run-shell 'kill 4242'", &[RUNS]),
+        ("tmux if-shell true kill-server", &[RUNS]),
+        ("tmux confirm-before -p 'go?' kill-server", &[RUNS]),
+        ("tmux bind-key -n F1 kill-server", &[RUNS]),
+        ("tmux set-hook -g pane-died kill-server", &[RUNS]),
+        ("tmux set -g after-new-window kill-server", &[RUNS]),
+        ("tmux display -p '#(pkill claude)'", &[RUNS]),
+        ("tmux new-window -d 'claude -p go'", &[RUNS]),
+        ("tmux split-window 'sleep 1'", &[RUNS]),
+        ("tmux source-file /tmp/kill.conf", &[RUNS]),
+        ("tmux -c 'pkill claude'", &[RUNS]),
+        ("kmux znative load owner/repo", &[RUNS]),
+        ("tmux send-keys -X copy-pipe sh", &[RUNS]),
+        ("tmux new-window -k -t ekko:3", &[KILL]),
+        ("tmux neww -dk -t ekko:3", &[KILL]),
+        ("tmux link-window -k -s app:1 -t ekko:3", &[KILL]),
+        ("tmux move-window -k -t ekko:3", &[KILL]),
+        ("tmux unlink-window -k -t ekko:3", &[KILL]),
+        ("tmux send-keys -t %3 /exit Enter", &[KEYS]),
+        ("tmux send -t ekko:3 C-c", &[KEYS]),
+        ("tmux paste-buffer -t %3", &[KEYS]),
+        ("tmux send-prefix -t %3", &[KEYS]),
+        ("tmux -L other send-keys x", &[KEYS]),
+        ("kill 4242; tmux send-keys -t %3 C-c && tmux run-shell true", &[SIGNAL, RUNS, KEYS]),
     ];
     let let_through = [
         "git status",
@@ -3574,6 +3610,19 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         "echo tmux kill-server",
         "git commit -m 'tmux kill-server, then claude stop'",
         "grep -rn kill-pane src",
+        "claude purge --dry-run",
+        "kill -l",
+        "kill -l 9",
+        "pkill --help",
+        "pgrep -f claude",
+        "echo kill 4242",
+        "tmux send-keys -t %7 'echo hi' Enter",
+        "tmux send-keys x",
+        "tmux new-window -d -n k",
+        "tmux display -p '#{pane_id}'",
+        "tmux set -g status-style bg=red",
+        "tmux set-hook -gu pane-died",
+        "tmux list-commands run-shell",
     ];
     for text in ["Write hello", "Write the docs"] {
         assert!(agents.ekko(&["--task", text]).status.success());
@@ -3582,6 +3631,8 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     let event = |command: &str| serde_json::json!({"session_id": "s-1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command, "description": "Run it"}, "cwd": agents.app, "tool_use_id": "toolu_1"}).to_string();
     let guard = |args: &[&str], command: &str, born: Option<&str>| -> String {
         let mut guard = agents.command(args);
+        // The pane the session runs in, as the multiplexer sets it.
+        guard.env("TMUX_PANE", "%7");
         if let Some(born) = born {
             guard.env("EKKO_AGENT_TASK", born);
         }
@@ -3596,7 +3647,7 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         let reason = output["permissionDecisionReason"].as_str().unwrap();
         assert_eq!(output["permissionDecision"], "deny", "{command}");
         assert!(reason.starts_with("ekko agents: this session, started for its tasks, "), "{command}: {reason}");
-        for kind in [PUSH, RELEASE, SESSION, STOP, KILL] {
+        for kind in [PUSH, RELEASE, SESSION, STOP, KILL, SIGNAL, RUNS, KEYS] {
             assert_eq!(reason.matches(kind).count(), usize::from(kinds.contains(&kind)), "{command}: {reason}");
         }
         assert!(reason.contains("ask them through ekko's ask with allow set to \""), "{command}: {reason}");
