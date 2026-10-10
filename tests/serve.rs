@@ -47,7 +47,7 @@ fn temp_home() -> PathBuf {
 /// its state under it.
 fn ekko(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ekko"));
-    command.env("HOME", home).env_remove("EKKO_DIR").env_remove("EKKO_PROJECT").env_remove("XDG_STATE_HOME").current_dir(home);
+    command.env("HOME", home).env_remove("EKKO_DIR").env_remove("EKKO_PROJECT").env_remove("EKKO_AGENT_TASK").env_remove("XDG_STATE_HOME").current_dir(home);
     command
 }
 

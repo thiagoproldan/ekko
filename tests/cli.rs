@@ -212,6 +212,7 @@ fn init_makes_a_folder_a_project_that_ekko_finds_from_inside_it() {
             .env("HOME", &home)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko")
     };
@@ -259,6 +260,7 @@ fn a_board_cleaned_out_of_its_folder_comes_back_with_init() {
             .env("HOME", &home)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko")
     };
@@ -420,6 +422,7 @@ fn the_terminal_says_what_a_notes_rests_on_line_does_not_hold() {
             .env("EKKO_TERMINAL", "none")
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko")
     };
@@ -482,6 +485,7 @@ fn the_terminal_says_to_recheck_a_note_whose_ground_moved() {
             .env("EKKO_TERMINAL", "none")
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko");
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -519,6 +523,7 @@ fn a_still_true_line_at_the_terminal_answers_a_date_and_says_it_knows_no_version
             .env("EKKO_TERMINAL", "none")
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko");
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -635,6 +640,7 @@ fn the_tasklist_hook_writes_the_sessions_list() {
             .env("HOME", &dir)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .env("CLAUDE_CONFIG_DIR", &config)
             .env_remove("CLAUDE_CODE_TASK_LIST_ID")
             .stdin(Stdio::piped())
@@ -680,6 +686,7 @@ fn the_memory_hook_gives_a_starting_session_the_project_page() {
             .env("HOME", &dir)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -727,6 +734,7 @@ fn the_guard_answers_a_pre_tool_use_event_and_stays_silent_otherwise() {
             .env("HOME", &home)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .env_remove("CLAUDECODE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -784,6 +792,7 @@ fn move_to_takes_items_to_another_board_and_the_old_id_says_where() {
             .env("HOME", &home)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .env_remove("CLAUDECODE")
             .output()
             .expect("failed to run ekko")
@@ -876,6 +885,7 @@ fn docs_are_written_from_the_board_and_only_over_their_own_files() {
             .env("TZ", "UTC")
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .output()
             .expect("failed to run ekko")
     };
@@ -1009,6 +1019,7 @@ fn repeats_lists_a_failure_that_recurs_and_the_prime_tells_it_once() {
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1186,6 +1197,7 @@ fn the_prime_names_the_sessions_on_its_board_that_need_a_restart() {
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1221,6 +1233,7 @@ fn the_prime_names_the_sessions_on_its_board_that_need_a_restart() {
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("EKKO_DIR")
         .env_remove("EKKO_PROJECT")
+        .env_remove("EKKO_AGENT_TASK")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1309,6 +1322,7 @@ fn the_probe_writes_the_board_again_and_finds_the_session_that_did_not_hear_it()
             .env_remove("CLAUDECODE")
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .output()
             .unwrap()
     };
@@ -1345,6 +1359,7 @@ fn the_probe_writes_the_board_again_and_finds_the_session_that_did_not_hear_it()
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1475,6 +1490,7 @@ fn a_copy_of_a_projects_folder_leaves_the_projects_copy_alone() {
             .env("HOME", &dir)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .env_remove("XDG_STATE_HOME")
             .env_remove("CLAUDECODE")
             .output()
@@ -1541,6 +1557,7 @@ fn a_scratch_home_writes_nothing_on_a_board_it_found_outside_it() {
             .env("HOME", home)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .env_remove("XDG_STATE_HOME")
             .env_remove("CLAUDECODE");
         if let Some(named) = named {
@@ -1662,6 +1679,7 @@ impl Agents {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .env_remove("EKKO_MUX_SOCKET")
             .env_remove("CLAUDECODE")
             .env_remove("TMUX")
@@ -1730,8 +1748,7 @@ impl Agents {
         command
             .env("EKKO_PROJECT", "app")
             .env("TMUX", format!("{},1,0", self.home.join("tmux-socket").display()))
-            .env("TMUX_PANE", "%7")
-            .env_remove("EKKO_AGENT_TASK");
+            .env("TMUX_PANE", "%7");
         if let Some(tasks) = tasks {
             command.env("EKKO_AGENT_TASK", tasks);
         }
@@ -1772,6 +1789,16 @@ impl Agents {
     /// its hooks, its tools and its MCP server, so the claims, waits and
     /// hooks of every step are this one process's.
     fn session(&self, tasks: &str) -> Stays {
+        self.stays(Some(tasks))
+    }
+
+    /// A session that stays, as `session` starts one, that ekko agents did
+    /// not start: the orchestrator (task 1646).
+    fn orchestrator(&self) -> Stays {
+        self.stays(None)
+    }
+
+    fn stays(&self, tasks: Option<&str>) -> Stays {
         let dir = self.home.join(format!("stays-{}", self.home.read_dir().unwrap().count()));
         fs::create_dir_all(&dir).unwrap();
         let claude = dir.join("claude");
@@ -1779,17 +1806,15 @@ impl Agents {
             &claude,
             "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\nexport CLAUDECODE=1\nn=0\nwhile :; do\n  n=$((n + 1))\n  while [ ! -e \"$dir/$n.go\" ]; do sleep 0.02; done\n  sh \"$dir/$n.go\" < \"$dir/$n.in\" > \"$dir/$n.out\" 2> \"$dir/$n.err\"\n  touch \"$dir/$n.done\"\ndone\n",
         );
-        let child = self
-            .running(&claude, &[])
+        let mut command = self.running(&claude, &[]);
+        command
             .env("EKKO_PROJECT", "app")
-            .env("EKKO_AGENT_TASK", tasks)
             .env("TMUX", format!("{},1,0", self.home.join("tmux-socket").display()))
-            .env("TMUX_PANE", "%7")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .env("TMUX_PANE", "%7");
+        if let Some(tasks) = tasks {
+            command.env("EKKO_AGENT_TASK", tasks);
+        }
+        let child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         Stays { child, dir, steps: std::cell::Cell::new(0) }
     }
 
@@ -2310,5 +2335,142 @@ fn the_born_hook_counts_every_prompt_while_tools_end_beside_it() {
         assert_eq!(born["prompts"], round, "round {round}: {born}");
         assert!(born.get("waiting").is_none(), "round {round}: {born}");
     }
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// What a session ekko agents started leaves to the orchestrator and the
+/// user (task 1646), each kind in the forms the guard reads, beside calls
+/// that only name one or look like one: the guard refuses each there, and
+/// in the orchestrator -- a session ekko agents did not start -- none. And
+/// at the terminal, a write to a task the session was not born for: refused
+/// there, made by the orchestrator.
+#[test]
+fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_its_orchestrator_none() {
+    use std::io::Write as _;
+    const PUSH: &str = "does not push or open a pull request";
+    const RELEASE: &str = "does not release or deploy";
+    const SESSION: &str = "does not start sessions";
+    let refused: &[(&str, &[&str])] = &[
+        ("git push", &[PUSH]),
+        ("git push origin task-7", &[PUSH]),
+        ("git -C ../app push --force-with-lease", &[PUSH]),
+        ("git -c push.default=current push", &[PUSH]),
+        ("cd .. && git push", &[PUSH]),
+        ("nix develop -c git push origin main", &[PUSH]),
+        ("timeout 60 git push", &[PUSH]),
+        ("bash -c 'git push'", &[PUSH]),
+        ("gh pr create --fill", &[PUSH]),
+        ("gh pr merge 5 --squash -R thiagoproldan/ekko", &[PUSH]),
+        ("gh release create v1.0.0 --notes done", &[RELEASE]),
+        ("gh release upload v1.0.0 ekko.tar.gz", &[RELEASE]),
+        ("cargo publish", &[RELEASE]),
+        ("cargo +nightly publish --dry-run", &[RELEASE]),
+        ("npm publish", &[RELEASE]),
+        ("yarn npm publish", &[RELEASE]),
+        ("sudo -n nixos-rebuild switch --flake /home/roldant/NixOS", &[RELEASE]),
+        ("nixos-rebuild boot", &[RELEASE]),
+        ("scripts/release.sh --trailer 'Ekko: 1' 1.2.3 notes.md", &[RELEASE]),
+        ("bash scripts/release.sh 1.2.3 notes.md", &[RELEASE]),
+        ("ekko agents start 5", &[SESSION]),
+        ("ekko --json agents start 5 --model haiku", &[SESSION]),
+        ("claude", &[SESSION]),
+        ("claude -p 'review the diff'", &[SESSION]),
+        ("claude --bg 'write the docs'", &[SESSION]),
+        ("claude --model haiku 'write it'", &[SESSION]),
+        ("claude attach 4f2a", &[SESSION]),
+        ("claude --resume", &[SESSION]),
+        ("claude ultrareview", &[SESSION]),
+        ("cargo test && git push && claude -p 'go on'", &[PUSH, SESSION]),
+        ("git push && gh pr create --fill", &[PUSH]),
+    ];
+    let let_through = [
+        "git status",
+        "git commit -m 'push it later'",
+        "git log --oneline origin/main..HEAD",
+        "echo git push",
+        "printf '%s\\n' 'cargo publish'",
+        "cat <<'EOF'\ngit push\nEOF",
+        "gh pr view 5",
+        "gh release view v1.0.0",
+        "cargo build --release",
+        "npm run build",
+        "nixos-rebuild build --flake .",
+        "ls scripts/release.sh",
+        "claude --version",
+        "claude mcp list",
+        "claude --settings /tmp/settings.json plugin list",
+        "ekko agents --help",
+        "ekko --list pending",
+        "grep -rn 'git push' docs",
+    ];
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let uid = agents.uid(1);
+    let event = |command: &str| serde_json::json!({"session_id": "s-1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command, "description": "Run it"}, "cwd": agents.app, "tool_use_id": "toolu_1"}).to_string();
+    let guard = |args: &[&str], command: &str, born: Option<&str>| -> String {
+        let mut guard = agents.command(args);
+        if let Some(born) = born {
+            guard.env("EKKO_AGENT_TASK", born);
+        }
+        let mut child = guard.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(event(command).as_bytes()).unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+    };
+    let hook = |command: &str, born: Option<&str>| guard(&["--guard", "--hook"], command, born);
+    for (command, kinds) in refused {
+        let reply: serde_json::Value = serde_json::from_str(&hook(command, Some(&uid))).unwrap_or_else(|_| panic!("not refused: {command}"));
+        let output = &reply["hookSpecificOutput"];
+        let reason = output["permissionDecisionReason"].as_str().unwrap();
+        assert_eq!(output["permissionDecision"], "deny", "{command}");
+        assert!(reason.starts_with("ekko agents: this session, started for its tasks, "), "{command}: {reason}");
+        for kind in [PUSH, RELEASE, SESSION] {
+            assert_eq!(reason.matches(kind).count(), usize::from(kinds.contains(&kind)), "{command}: {reason}");
+        }
+        assert!(reason.contains("ask them through ekko's ask with allow set to \""), "{command}: {reason}");
+        assert_eq!(hook(command, None), "", "the orchestrator's {command}");
+    }
+    for command in let_through {
+        assert_eq!(hook(command, Some(&uid)), "", "{command}");
+        assert_eq!(hook(command, None), "", "the orchestrator's {command}");
+    }
+    // Another guard refusing a call carries the limit's reason too: calls
+    // of their own, since this test's two sessions are one to the guard.
+    let other = |command: &str, born: Option<&str>| guard(&["--guard", "--refuse", "ctx: it would lose work"], command, born);
+    let born_other = other("git push --tags", Some(&uid));
+    assert!(born_other.contains("ekko agents: this session, started for its tasks, does not push"), "{born_other}");
+    let orchestrator_other = other("git push --dry-run", None);
+    assert!(orchestrator_other.contains("allow set to") && !orchestrator_other.contains("ekko agents"), "{orchestrator_other}");
+
+    let born = agents.session(&uid);
+    let branch = born.ekko(&["--guard", "--hook"], &event("git checkout -b task-2"));
+    assert!(branch.contains("ekko: branch task-2 did not claim task 2: Task 2 is not this session's to change"), "{branch}");
+    let theirs = born.ekko(&["--json", "--check", "2"], "");
+    let theirs: serde_json::Value = serde_json::from_str(&theirs).unwrap_or_else(|_| panic!("{theirs}"));
+    assert_eq!(theirs["code"], "NOT_BORN_FOR", "{theirs}");
+    assert_eq!(theirs["notBornFor"], serde_json::json!({"ids": [2], "born": [1]}), "{theirs}");
+    assert!(theirs["error"].as_str().unwrap().starts_with("Task 2 is not this session's to change: ekko agents started it for task 1"), "{theirs}");
+    assert!(born.ekko(&["--json", "--begin", "1"], "").contains("\"ok\":true"));
+    assert!(born.ekko(&["--json", "--task", "Found on the way"], "").contains("\"ok\":true"));
+    assert!(born.ekko(&["--json", "--star", "3"], "").contains("\"ok\":true"), "a task it made is its own");
+    assert!(born.ekko(&["--json", "--note", "What 2 needs"], "").contains("\"ok\":true"));
+    assert!(born.ekko(&["--json", "--star", "2"], "").contains("NOT_BORN_FOR"));
+    let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
+    let second = board()["2"].clone();
+    assert_eq!((second["isComplete"].as_bool(), second["isStarred"].as_bool(), second["inProgress"].as_bool()), (Some(false), Some(false), Some(false)), "{second}");
+    drop(born);
+    // The user, whatever the terminal they type in was started with, writes
+    // any task: one a session made too.
+    let mut typed = agents.command(&["--json", "--star", "3"]);
+    assert!(String::from_utf8(typed.env("EKKO_AGENT_TASK", &uid).output().unwrap().stdout).unwrap().contains("\"ok\":true"));
+    assert_eq!(board()["3"]["isStarred"], false, "starred by the session, and by the user no more");
+
+    let orchestrator = agents.orchestrator();
+    let branch = orchestrator.ekko(&["--guard", "--hook"], &event("git checkout -b task-2"));
+    assert!(branch.contains("ekko: task 2 is in progress now, held by this session: creating branch task-2 claimed it"), "{branch}");
+    assert!(orchestrator.ekko(&["--json", "--check", "2"], "").contains("\"ok\":true"));
+    assert_eq!(board()["2"]["isComplete"], true, "{}", board()["2"]);
+    drop(orchestrator);
     fs::remove_dir_all(&agents.home).ok();
 }

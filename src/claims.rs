@@ -19,17 +19,19 @@ use crate::item::{Item, State};
 use crate::ops::{Draft, Ref};
 use crate::shell::{self, Call, Reading};
 
-/// Where a guarded call finds its board: the variables `ekko` itself reads
-/// there, as the hook was started with them.
+/// What the hook guarding a call was started with: the variables `ekko`
+/// itself reads to find its board, and the tasks of the session ekko agents
+/// started that makes the call, if one does (`crate::agents::born_tasks`).
 #[derive(Debug, Default)]
 pub struct Env {
     pub ekko_dir: Option<String>,
     pub project: Option<String>,
+    pub born: Option<Vec<String>>,
 }
 
 impl Env {
     pub fn of_this_process() -> Env {
-        Env { ekko_dir: std::env::var("EKKO_DIR").ok(), project: std::env::var("EKKO_PROJECT").ok() }
+        Env { ekko_dir: std::env::var("EKKO_DIR").ok(), project: std::env::var("EKKO_PROJECT").ok(), born: crate::agents::born_tasks() }
     }
 }
 
@@ -93,7 +95,7 @@ pub fn told(home: &Path, command: &str, cwd: &Path, actor: &Actor, env: &Env) ->
 
 /// The command git runs with `args`, the arguments after it, and the folder
 /// it runs in: `folder`, or where `-C` moves it.
-fn git_command<'a>(args: &'a [String], folder: &Path) -> Option<(&'a str, &'a [String], PathBuf)> {
+pub(crate) fn git_command<'a>(args: &'a [String], folder: &Path) -> Option<(&'a str, &'a [String], PathBuf)> {
     let mut folder = folder.to_path_buf();
     let mut at = 0;
     while let Some(arg) = args.get(at).map(String::as_str) {
@@ -181,7 +183,7 @@ fn board(home: &Path, folder: &Path, actor: &Actor, env: &Env) -> Option<Ekko> {
     let location = crate::directory::locate(home, folder, None, env.ekko_dir.as_deref(), env.project.as_deref()).ok()?;
     location.project.as_ref()?;
     let actor = actor.clone().with_registry(Registry::at(crate::agent::processes_dir(home)));
-    Some(Ekko::at(&location).ok()?.acting_as(actor))
+    Some(Ekko::at(&location).ok()?.acting_as(actor).born_for(env.born.clone()))
 }
 
 /// Sets task `id` in progress for the session `ekko` acts as, which created

@@ -147,6 +147,9 @@ pub fn move_to(
 
     let mut left = ItemMap::clone(&before);
     left.retain(|id, _| !moving.contains_key(id));
+    // Before the other board is written: refused once the items had
+    // arrived there, a move would leave them on both boards.
+    ekko.refuse_unborn(&before, &left)?;
     if !force {
         let held = ekko.held_elsewhere(&before, &left, &[]);
         if !held.is_empty() {

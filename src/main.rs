@@ -259,7 +259,7 @@ fn main() -> ExitCode {
     // call may name a different project.
     if cli.mcp {
         let mode = if cli.resources { mcp::Mode::Resources } else { mcp::Mode::Board };
-        return mcp::run(home_dir, cwd, ekko_dir_env, project_env, mode);
+        return mcp::run(home_dir, cwd, ekko_dir_env, project_env, agents::born_tasks(), mode);
     }
     // About every session on this machine, whatever board it is on; with
     // --probe, after writing the board found here as any command finds it.
@@ -329,10 +329,13 @@ fn main() -> ExitCode {
     }
     // A command run by an agent through Bash, or by a hook, acts for the
     // Claude Code session it runs under; one typed at a terminal, for the user.
+    // In a session ekko agents started, it changes no task but the session's
+    // own (task 1646).
     let ekko = match Ekko::at(&location) {
         Ok(ekko) => ekko
             .acting_as(holder::Actor::of_this_command().with_registry(holder::Registry::at(agent::processes_dir(&home_dir))))
-            .in_folder(location.project.as_ref().and_then(|project| project.root.clone())),
+            .in_folder(location.project.as_ref().and_then(|project| project.root.clone()))
+            .born_for(agents::born_tasks()),
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
 

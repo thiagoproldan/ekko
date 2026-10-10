@@ -165,6 +165,7 @@ fn error_value(error: &EkkoError) -> Value {
         EkkoError::PhaseOrder(inversion) => Some(("inversion", json!(inversion))),
         EkkoError::Moved { to, .. } => Some(("moved", json!(to))),
         EkkoError::SplitLinks(splits) => Some(("links", json!(splits))),
+        EkkoError::NotBornFor { ids, born } => Some(("notBornFor", json!({"ids": ids, "born": born}))),
         EkkoError::Watched(watched) => {
             Some(("watched", Value::Array(watched.iter().map(|(id, what)| json!({"id": id, "what": what})).collect())))
         }

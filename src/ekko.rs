@@ -66,6 +66,11 @@ pub enum EkkoError {
     /// Gotchas whose cue, which the user turned on, a session's write
     /// would have changed, dropped or brought back (task 805).
     CueIsUsers(Vec<u32>),
+    /// Tasks already on the board that a write by a session ekko agents
+    /// started would have changed or removed, though it was not born for
+    /// them (task 1646), and the tasks it was born for, as this board
+    /// numbers them.
+    NotBornFor { ids: Vec<u32>, born: Vec<u32> },
     /// An item asked for by the id or uid it had before it moved to another
     /// board (task 897), and where it went.
     Moved { asked: String, to: Box<crate::storage::Moved> },
@@ -123,6 +128,7 @@ impl EkkoError {
             EkkoError::RenamedFlag { .. } => "RENAMED_FLAG",
             EkkoError::RemovedFlag { .. } => "REMOVED_FLAG",
             EkkoError::CueIsUsers(_) => "CUE_IS_USERS",
+            EkkoError::NotBornFor { .. } => "NOT_BORN_FOR",
             EkkoError::Moved { .. } => "MOVED",
             EkkoError::SplitLinks(_) => "SPLIT_LINKS",
             EkkoError::Watched(_) => "WATCHED",
@@ -172,6 +178,7 @@ impl EkkoError {
             | EkkoError::RenamedFlag { .. }
             | EkkoError::RemovedFlag { .. }
             | EkkoError::CueIsUsers(_)
+            | EkkoError::NotBornFor { .. }
             | EkkoError::Moved { .. }
             | EkkoError::SplitLinks(_)
             | EkkoError::Watched(_) => out.generic_error(&self.to_string()),
@@ -313,6 +320,21 @@ impl std::fmt::Display for EkkoError {
                      the user's answer in ekko's menu applies it"
                 )
             }
+            EkkoError::NotBornFor { ids, born } => write!(
+                f,
+                "{} not this session's to change: ekko agents started it for {}, and the rest of the board is the orchestrator's \
+                 and the user's, so nothing was written. Attach a note to {} saying what should change: a note is any session's to write",
+                match ids.as_slice() {
+                    [id] => format!("Task {id} is"),
+                    _ => format!("Tasks {} are", join_ids(ids)),
+                },
+                match born.as_slice() {
+                    [] => "tasks of its own".to_string(),
+                    [id] => format!("task {id}"),
+                    _ => format!("tasks {}", join_ids(born)),
+                },
+                if ids.len() == 1 { "it" } else { "them" }
+            ),
             EkkoError::Moved { asked, to } => {
                 let board = crate::move_to::board_name(to.project.as_deref());
                 write!(f, "Item {asked} moved to {board} at {}, where it is {}", crate::holder::when(to.at), to.as_id)
@@ -680,6 +702,13 @@ pub struct Ekko {
     /// true records (task 1326). `None` in the terminal and for any other
     /// client, which judges no version.
     pub(crate) claude_code: Option<String>,
+    /// The tasks of the session ekko agents started that writes through this
+    /// handle (task 1646), as EKKO_AGENT_TASK names them: of the tasks
+    /// already on the board, it changes or removes only these and those it
+    /// created (`refuse_unborn`). `None` for the user and any other session,
+    /// the orchestrator included, which change any. Set where a command or
+    /// the MCP server starts, from `crate::agents::born_tasks`.
+    pub(crate) born_for: Option<Vec<String>>,
 }
 
 /// What the words given to `--task` or `--note` say: the `@boards`, the
@@ -695,12 +724,19 @@ struct Created {
 
 impl Ekko {
     pub fn new(storage: Storage) -> Self {
-        Ekko { storage, actor: None, folder: None, linkable: None, claude_code: None }
+        Ekko { storage, actor: None, folder: None, linkable: None, claude_code: None, born_for: None }
     }
 
     /// This handle, writing for `actor`.
     pub fn acting_as(mut self, actor: crate::holder::Actor) -> Self {
         self.actor = Some(actor);
+        self
+    }
+
+    /// This handle, written by the session ekko agents started for `tasks`,
+    /// if it did: see `born_for`.
+    pub fn born_for(mut self, tasks: Option<Vec<String>>) -> Self {
+        self.born_for = tasks;
         self
     }
 
@@ -1212,6 +1248,34 @@ impl Ekko {
         Err(EkkoError::CueIsUsers(ids))
     }
 
+    /// Refuses a write by a session ekko agents started that would change or
+    /// remove a task already on the board other than its own (task 1646):
+    /// those it was born for and those it created. The rest of the board is
+    /// the orchestrator's and the user's. Notes of every kind, and new tasks,
+    /// it writes as any session does; the user writes anything, as the menu
+    /// such a session opens records their answers.
+    pub(crate) fn refuse_unborn(&self, before: &ItemMap, data: &ItemMap) -> Result<(), EkkoError> {
+        let Some(born) = &self.born_for else { return Ok(()) };
+        let Some(session) = self.actor.as_ref().filter(|actor| !actor.is_person()) else { return Ok(()) };
+        let named = |id: u32, item: &Item| born.iter().any(|name| item.uid.as_deref() == Some(name.as_str()) || *name == id.to_string());
+        let created = |item: &Item| item.created_by.as_ref().is_some_and(|by| session.is(by));
+        let ids: Vec<u32> = before
+            .iter()
+            .filter(|(id, item)| item.is_task && data.get(*id) != Some(*item) && !named(**id, item) && !created(item))
+            .map(|(id, _)| *id)
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let index = uid_index(before);
+        let mut born: Vec<u32> = born
+            .iter()
+            .filter_map(|name| index.get(name.as_str()).copied().or_else(|| name.parse().ok().filter(|id| before.contains_key(id))))
+            .collect();
+        born.sort_unstable();
+        Err(EkkoError::NotBornFor { ids, born })
+    }
+
     /// `save_touching` against the board as the caller read it, under the
     /// lock it still holds: a structured write already has that copy, and
     /// reading storage.json a second time only parses the whole board again.
@@ -1226,6 +1290,7 @@ impl Ekko {
     /// in this write.
     pub(crate) fn save_arriving(&self, before: &ItemMap, data: &mut ItemMap, arrived: &ItemMap) -> Result<Saved, EkkoError> {
         self.refuse_cue_changes(before, data)?;
+        self.refuse_unborn(before, data)?;
         let now = chrono::Local::now().timestamp_millis();
 
         // The trash empties here, on the way past, and only here.

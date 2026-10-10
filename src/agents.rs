@@ -472,6 +472,119 @@ fn same(one: &Path, other: &Path) -> bool {
     real(one) == real(other)
 }
 
+/// The tasks this process acts for when a session ekko agents started runs
+/// it -- EKKO_AGENT_TASK's uids, or display ids where a task has none --
+/// and `None` anywhere else, the orchestrator included. Read where a
+/// command, the MCP server or a hook starts, never by the board itself, so
+/// a test run in a born session writes its own boards as before.
+pub fn born_tasks() -> Option<Vec<String>> {
+    let tasks: Vec<String> = std::env::var(TASKS_VAR).ok()?.split(',').map(str::trim).filter(|task| !task.is_empty()).map(str::to_string).collect();
+    (!tasks.is_empty()).then_some(tasks)
+}
+
+/// What a session ekko agents started leaves to the orchestrator or the
+/// user (task 1646, design item 7 of artifact 1640): the guard refuses its
+/// Bash calls that do it, each as `limit_of` reads it, and its board refuses
+/// it a write to another's task (`EkkoError::NotBornFor`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    /// What sends its branch out: `git push`, and `gh pr create` or `merge`.
+    Push,
+    /// What releases or deploys: a `gh release` that writes, a `publish` of
+    /// `cargo`, `npm`, `pnpm` or `yarn`, `nixos-rebuild switch`, `boot` or
+    /// `test`, and a program whose name starts with `release`, run itself
+    /// or by a shell, as `scripts/release.sh` is.
+    Release,
+    /// What starts or opens a Claude Code session: `ekko agents start`, and
+    /// `claude` but for `--version`, `--help` and the commands that start
+    /// none (`NO_SESSION`).
+    Session,
+}
+
+impl Limit {
+    /// Why a born session leaves it to another, as its refusal says.
+    fn why(self) -> &'static str {
+        match self {
+            Limit::Push => "does not push or open a pull request: its branch is the orchestrator's to merge, and what reaches a remote is the user's to send",
+            Limit::Release => "does not release or deploy: that waits on the user's word",
+            Limit::Session => "does not start sessions: the orchestrator starts them, each with a context and a cost of its own",
+        }
+    }
+}
+
+/// The options `claude` takes a value after, as `claude --help` lists them
+/// (Claude Code 2.1.295): never its command, nor a prompt.
+const CLAUDE_VALUED: &[&str] = &[
+    "--add-dir", "--agent", "--agents", "--allowedTools", "--allowed-tools", "--append-system-prompt", "--autocompact", "--betas",
+    "--debug-file", "--disallowedTools", "--disallowed-tools", "--effort", "--environment", "--fallback-model", "--file",
+    "--input-format", "--json-schema", "--max-budget-usd", "--mcp-config", "--model", "-n", "--name", "--output-format",
+    "--permission-mode", "--permission-prompts", "--plugin-dir", "--plugin-url", "--remote-control-session-name-prefix",
+    "--session-id", "--setting-sources", "--settings", "--system-prompt", "--system-prompt-snapshot", "--tools",
+];
+
+/// Claude Code's commands that start or open no session, as `claude --help`
+/// lists them (2.1.295). Its others -- `agents`, `attach`, `respawn`,
+/// `ultrareview` -- start or open one, and any other first operand is a
+/// prompt.
+const NO_SESSION: &[&str] = &[
+    "auth", "auto-mode", "doctor", "gateway", "import", "install", "logs", "mcp", "plugin", "plugins", "purge", "rm", "setup-token",
+    "stop", "kill", "update", "upgrade",
+];
+
+/// The limit the call `call`, run in `folder`, reaches, if any.
+pub fn limit_of(call: &crate::shell::Call, folder: &Path) -> Option<Limit> {
+    let operands = |valued: &[&str]| crate::shell::operands(&call.args, valued);
+    match call.name.as_str() {
+        "git" => crate::claims::git_command(&call.args, folder).filter(|(git, _, _)| *git == "push").map(|_| Limit::Push),
+        "gh" => match operands(&["-R", "--repo"]).as_slice() {
+            ["pr", "create" | "merge", ..] => Some(Limit::Push),
+            ["release", "create" | "upload" | "edit" | "delete" | "delete-asset", ..] => Some(Limit::Release),
+            _ => None,
+        },
+        "cargo" => {
+            let operands = operands(&["--manifest-path", "-Z", "--config", "-C", "--color"]);
+            (operands.iter().find(|operand| !operand.starts_with('+')) == Some(&"publish")).then_some(Limit::Release)
+        }
+        // `yarn npm publish` and `npm run publish` too.
+        "npm" | "pnpm" | "yarn" => operands(&[]).iter().take(2).any(|operand| *operand == "publish").then_some(Limit::Release),
+        "nixos-rebuild" => {
+            let operands = operands(&["--flake", "-I", "--target-host", "--build-host", "--profile-name", "-p", "--specialisation", "-c"]);
+            operands.iter().any(|operand| matches!(*operand, "switch" | "boot" | "test")).then_some(Limit::Release)
+        }
+        "ekko" => operands(&[]).starts_with(&["agents", "start"]).then_some(Limit::Session),
+        "claude" => {
+            let asks = call.args.iter().any(|arg| matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h"));
+            let command = operands(CLAUDE_VALUED).first().copied();
+            (!asks && !command.is_some_and(|command| NO_SESSION.contains(&command))).then_some(Limit::Session)
+        }
+        "bash" | "sh" | "zsh" | "dash" => {
+            let script = operands(&[]).first().map(|script| Path::new(script).file_name().unwrap_or_default().to_string_lossy().into_owned());
+            script.filter(|script| script.starts_with("release")).map(|_| Limit::Release)
+        }
+        name if name.starts_with("release") => Some(Limit::Release),
+        _ => None,
+    }
+}
+
+/// Why the guard refuses the Bash call `command`, run from `cwd`, in a
+/// session ekko agents started: a reason for each limit its calls reach,
+/// read as the guard reads calls (`crate::shell`); none for a call that
+/// reaches none, or that only names one -- in an echo, a commit message, a
+/// here-document.
+pub fn limits(command: &str, cwd: &Path) -> Vec<String> {
+    let (calls, placed) = crate::shell::located(command, cwd, crate::shell::Reading::GUARD);
+    let mut found: Vec<Limit> = Vec::new();
+    for place in &placed {
+        if let Some(limit) = limit_of(&calls[place.at], &place.folder).filter(|limit| !found.contains(limit)) {
+            found.push(limit);
+        }
+    }
+    found.iter().map(|limit| format!("{LIMIT_REASON}: this session, started for its tasks, {}.", limit.why())).collect()
+}
+
+/// How the reason a born session's limit refuses with opens.
+pub const LIMIT_REASON: &str = "ekko agents";
+
 /// The argument that runs ekko as a born session's closer, which its hook
 /// starts: never typed, as `__ekko_clipboard_daemon` is not.
 pub const CLOSER_ARG: &str = "__ekko_close";
@@ -940,6 +1053,24 @@ mod tests {
         assert_eq!(tasks_of("3,4 \u{b7} sonnet \u{b7} waiting on you"), vec![3, 4]);
         assert_eq!(tasks_of("12"), Vec::<u32>::new(), "a name start did not give");
         assert_eq!(tasks_of("notes \u{b7} haiku"), Vec::<u32>::new());
+    }
+
+    /// Each option `claude` takes a value after hides no command: what
+    /// follows the value is, a command that starts no session or a prompt
+    /// (task 1646).
+    #[test]
+    fn a_value_of_claude_s_options_is_never_taken_for_its_command() {
+        let limit = |args: &[&str]| {
+            let (calls, placed) = crate::shell::located(&format!("claude {}", args.join(" ")), Path::new("/"), crate::shell::Reading::GUARD);
+            limit_of(&calls[placed[0].at], Path::new("/"))
+        };
+        for option in CLAUDE_VALUED {
+            assert_eq!(limit(&[option, "value", "mcp", "list"]), None, "{option}");
+            assert_eq!(limit(&[option, "value", "'write it'"]), Some(Limit::Session), "{option}");
+        }
+        for command in NO_SESSION {
+            assert_eq!(limit(&[command]), None, "{command}");
+        }
     }
 
     #[test]

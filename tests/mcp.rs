@@ -64,6 +64,7 @@ fn served(home: &PathBuf, folder: Option<&Path>, lines: &[String]) -> Vec<Value>
         .env_remove("XDG_STATE_HOME")
         .env("EKKO_TERMINAL", "none")
         .env_remove("EKKO_PROJECT")
+        .env_remove("EKKO_AGENT_TASK")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -399,6 +400,7 @@ fn every_2026_07_28_result_holds_the_fields_its_type_requires() {
         .env("HOME", &home)
         .env("EKKO_DIR", &home)
         .env_remove("EKKO_PROJECT")
+        .env_remove("EKKO_AGENT_TASK")
         .output()
         .unwrap();
     assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stderr));
@@ -809,6 +811,7 @@ impl Live {
             .env("HOME", home)
             .env("EKKO_TERMINAL", "none")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -899,6 +902,7 @@ fn the_board_is_served_as_resources_by_a_server_of_their_own() {
         .env("HOME", &home)
         .env("EKKO_DIR", &home)
         .env_remove("EKKO_PROJECT")
+        .env_remove("EKKO_AGENT_TASK")
         .output()
         .unwrap();
     assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stderr));
@@ -907,7 +911,7 @@ fn the_board_is_served_as_resources_by_a_server_of_their_own() {
     assert_eq!(uris(&live.ask(request(9, "resources/list", json!({})))), ["prime://board", "item://1", "item://4", "item://5"]);
 
     // A write that leaves the list as it was is not announced.
-    let starred = Command::new(env!("CARGO_BIN_EXE_ekko")).args(["--star", "1"]).env("HOME", &home).env("EKKO_DIR", &home).output().unwrap();
+    let starred = Command::new(env!("CARGO_BIN_EXE_ekko")).args(["--star", "1"]).env("HOME", &home).env("EKKO_DIR", &home).env_remove("EKKO_AGENT_TASK").output().unwrap();
     assert!(starred.status.success(), "{}", String::from_utf8_lossy(&starred.stderr));
     assert_eq!(live.next(std::time::Duration::from_secs(5)), None, "the list did not change, yet the client was told it did");
 
@@ -1068,6 +1072,18 @@ impl Held {
     }
 
     fn spawn_in(home: &PathBuf, folder: Option<&Path>, terminal: &str) -> Held {
+        Held::spawn_born(home, folder, terminal, None)
+    }
+
+    /// `start_in`, for a session ekko agents started for `born` (task 1646).
+    fn start_born(home: &PathBuf, folder: Option<&Path>, terminal: &str, born: &str) -> Held {
+        let mut live = Held::spawn_born(home, folder, terminal, Some(born));
+        live.send(&request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})));
+        live.reply(1);
+        live
+    }
+
+    fn spawn_born(home: &PathBuf, folder: Option<&Path>, terminal: &str, born: Option<&str>) -> Held {
         let script = home.join("terminal.sh");
         // The arguments end in `<ekko> --menu <file>`: the script finds both,
         // and the pid file beside the questions, as $exe, $spec and $pid. The
@@ -1079,6 +1095,10 @@ impl Held {
         match folder {
             Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
             None => command.env("EKKO_DIR", home).current_dir(home),
+        };
+        match born {
+            Some(born) => command.env("EKKO_AGENT_TASK", born),
+            None => command.env_remove("EKKO_AGENT_TASK"),
         };
         let mut child = command
             .arg("--mcp")
@@ -1318,7 +1338,7 @@ fn a_modern_client_hears_of_changes_on_the_stream_it_opened() {
     let home = temp_home();
     let meta = json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}});
     let write = |words: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_ekko")).args(words).env("HOME", &home).env("EKKO_DIR", &home).env_remove("EKKO_PROJECT").output().unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_ekko")).args(words).env("HOME", &home).env("EKKO_DIR", &home).env_remove("EKKO_PROJECT").env_remove("EKKO_AGENT_TASK").output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     };
     let listen = |id: &str| {
@@ -1379,6 +1399,7 @@ fn no_tool_reaches_another_projects_board() {
             .env("HOME", &home)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .output()
             .unwrap();
         assert!(out.status.success(), "ekko {args:?}: {}", String::from_utf8_lossy(&out.stderr));
@@ -1413,7 +1434,7 @@ fn no_tool_reaches_another_projects_board() {
     assert!(replies["99"]["error"]["message"].as_str().unwrap().contains("Unknown tool: projects"), "{}", replies["99"]);
     let searched = text(&replies["100"]);
     assert!(!searched.contains("secret"), "the session's board holds the other project's task: {searched}");
-    let own = Command::new(env!("CARGO_BIN_EXE_ekko")).arg("--list").current_dir(&other).env("HOME", &home).env_remove("EKKO_DIR").env_remove("EKKO_PROJECT").output().unwrap();
+    let own = Command::new(env!("CARGO_BIN_EXE_ekko")).arg("--list").current_dir(&other).env("HOME", &home).env_remove("EKKO_DIR").env_remove("EKKO_PROJECT").env_remove("EKKO_AGENT_TASK").output().unwrap();
     let own = String::from_utf8(own.stdout).unwrap();
     assert!(own.contains("a secret of the other project") && own.lines().filter(|line| line.contains("secret")).count() == 1, "the other board changed: {own}");
 
@@ -1429,6 +1450,7 @@ fn cli_in(home: &PathBuf, folder: &Path, args: &[&str]) -> String {
         .env("HOME", home)
         .env_remove("EKKO_DIR")
         .env_remove("EKKO_PROJECT")
+        .env_remove("EKKO_AGENT_TASK")
         .env_remove("CLAUDECODE")
         .output()
         .unwrap();
@@ -1578,6 +1600,7 @@ fn an_artifact_is_written_with_its_page_and_read_back() {
             .env("EKKO_DIR", &home)
             .env("HOME", &home)
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .env_remove("XDG_STATE_HOME")
             .current_dir(&home)
             .output()
@@ -1632,6 +1655,7 @@ fn a_server_with_a_scratch_home_writes_nothing_on_the_board_it_found() {
             .env("HOME", home)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .env_remove("XDG_STATE_HOME")
             .env("EKKO_TERMINAL", "none");
         if let Some(named) = named {
@@ -1695,6 +1719,7 @@ fn a_server_with_a_scratch_home_writes_nothing_on_the_board_it_found() {
         .env("HOME", &scratch)
         .env_remove("EKKO_DIR")
         .env_remove("EKKO_PROJECT")
+        .env_remove("EKKO_AGENT_TASK")
         .env_remove("XDG_STATE_HOME")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1872,6 +1897,7 @@ impl Session {
             .env("HOME", home)
             .env("EKKO_TERMINAL", "none")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .env_remove("XDG_STATE_HOME");
         match folder {
             Some(folder) => command.env_remove("EKKO_DIR").current_dir(folder),
@@ -2046,6 +2072,7 @@ fn commits_name_their_tasks_and_context_lists_them() {
             .env("HOME", &home)
             .env_remove("EKKO_DIR")
             .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_AGENT_TASK")
             .output()
             .unwrap();
         assert!(out.status.success(), "ekko {args:?}: {}", String::from_utf8_lossy(&out.stderr));
@@ -2127,4 +2154,147 @@ fn a_session_moves_items_at_once_where_linked_and_elsewhere_once_the_user_allows
     assert!(again.starts_with("NOT_LINKED: ") && again.contains(&format!("allow set to \"{code}\"")), "once: {again}");
     live.stop();
     assert!(cli_in(&home, site, &["--list"]).contains("stays"));
+}
+
+/// What a session ekko agents started writes (task 1646). Every write tool
+/// the server lists either reaches a task already on the board -- and on a
+/// task the session was not born for is refused NOT_BORN_FOR, writing
+/// nothing -- or cannot reach one. Its own task, a task it made and a note
+/// it writes; the orchestrator, a session ekko agents did not start, makes
+/// every call refused here; and the user's first answer in ekko's menu
+/// lets one refused call through, once.
+#[test]
+fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_through() {
+    let home = temp_home();
+    let folders = projects(&home, &["site", "blog"]);
+    let site = &folders[0];
+    cli_in(&home, site, &["--link-project", "blog"]);
+    cli_in(&home, site, &["--task", "The session's own"]);
+    for id in 2..=10 {
+        cli_in(&home, site, &["--task", &format!("Another's, {id}")]);
+    }
+    // The artifact, 11, made by a session of its own: a server whose client
+    // is not this test's process, which every other server here has.
+    let plan = "Ship the page\n\n## Goal\nWhy.\n## What is known\nFacts.\n## Design\nHow.\n## Risks and open questions\nNone.";
+    let mut maker = Command::new("sh")
+        .args(["-c", "\"$0\" --mcp; exit $?", env!("CARGO_BIN_EXE_ekko")])
+        .current_dir(site)
+        .env("HOME", &home)
+        .env("EKKO_TERMINAL", "none")
+        .env_remove("EKKO_DIR")
+        .env_remove("EKKO_PROJECT")
+        .env_remove("EKKO_AGENT_TASK")
+        .env_remove("EKKO_AGENT_TASK")
+        .env_remove("XDG_STATE_HOME")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let made = [request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}})), call(2, "artifact", json!({"text": plan}))];
+    maker.stdin.take().unwrap().write_all(made.map(|line| format!("{line}\n")).concat().as_bytes()).unwrap();
+    let mut out = String::new();
+    maker.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+    assert!(maker.wait().unwrap().success() && out.contains(r#"\"id\":11,"#), "{out}");
+    cli_in(&home, site, &["--note", "The user's note"]);
+    cli_in(&home, &folders[1], &["--task", "The blog's"]);
+    let blog = || fs::read_to_string(folders[1].join(".ekko/storage/storage.json")).unwrap();
+    let board = || -> Value { serde_json::from_str(&fs::read_to_string(site.join(".ekko/storage/storage.json")).unwrap()).unwrap() };
+    let own = board()["1"]["uid"].as_str().unwrap().to_string();
+
+    // Each tool that reaches a task already on the board, each on a task of its own.
+    let reaching: Vec<(&str, Value)> = vec![
+        ("set_state", json!({"items": [2], "state": "done"})),
+        ("force_state", json!({"items": [3], "state": "done"})),
+        ("edit", json!({"item": 4, "append": " and more"})),
+        ("update", json!({"item": 5, "priority": 3})),
+        ("link", json!({"item": 6, "blocked_by": [1]})),
+        ("batch", json!({"ops": [{"op": "set_state", "items": [7], "state": "progress"}]})),
+        ("stash", json!({"items": [8]})),
+        ("trash", json!({"items": [9]})),
+        ("move_to", json!({"destination": "blog", "items": [10]})),
+        ("artifact", json!({"artifact": 11, "steps": [{"key": "one", "text": "The first step"}]})),
+    ];
+    // And those that cannot: what they write is new, a note, or no item.
+    let cannot = ["create", "ask", "answer", "wait", "phases"];
+
+    let answer = format!("echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" {APPLY}; done");
+    let mut born = Held::start_born(&home, Some(site), &answer, &own);
+    born.send(&request(2, "tools/list", json!({})));
+    let listed = born.reply(2);
+    let mut writes: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tool| tool["annotations"]["readOnlyHint"] == false)
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    writes.sort_unstable();
+    let mut classed: Vec<&str> = reaching.iter().map(|(tool, _)| *tool).chain(cannot).collect();
+    classed.sort_unstable();
+    assert_eq!(writes, classed, "every write tool, each where it belongs");
+
+    let (before, blog_before) = (board(), blog());
+    let mut refused = HashMap::new();
+    for (at, (tool, arguments)) in reaching.iter().enumerate() {
+        let id = 10 + at as u64;
+        born.send(&call(id, tool, arguments.clone()));
+        let said = text(&born.reply(id)).to_string();
+        let target = 2 + at;
+        let expected = format!("{target} is not this session's to change: ekko agents started it for 1, and the rest of the board");
+        assert!(said.starts_with("NOT_BORN_FOR: ") && said.contains(&expected), "{tool}: {said}");
+        assert!(said.contains("a note is any session's to write. If the user wants this exact call made anyway") && said.contains("allow set to \""), "{tool}: {said}");
+        refused.insert(*tool, said);
+    }
+    let after = board();
+    for id in 2..=11 {
+        assert_eq!(before[id.to_string()], after[id.to_string()], "{id} as it was");
+    }
+    // A board linked to its own is the rest's too.
+    born.send(&call(25, "set_state", json!({"project": "blog", "items": [1], "state": "done"})));
+    let linked = text(&born.reply(25)).to_string();
+    assert!(linked.starts_with("NOT_BORN_FOR: 1 is not this session's to change: ekko agents started it for tasks of its own"), "{linked}");
+    assert_eq!(blog(), blog_before, "nothing reached the other board");
+
+    born.send(&call(30, "set_state", json!({"items": [1], "state": "progress"})));
+    born.send(&call(31, "create", json!({"text": "Found on the way"})));
+    born.send(&call(32, "edit", json!({"item": 13, "append": " -- measured"})));
+    born.send(&call(33, "create", json!({"kind": "note", "text": "What 2 needs", "attached_to": 2})));
+    born.send(&call(34, "edit", json!({"item": 12, "append": " Read."})));
+    for id in 30..=34 {
+        let reply = born.reply(id);
+        assert!(reply["result"]["isError"] != true, "{id}: {reply}");
+    }
+    let mine = board();
+    assert!(mine["13"]["description"].as_str().unwrap().ends_with("-- measured"), "{}", mine["13"]);
+    assert!(mine["12"]["description"].as_str().unwrap().ends_with("Read."), "{}", mine["12"]);
+
+    // The user lets the edit of 4 through: once.
+    let edit = &reaching[2].1;
+    let code = refused["edit"].rsplit("allow set to \"").next().unwrap().split('"').next().unwrap().to_string();
+    born.send(&call(40, "ask", json!({"questions": [proposing(json!({"text": "Deixo a sessão mudar a 4?", "allow": code}))]})));
+    let answered: Value = serde_json::from_str(text(&born.reply(40))).unwrap();
+    assert_eq!(answered["answers"][0]["answer"], APPLY, "{answered}");
+    born.send(&call(41, "edit", edit.clone()));
+    let through = born.reply(41);
+    assert!(through["result"]["isError"] != true, "{through}");
+    assert!(board()["4"]["description"].as_str().unwrap().ends_with("and more"), "{}", board()["4"]);
+    born.send(&call(42, "edit", edit.clone()));
+    let again = text(&born.reply(42)).to_string();
+    assert!(again.starts_with("NOT_BORN_FOR: 4 is not") && again.contains(&format!("allow set to \"{code}\"")), "once: {again}");
+    born.stop();
+
+    // The orchestrator makes each.
+    let lines: Vec<String> = std::iter::once(request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}})))
+        .chain(reaching.iter().enumerate().map(|(at, (tool, arguments))| call(10 + at as u64, tool, arguments.clone())))
+        .collect();
+    let replies = session_in(&home, site, &lines);
+    for (at, (tool, _)) in reaching.iter().enumerate() {
+        let reply = &replies[&(10 + at).to_string()];
+        assert!(reply["result"]["isError"] != true, "{tool}: {reply}");
+    }
+    let done = board();
+    assert_eq!(done["2"]["isComplete"], true, "{}", done["2"]);
+    assert!(done.get("10").is_none(), "moved to the blog: {}", done);
+    fs::remove_dir_all(&home).ok();
 }

@@ -139,6 +139,16 @@ pub struct Server {
     /// The version of Claude Code the handshake's initialize named, for
     /// every request under it (task 1325); see `claude_code`.
     claude_code: Mutex<Option<String>>,
+    /// The tasks ekko agents started this server's session for, if it did
+    /// (task 1646): its writes change no other task already on a board,
+    /// unless the user lets the call through (see `call`).
+    born: Option<Vec<String>>,
+}
+
+thread_local! {
+    /// Whether the call this thread makes now is one the user let through,
+    /// once, past the limit of a session ekko agents started (task 1646).
+    static LET_THROUGH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// An answer of prime or next a session read in full: the day, for prime the
@@ -311,8 +321,8 @@ fn send(stdout: &Mutex<io::Stdout>, messages: impl IntoIterator<Item = Value>) -
     out.flush()
 }
 
-pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>, mode: Mode) -> ExitCode {
-    let server = Arc::new(Server::new(home, cwd, ekko_dir_env, project_env, mode));
+pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>, born: Option<Vec<String>>, mode: Mode) -> ExitCode {
+    let server = Arc::new(Server::new(home, cwd, ekko_dir_env, project_env, born, mode));
     let stdout = Arc::new(Mutex::new(io::stdout()));
     if mode == Mode::Resources {
         let (server, stdout) = (Arc::clone(&server), Arc::clone(&stdout));
@@ -365,7 +375,7 @@ pub fn run(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_en
 }
 
 impl Server {
-    pub fn new(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>, mode: Mode) -> Self {
+    pub fn new(home: PathBuf, cwd: PathBuf, ekko_dir_env: Option<String>, project_env: Option<String>, born: Option<Vec<String>>, mode: Mode) -> Self {
         let started = chrono::Local::now().date_naive();
         let launched = std::env::args_os().next().and_then(|program| Launch::new(program, std::env::var_os("PATH")));
         let actor = holder::Actor::client_of_this_server().with_registry(holder::Registry::at(agent::processes_dir(&home)));
@@ -386,6 +396,7 @@ impl Server {
             told_at: Mutex::new(HashMap::new()),
             tools_listed: Mutex::new(None),
             claude_code: Mutex::new(None),
+            born,
         }
     }
 
@@ -1011,11 +1022,41 @@ impl Server {
             Some(Value::Object(map)) => map.clone(),
             Some(_) => return Err(RpcError::new(-32602, "Invalid params: arguments must be an object")),
         };
-        let (text, failed) = match self.tool(name, &mut args, self.claude_code(params, modern)) {
+        let claude_code = self.claude_code(params, modern);
+        // As given: a write this session's limit refuses is made as given
+        // once the user lets it through.
+        let given = self.born.as_ref().map(|_| args.clone());
+        let made = match self.tool(name, &mut args, claude_code.clone()) {
+            Err(refused) if refused.code == "NOT_BORN_FOR" => self.let_through(name, given.unwrap_or_default(), refused, claude_code),
+            made => made,
+        };
+        let (text, failed) = match made {
             Ok(text) => (text, false),
             Err(error) => (format!("{}: {}", error.code, error.message), true),
         };
         Ok(self.tool_result(text, failed))
+    }
+
+    /// A write the limit of a session ekko agents started refused (task
+    /// 1646), made once the user lets this exact call through in ekko's
+    /// menu, as a guard's refused call is let through: refused until then,
+    /// with how to ask.
+    fn let_through(&self, name: &str, mut given: Map<String, Value>, refused: ToolError, claude_code: Option<String>) -> Result<String, ToolError> {
+        let input = Value::Object(given.clone());
+        let call = format!("mcp:{}", crate::item::new_uid());
+        if let Some(ending) = crate::guard::gate(&self.home, name, &input, &self.cwd, &call, &refused.message, &self.actor) {
+            return Err(ToolError { code: refused.code, message: format!("{}. {ending}", refused.message) });
+        }
+        LET_THROUGH.set(true);
+        let made = self.tool(name, &mut given, claude_code);
+        LET_THROUGH.set(false);
+        made
+    }
+
+    /// The tasks this session was born for, which limit what its writes
+    /// change; `None` while a call the user let through runs.
+    fn born_for(&self) -> Option<Vec<String>> {
+        self.born.clone().filter(|_| !LET_THROUGH.get())
     }
 
     /// The session's board, resolved afresh each time: the same one
@@ -1026,7 +1067,7 @@ impl Server {
     fn open(&self) -> Result<(Ekko, directory::Location), EkkoError> {
         let location = directory::locate(&self.home, &self.cwd, None, self.ekko_dir_env.as_deref(), self.project_env.as_deref())?;
         let folder = location.project.as_ref().and_then(|project| project.root.clone());
-        Ok((Ekko::at(&location)?.acting_as(self.actor.clone()).in_folder(folder), location))
+        Ok((Ekko::at(&location)?.acting_as(self.actor.clone()).in_folder(folder).born_for(self.born_for()), location))
     }
 
     /// The board a call works on, taking its project: the session's own,
@@ -1049,7 +1090,7 @@ impl Server {
             return Err(unlinked(name, &location, &linked));
         };
         let location = directory::locate(&self.home, &self.cwd, None, None, Some(&there.name)).map_err(EkkoError::from)?;
-        Ok((Ekko::at(&location)?.acting_as(self.actor.clone()).in_folder(there.root.clone()), location))
+        Ok((Ekko::at(&location)?.acting_as(self.actor.clone()).in_folder(there.root.clone()).born_for(self.born_for()), location))
     }
 
     /// Whether this session may move items to `destination` (task 909): at
@@ -1078,7 +1119,7 @@ impl Server {
         let call = format!("mcp:{}", crate::item::new_uid());
         match crate::guard::gate(&self.home, "move_to", &input, &self.cwd, &call, &reason, &self.actor) {
             None => Ok(()),
-            Some(ending) => Err(ToolError { code: "NOT_LINKED", message: format!("{reason}{ending}") }),
+            Some(ending) => Err(ToolError { code: "NOT_LINKED", message: format!("{reason} {ending}") }),
         }
     }
 
@@ -1667,6 +1708,14 @@ fn agent_message(error: &EkkoError, name: &dyn Fn(u32) -> String) -> String {
         EkkoError::Directory(directory::DirectoryError::MissingProjectName) => {
             "EKKO_PROJECT is empty at this session's launch; the user unsets it, or names a project".to_string()
         }
+        EkkoError::NotBornFor { ids, born } => format!(
+            "{} {} not this session's to change: ekko agents started it for {}, and the rest of the board is the orchestrator's \
+             and the user's, so nothing was written. Attach a note to {} saying what should change: a note is any session's to write",
+            list(ids),
+            verb(ids),
+            if born.is_empty() { "tasks of its own".to_string() } else { list(born) },
+            if ids.len() == 1 { "it" } else { "them" }
+        ),
         EkkoError::Watched(watched) => format!(
             "A Claude Code session that still runs watches {}, and its wake hook reads only this board: {}. Nothing moved. \
              Answer the question or let the wait end first; with their word, the user can move it anyway with ekko --move-to \
@@ -2204,7 +2253,7 @@ mod tests {
     fn the_hooks_prime_is_the_one_a_session_holds_until_the_server_answers() {
         let home = crate::paths::test_dir("ekko-mcp-hooked");
         fs::create_dir_all(&home).unwrap();
-        let mut server = Server::new(home.clone(), home.clone(), Some(home.display().to_string()), None, Mode::Board);
+        let mut server = Server::new(home.clone(), home.clone(), Some(home.display().to_string()), None, None, Mode::Board);
         let (me, _, _) = holder::test_sessions();
         server.actor = me.with_registry(holder::Registry::at(agent::processes_dir(&home)));
         let call = |name: &str, args: Value| {

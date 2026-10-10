@@ -525,19 +525,28 @@ fn hook_reply(home: &Path, input: &str, actor: &Actor) -> Option<Value> {
     reply_to(home, &event, actor, &crate::claims::Env::default(), chrono::Local::now().timestamp_millis())
 }
 
-/// What the hook answers `event` with, for the session `actor`: nothing, a
-/// refusal, or context for a call it lets run -- word that the user's
-/// answer let it through, the task a branch it creates claimed, a task its
-/// commit names that the session does not hold (task 1560).
+/// What the hook answers `event` with, for the session `actor`, started with
+/// `env`: nothing, a refusal -- by a cue that is on, or by a limit of a
+/// session ekko agents started (task 1646) --, or context for a call it
+/// lets run -- word that the user's answer let it through, the task a
+/// branch it creates claimed, a task its commit names that the session does
+/// not hold (task 1560).
 fn reply_to(home: &Path, event: &Value, actor: &Actor, env: &crate::claims::Env, now: i64) -> Option<Value> {
     let seen = seen(event).filter(|seen| seen.tool == "Bash")?;
     let index = current(home, now);
-    let reasons = cue_reasons(home, &index, &seen);
+    let limits = limit_reasons(&seen, env.born.is_some());
+    let cues = cue_reasons(home, &index, &seen);
+    let past = match (limits.is_empty(), cues.is_empty()) {
+        (true, _) => "the cue that refuses it",
+        (false, true) => "the limit ekko agents sets this session",
+        (false, false) => "the limit ekko agents sets this session and the cue that refuse it",
+    };
+    let reasons = [limits, cues].concat();
     let mut context = Vec::new();
     if !reasons.is_empty() {
         match decide(home, &index, &seen, &reasons, actor, now) {
             Verdict::Through(question) => {
-                context.push(format!("ekko: the user's answer to question {question} let this call through, once, past the cue that refuses it."));
+                context.push(format!("ekko: the user's answer to question {question} let this call through, once, past {past}."));
             }
             Verdict::Refused(code, all) => {
                 return Some(json!({"hookSpecificOutput": {
@@ -551,6 +560,16 @@ fn reply_to(home: &Path, event: &Value, actor: &Actor, env: &crate::claims::Env,
     let cwd = Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd });
     context.extend(crate::claims::told(home, &seen.call, cwd, actor, env));
     (!context.is_empty()).then(|| json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context.join("\n")}}))
+}
+
+/// The reasons the limits of a session ekko agents started refuse the Bash
+/// call `seen` with, when such a session makes it (`born`): none from
+/// another session, nor for a call of another tool.
+fn limit_reasons(seen: &Seen, born: bool) -> Vec<String> {
+    if !born || seen.tool != "Bash" {
+        return Vec::new();
+    }
+    crate::agents::limits(&seen.call, Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd }))
 }
 
 /// The reasons of the cues that are on and name the Bash call `seen`.
@@ -612,12 +631,12 @@ fn ending(code: &str, all: &[String], reasons: &[String]) -> String {
 /// `ekko --guard --refuse REASON`, for another guard about to refuse the
 /// call on stdin, a PreToolUse event: exits 0, printing nothing, when the
 /// user let this call through; else records the refusal with `reason`,
-/// prints what the refusal should end with -- the reasons of ekko's cues
-/// and of any other guard that refused the call, then how to ask -- and
-/// exits 1. Anything it cannot read exits 2, and the other guard refuses as
-/// it would have.
+/// prints what the refusal should end with -- the reasons of ekko's cues,
+/// of the limits of a session ekko agents started, and of any other guard
+/// that refused the call, then how to ask -- and exits 1. Anything it
+/// cannot read exits 2, and the other guard refuses as it would have.
 pub fn refuse(home: &Path, input: &str, reason: &str) -> ExitCode {
-    match refuse_reply(home, input, reason, &Actor::of_this_command()) {
+    match refuse_reply(home, input, reason, &Actor::of_this_command(), crate::agents::born_tasks().is_some()) {
         None => ExitCode::from(2),
         Some(None) => ExitCode::SUCCESS,
         Some(Some(sentence)) => {
@@ -627,15 +646,15 @@ pub fn refuse(home: &Path, input: &str, reason: &str) -> ExitCode {
     }
 }
 
-/// `refuse`'s answer for the session `actor`: `None` for input it cannot
-/// read, else what a refusal ends with, or `None` inside for a call the
-/// user let through.
-fn refuse_reply(home: &Path, input: &str, reason: &str, actor: &Actor) -> Option<Option<String>> {
+/// `refuse`'s answer for the session `actor`, which ekko agents started
+/// when `born`: `None` for input it cannot read, else what a refusal
+/// ends with, or `None` inside for a call the user let through.
+fn refuse_reply(home: &Path, input: &str, reason: &str, actor: &Actor, born: bool) -> Option<Option<String>> {
     let seen = seen(&serde_json::from_str::<Value>(input).ok()?)?;
     let now = chrono::Local::now().timestamp_millis();
     let index = current(home, now);
     let given = vec![reason.trim().to_string()];
-    let reasons = [given.clone(), cue_reasons(home, &index, &seen)].concat();
+    let reasons = [given.clone(), limit_reasons(&seen, born), cue_reasons(home, &index, &seen)].concat();
     Some(match decide(home, &index, &seen, &reasons, actor, now) {
         Verdict::Through(_) => None,
         Verdict::Refused(code, all) => Some(ending(&code, &all, &given).trim_start().to_string()),
@@ -649,7 +668,7 @@ fn refuse_reply(home: &Path, input: &str, reason: &str, actor: &Actor) -> Option
 /// is, with `reason`, and this is what the refusal ends with.
 pub fn gate(home: &Path, tool: &str, input: &Value, cwd: &Path, call: &str, reason: &str, actor: &Actor) -> Option<String> {
     let event = serde_json::json!({"tool_name": tool, "tool_input": input, "cwd": cwd.display().to_string(), "tool_use_id": call});
-    refuse_reply(home, &event.to_string(), reason, actor).unwrap_or_else(|| Some(String::new()))
+    refuse_reply(home, &event.to_string(), reason, actor, false).unwrap_or_else(|| Some(String::new()))
 }
 
 fn clipped(text: &str, most: usize) -> String {
@@ -1058,10 +1077,36 @@ mod tests {
         let through = call("/r", "t4", &session).unwrap();
         let context = through["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(context.contains(&format!("question {asked}")) && through["hookSpecificOutput"].get("permissionDecision").is_none(), "{through}");
-        assert_eq!(refuse_reply(&home, &event(command, Path::new("/r"), "t4"), "ctx: it would lose work", &session), Some(None), "another guard on the same call");
+        assert_eq!(refuse_reply(&home, &event(command, Path::new("/r"), "t4"), "ctx: it would lose work", &session, false), Some(None), "another guard on the same call");
         assert!(refused(&call("/r", "t5", &session)).is_some(), "once: the next call is refused again");
         let allow = ekko_at(&dir, None).storage.get().unwrap()[&asked].question.clone().unwrap().allow.unwrap();
         assert_eq!(allow.used.unwrap().tool_use_id, "t4");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A call the limit of a session ekko agents started refuses (task 1646)
+    /// goes through once on the user's answer, as one a cue refuses does,
+    /// saying what it went past; another session's same call was never
+    /// refused.
+    #[test]
+    fn a_born_session_s_refused_push_goes_through_once_on_the_user_s_answer() {
+        let home = home("born");
+        let dir = home.join(".ekko");
+        let (session, _, _) = test_sessions();
+        let born = crate::claims::Env { born: Some(vec!["18dd061239a28cb8-a8dad".into()]), ..Default::default() };
+        let call = |tool_use_id: &str, env: &crate::claims::Env| {
+            let event: Value = serde_json::from_str(&event("git push origin task-7", Path::new("/r"), tool_use_id)).unwrap();
+            reply_to(&home, &event, &session, env, chrono::Local::now().timestamp_millis())
+        };
+        assert_eq!(call("t1", &crate::claims::Env::default()), None, "the orchestrator's");
+        let reason = refused(&call("t1", &born)).expect("refused");
+        assert!(reason.starts_with("ekko agents: this session, started for its tasks, does not push or open a pull request"), "{reason}");
+        let (asked, _) = ask(&ekko_at(&dir, Some(&session)), &home, json!({"text": "Deixo a sessão fazer o push?", "allow": code_in(&reason)})).unwrap();
+        answer(&dir, &Actor::person(), asked, APPLY).unwrap();
+        let through = call("t2", &born).expect("let through");
+        let context = through["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert_eq!(context, format!("ekko: the user's answer to question {asked} let this call through, once, past the limit ekko agents sets this session."));
+        assert!(refused(&call("t3", &born)).is_some(), "once: the next call is refused again");
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -1082,7 +1127,7 @@ mod tests {
             cued(&home.join(".ekko"), lesson, cue("gh", &["updateProjectV2Field"], None));
             let input = event(command, Path::new("/r"), "t1");
             // As ctx refuses: its reason, then what ekko told it to end with.
-            let from_ctx = || format!("{ctx}\n\n{}", refuse_reply(&home, &input, ctx, &session).unwrap().unwrap());
+            let from_ctx = || format!("{ctx}\n\n{}", refuse_reply(&home, &input, ctx, &session, false).unwrap().unwrap());
             let from_ekko = || refused(&hook_reply(&home, &input, &session)).unwrap();
             let (ekko_text, ctx_text) = if ekko_first {
                 let ekko_text = from_ekko();
@@ -1110,16 +1155,16 @@ mod tests {
         let read = |tool_use_id: &str| {
             json!({"tool_name": "Read", "tool_input": {"file_path": "/persist/secrets/key"}, "cwd": "/r", "tool_use_id": tool_use_id}).to_string()
         };
-        let sentence = refuse_reply(&home, &read("t1"), "ctx: it would bring secret material into the context", &session).unwrap().unwrap();
+        let sentence = refuse_reply(&home, &read("t1"), "ctx: it would bring secret material into the context", &session, false).unwrap().unwrap();
         let code = code_in(&sentence);
-        assert!(refuse_reply(&home, &read("t2"), "ctx: it would bring secret material into the context", &session).unwrap().is_some());
+        assert!(refuse_reply(&home, &read("t2"), "ctx: it would bring secret material into the context", &session, false).unwrap().is_some());
         let (asked, put) = ask(&ekko_at(&dir, Some(&session)), &home, json!({"text": "Leio a chave?", "allow": code})).unwrap();
         let explain = put.explain.unwrap_or_default();
         assert!(explain.contains("The call refused (Read), from /r:\n{\"file_path\":\"/persist/secrets/key\"}"), "{explain}");
         assert!(explain.contains("- ctx: it would bring secret material into the context"), "{explain}");
         answer(&dir, &Actor::person(), asked, APPLY).unwrap();
-        assert_eq!(refuse_reply(&home, &read("t3"), "ctx: again", &session), Some(None));
-        assert_eq!(refuse_reply(&home, "not json", "ctx", &session), None, "unreadable input: the other guard refuses as it would have");
+        assert_eq!(refuse_reply(&home, &read("t3"), "ctx: again", &session, false), Some(None));
+        assert_eq!(refuse_reply(&home, "not json", "ctx", &session, false), None, "unreadable input: the other guard refuses as it would have");
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -1131,7 +1176,7 @@ mod tests {
         let dir = home.join(".ekko");
         let (session, _, _) = test_sessions();
         let read = json!({"tool_name": "Read", "tool_input": {"file_path": "/k"}, "cwd": "/r", "tool_use_id": "t1"}).to_string();
-        let code = code_in(&refuse_reply(&home, &read, "ctx: a secret", &session).unwrap().unwrap());
+        let code = code_in(&refuse_reply(&home, &read, "ctx: a secret", &session, false).unwrap().unwrap());
         let (asked, _) = ask(&ekko_at(&dir, Some(&session)), &home, json!({"text": "Leio?", "allow": code})).unwrap();
         answer(&dir, &Actor::person(), asked, APPLY).unwrap();
         let grant = current(&home, chrono::Local::now().timestamp_millis()).granted.into_iter().find(|grant| grant.id == asked).unwrap();
@@ -1174,7 +1219,7 @@ mod tests {
             _ => {
                 reads.set(reads.get() + 1);
                 let read = json!({"tool_name": "Read", "tool_input": {"file_path": format!("/k{}", reads.get())}, "cwd": "/r", "tool_use_id": "t"});
-                let code = code_in(&refuse_reply(&home, &read.to_string(), "ctx: a secret", &session).unwrap().unwrap());
+                let code = code_in(&refuse_reply(&home, &read.to_string(), "ctx: a secret", &session, false).unwrap().unwrap());
                 json!({"text": "Leio?", "allow": code})
             }
         };
