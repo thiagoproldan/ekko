@@ -15,11 +15,12 @@
 //! there too, so a GraphQL mutation passed through `-f query="$(cat <<'EOF'`
 //! is seen, while a here-document written to a file still names nothing.
 //!
-//! The guard reads past that lexer in two ways, `Reading::GUARD`, which the
+//! The guard reads past that lexer in three ways, `Reading::GUARD`. Two the
 //! user chose on a replay of this machine's calls (decision 1569, note 1561):
 //! it unwraps `nix develop -c` and its kin, and leaves out the message a call
-//! is given. `calls` keeps the Python's reading, which the corpus test holds
-//! the port to.
+//! is given. The third reads a quoted or escaped operator as the shell does,
+//! as a word (task 1718). `calls` keeps the Python's reading, which the corpus
+//! test holds the port to.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -48,7 +49,7 @@ const MARK_OPEN: char = '\u{E000}';
 const MARK_CLOSE: char = '\u{E001}';
 
 /// How far a reading goes past ctx's lexer: each part is off by default, so
-/// `calls` reads as the Python does. These are the two changes of the cue
+/// `calls` reads as the Python does. The first two are the changes of the cue
 /// gaps' plan (artifact 1071), which a replay can turn on one at a time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Reading {
@@ -58,11 +59,17 @@ pub struct Reading {
     /// A message a call is given -- a commit's, an issue's, an ekko note's,
     /// as a flag's value or on stdin -- is prose: `heard` leaves it out.
     pub messages: bool,
+    /// An operator quoted or escaped -- `\;`, `';'`, `"&&"`, `'>'` -- is a
+    /// word, as the shell reads it: an argument of the call it is in, as
+    /// `find -exec ... \;` and tmux's command sequences have it (task 1718).
+    /// The lexer gives the same word for both, which ctx takes for the
+    /// operator.
+    pub literal: bool,
 }
 
 impl Reading {
-    /// The guard's: both parts.
-    pub const GUARD: Reading = Reading { unwrap: true, messages: true };
+    /// The guard's: every part.
+    pub const GUARD: Reading = Reading { unwrap: true, messages: true, literal: true };
 }
 
 /// Where what a call prints ends up.
@@ -411,7 +418,7 @@ impl Parse {
         let cut = self.cut_heredocs(command);
         let (top, inner) = self.blanked(&cut);
         let start = self.found.len();
-        match words(&top) {
+        match tokens(&top) {
             Ok(tokens) => self.simple_calls(tokens),
             Err(Unpaired) => self.loose_calls(&top), // quotes shlex cannot pair: split on blanks instead
         }
@@ -529,15 +536,18 @@ impl Parse {
     }
 
     /// The calls of the words, as shell_calls.simple_calls finds them.
-    fn simple_calls(&mut self, tokens: Vec<String>) {
+    fn simple_calls(&mut self, tokens: Vec<(String, bool)>) {
         let (mut current, mut prev): (Option<usize>, Option<String>) = (None, None);
         let mut fd: Option<String> = None;
         let mut redirection: Option<(String, Option<String>)> = None;
         let mut piping: Option<usize> = None;
         // Marks read where no call could own them yet, for the next one.
         let mut pending: Vec<Mark> = Vec::new();
-        for raw in tokens {
+        for (raw, literal) in tokens {
             let (word, marks) = unmarked(&raw);
+            // With `reading.literal`, an operator quoted or escaped is a word.
+            let bare = !(self.reading.literal && literal);
+            let separator = bare && SEPARATORS.contains(&word.as_str());
             if word.is_empty() && !raw.is_empty() {
                 pending.extend(marks); // a mark alone, a word shlex never saw
                 continue;
@@ -558,21 +568,19 @@ impl Parse {
                 fd = Some(digit.to_string());
                 continue;
             }
-            if is_redirection(&word) {
+            if bare && is_redirection(&word) {
                 redirection = Some((word, fd.take()));
                 continue;
             }
             // With `reading.unwrap`, the word after `nix develop -c` starts a
             // call, as the one after `timeout 5` does.
-            let unwrapped = self.reading.unwrap
-                && !SEPARATORS.contains(&word.as_str())
-                && current.is_some_and(|at| runs_next(&self.found[at]));
+            let unwrapped = self.reading.unwrap && !separator && current.is_some_and(|at| runs_next(&self.found[at]));
             if unwrapped {
                 current = None;
             }
             let (mut owner, mut arg) = (None, None);
             if let Some(at) = current {
-                if SEPARATORS.contains(&word.as_str()) {
+                if separator {
                     piping = if word == "|" || word == "|&" { Some(at) } else { None };
                     current = None;
                 } else {
@@ -588,7 +596,7 @@ impl Parse {
                     }
                     self.found[at].args.push(word.clone());
                 }
-            } else if SEPARATORS.contains(&word.as_str()) {
+            } else if separator {
             } else if unwrapped || at_command_position(prev.as_deref()) {
                 if is_assignment(&word) {
                     let (name, value) = word.split_once('=').unwrap_or((&word, ""));
@@ -846,11 +854,19 @@ fn uncommented(command: &str) -> String {
 #[derive(Debug)]
 struct Unpaired;
 
+/// The words of `command`, as `tokens` gives them.
+#[cfg(test)]
+fn words(command: &str) -> Result<Vec<String>, Unpaired> {
+    tokens(command).map(|tokens| tokens.into_iter().map(|(word, _)| word).collect())
+}
+
 /// The words of `command`, as shlex.shlex(uncommented(command), posix=True,
 /// punctuation_chars=True) with whitespace_split and no commenters gives
 /// them: runs of `();<>|&` are words of their own, quotes are removed, and
-/// within double quotes a backslash escapes only `"` and itself.
-fn words(command: &str) -> Result<Vec<String>, Unpaired> {
+/// within double quotes a backslash escapes only `"` and itself. Each comes
+/// with whether quotes or a backslash made any of it literal, which shlex
+/// does not tell: `\;` and `';'` are the word `;`, as the operator is.
+fn tokens(command: &str) -> Result<Vec<(String, bool)>, Unpaired> {
     #[derive(Clone, Copy, PartialEq)]
     enum State {
         Blank,
@@ -865,7 +881,7 @@ fn words(command: &str) -> Result<Vec<String>, Unpaired> {
     let (mut found, mut pushback) = (Vec::new(), None);
     let mut state = State::Blank;
     loop {
-        let (mut token, mut quoted, mut escaped_from) = (String::new(), false, State::Word);
+        let (mut token, mut quoted, mut escaped, mut escaped_from) = (String::new(), false, false, State::Word);
         loop {
             let next = pushback.take().or_else(|| chars.next());
             match state {
@@ -881,6 +897,7 @@ fn words(command: &str) -> Result<Vec<String>, Unpaired> {
                         }
                     }
                     Some('\\') => {
+                        escaped = true;
                         escaped_from = State::Word;
                         state = State::Escape;
                     }
@@ -900,6 +917,7 @@ fn words(command: &str) -> Result<Vec<String>, Unpaired> {
                         None => return Err(Unpaired),
                         Some(c) if c == q => state = State::Word,
                         Some('\\') if q == '"' => {
+                            escaped = true;
                             escaped_from = state;
                             state = State::Escape;
                         }
@@ -940,6 +958,7 @@ fn words(command: &str) -> Result<Vec<String>, Unpaired> {
                     }
                     Some(c @ ('\'' | '"')) => state = State::Quote(c),
                     Some('\\') => {
+                        escaped = true;
                         escaped_from = State::Word;
                         state = State::Escape;
                     }
@@ -957,7 +976,7 @@ fn words(command: &str) -> Result<Vec<String>, Unpaired> {
         if !quoted && token.is_empty() {
             return Ok(found);
         }
-        found.push(token);
+        found.push((token, quoted || escaped));
     }
 }
 
@@ -1298,6 +1317,36 @@ mod tests {
     #[test]
     fn quotes_shlex_cannot_pair_fall_back_to_blanks() {
         assert_eq!(named("echo 'unterminated; git reset --hard"), vec![pair("echo", &["'unterminated"]), pair("git", &["reset", "--hard"])]);
+    }
+
+    /// With `literal`, an operator quoted or escaped is a word of the call it
+    /// is in, as the shell reads it, and one left bare is still the
+    /// operator; without it, either is the operator, as ctx reads it (task
+    /// 1718).
+    #[test]
+    fn a_quoted_or_escaped_operator_is_a_word_with_literal() {
+        let read = |command: &str, literal: bool| -> Vec<(String, Vec<String>)> {
+            calls_read(command, Reading { literal, ..Reading::default() }).into_iter().map(|call| (call.name, call.args)).collect()
+        };
+        let words = [
+            ("find . -name '*.rs' -exec rm {} \\;", pair("find", &[".", "-name", "*.rs", "-exec", "rm", "{}", ";"])),
+            ("tmux new-window \\; kill-pane -t %3", pair("tmux", &["new-window", ";", "kill-pane", "-t", "%3"])),
+            ("tmux new-window ';' kill-pane", pair("tmux", &["new-window", ";", "kill-pane"])),
+            ("echo \"&&\" git push", pair("echo", &["&&", "git", "push"])),
+            ("echo '|' git push", pair("echo", &["|", "git", "push"])),
+            ("echo \\| git push", pair("echo", &["|", "git", "push"])),
+            ("echo '(' git push ')'", pair("echo", &["(", "git", "push", ")"])),
+            ("echo 'do' git push", pair("echo", &["do", "git", "push"])),
+            ("echo '>' out", pair("echo", &[">", "out"])),
+        ];
+        for (command, call) in words {
+            assert_eq!(read(command, true), vec![call.clone()], "{command}");
+            assert_ne!(read(command, false), vec![call], "as ctx reads it: {command}");
+        }
+        assert_eq!(read("tmux new-window ; kill-pane", true), vec![pair("tmux", &["new-window"]), pair("kill-pane", &[])]);
+        assert_eq!(read("git status && git push", true), vec![pair("git", &["status"]), pair("git", &["push"])]);
+        assert_eq!(read("echo a > out", true), vec![pair("echo", &["a"])]);
+        assert_eq!(read("tmux new-window \\; kill-pane", false), vec![pair("tmux", &["new-window"]), pair("kill-pane", &[])]);
     }
 
     #[test]

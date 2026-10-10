@@ -1491,8 +1491,8 @@ mod tests {
             Err(_) => Reading::GUARD,
             Ok(parts) => {
                 let parts: Vec<&str> = parts.split(',').filter(|part| !part.is_empty()).collect();
-                assert!(parts.iter().all(|part| ["unwrap", "messages"].contains(part)), "EKKO_CUE_READING: {parts:?}");
-                Reading { unwrap: parts.contains(&"unwrap"), messages: parts.contains(&"messages") }
+                assert!(parts.iter().all(|part| ["unwrap", "messages", "literal"].contains(part)), "EKKO_CUE_READING: {parts:?}");
+                Reading { unwrap: parts.contains(&"unwrap"), messages: parts.contains(&"messages"), literal: parts.contains(&"literal") }
             }
         };
         let indexed: Vec<Indexed> = cues

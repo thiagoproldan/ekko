@@ -160,7 +160,7 @@ fn created_branch<'a>(git: &str, rest: &'a [String]) -> Option<&'a str> {
 /// its arguments, all that is fed to it -- a here-document, what a
 /// substitution in them prints -- and the file `-F` or `--file` names.
 fn message(calls: &[Call], at: usize, rest: &[String], folder: &Path) -> String {
-    let mut texts = shell::heard(calls, at, Reading { unwrap: true, messages: false });
+    let mut texts = shell::heard(calls, at, Reading { messages: false, ..Reading::GUARD });
     let mut args = rest.iter();
     while let Some(arg) = args.next() {
         let file = match arg.as_str() {
