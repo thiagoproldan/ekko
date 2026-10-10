@@ -43,6 +43,7 @@ Added by Ekko, each of them invisible until you use it:
 - **Phases and `--roadmap`**: a project's roadmap, read backwards as history and forwards as a plan
 - **Docs from the board**: `ekko docs` writes the project's documentation as markdown -- its decisions, gotchas and procedures, its history, and a page per task -- by code, with no model, in a fraction of a second
 - **Plans to approve**: an artifact holds the plan for one goal across sessions -- its design, its risks, its steps in order -- on a page in your browser that follows every change, and your answer in Ekko's menu makes its steps into tasks
+- **Sessions for tasks**: `ekko agents start` hands a task to a Claude Code session born for it, with the model and effort you pick, in a worktree of its own and a tmux window you can step into
 - **Dependencies**: `--blocked-by`, so a task cannot be completed while what blocks it is open, and `--list ready` for what can actually be started
 - **`--set`**, an idempotent alternative to the toggles: a retried command cannot undo itself
 - **Stable `uid`s**, accepted anywhere a display id is, because display ids get recycled and `--restore` hands out new ones
@@ -110,6 +111,7 @@ $ ekko --help
     $ ekko docs [<folder>] [--project <name>]
     $ ekko artifact <id> [--project <name>] [--no-open]
     $ ekko serve [--idle <seconds>] [--stop]
+    $ ekko agents start <task>... --model <model> [--effort <level>] [--project <name>]
 
     Options
         none              Display board view
@@ -174,6 +176,7 @@ $ ekko --help
     Examples
       $ ekko
       $ ekko init
+      $ ekko agents start 12 --model sonnet --effort high
       $ ekko --archive
       $ ekko --attached-to @16 12
       $ ekko --begin 2 3
@@ -959,6 +962,23 @@ http://127.0.0.1:41389/project/notes/18da5a….html (opened in the browser)
 ```
 
 The page comes from the board through `ekko serve`, a local server `ekko artifact` starts when none runs, and opens in your default browser; `--no-open` prints its address instead, `--json` prints `{"page": …, "opened": …}`, and `--project <name>` reads another project's board. It keeps itself current while it is open, so leave it there while the session works. The head of History, near the page's end, says whether it writes as you: the browser `ekko artifact` opens gets the token a write needs, and a write from inside a Claude Code session is refused. To comment, select words in the plan and press Comment, C, or a theme's color, then write in the bar at the bottom and press Enter: the comment is your note on the artifact, pending until you send it. Review, the round button beside the bar at the bottom (or R), counts your pending comments and turns the bar into a review: write what it says, if anything, pick Comment, Approve or Request changes, and press Enter, which sends every pending comment with it; Approve lists the tasks it makes and asks a second Enter. Send now, where a comment opens, sends that one alone. When the session asks you to approve the plan, Ekko's menu shows the tasks the approval makes, and your first answer makes them; Approve or Request changes on the page answers the same question, and the menu closes. Any other question the session asks about the plan, or about a step's task, waits in a box at the top of the page, with its options and, beside the one you point at, why one would pick it, an example and a preview: pick one, or several where it allows, or Other answer… and write your own, add a note if you like, and press Answer; the menu closes as it would on your answer there. `ekko --answer ID` answers a question left open. Once the plan is approved, Start, on a step whose task may be taken up now, tells the session working the plan to take it up, as a comment sent alone is told, and the page says the Start was sent until the session sets that task in progress.
+
+### Sessions for tasks
+
+A Claude Code session, the orchestrator, hands a task to a session of its own, born to do it (artifact 1640):
+
+```
+$ ekko agents start 12 --model sonnet --effort high
+Started task 12 with sonnet at effort high, in window "12 · sonnet" of session ekko (pane %4)
+  in /home/me/app/.claude/worktrees/task-12, on branch task-12 (made for it)
+  to see it: tmux attach -t ekko
+```
+
+It makes a worktree for the task at `.claude/worktrees/task-12` in the project's repository, where Claude Code's own `--worktree` puts its own, on a new branch `task-12` from the HEAD of the main checkout -- unpushed commits included, where Claude Code's default branches from the remote's -- or takes up the one an earlier start left there. It opens a window named for the task and the model in the tmux session `ekko`, which it starts when it is not there, without switching the window you are in, and runs Claude Code in it with `--model` and `--effort`, `EKKO_AGENT_TASK` naming the task by uid, `EKKO_PROJECT` naming the project, and a first prompt: set the task in progress before changing anything, work and commit in that worktree, neither push, merge, release nor start sessions, and end with a closing note on the task -- what it did, the files, the tests and their outcomes, the commit, what is left -- and the task done, or with a handoff and the task back to pending. Several tasks share one session: `ekko agents start 3 4 --model haiku` opens `3,4 · haiku`, on branch `task-3-4`. `tmux attach -t ekko` shows the windows; step into one to talk to its session.
+
+A task the page's Start would refuse is refused here too, saying why, and nothing is opened: one done, cancelled or in progress -- naming who holds it, and whether that session still runs -- in the trash, with someone, or waiting on open work; and one that has a window in the session already. A session that ends within a second of its start, as one does when the window's PATH has no Claude Code, is said not to have started.
+
+Run by a Claude Code session, the born one starts from the environment that session's process started with, read from `/proc` (on Linux): what Claude Code adds to each command it runs, `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and others, would have the new one refuse to start, nested in another, so the window's command unsets each, and it sets `CLAUDE_CONFIG_DIR` as that session has it, so both run on the same Claude Code profile. The rest is the multiplexer's own environment, as in any window you open there. `EKKO_MUX` names the multiplexer, `tmux` by default, or anything that speaks tmux's commands; `EKKO_MUX_SOCKET` a socket of its own, as `tmux -L` takes it; and `EKKO_CLAUDE` the Claude Code to run, `claude` on the window's PATH by default. `--json` prints what was opened: the tasks, the window and its pane, the worktree and its branch, whether it was made now, and the command that shows it.
 
 ### Stable ids
 

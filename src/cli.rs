@@ -65,6 +65,38 @@ pub struct ServeCli {
     pub stop: bool,
 }
 
+/// `ekko agents start <task>... --model <model> [--effort <level>]` (task
+/// 1642): a session of Claude Code born to do board tasks, in a window of
+/// its own in the multiplexer. A command word, as `artifact` is.
+#[derive(Parser, Debug)]
+#[command(name = "ekko agents", disable_help_flag = true, disable_version_flag = true, disable_help_subcommand = true)]
+pub struct AgentsCli {
+    #[command(subcommand)]
+    pub command: Agents,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum Agents {
+    /// Open a session of Claude Code for the tasks, which it claims and does.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Start {
+        /// The tasks, by id or uid; several share one session.
+        #[arg(required = true, value_name = "TASK")]
+        ids: Vec<String>,
+        /// The model the session runs, as Claude Code's --model takes it.
+        #[arg(long, value_name = "MODEL", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        model: String,
+        /// The effort it runs at, as Claude Code's --effort takes it.
+        #[arg(long, value_name = "LEVEL", value_parser = clap::builder::PossibleValuesParser::new(crate::agents::EFFORTS))]
+        effort: Option<String>,
+        /// A project's board other than the one found from the folder.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
+}
+
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 #[command(group(clap::ArgGroup::new("hooked").args(["prime", "memory", "tasklist", "wake", "guard"])))]

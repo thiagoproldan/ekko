@@ -1574,3 +1574,303 @@ fn a_scratch_home_writes_nothing_on_a_board_it_found_outside_it() {
     assert!(!storage.contains("from a scratch HOME"), "{storage}");
     fs::remove_dir_all(&dir).ok();
 }
+
+/// A stand-in for tmux (task 1642): records each call, its arguments apart,
+/// and the environment it opens a window with, and answers as tmux would
+/// for the session `ekko`: whether it is there, its windows' names, a new
+/// window's pane, and that pane running unless a file `dead` says it ended.
+const MUX: &str = r#"#!/bin/sh
+state="$(dirname "$0")/mux-state"
+mkdir -p "$state"
+for arg in "$@"; do printf '%s\037' "$arg"; done >> "$state/calls"
+printf '\n' >> "$state/calls"
+[ "$1" = -L ] && shift 2
+case "$1" in
+  has-session) [ -e "$state/session" ] ;;
+  list-windows) cat "$state/windows" ;;
+  new-session|new-window)
+    touch "$state/session"
+    while [ $# -gt 0 ]; do
+      [ "$1" = -n ] && printf '%s\n' "$2" >> "$state/windows"
+      shift
+    done
+    env > "$state/env"
+    echo %7 ;;
+  list-panes) [ -e "$state/dead" ] || echo '%7 0' ;;
+  *) exit 1 ;;
+esac
+"#;
+
+/// A project `app` in a git repository with one commit, its board made by
+/// `ekko init` in a scratch HOME, and the stand-in multiplexer beside it,
+/// which `ekko agents` runs as EKKO_MUX (task 1642).
+struct Agents {
+    home: PathBuf,
+    app: PathBuf,
+    mux: PathBuf,
+}
+
+impl Agents {
+    fn new() -> Agents {
+        let home = temp_ekko_dir();
+        let app = home.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let agents = Agents { mux: home.join("mux"), home, app };
+        agents.git(&agents.app, &["init", "-q"]);
+        agents.git(&agents.app, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        write_executable(&agents.mux, MUX);
+        assert!(agents.ekko(&["init"]).status.success());
+        agents
+    }
+
+    fn git(&self, folder: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(folder)
+            .args(["-c", "user.name=ekko", "-c", "user.email=ekko@example.com", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+            .args(args)
+            .env("HOME", &self.home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// ekko in the project's folder, as the person: no Claude Code session
+    /// runs it, whichever runs these tests.
+    fn command(&self, args: &[&str]) -> Command {
+        self.running(env!("CARGO_BIN_EXE_ekko"), args)
+    }
+
+    /// `program` with `args`, as `command` runs ekko.
+    fn running(&self, program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Command {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .current_dir(&self.app)
+            .env("HOME", &self.home)
+            .env("EKKO_MUX", &self.mux)
+            .env("EKKO_CLAUDE", "/stand-in/claude")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("EKKO_DIR")
+            .env_remove("EKKO_PROJECT")
+            .env_remove("EKKO_MUX_SOCKET")
+            .env_remove("CLAUDECODE")
+            .env_remove("TMUX");
+        command
+    }
+
+    fn ekko(&self, args: &[&str]) -> process::Output {
+        self.command(args).output().expect("failed to run ekko")
+    }
+
+    fn json(&self, args: &[&str]) -> serde_json::Value {
+        let output = self.ekko(args);
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
+    }
+
+    fn uid(&self, id: u32) -> String {
+        let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(self.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
+        board[id.to_string()]["uid"].as_str().unwrap().to_string()
+    }
+
+    /// Every call the multiplexer was made, each its arguments.
+    fn calls(&self) -> Vec<Vec<String>> {
+        let calls = fs::read_to_string(self.home.join("mux-state/calls")).unwrap_or_default();
+        calls.lines().map(|call| call.split('\u{1f}').filter(|arg| !arg.is_empty()).map(str::to_string).collect()).collect()
+    }
+
+    /// The calls that opened a window.
+    fn opened(&self) -> Vec<Vec<String>> {
+        self.calls().into_iter().filter(|call| matches!(call.first().map(String::as_str), Some("new-session" | "new-window"))).collect()
+    }
+
+    /// The command an opening call runs in its window, after tmux's own
+    /// arguments, which end with the pane's format.
+    fn command_of(call: &[String]) -> Vec<String> {
+        let at = call.iter().position(|arg| arg == "#{pane_id}").expect("the pane's format");
+        call[at + 1..].to_vec()
+    }
+
+    fn worktree(&self, branch: &str) -> PathBuf {
+        fs::canonicalize(&self.app).unwrap().join(".claude").join("worktrees").join(branch)
+    }
+}
+
+/// The value env(1) is given for `name` in `command`, before its command.
+fn assigned<'a>(command: &'a [String], name: &str) -> Option<&'a str> {
+    let at = command.iter().position(|arg| arg == "/stand-in/claude")?;
+    command[..at].iter().find_map(|arg| arg.strip_prefix(name)?.strip_prefix('='))
+}
+
+/// Whether env(1) unsets `name` in `command`.
+fn unsets(command: &[String], name: &str) -> bool {
+    command.windows(2).any(|pair| pair[0] == "-u" && pair[1] == name)
+}
+
+/// `ekko agents start` (task 1642): a task that may be taken up gets a
+/// worktree of its own, on a branch named for it, and a window named for it
+/// and its model in the session `ekko`, not made current. Its Claude Code
+/// runs through env(1) without CLAUDECODE, with the model and effort given,
+/// the task's uid and the project's name, and a first prompt that has it
+/// claim the task before it changes anything. Two tasks share a window,
+/// opened beside the first. A task with a window already is refused, and
+/// nothing more is opened.
+#[test]
+fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs", "Write the tests"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+
+    let reply = agents.json(&["agents", "start", "1", "--model", "haiku", "--effort", "low", "--json"]);
+    let worktree = agents.worktree("task-1");
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["window"], "1 \u{b7} haiku");
+    assert_eq!(reply["branch"], "task-1");
+    assert_eq!(reply["pane"], "%7");
+    assert_eq!(reply["made"], true);
+    assert_eq!(reply["worktree"], worktree.to_str().unwrap());
+    assert_eq!(agents.git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]), "task-1");
+    let opened = agents.opened();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    let head = ["new-session", "-d", "-s", "ekko", "-n", "1 \u{b7} haiku", "-c", worktree.to_str().unwrap(), "-P", "-F", "#{pane_id}"];
+    assert_eq!(opened[0][..head.len()], head);
+    let command = Agents::command_of(&opened[0]);
+    assert_eq!(command[0], "env");
+    assert!(unsets(&command, "CLAUDECODE"), "{command:?}");
+    assert_eq!(assigned(&command, "EKKO_AGENT_TASK"), Some(agents.uid(1).as_str()), "{command:?}");
+    assert_eq!(assigned(&command, "EKKO_PROJECT"), Some("app"), "{command:?}");
+    let claude = command.iter().position(|arg| arg == "/stand-in/claude").unwrap();
+    assert_eq!(command[claude + 1..command.len() - 1], ["--model", "haiku", "--effort", "low"]);
+    let prompt = command.last().unwrap();
+    assert!(prompt.starts_with("ekko agents started this session to do task 1 on"), "{prompt}");
+    assert!(prompt.contains("Before you change anything, set task 1 in progress"), "{prompt}");
+    assert!(prompt.contains(&format!("{}, on its branch task-1", worktree.display())), "{prompt}");
+
+    // Two tasks share one session, in a window beside the first.
+    let reply = agents.json(&["agents", "start", "2", "3", "--model", "sonnet", "--json"]);
+    assert_eq!(reply["window"], "2,3 \u{b7} sonnet", "{reply}");
+    assert_eq!(reply["branch"], "task-2-3");
+    let opened = agents.opened();
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    assert_eq!(opened[1][..4], ["new-window", "-d", "-t", "=ekko:"]);
+    let command = Agents::command_of(&opened[1]);
+    assert_eq!(assigned(&command, "EKKO_AGENT_TASK"), Some(format!("{},{}", agents.uid(2), agents.uid(3)).as_str()));
+    assert!(!command.iter().any(|arg| arg == "--effort"), "no effort was given: {command:?}");
+    assert!(command.last().unwrap().contains("to do tasks 2 and 3 on"), "{command:?}");
+
+    // A task with a window is refused, and nothing more is opened.
+    let refused = agents.json(&["agents", "start", "3", "--model", "haiku", "--json"]);
+    assert_eq!(refused["code"], "INVALID_INPUT", "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("task 3 has a window already, 2,3 \u{b7} sonnet"), "{refused}");
+    assert_eq!(agents.opened().len(), 2);
+    assert!(!agents.worktree("task-3").exists());
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A task done, held by a session that still runs, or in the trash is
+/// refused, each saying why, with no word to the multiplexer and no
+/// worktree made; a task that may be taken up, beside them, is started.
+#[test]
+fn agents_start_refuses_a_task_done_held_by_a_running_session_or_in_the_trash() {
+    use std::io::Write as _;
+    let agents = Agents::new();
+    for text in ["Done", "Held", "Trashed", "Free"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    assert!(agents.ekko(&["--check", "1"]).status.success());
+    // Held by this test's process, as the client of the server that claims it.
+    let mut server = agents.command(&["--mcp"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let lines = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "set_state", "arguments": {"items": [2], "state": "progress"}}}),
+    ];
+    let mut stdin = server.stdin.take().unwrap();
+    for line in lines {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let mut said = String::new();
+    server.stdout.take().unwrap().read_to_string(&mut said).unwrap();
+    assert!(server.wait().unwrap().success());
+    assert!(!said.contains("\"isError\":true"), "{said}");
+    assert!(agents.ekko(&["--delete", "3"]).status.success());
+
+    for (id, why) in [("1", "task 1 is done already"), ("2", "task 2 is in progress already, held by"), ("3", "task 3 is in the trash")] {
+        let refused = agents.json(&["agents", "start", id, "--model", "haiku", "--json"]);
+        assert_eq!(refused["code"], "INVALID_INPUT", "{refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(error.contains(why), "{refused}");
+        if id == "2" {
+            assert!(error.ends_with("which still runs"), "{refused}");
+        }
+        assert!(!agents.worktree(&format!("task-{id}")).exists(), "a worktree for task {id}");
+    }
+    assert!(agents.calls().is_empty(), "a refused start spoke to the multiplexer: {:?}", agents.calls());
+
+    let started = agents.json(&["agents", "start", "4", "--model", "haiku", "--json"]);
+    assert_eq!(started["ok"], true, "{started}");
+    assert_eq!(agents.opened().len(), 1);
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A session whose window is gone within the first second did not start:
+/// the start says so, rather than the pane it opened.
+#[test]
+fn agents_start_says_when_the_session_ended_at_once() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    fs::create_dir_all(agents.home.join("mux-state")).unwrap();
+    fs::write(agents.home.join("mux-state/dead"), "").unwrap();
+    let refused = agents.json(&["agents", "start", "1", "--model", "haiku", "--json"]);
+    assert_eq!(refused["code"], "INVALID_INPUT", "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("ended within 1 s: /stand-in/claude did not start there"), "{refused}");
+    assert_eq!(agents.opened().len(), 1, "it was opened");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// Under a Claude Code session, a born session starts with the environment
+/// that session's process started with, read from /proc (task 1642): what
+/// the session adds to the command running ekko -- here CLAUDECODE,
+/// CLAUDE_CODE_SESSION_ID and AI_AGENT, as Claude Code adds them -- is not
+/// in the environment the multiplexer runs with, and the window's command
+/// unsets each; what the session started with stays, its Claude Code
+/// profile set in the window.
+#[test]
+fn a_born_session_starts_with_the_environment_its_orchestrator_started_with() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    // The stand-in session: a process named claude, which adds to the
+    // command it runs what Claude Code adds, and stays while it runs.
+    let claude = agents.home.join("claude");
+    write_executable(&claude, "#!/bin/sh\nexport CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=s-1 AI_AGENT=claude-code\n\"$@\"\nexit $?\n");
+    let profile = agents.home.join("profile");
+    let output = agents
+        .running(&claude, &[env!("CARGO_BIN_EXE_ekko"), "agents", "start", "1", "--model", "haiku", "--json"])
+        .env("KEPT_FROM_THE_START", "yes")
+        .env("CLAUDE_CONFIG_DIR", &profile)
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("AI_AGENT")
+        .output()
+        .unwrap();
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stderr)));
+    assert_eq!(reply["ok"], true, "{reply}");
+
+    let environment = fs::read_to_string(agents.home.join("mux-state/env")).unwrap();
+    let has = |name: &str| environment.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix('=')).map(str::to_string);
+    assert_eq!(has("KEPT_FROM_THE_START").as_deref(), Some("yes"), "{environment}");
+    assert_eq!(has("CLAUDE_CONFIG_DIR").as_deref(), profile.to_str(), "{environment}");
+    let command = Agents::command_of(&agents.opened()[0]);
+    for added in ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "AI_AGENT"] {
+        assert_eq!(has(added), None, "{added} reached the multiplexer: {environment}");
+        assert!(unsets(&command, added), "{added} is not unset: {command:?}");
+    }
+    assert!(!unsets(&command, "KEPT_FROM_THE_START"), "{command:?}");
+    assert_eq!(assigned(&command, "CLAUDE_CONFIG_DIR"), profile.to_str(), "{command:?}");
+    fs::remove_dir_all(&agents.home).ok();
+}

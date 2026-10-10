@@ -1,4 +1,5 @@
 mod agent;
+mod agents;
 mod anchors;
 mod artifact;
 mod claims;
@@ -47,6 +48,7 @@ const HELP: &str = r#"
     $ ekko docs [<folder>] [--project <name>]
     $ ekko artifact <id> [--project <name>] [--no-open]
     $ ekko serve [--idle <seconds>] [--stop]
+    $ ekko agents start <task>... --model <model> [--effort <level>] [--project <name>]
 
     Options
         none              Display board view
@@ -111,6 +113,7 @@ const HELP: &str = r#"
     Examples
       $ ekko
       $ ekko init
+      $ ekko agents start 12 --model sonnet --effort high
       $ ekko --archive
       $ ekko --attached-to @16 12
       $ ekko --begin 2 3
@@ -201,6 +204,10 @@ fn main() -> ExitCode {
     // And `serve` (task 1102).
     if args.get(leading_json).map(String::as_str) == Some("serve") {
         return run_serve(&args[leading_json + 1..]);
+    }
+    // And `agents` (task 1642).
+    if args.get(leading_json).map(String::as_str) == Some("agents") {
+        return run_agents(&args[leading_json + 1..], leading_json > 0);
     }
 
     let cli = match cli::Cli::try_parse_from(std::iter::once("ekko".to_string()).chain(args)) {
@@ -524,6 +531,65 @@ fn run_artifact(args: &[String], json_first: bool) -> ExitCode {
     } else {
         println!("{page}");
     }
+    ExitCode::SUCCESS
+}
+
+/// `ekko agents start`: a session of Claude Code born to do board tasks,
+/// opened in a window of its own in the multiplexer, with the model and
+/// effort given (task 1642, artifact 1640).
+fn run_agents(args: &[String], json_first: bool) -> ExitCode {
+    let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cli = match cli::AgentsCli::try_parse_from(std::iter::once("ekko agents".to_string()).chain(args.iter().cloned())) {
+        Ok(cli) => cli,
+        Err(e) => {
+            eprint!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cli::Agents::Start { ids, model, effort, project, json } = cli.command;
+    let json_mode = json_first || json;
+    let ekko_dir_env = std::env::var("EKKO_DIR").ok();
+    let project_env = std::env::var("EKKO_PROJECT").ok();
+    let project_name = project.as_deref().or(project_env.as_deref());
+    let location = match directory::locate(&home_dir, &cwd, None, ekko_dir_env.as_deref(), project_name) {
+        Ok(location) => location,
+        Err(err) => return finish_with_error(&EkkoError::from(err), json_mode, &home_dir),
+    };
+    let started = Ekko::at(&location).and_then(|ekko| agents::start(&ekko, &location, &home_dir, &ids, &model, effort.as_deref()));
+    let started = match started {
+        Ok(started) => started,
+        Err(err) => return finish_with_error(&err, json_mode, &home_dir),
+    };
+    if json_mode {
+        let out = serde_json::json!({
+            "ok": true,
+            "command": "agents start",
+            "tasks": started.tasks,
+            "session": agents::SESSION,
+            "window": started.window,
+            "pane": started.pane,
+            "model": model,
+            "effort": effort,
+            "worktree": started.worktree,
+            "branch": started.branch,
+            "made": started.made,
+            "attach": started.attach,
+        });
+        println!("{out}");
+        return ExitCode::SUCCESS;
+    }
+    let tasks: Vec<String> = started.tasks.iter().map(u32::to_string).collect();
+    let tasks = match tasks.as_slice() {
+        [one] => format!("task {one}"),
+        [rest @ .., last] => format!("tasks {} and {last}", rest.join(", ")),
+        [] => String::new(),
+    };
+    let at = effort.as_deref().map(|effort| format!(" at effort {effort}")).unwrap_or_default();
+    println!("Started {tasks} with {model}{at}, in window \"{}\" of session {} (pane {})", started.window, agents::SESSION, started.pane);
+    let worktree = if started.made { "made for it" } else { "an earlier start's, taken up again" };
+    println!("  in {}, on branch {} ({worktree})", started.worktree.display(), started.branch);
+    println!("  to see it: {}", started.attach);
     ExitCode::SUCCESS
 }
 
