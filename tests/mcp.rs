@@ -2119,19 +2119,22 @@ fn a_session_moves_items_at_once_where_linked_and_elsewhere_once_the_user_allows
     assert!(cli_in(&home, site, &["--list"]).contains("stays"));
 }
 
-/// What a session ekko agents started writes (task 1646). Every write tool
-/// the server lists either reaches a task already on the board -- and on a
-/// task the session was not born for is refused NOT_BORN_FOR, writing
-/// nothing -- or cannot reach one. Its own task, a task it made and a note
-/// it writes; the orchestrator, a session ekko agents did not start, makes
-/// every call refused here; and the user's first answer in ekko's menu
-/// lets one refused call through, once.
+/// What a session ekko agents started writes (tasks 1646 and 1716). Every
+/// write tool the server lists either reaches a task already on the board
+/// -- and on a task the session was not born for is refused NOT_BORN_FOR,
+/// writing nothing --, reaches the board's phases -- refused the same way
+/// when it would change them --, or cannot reach either. Its own task, a
+/// task it made, a declared phase on either, and a note it writes; the
+/// orchestrator, a session ekko agents did not start, makes every call
+/// refused here; and the user's first answer in ekko's menu lets one
+/// refused call through, once.
 #[test]
 fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_through() {
     let home = temp_home();
     let folders = projects(&home, &["site", "blog"]);
     let site = &folders[0];
     cli_in(&home, site, &["--link-project", "blog"]);
+    cli_in(&home, site, &["--phases", "build"]);
     cli_in(&home, site, &["--task", "The session's own"]);
     for id in 2..=10 {
         cli_in(&home, site, &["--task", &format!("Another's, {id}")]);
@@ -2174,7 +2177,7 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
         ("artifact", json!({"artifact": 11, "steps": [{"key": "one", "text": "The first step"}]})),
     ];
     // And those that cannot: what they write is new, a note, or no item.
-    let cannot = ["create", "ask", "answer", "wait", "phases"];
+    let cannot = ["create", "ask", "answer", "wait"];
 
     let answer = format!("echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" {APPLY}; done");
     let mut born = Held::start_born(&home, Some(site), &answer, &own);
@@ -2188,7 +2191,7 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     writes.sort_unstable();
-    let mut classed: Vec<&str> = reaching.iter().map(|(tool, _)| *tool).chain(cannot).collect();
+    let mut classed: Vec<&str> = reaching.iter().map(|(tool, _)| *tool).chain(cannot).chain(["phases"]).collect();
     classed.sort_unstable();
     assert_eq!(writes, classed, "every write tool, each where it belongs");
 
@@ -2213,19 +2216,33 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
     let linked = text(&born.reply(25)).to_string();
     assert!(linked.starts_with("NOT_BORN_FOR: 1 is not this session's to change: ekko agents started it for tasks of its own"), "{linked}");
     assert_eq!(blog(), blog_before, "nothing reached the other board");
+    // The board's phases (task 1716): a change is refused, writing nothing.
+    let phases = || fs::read_to_string(site.join(".ekko/storage/phases.json")).unwrap();
+    let declared = phases();
+    let change = json!({"sequence": ["build", "ship"]});
+    born.send(&call(26, "phases", change.clone()));
+    let said = text(&born.reply(26)).to_string();
+    let expected = "NOT_BORN_FOR: The board's phases are not this session's to change: ekko agents started it for 1, and the phases are";
+    assert!(said.starts_with(expected) && said.contains("allow set to \""), "{said}");
+    assert_eq!(phases(), declared, "nothing written");
 
     born.send(&call(30, "set_state", json!({"items": [1], "state": "progress"})));
     born.send(&call(31, "create", json!({"text": "Found on the way"})));
     born.send(&call(32, "edit", json!({"item": 13, "append": " -- measured"})));
     born.send(&call(33, "create", json!({"kind": "note", "text": "What 2 needs", "attached_to": 2})));
     born.send(&call(34, "edit", json!({"item": 12, "append": " Read."})));
-    for id in 30..=34 {
+    // The sequence the board has, and a declared phase on a task of its own.
+    born.send(&call(35, "phases", json!({"sequence": ["build"]})));
+    born.send(&call(36, "create", json!({"text": "Built on the way", "phase": "build"})));
+    born.send(&call(37, "update", json!({"item": 1, "phase": "build"})));
+    for id in 30..=37 {
         let reply = born.reply(id);
         assert!(reply["result"]["isError"] != true, "{id}: {reply}");
     }
     let mine = board();
     assert!(mine["13"]["description"].as_str().unwrap().ends_with("-- measured"), "{}", mine["13"]);
     assert!(mine["12"]["description"].as_str().unwrap().ends_with("Read."), "{}", mine["12"]);
+    assert_eq!((mine["1"]["phase"].as_str(), mine["15"]["phase"].as_str()), (Some("build"), Some("build")), "{mine}");
 
     // The user lets the edit of 4 through: once.
     let edit = &reaching[2].1;
@@ -2240,19 +2257,35 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
     born.send(&call(42, "edit", edit.clone()));
     let again = text(&born.reply(42)).to_string();
     assert!(again.starts_with("NOT_BORN_FOR: 4 is not") && again.contains(&format!("allow set to \"{code}\"")), "once: {again}");
+    // And the change of the phases: once.
+    let code = said.rsplit("allow set to \"").next().unwrap().split('"').next().unwrap().to_string();
+    born.send(&call(43, "ask", json!({"questions": [proposing(json!({"text": "Deixo a sessão mudar as fases?", "allow": code}))]})));
+    let answered: Value = serde_json::from_str(text(&born.reply(43))).unwrap();
+    assert_eq!(answered["answers"][0]["answer"], APPLY, "{answered}");
+    born.send(&call(44, "phases", change.clone()));
+    let through = born.reply(44);
+    assert!(through["result"]["isError"] != true, "{through}");
+    assert!(phases().contains("ship"), "{}", phases());
+    born.send(&call(45, "phases", change));
+    assert!(born.reply(45)["result"]["isError"] != true, "the sequence it now has");
+    born.send(&call(46, "phases", json!({"sequence": ["build", "ship", "test"]})));
+    let again = text(&born.reply(46)).to_string();
+    assert!(again.starts_with("NOT_BORN_FOR: The board's phases") && again.contains("allow set to \""), "once: {again}");
     born.stop();
 
     // The orchestrator makes each.
     let lines: Vec<String> = std::iter::once(request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}})))
         .chain(reaching.iter().enumerate().map(|(at, (tool, arguments))| call(10 + at as u64, tool, arguments.clone())))
+        .chain([call(30, "phases", json!({"sequence": ["build", "ship", "test"]}))])
         .collect();
     let replies = session_in(&home, site, &lines);
-    for (at, (tool, _)) in reaching.iter().enumerate() {
+    for (at, (tool, _)) in reaching.iter().enumerate().chain([(20, &("phases", Value::Null))]) {
         let reply = &replies[&(10 + at).to_string()];
         assert!(reply["result"]["isError"] != true, "{tool}: {reply}");
     }
     let done = board();
     assert_eq!(done["2"]["isComplete"], true, "{}", done["2"]);
     assert!(done.get("10").is_none(), "moved to the blog: {}", done);
+    assert!(phases().contains("test"), "{}", phases());
     fs::remove_dir_all(&home).ok();
 }

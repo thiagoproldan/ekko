@@ -2854,17 +2854,23 @@ fn the_born_hook_counts_every_prompt_while_tools_end_beside_it() {
 }
 
 /// What a session ekko agents started leaves to the orchestrator and the
-/// user (task 1646), each kind in the forms the guard reads, beside calls
-/// that only name one or look like one: the guard refuses each there, and
-/// in the orchestrator -- a session ekko agents did not start -- none. And
-/// at the terminal, a write to a task the session was not born for: refused
-/// there, made by the orchestrator.
+/// user (tasks 1646 and 1716), each kind in the forms the guard reads,
+/// beside calls that only name one or look like one: the guard refuses each
+/// there, and in the orchestrator -- a session ekko agents did not start --
+/// none. And at the terminal, a write to a task the session was not born
+/// for, or to the board's phases: refused there, made by the orchestrator.
 #[test]
 fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_its_orchestrator_none() {
     use std::io::Write as _;
     const PUSH: &str = "does not push or open a pull request";
     const RELEASE: &str = "does not release or deploy";
     const SESSION: &str = "does not start sessions";
+    const STOP: &str = "does not stop, respawn or remove Claude Code's sessions";
+    const KILL: &str = "does not kill or respawn the multiplexer's panes, windows, sessions or server";
+    let agents = Agents::new();
+    // The stand-in multiplexer, which the guard's EKKO_MUX names, as the
+    // session's names the one `start` used.
+    let ours = format!("{} -L ekko kill-pane -t %3", agents.mux.display());
     let refused: &[(&str, &[&str])] = &[
         ("git push", &[PUSH]),
         ("git push origin task-7", &[PUSH]),
@@ -2897,6 +2903,27 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         ("claude ultrareview", &[SESSION]),
         ("cargo test && git push && claude -p 'go on'", &[PUSH, SESSION]),
         ("git push && gh pr create --fill", &[PUSH]),
+        ("claude stop 4f2a", &[STOP]),
+        ("claude kill 4f2a", &[STOP]),
+        ("claude rm 4f2a", &[STOP]),
+        ("claude respawn --all", &[STOP]),
+        ("claude --settings /tmp/settings.json stop 4f2a", &[STOP]),
+        ("tmux kill-server", &[KILL]),
+        ("tmux -L ekko kill-session -t ekko", &[KILL]),
+        ("tmux kill-window -t ekko:3", &[KILL]),
+        ("tmux kill-pane -t %3", &[KILL]),
+        ("tmux respawn-pane -k -t %3", &[KILL]),
+        ("tmux respawn-window -k -t ekko:3", &[KILL]),
+        ("tmux killw -t ekko:3", &[KILL]),
+        ("tmux kill-ser", &[KILL]),
+        ("kmux -L ekko kill-session -t ekko", &[KILL]),
+        ("ztmux kill-server", &[KILL]),
+        (&ours, &[KILL]),
+        ("tmux new-window -d \\; kill-pane -t %3", &[KILL]),
+        ("tmux display -p done\\; respawnp -k", &[KILL]),
+        ("timeout 5 tmux kill-server", &[KILL]),
+        ("bash -c 'kmux kill-server'", &[KILL]),
+        ("tmux kill-session -t ekko && claude stop 4f2a && claude -p 'again'", &[SESSION, STOP, KILL]),
     ];
     let let_through = [
         "git status",
@@ -2917,8 +2944,16 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         "ekko agents --help",
         "ekko --list pending",
         "grep -rn 'git push' docs",
+        "claude stop --help",
+        "claude logs 4f2a",
+        "tmux list-panes -a -F '#{pane_id}'",
+        "tmux new-window -d -n build",
+        "kmux -L ekko display -p 'kill-pane'",
+        "tmux display -p 'done\\;' kill-pane",
+        "echo tmux kill-server",
+        "git commit -m 'tmux kill-server, then claude stop'",
+        "grep -rn kill-pane src",
     ];
-    let agents = Agents::new();
     for text in ["Write hello", "Write the docs"] {
         assert!(agents.ekko(&["--task", text]).status.success());
     }
@@ -2940,7 +2975,7 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         let reason = output["permissionDecisionReason"].as_str().unwrap();
         assert_eq!(output["permissionDecision"], "deny", "{command}");
         assert!(reason.starts_with("ekko agents: this session, started for its tasks, "), "{command}: {reason}");
-        for kind in [PUSH, RELEASE, SESSION] {
+        for kind in [PUSH, RELEASE, SESSION, STOP, KILL] {
             assert_eq!(reason.matches(kind).count(), usize::from(kinds.contains(&kind)), "{command}: {reason}");
         }
         assert!(reason.contains("ask them through ekko's ask with allow set to \""), "{command}: {reason}");
@@ -2958,6 +2993,7 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     let orchestrator_other = other("git push --dry-run", None);
     assert!(orchestrator_other.contains("allow set to") && !orchestrator_other.contains("ekko agents"), "{orchestrator_other}");
 
+    assert!(agents.ekko(&["--phases", "build"]).status.success(), "the user declares the phases");
     let born = agents.session(&uid);
     let branch = born.ekko(&["--guard", "--hook"], &event("git checkout -b task-2"));
     assert!(branch.contains("ekko: branch task-2 did not claim task 2: Task 2 is not this session's to change"), "{branch}");
@@ -2971,21 +3007,35 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     assert!(born.ekko(&["--json", "--star", "3"], "").contains("\"ok\":true"), "a task it made is its own");
     assert!(born.ekko(&["--json", "--note", "What 2 needs"], "").contains("\"ok\":true"));
     assert!(born.ekko(&["--json", "--star", "2"], "").contains("NOT_BORN_FOR"));
+    // The board's phases (task 1716): a change is refused; the sequence the
+    // board has, and a declared phase on a task of its own, are free.
+    let phases = born.ekko(&["--json", "--phases", "build", "ship"], "");
+    let phases: serde_json::Value = serde_json::from_str(&phases).unwrap_or_else(|_| panic!("{phases}"));
+    assert_eq!(phases["code"], "NOT_BORN_FOR", "{phases}");
+    assert_eq!(phases["notBornFor"], serde_json::json!({"phases": true, "born": [1]}), "{phases}");
+    let said = phases["error"].as_str().unwrap();
+    assert!(said.starts_with("The board's phases are not this session's to change: ekko agents started it for task 1,"), "{said}");
+    assert!(born.ekko(&["--json", "--phases", "build"], "").contains("\"ok\":true"));
+    assert!(born.ekko(&["--json", "--phase", "build", "--task", "Built on the way"], "").contains("\"ok\":true"));
+    assert_eq!(fs::read_to_string(agents.home.join("app/.ekko/storage/phases.json")).unwrap().matches('"').count(), 2, "build alone");
     let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
     let second = board()["2"].clone();
     assert_eq!((second["isComplete"].as_bool(), second["isStarred"].as_bool(), second["inProgress"].as_bool()), (Some(false), Some(false), Some(false)), "{second}");
     drop(born);
     // The user, whatever the terminal they type in was started with, writes
-    // any task: one a session made too.
+    // any task -- one a session made too -- and the phases.
     let mut typed = agents.command(&["--json", "--star", "3"]);
     assert!(String::from_utf8(typed.env("EKKO_AGENT_TASK", &uid).output().unwrap().stdout).unwrap().contains("\"ok\":true"));
     assert_eq!(board()["3"]["isStarred"], false, "starred by the session, and by the user no more");
+    let mut typed = agents.command(&["--json", "--phases", "build", "test"]);
+    assert!(String::from_utf8(typed.env("EKKO_AGENT_TASK", &uid).output().unwrap().stdout).unwrap().contains("\"ok\":true"), "the user's phases");
 
     let orchestrator = agents.orchestrator();
     let branch = orchestrator.ekko(&["--guard", "--hook"], &event("git checkout -b task-2"));
     assert!(branch.contains("ekko: task 2 is in progress now, held by this session: creating branch task-2 claimed it"), "{branch}");
     assert!(orchestrator.ekko(&["--json", "--check", "2"], "").contains("\"ok\":true"));
     assert_eq!(board()["2"]["isComplete"], true, "{}", board()["2"]);
+    assert!(orchestrator.ekko(&["--json", "--phases", "build", "ship"], "").contains("\"ok\":true"));
     drop(orchestrator);
     fs::remove_dir_all(&agents.home).ok();
 }

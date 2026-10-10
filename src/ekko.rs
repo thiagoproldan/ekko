@@ -71,6 +71,10 @@ pub enum EkkoError {
     /// them (task 1646), and the tasks it was born for, as this board
     /// numbers them.
     NotBornFor { ids: Vec<u32>, born: Vec<u32> },
+    /// A change to the board's phases by a session ekko agents started
+    /// (task 1716), and the tasks it was born for, as this board numbers
+    /// them: the sequence is the orchestrator's and the user's.
+    PhasesNotBornFor { born: Vec<u32> },
     /// An item asked for by the id or uid it had before it moved to another
     /// board (task 897), and where it went.
     Moved { asked: String, to: Box<crate::storage::Moved> },
@@ -128,7 +132,7 @@ impl EkkoError {
             EkkoError::RenamedFlag { .. } => "RENAMED_FLAG",
             EkkoError::RemovedFlag { .. } => "REMOVED_FLAG",
             EkkoError::CueIsUsers(_) => "CUE_IS_USERS",
-            EkkoError::NotBornFor { .. } => "NOT_BORN_FOR",
+            EkkoError::NotBornFor { .. } | EkkoError::PhasesNotBornFor { .. } => "NOT_BORN_FOR",
             EkkoError::Moved { .. } => "MOVED",
             EkkoError::SplitLinks(_) => "SPLIT_LINKS",
             EkkoError::Watched(_) => "WATCHED",
@@ -179,6 +183,7 @@ impl EkkoError {
             | EkkoError::RemovedFlag { .. }
             | EkkoError::CueIsUsers(_)
             | EkkoError::NotBornFor { .. }
+            | EkkoError::PhasesNotBornFor { .. }
             | EkkoError::Moved { .. }
             | EkkoError::SplitLinks(_)
             | EkkoError::Watched(_) => out.generic_error(&self.to_string()),
@@ -334,6 +339,22 @@ impl std::fmt::Display for EkkoError {
                     _ => format!("tasks {}", join_ids(born)),
                 },
                 if ids.len() == 1 { "it" } else { "them" }
+            ),
+            EkkoError::PhasesNotBornFor { born } => write!(
+                f,
+                "The board's phases are not this session's to change: ekko agents started it for {}, and the phases are the \
+                 orchestrator's and the user's, so nothing was written. Its own tasks take any phase the board declares; attach a \
+                 note to {} saying what the phases should be: a note is any session's to write",
+                match born.as_slice() {
+                    [] => "tasks of its own".to_string(),
+                    [id] => format!("task {id}"),
+                    _ => format!("tasks {}", join_ids(born)),
+                },
+                match born.as_slice() {
+                    [] => "its tasks".to_string(),
+                    [id] => format!("task {id}"),
+                    _ => format!("one of tasks {}", join_ids(born)),
+                },
             ),
             EkkoError::Moved { asked, to } => {
                 let board = crate::move_to::board_name(to.project.as_deref());
@@ -1267,13 +1288,20 @@ impl Ekko {
         if ids.is_empty() {
             return Ok(());
         }
-        let index = uid_index(before);
-        let mut born: Vec<u32> = born
-            .iter()
-            .filter_map(|name| index.get(name.as_str()).copied().or_else(|| name.parse().ok().filter(|id| before.contains_key(id))))
-            .collect();
-        born.sort_unstable();
-        Err(EkkoError::NotBornFor { ids, born })
+        Err(EkkoError::NotBornFor { ids, born: born_ids(born, before) })
+    }
+
+    /// Refuses a session ekko agents started a write that changes the
+    /// board's phases from `phases` (task 1716, the user's answer 1710):
+    /// declaring, renaming, reordering or removing one. The sequence is the
+    /// orchestrator's and the user's; giving its own tasks a phase the board
+    /// declares is a write to them, and free.
+    fn refuse_unborn_phases(&self, data: &ItemMap, phases: &[String]) -> Result<(), EkkoError> {
+        let Some(born) = &self.born_for else { return Ok(()) };
+        if self.actor.as_ref().is_none_or(|actor| actor.is_person()) || self.storage.get_phases()? == phases {
+            return Ok(());
+        }
+        Err(EkkoError::PhasesNotBornFor { born: born_ids(born, data) })
     }
 
     /// `save_touching` against the board as the caller read it, under the
@@ -2439,10 +2467,11 @@ impl Ekko {
         let cleaned = remove_duplicates(
             names.iter().map(|n| n.trim_start_matches('@').to_string()).collect(),
         );
+        let data = self.storage.get_shared()?;
+        self.refuse_unborn_phases(&data, &cleaned)?;
         // Every item's phase is a declared one -- create and update refuse
         // any other -- so a phase leaves the sequence only once it holds
         // nothing, or its items would drop out of the roadmap and the filters.
-        let data = self.storage.get_shared()?;
         let mut held: Vec<(&str, u32)> = data
             .values()
             .filter(|item| item.trashed.is_none())
@@ -2691,6 +2720,19 @@ pub(crate) fn broken_dependencies(data: &ItemMap) -> BTreeSet<(u32, u32)> {
 /// Every uid on a board, resolved to its display id in one pass.
 pub(crate) fn uid_index(items: &ItemMap) -> HashMap<&str, u32> {
     items.iter().filter_map(|(id, item)| Some((item.uid.as_deref()?, *id))).collect()
+}
+
+/// The tasks a session ekko agents started was born for, as EKKO_AGENT_TASK
+/// names them -- by uid, or by id -- numbered as `items` numbers them, in
+/// order: those it does not hold left out.
+fn born_ids(born: &[String], items: &ItemMap) -> Vec<u32> {
+    let index = uid_index(items);
+    let mut ids: Vec<u32> = born
+        .iter()
+        .filter_map(|name| index.get(name.as_str()).copied().or_else(|| name.parse().ok().filter(|id| items.contains_key(id))))
+        .collect();
+    ids.sort_unstable();
+    ids
 }
 
 /// Each declared phase with its position in the sequence.

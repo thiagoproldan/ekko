@@ -1716,6 +1716,17 @@ fn agent_message(error: &EkkoError, name: &dyn Fn(u32) -> String) -> String {
             if born.is_empty() { "tasks of its own".to_string() } else { list(born) },
             if ids.len() == 1 { "it" } else { "them" }
         ),
+        EkkoError::PhasesNotBornFor { born } => format!(
+            "The board's phases are not this session's to change: ekko agents started it for {}, and the phases are the \
+             orchestrator's and the user's, so nothing was written. Its own tasks take any phase the board declares, with create or \
+             update; attach a note to {} saying what the phases should be: a note is any session's to write",
+            if born.is_empty() { "tasks of its own".to_string() } else { list(born) },
+            match born.as_slice() {
+                [] => "its tasks".to_string(),
+                [_] => list(born),
+                _ => format!("one of {}", list(born)),
+            }
+        ),
         EkkoError::Watched(watched) => format!(
             "A Claude Code session that still runs watches {}, and its wake hook reads only this board: {}. Nothing moved. \
              Answer the question or let the wait end first; with their word, the user can move it anyway with ekko --move-to \
