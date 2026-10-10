@@ -219,6 +219,11 @@ pub struct OnUser {
     pub since: i64,
     /// In Claude Code's words: `Claude needs your permission to use Bash`.
     pub what: String,
+    /// Where the user finds it (task 1715): the name of the window it runs
+    /// in, as the multiplexer's status line shows it before the session
+    /// waited -- `12 · haiku`, or the wall's. Absent outside a multiplexer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]

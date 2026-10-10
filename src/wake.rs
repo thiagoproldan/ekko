@@ -268,17 +268,17 @@ pub fn untold(ekko: &Ekko, me: &Actor, told: &Told, since: u64, holding: bool) -
                         && !over.by.as_ref().is_some_and(|by| me.is(by)) =>
                 {
                     if told.mark(&format!("over-{uid}")) {
-                        let by = over.by.as_ref().filter(|_| over.how != How::Ended).map(|by| format!(", by {}", name(by))).unwrap_or_default();
-                        let now = match (over.how, target.and_then(State::of)) {
-                            (How::Released, Some(state)) => format!(", now {}", state.word()),
-                            _ => String::new(),
-                        };
-                        lines.push(format!(
-                            "{named} {}{now}{by}. This session waited on it (note {}) to: {}",
-                            agent::ended_phrase(over.how, true),
-                            note.id,
-                            agent::clip(&note.description, QUOTED)
-                        ));
+                        let waited = format!("This session waited on it (note {}) to: {}", note.id, agent::clip(&note.description, QUOTED));
+                        if over.how == How::Asked {
+                            lines.push(asked(&named, target, &waited));
+                        } else {
+                            let by = over.by.as_ref().filter(|_| over.how != How::Ended).map(|by| format!(", by {}", name(by))).unwrap_or_default();
+                            let now = match (over.how, target.and_then(State::of)) {
+                                (How::Released, Some(state)) => format!(", now {}", state.word()),
+                                _ => String::new(),
+                            };
+                            lines.push(format!("{named} {}{now}{by}. {waited}", agent::ended_phrase(over.how, true)));
+                        }
                     }
                 }
                 None if holding && wait.rev > since && !mine(&wait.by) => {
@@ -311,6 +311,24 @@ pub fn untold(ekko: &Ekko, me: &Actor, told: &Told, since: u64, holding: bool) -
         }
     }
     Ok(lines)
+}
+
+/// The line telling a session that the one holding the task it waited on,
+/// `named`, waits on the user (task 1715): in which window and for what,
+/// while it still does, for the session to tell the user, who may be
+/// looking at it rather than at that window; then that it wait again.
+fn asked(named: &str, target: Option<&Item>, waited: &str) -> String {
+    let held = target.filter(|item| State::of(item) == Some(State::Progress)).and_then(|item| item.held_by.as_ref());
+    match held.and_then(Holder::waits) {
+        Some(on) => {
+            let window = on.window.as_deref().map(|window| format!(", in the window named \"{window}\"")).unwrap_or_default();
+            format!(
+                "{named} is held by a session that waits on the user{window}: {}. Tell the user, then wait on it again. {waited}",
+                agent::clip(&on.what, QUOTED)
+            )
+        }
+        None => format!("{named} was held by a session that waited on the user, and waits no longer. Wait on it again. {waited}"),
+    }
 }
 
 /// The cursor the SessionStart hook last served `me`'s conversation on
@@ -431,6 +449,91 @@ mod tests {
 
         set(&as_(&me), 2, "progress", true);
         assert!(untold(&as_(&me), &me, &mine, 0, false).unwrap().is_empty(), "its own write ended it: {fix}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Marks the task `task`, which the session `ekko` writes as holds, as
+    /// waiting on the user for `what` in `window` from now, or clears the
+    /// mark, as a born session's hook does (`agents::mark_holds`).
+    fn mark(ekko: &Ekko, task: u32, on: Option<(&str, &str)>) {
+        let _lock = ekko.storage.acquire_lock().unwrap();
+        let before = ekko.storage.get_shared().unwrap();
+        let mut data = crate::storage::ItemMap::clone(&before);
+        let holder = data.get_mut(&task).unwrap().held_by.as_mut().unwrap();
+        holder.waits_on_user = on.map(|(what, window)| crate::holder::OnUser {
+            since: chrono::Local::now().timestamp_millis(),
+            what: what.to_string(),
+            window: Some(window.to_string()),
+            unknown: Default::default(),
+        });
+        ekko.save_against(&before, &mut data).unwrap();
+    }
+
+    /// A wait on a task ends when the session holding it starts to wait on
+    /// the user, and on no other write (task 1715): the hook wakes the
+    /// session that waited, once, saying in which window and for what. A
+    /// wait made again ends not on that mark but on the next one; and told
+    /// once the mark is cleared, it says the holder waits no longer.
+    #[test]
+    fn a_wait_ends_when_its_task_s_holder_waits_on_the_user_and_says_where() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let dir = crate::paths::test_dir("ekko-wake-asked");
+        let home = dir.join("home");
+        let as_ = |actor: &Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        let mine = Told::of(&home, me.process.as_ref().unwrap());
+        let (holder, waiter) = (as_(&other), as_(&me));
+        holder.create_task(&["Write the docs".to_string()]).unwrap();
+        set(&holder, 1, "progress", false);
+        let first = wait_on(&waiter, 1, "done", "review the docs");
+        let open = |note: u32| waiter.storage.get().unwrap()[&note].wait.as_ref().unwrap().over.is_none();
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(3));
+
+        // Every other write leaves it open: the task's text, its star, a
+        // task beside it, and a mark cleared that was never set.
+        let mut draft = Draft::open(&holder).unwrap();
+        draft.edit(&crate::ops::Edit { item: Ref::Id(1), text: None, replace: None, append: Some(" -- started".into()), if_updated_at: None }).unwrap();
+        draft.set_state(&[Ref::Id(1)], "starred").unwrap();
+        draft.commit(false).unwrap();
+        holder.create_task(&["Another task".to_string()]).unwrap();
+        mark(&holder, 1, None);
+        assert!(open(first), "another write ended it");
+        assert!(untold(&waiter, &me, &mine, 0, false).unwrap().is_empty());
+
+        pause();
+        mark(&holder, 1, Some(("Claude needs your permission -- Bash: date > stamp.txt", "1 \u{b7} haiku")));
+        assert!(!open(first), "the mark did not end it");
+        let input = serde_json::json!({"hook_event_name": "FileChanged", "file_path": waiter.storage.storage_path()}).to_string();
+        let told = untold(&waiter, &me, &Told::within(&home.join("peek"), me.process.as_ref().unwrap()), 0, false).unwrap();
+        assert_eq!(
+            told,
+            vec![format!(
+                "1 (Write the docs (+10 chars)) is held by a session that waits on the user, in the window named \"1 \u{b7} haiku\": \
+                 Claude needs your permission -- Bash: date > stamp.txt. Tell the user, then wait on it again. \
+                 This session waited on it (note {first}) to: review the docs"
+            )]
+        );
+        assert_eq!(hook(&waiter, &input, &home, "default board"), ExitCode::from(2));
+        assert_eq!(hook(&waiter, &input, &home, "default board"), ExitCode::SUCCESS, "once");
+
+        // Made again, the wait does not end on the same mark, nor on the
+        // mark cleared; the next one ends it.
+        pause();
+        let again = wait_on(&waiter, 1, "done", "review the docs");
+        mark(&holder, 1, None);
+        assert!(open(again), "the mark it was told of ended the wait made again");
+        pause();
+        mark(&holder, 1, Some(("Claude needs your permission -- Bash: rm -r target", "1 \u{b7} haiku")));
+        assert!(!open(again));
+        // Told once the mark is cleared, it says so.
+        mark(&holder, 1, None);
+        let told = untold(&waiter, &me, &mine, 0, false).unwrap();
+        assert_eq!(
+            told,
+            vec![format!(
+                "1 (Write the docs (+10 chars)) was held by a session that waited on the user, and waits no longer. Wait on it again. \
+                 This session waited on it (note {again}) to: review the docs"
+            )]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

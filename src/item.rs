@@ -933,15 +933,23 @@ impl Wait {
             Some(State::Cancelled) => Some(How::Cancelled),
             _ => None,
         };
+        // The session holding it waits on the user, and began to after this
+        // wait was recorded (task 1715): of a mark made before it, or in the
+        // same millisecond, the reply that recorded it told the waiter, and a
+        // wait made again once told would end at once on it.
+        let asked = || {
+            let holder = item.held_by.as_ref().filter(|_| State::of(item) == Some(State::Progress))?;
+            holder.waits().filter(|on| on.since > self.by.since).map(|_| How::Asked)
+        };
         match self.until {
             Until::Answered => item.question.as_ref().and_then(|question| question.answer.as_ref()).map(|_| How::Answered),
-            Until::Done => closed,
+            Until::Done => closed.or_else(asked),
             Until::Free if closed.is_some() => closed,
             Until::Free if State::of(item) != Some(State::Progress) => Some(How::Released),
             Until::Free => match &item.held_by {
                 Some(holder) if self.by.process().is_some() && holder.process() == self.by.process() => Some(How::Yours),
                 Some(holder) if !holder.alive() => Some(How::Ended),
-                Some(_) => None,
+                Some(_) => asked(),
                 None => Some(How::Released),
             },
             Until::Unknown(_) => None,
@@ -1022,6 +1030,11 @@ pub enum How {
     Removed,
     /// Dropped by the session that waited: nobody is told.
     Dropped,
+    /// Still in progress, and the session holding it began to wait on the
+    /// user after the wait was recorded (task 1715): a permission prompt, a
+    /// dialog, a turn ended asking, as a session ekko agents started marks
+    /// it.
+    Asked,
     /// A way of ending a later version added, kept as it stored it (task
     /// 845). The wait is over all the same, and the session that waited is
     /// told so.
@@ -1040,6 +1053,7 @@ impl How {
             How::Yours => "yours",
             How::Removed => "removed",
             How::Dropped => "dropped",
+            How::Asked => "asked",
             How::Unknown(word) => word,
         }
     }
@@ -1055,6 +1069,7 @@ impl How {
             "yours" => Some(How::Yours),
             "removed" => Some(How::Removed),
             "dropped" => Some(How::Dropped),
+            "asked" => Some(How::Asked),
             _ => None,
         }
     }
@@ -2023,7 +2038,7 @@ mod tests {
                 Until::Done | Until::Free | Until::Answered | Until::Unknown(_) => {}
             }
             match how {
-                How::Done | How::Cancelled | How::Answered | How::Released | How::Ended | How::Yours | How::Removed | How::Dropped | How::Unknown(_) => {}
+                How::Done | How::Cancelled | How::Answered | How::Released | How::Ended | How::Yours | How::Removed | How::Dropped | How::Asked | How::Unknown(_) => {}
             }
             match kind {
                 Knowledge::Decision | Knowledge::Gotcha | Knowledge::Procedure | Knowledge::Unknown(_) => {}
@@ -2032,7 +2047,7 @@ mod tests {
 
         reads_back(&[Until::Done, Until::Free, Until::Answered], Until::Unknown);
         reads_back(
-            &[How::Done, How::Cancelled, How::Answered, How::Released, How::Ended, How::Yours, How::Removed, How::Dropped],
+            &[How::Done, How::Cancelled, How::Answered, How::Released, How::Ended, How::Yours, How::Removed, How::Dropped, How::Asked],
             How::Unknown,
         );
         reads_back(&[Knowledge::Decision, Knowledge::Gotcha, Knowledge::Procedure], Knowledge::Unknown);
@@ -2054,6 +2069,37 @@ mod tests {
         let mut trashed = task_in(State::Done);
         trashed.trashed = Some(1);
         assert_eq!((wait.over_on(Some(&trashed)), wait.over_on(None)), (Some(How::Removed), Some(How::Removed)));
+    }
+
+    /// A wait on a task ends when the session holding it starts to wait on
+    /// the user after the wait was recorded, until done and until free alike
+    /// (task 1715); not on a mark made before it, nor on one whose session
+    /// has ended, nor on a task out of progress; and a task closing, or a
+    /// holder gone, ends it as before.
+    #[test]
+    fn a_wait_ends_when_the_holder_starts_to_wait_on_the_user_after_it() {
+        let (me, other, gone) = crate::holder::test_sessions();
+        let recorded = 1_000;
+        let wait = |until: Until| Wait { on: "t".into(), until, by: me.holder(recorded), rev: 1, over: None, unknown: BTreeMap::new() };
+        let held = |by: &crate::holder::Actor, marked: Option<i64>, state: State| {
+            let mut task = task_in(state);
+            let mut holder = by.holder(0);
+            holder.waits_on_user = marked.map(|since| crate::holder::OnUser { since, what: "Claude needs your permission".into(), window: None, unknown: BTreeMap::new() });
+            task.held_by = Some(holder);
+            task
+        };
+        for until in [Until::Done, Until::Free] {
+            let wait = wait(until);
+            assert_eq!(wait.over_on(Some(&held(&other, None, State::Progress))), None, "{until:?}: not marked");
+            assert_eq!(wait.over_on(Some(&held(&other, Some(recorded - 1), State::Progress))), None, "{until:?}: marked before the wait");
+            assert_eq!(wait.over_on(Some(&held(&other, Some(recorded), State::Progress))), None, "{until:?}: marked as it was recorded");
+            assert_eq!(wait.over_on(Some(&held(&other, Some(recorded + 1), State::Progress))), Some(How::Asked), "{until:?}");
+            assert_eq!(wait.over_on(Some(&held(&other, Some(recorded + 5), State::Done))), Some(How::Done), "{until:?}: done first");
+        }
+        let marked_gone = held(&gone, Some(recorded + 5), State::Progress);
+        assert_eq!((wait(Until::Done).over_on(Some(&marked_gone)), wait(Until::Free).over_on(Some(&marked_gone))), (None, Some(How::Ended)), "its session ended");
+        assert_eq!(wait(Until::Free).over_on(Some(&held(&other, Some(recorded + 5), State::Paused))), Some(How::Released));
+        assert_eq!(wait(Until::Done).over_on(Some(&held(&other, Some(recorded + 5), State::Paused))), None, "out of progress, not done");
     }
 
     /// A note of a kind only a later version knows shows that word where a

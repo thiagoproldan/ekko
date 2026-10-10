@@ -1567,6 +1567,9 @@ fn wait(ekko: &Ekko, spec: &ops::WaitOn, linked: bool) -> Result<String, ToolErr
         // (tasklist's watchPaths), so one linked since is told in replies.
         let woken = if linked { "where ekko's plugin runs and this session started after the link" } else { "where ekko's plugin runs" };
         reply["told"] = json!(format!("once the wait is over, whichever way it ends: woken while idle {woken}, else in your next ekko reply"));
+        if let Some(asked) = recorded.first().and_then(|note| asked_already(&committed.data, *note)) {
+            reply["asked"] = json!(asked);
+        }
     } else {
         reply["dropped"] = json!(dropped);
     }
@@ -1574,6 +1577,23 @@ fn wait(ekko: &Ekko, spec: &ops::WaitOn, linked: bool) -> Result<String, ToolErr
         reply["notices"] = json!(committed.notices);
     }
     Ok(reply.to_string())
+}
+
+/// What the wait of note `note` is on, held by a session that waited on
+/// the user already as it was recorded (task 1715): a mark made before a
+/// wait does not end it, so the reply that records it says so.
+fn asked_already(data: &crate::storage::ItemMap, note: u32) -> Option<String> {
+    let wait = data.get(&note)?.wait.as_ref()?;
+    let target = data.values().find(|item| item.uid.as_deref() == Some(wait.on.as_str()))?;
+    let held = target.held_by.as_ref().filter(|_| crate::item::State::of(target) == Some(crate::item::State::Progress))?;
+    let on = held.waits()?;
+    let window = on.window.as_deref().map(|window| format!(", in the window named \"{window}\"")).unwrap_or_default();
+    Some(format!(
+        "{} is held by a session that waits on the user already, since {}{window}: {}. Tell the user. This wait ends as until says, or the next time that session waits on the user.",
+        target.id,
+        crate::holder::when(on.since),
+        agent::clip(&on.what, 300)
+    ))
 }
 
 /// Records ask's questions, each with the options it offers under it: the
@@ -2108,7 +2128,7 @@ fn tool_definitions(linked: &[String]) -> Value {
         },
         {
             "name": "wait",
-            "description": "Wait on a task another session or the user holds, or on a question, instead of watching the board: recorded as a note attached to it, whose text is what you will do once the wait is over, so it outlives this session's /clear or restart and the holder sees it. You are told once when it is over, whichever way it ended -- woken while idle where ekko's plugin runs, else in your next ekko reply. until: done (the task is done or cancelled), free (it leaves its holder's hands) or answered (a question); by default done for a task, answered for a question. cancel drops this session's waits on the item.",
+            "description": "Wait on a task another session or the user holds, or on a question, instead of watching the board: recorded as a note attached to it, whose text is what you will do once the wait is over, so it outlives this session's /clear or restart and the holder sees it. You are told once when it is over, whichever way it ended -- woken while idle where ekko's plugin runs, else in your next ekko reply. until: done (the task is done or cancelled), free (it leaves its holder's hands) or answered (a question); by default done for a task, answered for a question. A wait on a task also ends when the session holding it starts to wait on the user, as a session ekko agents started marks it: you are told its window and what for, to tell the user, and wait again. cancel drops this session's waits on the item.",
             "inputSchema": object(json!({
                 "item": item,
                 "until": {"type": "string", "enum": ["done", "free", "answered"]},

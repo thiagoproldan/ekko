@@ -1324,17 +1324,29 @@ fn asked_for(tool: &serde_json::Value, input: &serde_json::Value) -> String {
 /// nothing is marked. What it marked, to clear.
 fn wait_on_user(home: &Path, cwd: &Path, tasks: &str, session: &str, kind: &str, what: &str) -> Option<Waiting> {
     let since = chrono::Local::now().timestamp_millis();
-    let board = match crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of) {
+    let process = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of);
+    let ekko = process.as_ref().map(|_| board(home, cwd));
+    if kind == "idle_prompt" {
+        if let Some(note) = process.as_ref().zip(ekko.as_ref().and_then(|ekko| ekko.as_ref().ok())).and_then(|(process, ekko)| waits_on_board(ekko, process)) {
+            log(home, session, tasks, &format!("does not wait on you ({kind}): it waits on the board, through note {note}"));
+            return None;
+        }
+    }
+    // Its window, and whether it is on the wall, whose name is every
+    // session's on it (task 1677): there its border says this one waits.
+    let pane = Mux::of_this_pane().zip(set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned()));
+    let found = pane.ok_or_else(|| "in no multiplexer's pane".to_string()).and_then(|(mux, pane)| {
+        let wall = mux.on_wall(&pane);
+        let name = mux.window_name(&pane)?;
+        Ok((mux, pane, name, wall))
+    });
+    // Where the user finds it, which the board says to whoever waits on its
+    // task (task 1715).
+    let window = found.as_ref().ok().map(|(_, _, name, _)| name.strip_suffix(WAITING_ON_YOU).unwrap_or(name).to_string());
+    let board = match process.zip(ekko) {
         None => "not marked on the board: no Claude Code process is among its ancestors".to_string(),
-        Some(process) => {
-            let ekko = board(home, cwd);
-            if kind == "idle_prompt" {
-                if let Some(note) = ekko.as_ref().ok().and_then(|ekko| waits_on_board(ekko, &process)) {
-                    log(home, session, tasks, &format!("does not wait on you ({kind}): it waits on the board, through note {note}"));
-                    return None;
-                }
-            }
-            let on = crate::holder::OnUser { since, what: what.to_string(), unknown: BTreeMap::new() };
+        Some((process, ekko)) => {
+            let on = crate::holder::OnUser { since, what: what.to_string(), window, unknown: BTreeMap::new() };
             match ekko.and_then(|ekko| mark_holds(&ekko, tasks, &process, Some(on))) {
                 Ok(ids) if ids.is_empty() => "no task of its own in progress to mark on the board".to_string(),
                 Ok(ids) => format!("marked on task {}", listed(&ids)),
@@ -1342,14 +1354,10 @@ fn wait_on_user(home: &Path, cwd: &Path, tasks: &str, session: &str, kind: &str,
             }
         }
     };
-    let pane = Mux::of_this_pane().zip(set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned()));
-    let renamed = pane.ok_or_else(|| "in no multiplexer's pane".to_string()).and_then(|(mux, pane)| {
-        // The wall's name is every session's on it (task 1677): its border
-        // says this one waits.
-        if mux.on_wall(&pane) {
+    let renamed = found.and_then(|(mux, pane, name, wall)| {
+        if wall {
             return Err("it is on the wall, whose name is not its own".to_string());
         }
-        let name = mux.window_name(&pane)?;
         if name.ends_with(WAITING_ON_YOU) {
             return Ok(name);
         }

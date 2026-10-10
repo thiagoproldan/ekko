@@ -1924,6 +1924,30 @@ impl Stays {
     fn ran(&self) -> String {
         self.hook("PostToolUse", serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "true"}, "tool_response": {"stdout": ""}}))
     }
+
+    /// What the last step printed on stderr: a hook's words to the session.
+    fn said(&self) -> String {
+        fs::read_to_string(self.dir.join(format!("{}.err", self.steps.get()))).unwrap()
+    }
+
+    /// The text of each reply ekko's MCP server, run as this session's
+    /// own, gives the tool calls `calls`, each a tool's name and arguments.
+    fn tools(&self, calls: &[(&str, serde_json::Value)]) -> Vec<String> {
+        let initialize = serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}}});
+        let lines: Vec<String> = std::iter::once(initialize.to_string())
+            .chain(calls.iter().enumerate().map(|(at, (tool, arguments))| {
+                serde_json::json!({"jsonrpc": "2.0", "id": at + 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}).to_string()
+            }))
+            .collect();
+        let out = self.ekko(&["--mcp"], &format!("{}\n", lines.join("\n")));
+        let replies: Vec<serde_json::Value> = out.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+        (1..=calls.len())
+            .map(|id| {
+                let reply = replies.iter().find(|reply| reply["id"] == id).unwrap_or_else(|| panic!("no reply {id}: {out}"));
+                reply["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{reply}")).to_string()
+            })
+            .collect()
+    }
 }
 
 impl Drop for Stays {
@@ -2333,6 +2357,57 @@ fn a_born_session_waiting_on_the_user_says_so_on_its_task_and_window_until_it_mo
     session.ran();
     session.hook("Notification", serde_json::json!({"notification_type": "permission_prompt", "message": "Claude needs your permission"}));
     assert!(agents.logged("waits on you (permission_prompt): Claude needs your permission; marked on task 1;"), "{:?}", fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// The orchestrator's wait on a born session's task ends when that session
+/// starts to wait on the user (task 1715, answer 1709): its wake hook says
+/// in which window and for what, as the born hook marked the task. Waited
+/// on again while the mark stands, the wait's reply says so and the wait
+/// stays open; the mark cleared, the hook has nothing to tell.
+#[test]
+fn an_orchestrator_waiting_on_a_born_session_s_task_is_woken_when_it_waits_on_the_user() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    agents.name_window("1 \u{b7} haiku");
+    let session = agents.session(&agents.uid(1));
+    session.ekko(&["--begin", "1"], "");
+    let orchestrator = agents.orchestrator();
+    let wait = ("wait", serde_json::json!({"item": 1, "until": "done", "text": "review hello"}));
+    let first: serde_json::Value = serde_json::from_str(&orchestrator.tools(std::slice::from_ref(&wait))[0]).unwrap();
+    assert!(first["ok"] == true && first.get("asked").is_none(), "{first}");
+    let changed = serde_json::json!({"hook_event_name": "FileChanged", "session_id": "o-1", "file_path": agents.home.join("app/.ekko/storage/storage.json")}).to_string();
+    orchestrator.ekko(&["--wake", "--hook"], &changed);
+    assert_eq!(orchestrator.said(), "", "nothing ended the wait yet");
+
+    session.asks();
+    orchestrator.ekko(&["--wake", "--hook"], &changed);
+    let told = orchestrator.said();
+    assert!(
+        told.starts_with(
+            "1 (Write hello) is held by a session that waits on the user, in the window named \"1 \u{b7} haiku\": \
+             Claude needs your permission -- Bash: date > stamp.txt. Tell the user, then wait on it again. This session waited on it (note "
+        ),
+        "{told}"
+    );
+    let again: serde_json::Value = serde_json::from_str(&orchestrator.tools(&[wait])[0]).unwrap();
+    let asked = again["asked"].as_str().unwrap_or_else(|| panic!("{again}"));
+    assert!(asked.starts_with("1 is held by a session that waits on the user already, since "), "{asked}");
+    assert!(asked.contains(", in the window named \"1 \u{b7} haiku\": Claude needs your permission -- Bash: date > stamp.txt. Tell the user."), "{asked}");
+    orchestrator.ekko(&["--wake", "--hook"], &changed);
+    assert_eq!(orchestrator.said(), "", "the wait made again ended on the mark it was told of");
+
+    session.ran();
+    orchestrator.ekko(&["--wake", "--hook"], &changed);
+    assert_eq!(orchestrator.said(), "", "a mark cleared ends no wait");
+
+    // The next time the session waits on the user ends that wait, and the
+    // window is named as it was before it said so.
+    agents.name_window("1 \u{b7} haiku \u{b7} waiting on you");
+    session.asks();
+    orchestrator.ekko(&["--wake", "--hook"], &changed);
+    let told = orchestrator.said();
+    assert!(told.starts_with("1 (Write hello) is held by a session that waits on the user, in the window named \"1 \u{b7} haiku\": "), "{told}");
     fs::remove_dir_all(&agents.home).ok();
 }
 
