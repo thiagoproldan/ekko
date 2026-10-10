@@ -99,7 +99,7 @@ pub enum Agents {
 
 #[derive(Parser, Debug, Default)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
-#[command(group(clap::ArgGroup::new("hooked").args(["prime", "memory", "tasklist", "wake", "guard"])))]
+#[command(group(clap::ArgGroup::new("hooked").args(["prime", "memory", "tasklist", "wake", "guard", "born"])))]
 pub struct Cli {
     /// Attach a note to the task it explains, by id: the note first, then
     /// its task. No task detaches it.
@@ -257,7 +257,7 @@ pub struct Cli {
     #[arg(long, requires = "doctor")]
     pub probe: bool,
 
-    /// With --prime, --memory, --tasklist, --wake or --guard: answer a Claude Code hook, whose
+    /// With --prime, --memory, --tasklist, --wake, --guard or --born: answer a Claude Code hook, whose
     /// event arrives as JSON on stdin. For --prime, a session that resumes or
     /// forks gets what moved since this hook last served it, not a second prime.
     #[arg(long, requires = "hooked")]
@@ -282,6 +282,14 @@ pub struct Cli {
     /// board's file changes, and exit 2 wakes a session sitting idle.
     #[arg(long, requires = "hook")]
     pub wake: bool,
+
+    /// With --hook: what a session `ekko agents start` opened does as each
+    /// prompt reaches it and each turn ends -- see `agents::hook`: once its
+    /// tasks are finished and no prompt came after that, it is closed. The
+    /// plugin runs it on UserPromptSubmit and Stop; in a session ekko agents
+    /// did not open, it does nothing.
+    #[arg(long, requires = "hook")]
+    pub born: bool,
 
     /// With --hook: refuse the Bash calls a gotcha's cue names, as Claude
     /// Code's PreToolUse -- see `guard`. With --refuse: answer another

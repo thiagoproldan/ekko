@@ -1578,13 +1578,14 @@ fn a_scratch_home_writes_nothing_on_a_board_it_found_outside_it() {
 /// A stand-in for tmux (task 1642): records each call, its arguments apart,
 /// and the environment it opens a window with, and answers as tmux would
 /// for the session `ekko`: whether it is there, its windows' names, a new
-/// window's pane, and that pane running unless a file `dead` says it ended.
+/// window's pane, and that pane running unless a file `dead` says it ended,
+/// which kill-pane writes.
 const MUX: &str = r#"#!/bin/sh
 state="$(dirname "$0")/mux-state"
 mkdir -p "$state"
 for arg in "$@"; do printf '%s\037' "$arg"; done >> "$state/calls"
 printf '\n' >> "$state/calls"
-[ "$1" = -L ] && shift 2
+case "$1" in -L|-S) shift 2 ;; esac
 case "$1" in
   has-session) [ -e "$state/session" ] ;;
   list-windows) cat "$state/windows" ;;
@@ -1597,6 +1598,7 @@ case "$1" in
     env > "$state/env"
     echo %7 ;;
   list-panes) [ -e "$state/dead" ] || echo '%7 0' ;;
+  kill-pane) touch "$state/dead" ;;
   *) exit 1 ;;
 esac
 "#;
@@ -1659,7 +1661,8 @@ impl Agents {
             .env_remove("EKKO_PROJECT")
             .env_remove("EKKO_MUX_SOCKET")
             .env_remove("CLAUDECODE")
-            .env_remove("TMUX");
+            .env_remove("TMUX")
+            .env_remove("XDG_STATE_HOME");
         command
     }
 
@@ -1698,6 +1701,82 @@ impl Agents {
     fn worktree(&self, branch: &str) -> PathBuf {
         fs::canonicalize(&self.app).unwrap().join(".claude").join("worktrees").join(branch)
     }
+
+    /// Runs the born hook on `event` in the session `session`, started for
+    /// `tasks` (none: a session ekko agents did not start), in the pane %7,
+    /// under a stand-in Claude Code: a process named claude that outlives
+    /// its hook, as Claude Code does, until something ends it or 30 s pass.
+    /// The stand-in, and what the hook printed, once it has returned.
+    fn born(&self, tasks: Option<&str>, session: &str, event: &str, extra: serde_json::Value) -> (process::Child, String) {
+        use std::io::Write as _;
+        let claude = self.home.join("claude");
+        if !claude.exists() {
+            // Its output closes as the hook returns, which tells the reader.
+            write_executable(&claude, "#!/bin/sh\n\"$@\"\nexec sleep 30 >/dev/null 2>&1\n");
+        }
+        let mut command = self.running(&claude, &[env!("CARGO_BIN_EXE_ekko"), "--born", "--hook"]);
+        command
+            .env("EKKO_PROJECT", "app")
+            .env("TMUX", format!("{},1,0", self.home.join("tmux-socket").display()))
+            .env("TMUX_PANE", "%7")
+            .env_remove("EKKO_AGENT_TASK");
+        if let Some(tasks) = tasks {
+            command.env("EKKO_AGENT_TASK", tasks);
+        }
+        let mut stand_in = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let mut input = serde_json::json!({"session_id": session, "hook_event_name": event});
+        input.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        writeln!(stand_in.stdin.take().unwrap(), "{input}").unwrap();
+        let mut said = String::new();
+        stand_in.stdout.take().unwrap().read_to_string(&mut said).unwrap();
+        (stand_in, said)
+    }
+
+    /// A prompt reaching the session: the hook runs, and its stand-in goes.
+    fn prompt(&self, tasks: &str, session: &str) {
+        let (mut stand_in, _) = self.born(Some(tasks), session, "UserPromptSubmit", serde_json::json!({"prompt": "go on"}));
+        stand_in.kill().ok();
+        stand_in.wait().ok();
+    }
+
+    /// The end of a turn, with no background work in flight.
+    fn stop(&self, tasks: &str, session: &str) -> (process::Child, String) {
+        self.born(Some(tasks), session, "Stop", serde_json::json!({"background_tasks": [], "session_crons": []}))
+    }
+
+    /// Whether a line of born.log holds `what` within 5 s.
+    fn logged(&self, what: &str) -> bool {
+        let log = self.home.join(".local/state/ekko/born/born.log");
+        (0..100).any(|_| {
+            let found = fs::read_to_string(&log).is_ok_and(|log| log.contains(what));
+            if !found {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            found
+        })
+    }
+}
+
+/// Whether the stand-in session was ended by SIGTERM within 5 s.
+fn ended_by_sigterm(stand_in: &mut process::Child) -> bool {
+    use std::os::unix::process::ExitStatusExt as _;
+    for _ in 0..100 {
+        if let Some(status) = stand_in.try_wait().unwrap() {
+            return status.signal() == Some(libc::SIGTERM);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// Whether the stand-in session still runs 2.5 s on, past the second the
+/// closer waits; then it is ended.
+fn still_runs(stand_in: &mut process::Child) -> bool {
+    std::thread::sleep(std::time::Duration::from_millis(2_500));
+    let running = stand_in.try_wait().unwrap().is_none();
+    stand_in.kill().ok();
+    stand_in.wait().ok();
+    running
 }
 
 /// The value env(1) is given for `name` in `command`, before its command.
@@ -1744,6 +1823,7 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert!(unsets(&command, "CLAUDECODE"), "{command:?}");
     assert_eq!(assigned(&command, "EKKO_AGENT_TASK"), Some(agents.uid(1).as_str()), "{command:?}");
     assert_eq!(assigned(&command, "EKKO_PROJECT"), Some("app"), "{command:?}");
+    assert_eq!(assigned(&command, "EKKO_MUX"), agents.mux.to_str(), "the hook that closes it speaks to the same one: {command:?}");
     let claude = command.iter().position(|arg| arg == "/stand-in/claude").unwrap();
     assert_eq!(command[claude + 1..command.len() - 1], ["--model", "haiku", "--effort", "low"]);
     let prompt = command.last().unwrap();
@@ -1872,5 +1952,102 @@ fn a_born_session_starts_with_the_environment_its_orchestrator_started_with() {
     }
     assert!(!unsets(&command, "KEPT_FROM_THE_START"), "{command:?}");
     assert_eq!(assigned(&command, "CLAUDE_CONFIG_DIR"), profile.to_str(), "{command:?}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A born session's hook (task 1643, note 1638's cases A and B): at the end
+/// of a turn whose task is not done, the session stays; once it is done and
+/// no prompt came after, the session's Claude Code is ended by SIGTERM a
+/// second later, and its pane, still listed, is closed and gone from the
+/// list. Background work in flight keeps it, and a session ekko agents did
+/// not start is left alone, whatever its board says.
+#[test]
+fn a_born_session_closes_once_its_task_is_done_and_not_before() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    let uid = agents.uid(1);
+    agents.prompt(&uid, "s-1");
+
+    let (mut stand_in, said) = agents.stop(&uid, "s-1");
+    assert!(said.is_empty(), "{said}");
+    assert!(agents.logged(&format!("{uid} stays: task 1 is pending")));
+    assert!(still_runs(&mut stand_in), "closed with its task pending");
+
+    assert!(agents.ekko(&["--check", "1"]).status.success());
+    let busy = serde_json::json!({"background_tasks": [{"id": "b-1", "type": "shell", "status": "running"}], "session_crons": []});
+    let (mut stand_in, _) = agents.born(Some(&uid), "s-1", "Stop", busy);
+    assert!(agents.logged("stays: background work is in flight"));
+    assert!(still_runs(&mut stand_in), "closed with background work in flight");
+    let (mut stand_in, _) = agents.born(None, "s-1", "Stop", serde_json::json!({"background_tasks": [], "session_crons": []}));
+    assert!(still_runs(&mut stand_in), "closed a session ekko agents did not start");
+
+    let (mut stand_in, said) = agents.stop(&uid, "s-1");
+    assert!(said.contains("systemMessage") && said.contains("closes now"), "{said}");
+    // Read before the stand-in is reaped: a process ended and not reaped yet
+    // is a zombie, which the closer must take for ended.
+    assert!(agents.logged("closed: its Claude Code ended, and its pane %7 is gone"), "{:?}", fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")));
+    assert!(ended_by_sigterm(&mut stand_in), "not ended by SIGTERM once its task was done");
+    let socket = agents.home.join("tmux-socket");
+    let closing: Vec<Vec<String>> = agents.calls().into_iter().filter(|call| call[..2] == ["-S", socket.to_str().unwrap()]).collect();
+    assert_eq!(closing.iter().map(|call| call[2].as_str()).collect::<Vec<_>>(), ["list-panes", "kill-pane", "list-panes", "list-panes"], "{closing:?}");
+    assert_eq!(closing[1][3..], ["-t", "%7"]);
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// Note 1638's case C: the user finishes the task, then talks to the
+/// session; a prompt that reaches it once its task is done makes it the
+/// user's, and it stays at the end of that turn and every one after.
+#[test]
+fn a_born_session_the_user_talks_to_once_its_task_is_done_stays() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    let uid = agents.uid(1);
+    agents.prompt(&uid, "s-1");
+    assert!(agents.ekko(&["--check", "1"]).status.success());
+    agents.prompt(&uid, "s-1");
+    assert!(agents.logged("a prompt reached it after its tasks were finished: it stays, the user's now"));
+    for _ in 0..2 {
+        let (mut stand_in, said) = agents.stop(&uid, "s-1");
+        assert!(said.is_empty(), "{said}");
+        assert!(still_runs(&mut stand_in), "closed after the user talked to it");
+    }
+    assert!(agents.logged("stays: a prompt reached it after its tasks were finished"));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A prompt typed while the task is under way, which Claude Code fires as
+/// it is typed, does not keep the session once the task is done (design
+/// item 2: only a prompt after that does); a prompt that reaches it in the
+/// second before it closes does, and so does its task reopened then.
+#[test]
+fn a_prompt_mid_task_does_not_keep_a_born_session_but_one_as_it_closes_does() {
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs", "Write the tests"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let (one, two) = (agents.uid(1), agents.uid(2));
+    agents.prompt(&one, "s-1");
+    assert!(agents.ekko(&["--begin", "1"]).status.success());
+    agents.prompt(&one, "s-1");
+    assert!(agents.ekko(&["--check", "1"]).status.success());
+    let (mut stand_in, _) = agents.stop(&one, "s-1");
+    assert!(ended_by_sigterm(&mut stand_in), "a prompt mid-task kept it");
+
+    agents.prompt(&two, "s-2");
+    assert!(agents.ekko(&["--check", "2"]).status.success());
+    let (mut stand_in, said) = agents.stop(&two, "s-2");
+    assert!(said.contains("closes now"), "{said}");
+    agents.prompt(&two, "s-2");
+    assert!(still_runs(&mut stand_in), "closed after a prompt reached it in its last second");
+    assert!(agents.logged(&format!("{two} stays: a prompt reached it as it was closing")));
+
+    let three = agents.uid(3);
+    agents.prompt(&three, "s-3");
+    assert!(agents.ekko(&["--check", "3"]).status.success());
+    let (mut stand_in, said) = agents.stop(&three, "s-3");
+    assert!(said.contains("closes now"), "{said}");
+    assert!(agents.ekko(&["--check", "3"]).status.success(), "reopened");
+    assert!(still_runs(&mut stand_in), "closed with its task reopened in its last second");
+    assert!(agents.logged(&format!("{three} stays: task 3 is pending")));
     fs::remove_dir_all(&agents.home).ok();
 }

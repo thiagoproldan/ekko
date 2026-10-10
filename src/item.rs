@@ -1966,7 +1966,7 @@ mod tests {
         assert!(missing.is_empty(), "no `unknown`, and no reason given here for none: {missing:?}");
         checked.sort();
         let expected = [
-            "Aid", "Allowance", "Anchor", "Answer", "Approving", "Artifact", "Comment", "Counters", "Cue", "Earlier", "Failure", "Holder", "Item",
+            "Aid", "Allowance", "Anchor", "Answer", "Approving", "Artifact", "Born", "Comment", "Counters", "Cue", "Earlier", "Failure", "Holder", "Item",
             "Linking", "Moved", "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Seen", "State", "Step",
             "StillTrue", "Unread", "Use", "Used", "Wait",
         ];

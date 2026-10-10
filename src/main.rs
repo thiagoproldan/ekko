@@ -84,11 +84,12 @@ const HELP: &str = r#"
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
       --prime             Summarise the board for picking work back up
-      --hook              With --prime, --memory, --tasklist or --guard: answer a Claude Code hook's event on stdin
+      --hook              With --prime, --memory, --tasklist, --guard or --born: answer a Claude Code hook's event on stdin
       --memory            With --hook: put the project's memory page in a starting session's context
       --tasklist          With --hook: draw the board in the session's Claude Code task list
       --guard             With --hook: refuse the Bash calls a gotcha's cue names
       --refuse <REASON>   With --guard: another guard's refusal, which the user may let through
+      --born              With --hook: close a session ekko agents started once its tasks are finished
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
@@ -175,6 +176,12 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some(CLIPBOARD_DAEMON_ARG) {
         return run_clipboard_daemon();
     }
+    // A born session's closer, which its hook starts (task 1643).
+    if args.first().map(String::as_str) == Some(agents::CLOSER_ARG) {
+        let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        return agents::close(&home_dir, &cwd, &args[1..]);
+    }
 
     // Handled before clap ever sees argv, same as meow's behavior this is
     // replacing: --help/--version anywhere in the invocation wins,
@@ -241,6 +248,11 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+    // A born session's hook (task 1643), before any board is located: in
+    // every other session it does nothing, at the cost of a process.
+    if cli.born {
+        return agents::hook(&home_dir, &cwd, &read_hook_input());
     }
     // Before any board is opened: the server opens one per call, because each
     // call may name a different project.

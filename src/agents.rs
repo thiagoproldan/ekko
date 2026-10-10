@@ -2,17 +2,21 @@
 //! born to do board tasks, opened in a window of its own in a terminal
 //! multiplexer, with the model and effort chosen for those tasks, in a
 //! worktree of its own. It lives for its tasks; the user sees its window,
-//! and may step into it and talk to it.
+//! and may step into it and talk to it. Its hook (task 1643) closes it once
+//! its tasks are finished, unless the user talks to it after that.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::directory::Location;
 use crate::ekko::{Ekko, EkkoError};
+use crate::holder::Process;
 use crate::item::{Item, State};
 use crate::storage::ItemMap;
 
@@ -104,10 +108,10 @@ pub fn start(
     };
     let window = format!("{} \u{b7} {model}", joined(&ids, ","));
     let uids: Vec<String> = ids.iter().map(|id| all[id].uid.clone().unwrap_or_else(|| id.to_string())).collect();
-    let argv = command_line(&environment, &uids.join(","), &project.name, model, effort, &first_prompt(&ids, &branch, &worktree.path));
+    let argv = command_line(&environment, &mux.binary, &uids.join(","), &project.name, model, effort, &first_prompt(&ids, &branch, &worktree.path));
     let pane = mux.open(&window, &cwd, &argv).map_err(refused)?;
     std::thread::sleep(SETTLE);
-    if !mux.alive(&pane).map_err(refused)? {
+    if !mux.alive(&pane) {
         return Err(refused(format!(
             "the session opened in window {window} ended within {} s: {} did not start there; run it in {} to see why",
             SETTLE.as_secs(),
@@ -169,11 +173,13 @@ fn starting_environment() -> Result<Vec<(OsString, OsString)>, String> {
 /// `environment` has not -- a multiplexer's server started by a session's
 /// command holds them all -- sets the Claude Code profile `environment`
 /// names, CLAUDE_CONFIG_DIR, or unsets it for the default one, and names the
-/// tasks and the project. The rest is the multiplexer's, as in any window
-/// the user opens there: no value but these goes on a command line, which
-/// any process on the machine may read.
+/// tasks, the project and the multiplexer's binary, for the hook that closes
+/// the window. The rest is the multiplexer's, as in any window the user
+/// opens there: no value but these goes on a command line, which any
+/// process on the machine may read.
 fn command_line(
     environment: &[(OsString, OsString)],
+    mux: &OsStr,
     uids: &str,
     project: &str,
     model: &str,
@@ -202,6 +208,9 @@ fn command_line(
     }
     argv.push(format!("{TASKS_VAR}={uids}").into());
     argv.push(format!("EKKO_PROJECT={project}").into());
+    let mut binary = OsString::from("EKKO_MUX=");
+    binary.push(mux);
+    argv.push(binary);
     argv.push(claude());
     argv.extend(["--model".into(), model.into()]);
     if let Some(effort) = effort {
@@ -214,7 +223,7 @@ fn command_line(
 /// The Claude Code a born session runs: `EKKO_CLAUDE`, else `claude` as the
 /// window's PATH finds it -- the user's own launcher, with their settings.
 fn claude() -> OsString {
-    std::env::var_os("EKKO_CLAUDE").filter(|claude| !claude.is_empty()).unwrap_or_else(|| "claude".into())
+    set("EKKO_CLAUDE").unwrap_or_else(|| "claude".into())
 }
 
 /// A born session's first prompt: what it was started for, that it claims
@@ -257,35 +266,41 @@ fn tasks_of(name: &str) -> Vec<u32> {
 }
 
 /// The multiplexer, spoken to in tmux's command language (design item 8):
-/// the binary `EKKO_MUX` names, `tmux` otherwise, on the socket
-/// `EKKO_MUX_SOCKET` names, as `-L` takes it, or else the one it finds
-/// itself -- the server this command runs inside, or the user's default. It
-/// runs with the environment born sessions start from, so a server it starts
-/// hands that one to every window.
+/// the binary `EKKO_MUX` names, `tmux` otherwise, on the server some
+/// arguments name -- `-L <name>`, `-S <path>` -- or else the one it finds
+/// itself: the server this command runs inside, or the user's default.
 struct Mux {
     binary: OsString,
-    socket: Option<OsString>,
-    environment: Vec<(OsString, OsString)>,
+    server: Vec<OsString>,
+    /// The environment it runs with; this process's own when `None`.
+    environment: Option<Vec<(OsString, OsString)>>,
 }
 
 impl Mux {
+    /// The one `start` speaks to, on the socket `EKKO_MUX_SOCKET` names, as
+    /// `-L` takes it. It runs with the environment born sessions start
+    /// from, so a server it starts hands that one to every window.
     fn new(environment: Vec<(OsString, OsString)>) -> Mux {
-        let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-        Mux { binary: set("EKKO_MUX").unwrap_or_else(|| "tmux".into()), socket: set("EKKO_MUX_SOCKET"), environment }
+        let server = set("EKKO_MUX_SOCKET").map(|socket| vec!["-L".into(), socket]).unwrap_or_default();
+        Mux { binary: set("EKKO_MUX").unwrap_or_else(|| "tmux".into()), server, environment: Some(environment) }
+    }
+
+    /// The one whose pane this process runs in, as the server tells its
+    /// panes: the socket before the first comma of TMUX.
+    fn of_this_pane() -> Option<Mux> {
+        let tmux = std::env::var_os("TMUX")?;
+        let socket = tmux.as_bytes().split(|byte| *byte == b',').next().filter(|socket| !socket.is_empty())?;
+        let server = vec!["-S".into(), OsStr::from_bytes(socket).to_os_string()];
+        Some(Mux { binary: set("EKKO_MUX").unwrap_or_else(|| "tmux".into()), server, environment: None })
     }
 
     fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Output, String> {
         let mut command = Command::new(&self.binary);
-        if let Some(socket) = &self.socket {
-            command.arg("-L").arg(socket);
+        command.args(&self.server).args(args).stdin(Stdio::null());
+        if let Some(environment) = &self.environment {
+            command.env_clear().envs(environment.iter().map(|(name, value)| (name, value)));
         }
-        command
-            .args(args)
-            .env_clear()
-            .envs(self.environment.iter().map(|(name, value)| (name, value)))
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|error| format!("{} could not be run: {error}", self.binary.to_string_lossy()))
+        command.output().map_err(|error| format!("{} could not be run: {error}", self.binary.to_string_lossy()))
     }
 
     fn failed(&self, what: &str, output: &Output) -> String {
@@ -330,23 +345,40 @@ impl Mux {
         Ok(pane)
     }
 
-    /// Whether `pane` still runs. tmux's display-message answers for a
-    /// pane that is gone as for one that runs (gotcha 1637), so the list of
-    /// panes is read, with whether each is dead, for a remain-on-exit that
-    /// keeps a dead one listed.
-    fn alive(&self, pane: &str) -> Result<bool, String> {
+    /// The panes on its server, each as its id and whether it is dead: `%3
+    /// 0` runs, `%3 1` is one a remain-on-exit keeps. tmux's
+    /// display-message answers for a pane that is gone as for one that runs
+    /// (gotcha 1637); this list tells them apart.
+    fn panes(&self) -> Result<Vec<String>, String> {
         let output = self.run(&["list-panes", "-a", "-F", "#{pane_id} #{pane_dead}"])?;
+        if !output.status.success() {
+            return Err(self.failed("list-panes", &output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect())
+    }
+
+    /// Whether `pane` still runs; not when no server answers.
+    fn alive(&self, pane: &str) -> bool {
         let running = format!("{pane} 0");
-        Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).lines().any(|line| line == running))
+        self.panes().is_ok_and(|panes| panes.contains(&running))
+    }
+
+    /// Whether `pane` is on its server, running or dead; `Err` with what
+    /// the server said when none answers, which takes its panes with it.
+    fn listed(&self, pane: &str) -> Result<bool, String> {
+        Ok(self.panes()?.iter().any(|line| line.split(' ').next() == Some(pane)))
     }
 
     fn attach(&self) -> String {
         let binary = Path::new(&self.binary).file_name().unwrap_or(self.binary.as_os_str()).to_string_lossy().into_owned();
-        match &self.socket {
-            Some(socket) => format!("{binary} -L {} attach -t {SESSION}", socket.to_string_lossy()),
-            None => format!("{binary} attach -t {SESSION}"),
-        }
+        let server: String = self.server.iter().map(|arg| format!(" {}", arg.to_string_lossy())).collect();
+        format!("{binary}{server} attach -t {SESSION}")
     }
+}
+
+/// The value of the variable `name`, unless it is unset or empty.
+fn set(name: &str) -> Option<OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
 /// A born session's worktree: where it is, the top of its repository, and
@@ -415,6 +447,247 @@ fn same(one: &Path, other: &Path) -> bool {
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     real(one) == real(other)
 }
+
+/// The argument that runs ekko as a born session's closer, which its hook
+/// starts: never typed, as `__ekko_clipboard_daemon` is not.
+pub const CLOSER_ARG: &str = "__ekko_close";
+
+/// How long the closer waits after a turn ends before it ends the session:
+/// a prompt that reaches it meanwhile keeps it.
+const GRACE: Duration = Duration::from_secs(1);
+
+/// How long the closer waits for the session's process, then its pane, to
+/// be gone.
+const GONE_WITHIN: Duration = Duration::from_secs(10);
+
+/// What the hook keeps of a born session between its events, in ekko's
+/// state directory: how many prompts reached it, and whether one reached it
+/// once its tasks were finished.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Born {
+    prompts: u64,
+    talked: bool,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// The hook of a born session (task 1643), on Claude Code's
+/// UserPromptSubmit and Stop; nothing in a session `start` did not open,
+/// which has no EKKO_AGENT_TASK. Each prompt is counted, and whether the
+/// session's tasks were all finished -- done or cancelled -- when it came:
+/// the user talking to a session whose work is over makes it theirs (design
+/// item 2). A prompt typed while a turn runs counts when it is typed, which
+/// is when Claude Code 2.1.295 fires the event for it, into the turn that
+/// runs. At the end of a turn, a session whose tasks are all finished, that
+/// no prompt reached since, with no background work in flight, is closed by
+/// a process of its own, which outlives the hook.
+pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
+    let Some(tasks) = std::env::var(TASKS_VAR).ok().filter(|tasks| !tasks.trim().is_empty()) else {
+        return std::process::ExitCode::SUCCESS;
+    };
+    let input: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+    let session = input["session_id"].as_str().unwrap_or_default();
+    let finished = finished(home, cwd, &tasks);
+    match input["hook_event_name"].as_str().unwrap_or_default() {
+        "UserPromptSubmit" => {
+            let mut born = read_born(home, session);
+            born.prompts += 1;
+            if finished.is_ok() && !born.talked {
+                born.talked = true;
+                log(home, session, &tasks, "a prompt reached it after its tasks were finished: it stays, the user's now");
+            }
+            write_born(home, session, &born);
+        }
+        "Stop" => {
+            let born = read_born(home, session);
+            let busy = |key: &str| input[key].as_array().is_some_and(|work| !work.is_empty());
+            let stays = match finished {
+                Err(why) => Some(why),
+                Ok(()) if born.talked => Some("a prompt reached it after its tasks were finished".to_string()),
+                Ok(()) if busy("background_tasks") || busy("session_crons") => Some("background work is in flight".to_string()),
+                Ok(()) => None,
+            };
+            if let Some(why) = stays {
+                log(home, session, &tasks, &format!("stays: {why}"));
+                return std::process::ExitCode::SUCCESS;
+            }
+            let process = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of);
+            let closing = process.ok_or_else(|| "no Claude Code process is among its ancestors".to_string()).and_then(|process| spawn_closer(session, born.prompts, &process));
+            match closing {
+                Ok(()) => {
+                    log(home, session, &tasks, "its tasks are finished: closing");
+                    println!("{}", serde_json::json!({"systemMessage": "ekko: this session's tasks are finished, so it closes now"}));
+                }
+                Err(why) => log(home, session, &tasks, &format!("not closed: {why}")),
+            }
+        }
+        _ => {}
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+/// Whether the tasks `named` -- EKKO_AGENT_TASK's uids, or display ids where
+/// a task has none -- are all finished, done or cancelled, on the board this
+/// session works on; why not, if not.
+fn finished(home: &Path, cwd: &Path, named: &str) -> Result<(), String> {
+    let (ekko_dir, project) = (std::env::var("EKKO_DIR").ok(), std::env::var("EKKO_PROJECT").ok());
+    let location = crate::directory::locate(home, cwd, None, ekko_dir.as_deref(), project.as_deref()).map_err(|error| EkkoError::from(error).to_string())?;
+    let all = Ekko::at(&location).and_then(|ekko| ekko.storage.get_shared().map_err(EkkoError::from)).map_err(|error| error.to_string())?;
+    let index = crate::ekko::uid_index(&all);
+    for name in named.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        let id = index.get(name).copied().or_else(|| name.parse::<u32>().ok());
+        let Some(task) = id.and_then(|id| all.get(&id)) else {
+            return Err(format!("task {name} is not on its board"));
+        };
+        match State::of(task) {
+            Some(State::Done | State::Cancelled) => {}
+            Some(state) => return Err(format!("task {} is {}", task.id, state.word())),
+            None => return Err(format!("{} is no task", task.id)),
+        }
+    }
+    Ok(())
+}
+
+/// Starts the closer: ekko again, in a session of its own with none of the
+/// hook's pipes, so that the hook returns at once and the closer outlives
+/// it.
+fn spawn_closer(session: &str, prompts: u64, process: &Process) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().map_err(|error| format!("ekko's own binary is not found: {error}"))?;
+    let mut command = Command::new(exe);
+    command
+        .arg(CLOSER_ARG)
+        .args([session.to_string(), prompts.to_string(), process.pid.to_string(), process.start.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: the closure runs between fork and exec, and calls only setsid,
+    // which is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    command.spawn().map(drop).map_err(|error| format!("its closer did not start: {error}"))
+}
+
+/// The closer (CLOSER_ARG `<session> <prompts> <pid> <start>`): a second
+/// after the turn ended, unless a prompt reached the session meanwhile or
+/// its tasks are no longer all finished, ends its Claude Code with SIGTERM,
+/// which ends it at once -- 5 ms, measured with Claude Code 2.1.295, and
+/// its SessionEnd hooks do not run -- where /exit typed into its pane would
+/// land on whatever the user has half typed there. Then it makes sure the
+/// pane is gone, by the list of panes, and closes one a remain-on-exit
+/// keeps.
+pub fn close(home: &Path, cwd: &Path, args: &[String]) -> std::process::ExitCode {
+    use std::process::ExitCode;
+    let tasks = std::env::var(TASKS_VAR).unwrap_or_default();
+    let [session, prompts, pid, start] = args else { return ExitCode::FAILURE };
+    let (Ok(prompts), Ok(pid), Ok(start), Some(boot)) = (prompts.parse::<u64>(), pid.parse::<u32>(), start.parse::<u64>(), crate::holder::boot()) else {
+        return ExitCode::FAILURE;
+    };
+    std::thread::sleep(GRACE);
+    if read_born(home, session).prompts != prompts {
+        log(home, session, &tasks, "stays: a prompt reached it as it was closing");
+        return ExitCode::SUCCESS;
+    }
+    if let Err(why) = finished(home, cwd, &tasks) {
+        log(home, session, &tasks, &format!("stays: {why}"));
+        return ExitCode::SUCCESS;
+    }
+    let process = Process { pid, start, boot };
+    if running(&process) {
+        // SAFETY: a plain kill(2) of the process this pid names now, which
+        // `running` has just found to be the session's own.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if !within(GONE_WITHIN, || !running(&process)) {
+            log(home, session, &tasks, &format!("not closed: its Claude Code, pid {pid}, still runs {} s after SIGTERM", GONE_WITHIN.as_secs()));
+            return ExitCode::FAILURE;
+        }
+    }
+    let (Some(mux), Some(pane)) = (Mux::of_this_pane(), set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned())) else {
+        log(home, session, &tasks, "closed: its Claude Code ended, in no multiplexer's pane");
+        return ExitCode::SUCCESS;
+    };
+    if mux.listed(&pane) == Ok(true) {
+        let _ = mux.run(&["kill-pane", "-t", &pane]);
+    }
+    let gone = within(GONE_WITHIN, || mux.listed(&pane) != Ok(true));
+    match (gone, mux.listed(&pane)) {
+        (true, Ok(_)) => log(home, session, &tasks, &format!("closed: its Claude Code ended, and its pane {pane} is gone")),
+        (true, Err(why)) => log(home, session, &tasks, &format!("closed: its Claude Code ended, and its pane {pane} is gone with its server ({why})")),
+        (false, _) => {
+            log(home, session, &tasks, &format!("not closed: its Claude Code ended, and its pane {pane} is still listed"));
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Whether `process` still runs: alive, and not a zombie waiting for its
+/// parent to reap it.
+fn running(process: &Process) -> bool {
+    let state = std::fs::read_to_string(format!("/proc/{}/stat", process.pid))
+        .ok()
+        .and_then(|stat| Some(stat.get(stat.rfind(')')? + 1..)?.split_whitespace().next()?.to_string()));
+    process.alive() && state.is_some_and(|state| state != "Z")
+}
+
+/// Whether `done` holds within `limit`, asked every 50 ms.
+fn within(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let until = std::time::Instant::now() + limit;
+    loop {
+        if done() {
+            return true;
+        }
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Where the hook keeps born sessions: `born/` in ekko's state directory, a
+/// file for each session and `born.log`, what was decided and why.
+fn born_dir(home: &Path) -> PathBuf {
+    crate::agent::state_dir(home).join("born")
+}
+
+fn born_file(home: &Path, session: &str) -> PathBuf {
+    let name: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    born_dir(home).join(format!("{}.json", if name.is_empty() { "unknown" } else { &name }))
+}
+
+fn read_born(home: &Path, session: &str) -> Born {
+    std::fs::read_to_string(born_file(home, session)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+/// Written whole and put in place by a rename, for the closer, which reads
+/// it from another process.
+fn write_born(home: &Path, session: &str, born: &Born) {
+    let file = born_file(home, session);
+    let written = std::fs::create_dir_all(born_dir(home)).and_then(|()| {
+        let fresh = file.with_extension(format!("json.{}", std::process::id()));
+        std::fs::write(&fresh, serde_json::to_string(born).unwrap_or_default())?;
+        std::fs::rename(&fresh, &file)
+    });
+    if let Err(error) = written {
+        eprintln!("ekko: what this session's prompts were could not be kept: {error}");
+    }
+}
+
+/// A line of `born.log`: when, the session, its tasks, and what was decided.
+fn log(home: &Path, session: &str, tasks: &str, what: &str) {
+    use std::io::Write as _;
+    let line = format!("{} {} {tasks} {what}\n", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f"), session.get(..8).unwrap_or(session));
+    let _ = std::fs::create_dir_all(born_dir(home))
+        .and_then(|()| std::fs::OpenOptions::new().create(true).append(true).open(born_dir(home).join("born.log")))
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+}
+
 
 #[cfg(test)]
 mod tests {
