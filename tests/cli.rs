@@ -2191,6 +2191,44 @@ fn a_born_session_the_user_talks_to_once_its_task_is_done_stays() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// The end of background work, which Claude Code tells the session with a
+/// prompt of its own (task 1688), is no one talking to it: a session that
+/// set its task done while a shell ran in the background closes once the
+/// shell's notice has been answered, where the user's prompt keeps it.
+#[test]
+fn a_background_shell_s_notice_after_the_task_is_done_does_not_keep_a_born_session() {
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let notice = serde_json::json!({"prompt": "<task-notification>\n<task-id>b9tgxbuqo</task-id>\n<status>completed</status>\n<summary>Background command \"Sleep 20 seconds\" completed (exit code 0)</summary>\n</task-notification>"});
+    let shell = serde_json::json!({"background_tasks": [{"id": "b9tgxbuqo", "type": "shell", "status": "running", "command": "sleep 20"}], "session_crons": []});
+    for (id, session) in [(1, "s-1"), (2, "s-2")] {
+        let uid = agents.uid(id);
+        agents.prompt(&uid, session);
+        assert!(agents.ekko(&["--check", &id.to_string()]).status.success());
+        let (mut stand_in, _) = agents.born(Some(&uid), session, "Stop", shell.clone());
+        stand_in.kill().ok();
+        stand_in.wait().ok();
+        if id == 1 {
+            let (mut stand_in, _) = agents.born(Some(&uid), session, "UserPromptSubmit", notice.clone());
+            stand_in.kill().ok();
+            stand_in.wait().ok();
+        } else {
+            agents.prompt(&uid, session);
+        }
+        let (mut stand_in, _) = agents.stop(&uid, session);
+        if id == 1 {
+            assert!(ended_by_sigterm(&mut stand_in), "the shell's notice kept it");
+        } else {
+            assert!(still_runs(&mut stand_in), "the user's prompt did not keep it");
+        }
+    }
+    let log = fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")).unwrap();
+    assert_eq!(log.matches("the user's now").count(), 1, "{log}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// A prompt typed while the task is under way, which Claude Code fires as
 /// it is typed, does not keep the session once the task is done (design
 /// item 2: only a prompt after that does); a prompt that reaches it in the

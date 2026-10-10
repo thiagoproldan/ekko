@@ -935,7 +935,11 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
     match event {
         "UserPromptSubmit" => {
             born.prompts += 1;
-            if finished(home, cwd, &tasks).is_ok() && !born.talked {
+            // Claude Code tells a session that its background work ended
+            // with a prompt of its own, `<task-notification>` and the task
+            // (2.1.295): no one talking to it (task 1688).
+            let notice = input["prompt"].as_str().is_some_and(|prompt| prompt.trim_start().starts_with("<task-notification>"));
+            if !notice && finished(home, cwd, &tasks).is_ok() && !born.talked {
                 born.talked = true;
                 log(home, session, &tasks, "a prompt reached it after its tasks were finished: it stays, the user's now");
             }
