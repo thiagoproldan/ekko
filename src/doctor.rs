@@ -1375,10 +1375,14 @@ mod tests {
             .unwrap();
         // The parent of a spawn may run again inside the child's exec, before
         // the kernel sets where its arguments and environment lie: /proc
-        // shows them empty until then (8 runs in 30 of the suite).
+        // shows them empty until then (8 runs in 30 of the suite). It sets
+        // the arguments' first, so a read between the two finds arguments
+        // and no environment: 215 of 30000 reads polled with no pause did,
+        // and none of 30000 that waited for PATH too, which the child
+        // inherits (task 1680).
         let read = (0..200)
             .find_map(|_| {
-                let read = Proc::read(child.id()).filter(|read| !read.args.is_empty());
+                let read = Proc::read(child.id()).filter(|read| !read.args.is_empty() && read.path_var.is_some());
                 if read.is_none() {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
