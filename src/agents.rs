@@ -69,14 +69,43 @@ macro_rules! any_pane {
     };
 }
 
+/// A window's tab while ztmux's tab bar is on (task 1678): `ztmux tabs on`
+/// sets the global user option @ztmux-tab-bar and draws each window as
+/// ` #I #W ` in grey, the current one in green -- colours as ztmux 3.7.47's
+/// tabs.rs sets them -- but a born window's own format is the one tmux
+/// draws it with. So this draws the bar's tab around `$name`, in black on
+/// yellow while a pane of the window waits on the user.
+macro_rules! tab {
+    ($($name:tt)+) => {
+        concat!(
+            "#{?",
+            any_pane!("waiting"),
+            ",#[fg=black#,bg=yellow#,bold],#{?window_active,#[fg=colour235#,bg=colour108#,bold],#[fg=colour245#,bg=colour237]}} #I ",
+            $($name)+,
+            " #[default]"
+        )
+    };
+}
+
 /// How a born session's window reads in the status line (task 1675): its
 /// index, then its name after a symbol for its session's state -- ⚙
 /// working, ● waiting on you, black on yellow, ○ idle, dimmed -- and tmux's
 /// flags, as tmux's own format ends. No colour of a status line hides it:
 /// tmux's own is green, which a green symbol would vanish into. The state
-/// is the panes' of the window, waiting first, whichever is active.
+/// is the panes' of the window, waiting first, whichever is active. With
+/// ztmux's tab bar on, a tab as the bar draws its own (`tab!`).
 pub const STATUS_FORMAT: &str = concat!(
-    "#I:#{?",
+    "#{?#{@ztmux-tab-bar},",
+    tab!(
+        "#{?",
+        any_pane!("waiting"),
+        ",\u{25cf} ,#{?",
+        any_pane!("working"),
+        ",\u{2699} ,#{?",
+        any_pane!("idle"),
+        ",\u{25cb} ,}}}#W"
+    ),
+    ",#I:#{?",
     any_pane!("waiting"),
     ",#[fg=black#,bg=yellow#,bold]\u{25cf} #W#[default],",
     "#{?",
@@ -85,7 +114,7 @@ pub const STATUS_FORMAT: &str = concat!(
     "#{?",
     any_pane!("idle"),
     ",#[dim]\u{25cb} #W#[default],#W}}}",
-    "#{?window_flags,#{window_flags}, }"
+    "#{?window_flags,#{window_flags}, }}"
 );
 
 /// What `start` opened.
@@ -499,6 +528,15 @@ impl Mux {
         self.run(&["display-message", "-p", "-t", pane, &format!("#{{{WALL_OPTION}}}")]).is_ok_and(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1")
     }
 
+    /// Whether ztmux frames every pane, its zellij mode on, as it reads
+    /// @ztmux-zellij-mode, or @ztmux-pane-names for an older setting; never
+    /// for tmux, which has neither.
+    fn framed(&self) -> bool {
+        let format = "#{?#{@ztmux-zellij-mode},#{@ztmux-zellij-mode},#{@ztmux-pane-names}}";
+        self.run(&["display-message", "-p", "-t", &format!("={SESSION}:"), format])
+            .is_ok_and(|output| output.status.success() && matches!(String::from_utf8_lossy(&output.stdout).trim(), "on" | "1" | "true" | "yes"))
+    }
+
     /// The names of the windows in the session `ekko`; none without it.
     fn windows(&self) -> Result<Vec<String>, String> {
         if !self.has_session()? {
@@ -645,13 +683,19 @@ pub const WALL_BORDER: &str = concat!(
 
 /// How the wall is drawn in the status line: its name, then each pane's
 /// state, one symbol a pane as STATUS_FORMAT draws it, so that a session
-/// that waits on the user shows when another pane is the active one.
+/// that waits on the user shows when another pane is the active one; with
+/// ztmux's tab bar on, in a tab as STATUS_FORMAT draws one.
 pub const WALL_STATUS: &str = concat!(
-    "#I:#W ",
+    "#{?#{@ztmux-tab-bar},",
+    tab!(
+        "#W ",
+        "#{P:#{?#{==:#{@ekko_state},waiting},\u{25cf},#{?#{==:#{@ekko_state},working},\u{2699},#{?#{==:#{@ekko_state},idle},\u{25cb},}}}}"
+    ),
+    ",#I:#W ",
     "#{P:#{?#{==:#{@ekko_state},waiting},#[fg=black#,bg=yellow#,bold]\u{25cf}#[default],",
     "#{?#{==:#{@ekko_state},working},\u{2699},",
     "#{?#{==:#{@ekko_state},idle},#[dim]\u{25cb}#[default],}}}}",
-    "#{?window_flags,#{window_flags}, }"
+    "#{?window_flags,#{window_flags}, }}"
 );
 
 /// The options `wall` sets on the wall's window, each with its value there
@@ -713,7 +757,12 @@ pub fn wall() -> Result<Moved, String> {
         dressed.push(["kill-pane", "-t", &placeholder].map(str::to_string).to_vec());
         dressed.push(["select-layout", "-t", &wall, "tiled"].map(str::to_string).to_vec());
     }
+    // ztmux's frames title each pane already (task 1678), and a border's
+    // status line there takes the place of a pane's frame, which is then
+    // not drawn (measured on ztmux 3.7.47).
+    let framed = mux.framed();
     for (option, value, _) in WALL_OPTIONS {
+        let value = if framed && option == "pane-border-status" { "off" } else { value };
         dressed.push(["set-option", "-w", "-t", &wall, option, value].map(str::to_string).to_vec());
     }
     // The wall is what one attached to the session ekko sees next.

@@ -1663,7 +1663,7 @@ case "$1" in
     case "$all" in *'#{window_id} #{pane_id}'*) echo '@9 %9' ;; *) echo %7 ;; esac ;;
   list-panes) if [ "$2" = -s ]; then cat "$state/born-panes" 2>/dev/null; true; else [ -e "$state/dead" ] || echo '%7 0'; fi ;;
   kill-pane) touch "$state/dead" ;;
-  display-message) case "$all" in *ekko_wall*) [ -e "$state/wall" ] && echo 1; true ;; *) cat "$state/name" ;; esac ;;
+  display-message) case "$all" in *ekko_wall*) [ -e "$state/wall" ] && echo 1; true ;; *ztmux-zellij-mode*) [ -e "$state/zellij" ] && echo on; true ;; *) cat "$state/name" ;; esac ;;
   rename-window) eval "name=\${$#}"; printf '%s\n' "$name" > "$state/name" ;;
   set-option) if [ -e "$state/refuse" ]; then echo 'unknown flag -p' >&2; exit 1; fi ;;
   join-pane|select-layout|break-pane|select-window) ;;
@@ -2393,7 +2393,12 @@ fn a_born_session_s_pane_holds_its_state_for_the_views_as_it_changes() {
         assert!(format.contains(symbol) && format.contains(&format!("#{{P:#{{?#{{==:#{{@ekko_state}},{state}}},")), "{state} in {format}");
     }
     assert!(!format.replace("#{P:#{?#{==:#{@ekko_state},", "").contains("@ekko_state"), "a state read from the active pane: {format}");
-    assert!(format.starts_with("#I:") && format.ends_with("#{?window_flags,#{window_flags}, }"), "{format}");
+    // tmux's own form, or, with ztmux's tab bar on, its tab (task 1678):
+    // its colours, the current one green, and the symbol before the name.
+    let (tab, plain) = format.strip_prefix("#{?#{@ztmux-tab-bar},").and_then(|rest| rest.split_once(",#I:")).unwrap_or_else(|| panic!("{format}"));
+    assert!(plain.ends_with("#{?window_flags,#{window_flags}, }}"), "{plain}");
+    assert!(tab.contains("#{?window_active,#[fg=colour235#,bg=colour108#,bold],#[fg=colour245#,bg=colour237]}") && tab.ends_with(",\u{25cb} ,}}}#W #[default]"), "{tab}");
+    assert!(["\u{25cf} ,", "\u{2699} ,", "#[fg=black#,bg=yellow#,bold]"].iter().all(|part| tab.contains(part)), "{tab}");
 
     // Several tasks: the first one's title, and how many more.
     let started = agents.json(&["agents", "start", "2", "3", "--model", "sonnet", "--json"]);
@@ -2559,7 +2564,11 @@ fn the_wall_takes_every_running_born_session_and_unwall_gives_each_its_window_ba
     // In the status line, a symbol for each pane on the wall.
     for option in ["window-status-format", "window-status-current-format"] {
         let status = commands.iter().find(|command| command.starts_with(&["set-option".to_string(), "-w".into(), "-t".into(), "@9".into(), option.into()])).unwrap();
-        assert!(status[5].starts_with("#I:#W #{P:") && ["\u{25cf}", "\u{2699}", "\u{25cb}"].iter().all(|symbol| status[5].contains(symbol)), "{status:?}");
+        let (tab, plain) = status[5].strip_prefix("#{?#{@ztmux-tab-bar},").and_then(|rest| rest.split_once(",#I:#W #{P:")).unwrap_or_else(|| panic!("{status:?}"));
+        for drawn in [tab, plain] {
+            assert!(["\u{25cf}", "\u{2699}", "\u{25cb}"].iter().all(|symbol| drawn.contains(symbol)), "{drawn}");
+        }
+        assert!(tab.contains("colour108") && tab.contains(" #I #W #{P:"), "{tab}");
     }
     assert!(marked < at(&["select-window", "-t", "@9"]), "{commands:?}");
     let walled: Vec<String> = commands.iter().filter(|command| command.len() == 6 && command[..4] == ["set-option", "-w", "-t", "@9"]).map(|command| command[4].clone()).collect();
@@ -2571,6 +2580,18 @@ fn the_wall_takes_every_running_born_session_and_unwall_gives_each_its_window_ba
     let said = String::from_utf8(agents.ekko(&["agents", "wall"]).stdout).unwrap();
     assert_eq!(said.trim(), "Every session is on the wall already, in window @9 of session ekko");
     assert!(calls(before).iter().all(|call| call[0] != "join-pane" && call[0] != "new-window"), "{:?}", calls(before));
+    let border_status = |from: usize| -> Vec<String> {
+        calls(from).into_iter().flat_map(|call| call.split(|arg| arg == ";").map(<[String]>::to_vec).collect::<Vec<_>>()).filter(|command| command.len() == 6 && command[4] == "pane-border-status").map(|command| command[5].clone()).collect()
+    };
+    assert_eq!(border_status(before), ["top"]);
+
+    // With ztmux's frames on, which title each pane, no border's status
+    // line: it would take the place of a pane's frame (task 1678).
+    fs::write(mux.join("zellij"), "").unwrap();
+    let before = agents.calls().len();
+    assert!(agents.ekko(&["agents", "wall"]).status.success());
+    assert_eq!(border_status(before), ["off"]);
+    fs::remove_file(mux.join("zellij")).unwrap();
 
     // One started since joins the wall there is, after its last pane.
     let born = fs::read_to_string(mux.join("born-panes")).unwrap();
