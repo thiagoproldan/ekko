@@ -2141,6 +2141,81 @@ fn agents_start_says_when_the_session_ended_at_once() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// At most the project's limit of sessions run at once (task 1727): two
+/// until the user sets another with `ekko agents limit`. A start past it is
+/// refused, naming those that run, with nothing opened. A session counts
+/// while its pane lives; another project's does not. A pane that names no
+/// project counts, and so does a window named for tasks where no pane has
+/// the options, which the multiplexer would not set.
+#[test]
+fn agents_start_runs_at_most_the_projects_limit_of_sessions_at_once() {
+    let agents = Agents::new();
+    for text in ["One", "Two", "Three", "Four"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let shown = agents.json(&["agents", "limit", "--json"]);
+    assert_eq!((shown["limit"].as_u64(), shown["set"].as_bool()), (Some(2), Some(false)), "{shown}");
+    let said = String::from_utf8(agents.ekko(&["agents", "limit"]).stdout).unwrap();
+    assert!(said.contains("runs at most 2 sessions at once for this project, until the user sets another limit"), "{said}");
+    let zero = agents.ekko(&["agents", "limit", "0"]);
+    assert!(!zero.status.success() && String::from_utf8_lossy(&zero.stderr).contains("0 is not in 1.."), "{zero:?}");
+
+    let state = agents.home.join("mux-state");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("session"), "").unwrap();
+    // As born_panes lists them: pane, dead, window id, window, tasks,
+    // title, model, effort, state, since, waits, project.
+    let pane = |id: u32, dead: u32, project: &str| format!("%{id}\t{dead}\t@{id}\t{id} \u{b7} haiku\t{id}\tTitle\thaiku\t\tworking\t1\t\t{project}\n");
+    let running = |panes: &[String], windows: &[&str]| {
+        fs::write(state.join("born-panes"), panes.concat()).unwrap();
+        fs::write(state.join("windows"), windows.iter().map(|name| format!("{name}\n")).collect::<String>()).unwrap();
+    };
+    let refused = |id: &str| -> String {
+        let reply = agents.json(&["agents", "start", id, "--model", "haiku", "--json"]);
+        assert_eq!(reply["code"], "INVALID_INPUT", "{reply}");
+        assert!(agents.opened().is_empty(), "a refused start opened a window: {:?}", agents.opened());
+        assert!(!agents.worktree(&format!("task-{id}")).exists(), "a worktree for task {id}");
+        reply["error"].as_str().unwrap().to_string()
+    };
+    let (one, two) = ("1 \u{b7} haiku", "2 \u{b7} haiku");
+
+    running(&[pane(1, 0, "app"), pane(2, 0, "app")], &[one, two]);
+    let said = refused("3");
+    assert!(
+        said.starts_with(&format!(
+            "2 sessions ekko agents started run for project app already, as many as its limit lets run at once (2, set with ekko agents limit): \
+             task 1 in window \"{one}\"; task 2 in window \"{two}\". Start task 3 once one has gone"
+        )),
+        "{said}"
+    );
+    // A pane an ekko before task 1727 opened names no project: it counts.
+    running(&[pane(1, 0, ""), pane(2, 0, "app")], &[one, two]);
+    assert!(refused("3").contains("task 1 in window"));
+    // A window named for a task, where no pane has the options, counts.
+    running(&[pane(2, 0, "app")], &[two, "4 \u{b7} sonnet"]);
+    let said = refused("3");
+    assert!(said.contains(&format!("task 2 in window \"{two}\"; window \"4 \u{b7} sonnet\"")), "{said}");
+
+    // Another project's session, and a pane whose session ended, do not.
+    running(&[pane(1, 0, "other"), pane(2, 0, "app"), pane(4, 1, "app")], &[one, two, "4 \u{b7} haiku"]);
+    let started = agents.json(&["agents", "start", "3", "--model", "haiku", "--json"]);
+    assert_eq!(started["ok"], true, "{started}");
+    let calls = agents.calls();
+    let named = calls.iter().find_map(|call| call.iter().position(|arg| arg == "@ekko_project").map(|at| call[at + 1].clone()));
+    assert_eq!(named.as_deref(), Some("app"), "the pane names its project: {calls:?}");
+
+    // The user's limit.
+    assert!(agents.ekko(&["agents", "limit", "3"]).status.success());
+    let shown = agents.json(&["agents", "limit", "--json"]);
+    assert_eq!((shown["limit"].as_u64(), shown["set"].as_bool()), (Some(3), Some(true)), "{shown}");
+    let board = fs::read_to_string(agents.home.join("app/.ekko/storage/agents.json")).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&board).unwrap(), serde_json::json!({"limit": 3}));
+    running(&[pane(1, 0, "app"), pane(2, 0, "app")], &[one, two]);
+    let started = agents.json(&["agents", "start", "4", "--model", "haiku", "--json"]);
+    assert_eq!(started["ok"], true, "{started}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// Under a Claude Code session, a born session starts with the environment
 /// that session's process started with, read from /proc (task 1642): what
 /// the session adds to the command running ekko -- here CLAUDECODE,
@@ -2741,6 +2816,8 @@ fn a_born_session_s_pane_holds_its_state_for_the_views_as_it_changes() {
             ["set-option", "-p", "-u", "-t", "%7", "@ekko_waits"].map(str::to_string).to_vec(),
             window("window-status-format"),
             window("window-status-current-format"),
+            // Its project (task 1727), as one session holds every project's.
+            pane("@ekko_project", "app"),
         ]
     );
     // Each state read from every pane of the window, not its active one
@@ -2890,10 +2967,10 @@ fn the_wall_takes_every_running_born_session_and_unwall_gives_each_its_window_ba
     fs::write(mux.join("session"), "").unwrap();
     let panes = |one: &str, two: &str| {
         let lines = [
-            format!("%1\t0\t{one}\t1 \u{b7} haiku\t1\tWrite hello\thaiku\tlow\tworking\t1\t"),
-            format!("%2\t0\t{two}\t2 \u{b7} sonnet\t2\tWrite the docs\tsonnet\t\twaiting\t1\tClaude needs your permission"),
-            "%3\t1\t@3\t3 \u{b7} haiku\t3\tWrite the tests\thaiku\t\tidle\t1\t".to_string(),
-            "%4\t0\t@4\tzsh\t\t\t\t\t\t\t".to_string(),
+            format!("%1\t0\t{one}\t1 \u{b7} haiku\t1\tWrite hello\thaiku\tlow\tworking\t1\t\tapp"),
+            format!("%2\t0\t{two}\t2 \u{b7} sonnet\t2\tWrite the docs\tsonnet\t\twaiting\t1\tClaude needs your permission\tapp"),
+            "%3\t1\t@3\t3 \u{b7} haiku\t3\tWrite the tests\thaiku\t\tidle\t1\t\tapp".to_string(),
+            "%4\t0\t@4\tzsh\t\t\t\t\t\t\t\t".to_string(),
         ];
         fs::write(mux.join("born-panes"), lines.join("\n") + "\n").unwrap();
     };
@@ -2951,7 +3028,7 @@ fn the_wall_takes_every_running_born_session_and_unwall_gives_each_its_window_ba
 
     // One started since joins the wall there is, after its last pane.
     let born = fs::read_to_string(mux.join("born-panes")).unwrap();
-    fs::write(mux.join("born-panes"), format!("{born}%5\t0\t@5\t3 \u{b7} haiku\t3\tWrite the tests\thaiku\t\tworking\t1\t\n")).unwrap();
+    fs::write(mux.join("born-panes"), format!("{born}%5\t0\t@5\t3 \u{b7} haiku\t3\tWrite the tests\thaiku\t\tworking\t1\t\tapp\n")).unwrap();
     let before = agents.calls().len();
     let said = String::from_utf8(agents.ekko(&["agents", "wall"]).stdout).unwrap();
     assert_eq!(said.trim(), "On the wall, window @9 of session ekko: 3 (%5)");
@@ -3031,10 +3108,10 @@ fn agents_view_shows_the_sessions_by_state_and_what_they_finished_today() {
     fs::write(mux.join("session"), "").unwrap();
     let since = now.timestamp();
     let panes = [
-        format!("%1\t0\t@1\t1 \u{b7} haiku\t1\tFix ##3 in the parser\thaiku\tlow\twaiting\t{since}\tClaude needs your permission -- Bash: echo ##3 > stamp.txt"),
-        format!("%2\t0\t@2\t2 \u{b7} sonnet\t2\tWrite the docs\tsonnet\t\tworking\t{since}\t"),
-        format!("%3\t0\t@3\t3 \u{b7} haiku\t3\tReview the plan\thaiku\t\tidle\t{since}\t"),
-        "%9\t0\t@9\tzsh\t\t\t\t\t\t\t".to_string(),
+        format!("%1\t0\t@1\t1 \u{b7} haiku\t1\tFix ##3 in the parser\thaiku\tlow\twaiting\t{since}\tClaude needs your permission -- Bash: echo ##3 > stamp.txt\tapp"),
+        format!("%2\t0\t@2\t2 \u{b7} sonnet\t2\tWrite the docs\tsonnet\t\tworking\t{since}\t\tapp"),
+        format!("%3\t0\t@3\t3 \u{b7} haiku\t3\tReview the plan\thaiku\t\tidle\t{since}\t\tapp"),
+        "%9\t0\t@9\tzsh\t\t\t\t\t\t\t\t".to_string(),
     ];
     fs::write(mux.join("born-panes"), panes.join("\n") + "\n").unwrap();
     let output = agents.ekko(&["agents", "view", "--once"]);
@@ -3385,6 +3462,13 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     let said = test["error"].as_str().unwrap();
     assert!(said.starts_with("The project's test command is not this session's to set: ekko agents started it for task 1,"), "{said}");
     assert!(born.ekko(&["--json", "agents", "test", "--none"], "").contains("NOT_BORN_FOR"));
+    // How many sessions run at once (task 1727): the user's too.
+    let limit = born.ekko(&["--json", "agents", "limit", "5"], "");
+    let limit: serde_json::Value = serde_json::from_str(&limit).unwrap_or_else(|_| panic!("{limit}"));
+    assert_eq!((limit["code"].as_str(), limit["notBornFor"].clone()), (Some("NOT_BORN_FOR"), serde_json::json!({"limit": true, "born": [1]})), "{limit}");
+    let said = limit["error"].as_str().unwrap();
+    assert!(said.starts_with("The project's limit on sessions at once is not this session's to set: ekko agents started it for task 1, and how many sessions run at once is the user's to set"), "{said}");
+    assert!(born.ekko(&["--json", "agents", "limit"], "").contains("\"limit\":2"), "read");
     assert!(!agents.home.join("app/.ekko/storage/agents.json").exists());
     assert!(born.ekko(&["--json", "agents", "test"], "").contains("\"ok\":true"), "read");
     let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
@@ -3400,8 +3484,11 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     assert!(String::from_utf8(typed.env("EKKO_AGENT_TASK", &uid).output().unwrap().stdout).unwrap().contains("\"ok\":true"), "the user's phases");
     let mut typed = agents.command(&["--json", "agents", "test", "cargo test"]);
     assert!(String::from_utf8(typed.env("EKKO_AGENT_TASK", &uid).output().unwrap().stdout).unwrap().contains("\"ok\":true"), "the user's test");
+    let mut typed = agents.command(&["--json", "agents", "limit", "3"]);
+    assert!(String::from_utf8(typed.env("EKKO_AGENT_TASK", &uid).output().unwrap().stdout).unwrap().contains("\"ok\":true"), "the user's limit");
     let born = agents.session(&uid);
     assert!(born.ekko(&["--json", "agents", "test", "cargo test"], "").contains("\"ok\":true"), "the test it has, unchanged");
+    assert!(born.ekko(&["--json", "agents", "limit", "3"], "").contains("\"ok\":true"), "the limit it has, unchanged");
     drop(born);
 
     let orchestrator = agents.orchestrator();
@@ -3411,6 +3498,7 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     assert_eq!(board()["2"]["isComplete"], true, "{}", board()["2"]);
     assert!(orchestrator.ekko(&["--json", "--phases", "build", "ship"], "").contains("\"ok\":true"));
     assert!(orchestrator.ekko(&["--json", "agents", "test", "--none"], "").contains("\"ok\":true"), "the orchestrator, at the user's word");
+    assert!(orchestrator.ekko(&["--json", "agents", "limit", "4"], "").contains("\"ok\":true"), "the orchestrator, at the user's word");
     drop(orchestrator);
     fs::remove_dir_all(&agents.home).ok();
 }

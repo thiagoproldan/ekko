@@ -377,6 +377,7 @@ mod tests {
             state: state.to_string(),
             since: Some(chrono::Local::now().timestamp()),
             waits: waits.map(str::to_string),
+            project: Some("app".to_string()),
         }
     }
 

@@ -129,6 +129,19 @@ pub enum Agents {
         #[arg(long, short = 'j')]
         json: bool,
     },
+    /// Show how many sessions start runs at once for the project, or set
+    /// it: the user's to set.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Limit {
+        /// The most sessions that run at once, one at least.
+        #[arg(value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        limit: Option<u32>,
+        /// A project's board other than the one found from the folder.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
     /// Show the sessions it opened, by state, and the tasks they finished
     /// today; step into one, or peek at it.
     #[command(disable_help_flag = true, disable_version_flag = true)]

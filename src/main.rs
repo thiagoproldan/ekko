@@ -53,6 +53,7 @@ const HELP: &str = r#"
     $ ekko agents start <task>... --model <model> [--effort <level>] [--project <name>]
     $ ekko agents merge <task>... [--keep] [--project <name>]
     $ ekko agents test [<command> | --none] [--project <name>]
+    $ ekko agents limit [<n>] [--project <name>]
     $ ekko agents view [--once] [--project <name>]
     $ ekko agents wall
     $ ekko agents unwall
@@ -585,6 +586,8 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
         cli::Agents::Test { command, none, project, json } => {
             return run_agents_test(&home_dir, &cwd, command.as_deref(), none, project.as_deref(), json_first || json);
         }
+        // `ekko agents limit` (task 1727).
+        cli::Agents::Limit { limit, project, json } => return run_agents_limit(&home_dir, &cwd, limit, project.as_deref(), json_first || json),
         // `ekko agents view` (task 1676).
         cli::Agents::View { once, project } => {
             let project_env = std::env::var("EKKO_PROJECT").ok();
@@ -712,6 +715,35 @@ fn run_agents_test(home_dir: &Path, cwd: &Path, command: Option<&str>, none: boo
         (None, false) => println!(
             "No test command is set: ekko agents merge refuses until the user sets one with ekko agents test 'COMMAND', or says the project has none with ekko agents test --none"
         ),
+    }
+    ExitCode::SUCCESS
+}
+
+/// `ekko agents limit`: how many sessions `ekko agents start` runs at once
+/// for the project, shown, or set as the user says (task 1727).
+fn run_agents_limit(home_dir: &Path, cwd: &Path, limit: Option<u32>, project: Option<&str>, json_mode: bool) -> ExitCode {
+    let settings = agents_board(home_dir, cwd, project).and_then(|(location, ekko)| {
+        if location.project.is_none() {
+            return Err(EkkoError::InvalidInput("ekko agents works on a project's board, whose sessions work in worktrees of the project's repository; this is the default board".into()));
+        }
+        match limit {
+            Some(limit) => ekko.set_agents_limit(limit),
+            None => ekko.storage.get_agents().map_err(EkkoError::from),
+        }
+    });
+    let settings = match settings {
+        Ok(settings) => settings,
+        Err(err) => return finish_with_error(&err, json_mode, home_dir),
+    };
+    if json_mode {
+        println!("{}", serde_json::json!({"ok": true, "command": "agents limit", "limit": settings.at_once(), "set": settings.limit.is_some()}));
+        return ExitCode::SUCCESS;
+    }
+    let at_once = settings.at_once();
+    let sessions = if at_once == 1 { "session" } else { "sessions" };
+    match settings.limit {
+        Some(_) => println!("ekko agents start runs at most {at_once} {sessions} at once for this project, as the user set"),
+        None => println!("ekko agents start runs at most {at_once} {sessions} at once for this project, until the user sets another limit with ekko agents limit N"),
     }
     ExitCode::SUCCESS
 }

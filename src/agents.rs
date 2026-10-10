@@ -45,7 +45,8 @@ const SETTLE: Duration = Duration::from_secs(1);
 /// -- `working`, `waiting` on the user or `idle` -- and since when, in
 /// seconds since the epoch, set by its hook as it changes; and what it
 /// waits on, while it does. On the pane, not its window, so they go with it
-/// into another window.
+/// into another window. And the project whose tasks they are (task 1727),
+/// as one session of the multiplexer holds every project's.
 pub const TASKS_OPTION: &str = "@ekko_tasks";
 pub const TITLE_OPTION: &str = "@ekko_title";
 pub const MODEL_OPTION: &str = "@ekko_model";
@@ -53,6 +54,19 @@ pub const EFFORT_OPTION: &str = "@ekko_effort";
 pub const STATE_OPTION: &str = "@ekko_state";
 pub const SINCE_OPTION: &str = "@ekko_since";
 pub const WAITS_OPTION: &str = "@ekko_waits";
+pub const PROJECT_OPTION: &str = "@ekko_project";
+
+/// The most sessions `start` runs at once for a project where the user set
+/// no other with `ekko agents limit` (task 1727): two, to begin with, as
+/// the user decided (decision 1717).
+pub const LIMIT: u32 = 2;
+
+impl crate::storage::AgentsSettings {
+    /// The most sessions that run at once for the project.
+    pub fn at_once(&self) -> u32 {
+        self.limit.unwrap_or(LIMIT)
+    }
+}
 
 /// The states `STATE_OPTION` takes.
 pub const WORKING: &str = "working";
@@ -141,7 +155,8 @@ pub struct Started {
 /// prompt to claim them before it changes anything. Refused, opening
 /// nothing, for a task the page's Start would refuse -- done, in progress,
 /// in the trash, with someone, waiting on open work -- and for one that has
-/// a window already.
+/// a window already; and while as many sessions run for the project as its
+/// limit lets run at once (task 1727).
 pub fn start(
     ekko: &Ekko,
     location: &Location,
@@ -178,17 +193,35 @@ pub fn start(
 
     let environment = starting_environment().map_err(refused)?;
     let mux = Mux::new(environment.clone());
-    for name in mux.windows().map_err(refused)? {
-        if let Some(id) = ids.iter().find(|id| tasks_of(&name).contains(id)) {
+    let windows = mux.windows().map_err(refused)?;
+    for name in &windows {
+        if let Some(id) = ids.iter().find(|id| tasks_of(name).contains(id)) {
             return Err(refused(format!("task {id} has a window already, {name} in session {SESSION}: step into it there")));
         }
     }
     // A session on the wall has no window of its own (task 1677): its pane
     // says what it is for.
-    for pane in mux.born_panes().map_err(refused)?.into_iter().filter(|pane| !pane.dead) {
+    let born = mux.born_panes().map_err(refused)?;
+    for pane in born.iter().filter(|pane| !pane.dead) {
         if let Some(id) = ids.iter().find(|id| pane.tasks.contains(id)) {
             return Err(refused(format!("task {id} has a session already, in pane {} of window {} in session {SESSION}: step into it there", pane.pane, pane.window)));
         }
+    }
+    let limit = ekko.storage.get_agents()?.at_once();
+    let running = running_for(&project.name, &windows, &born);
+    if running.len() >= limit as usize {
+        return Err(refused(format!(
+            "{} {} for project {} already, as many as its limit lets run at once ({limit}, set with ekko agents limit): {}. \
+             Start {} once one has gone -- a session closes itself once its tasks are finished; the limit is the user's to raise",
+            running.len(),
+            if running.len() == 1 { "session ekko agents started runs" } else { "sessions ekko agents started run" },
+            project.name,
+            running.join("; "),
+            match ids.as_slice() {
+                [id] => format!("task {id}"),
+                _ => format!("tasks {}", listed(&ids)),
+            },
+        )));
     }
     let branch = format!("task-{}", joined(&ids, "-"));
     let worktree = worktree(root, &branch).map_err(refused)?;
@@ -216,6 +249,7 @@ pub fn start(
     for option in ["window-status-format", "window-status-current-format"] {
         drawn.push(["set-option", "-w", "-t", &pane, option, STATUS_FORMAT].map(str::to_string).to_vec());
     }
+    drawn.push(set_pane(&pane, PROJECT_OPTION, &project.name));
     let undrawn = mux.batch(&drawn).err();
     std::thread::sleep(SETTLE);
     if !mux.alive(&pane) {
@@ -264,6 +298,24 @@ fn shown(value: &str) -> String {
         Some(rest) => format!("{rest}\\;"),
         None => line,
     }
+}
+
+/// The sessions `start` opened that count toward `project`'s limit (task
+/// 1727), each as its refusal names it: the live panes whose options name
+/// the project, or name none, as an ekko before that task left them; and,
+/// of whichever project, the windows named for tasks where no pane has the
+/// options, which the multiplexer would not set (`Started::undrawn`).
+fn running_for(project: &str, windows: &[String], born: &[BornPane]) -> Vec<String> {
+    let drawn: HashSet<&str> = born.iter().map(|pane| pane.window.as_str()).collect();
+    let tasks = |ids: &[u32]| match ids {
+        [id] => format!("task {id}"),
+        _ => format!("tasks {}", listed(ids)),
+    };
+    born.iter()
+        .filter(|pane| !pane.dead && pane.project.as_deref().is_none_or(|name| name == project))
+        .map(|pane| format!("{} in window \"{}\"", tasks(&pane.tasks), pane.window))
+        .chain(windows.iter().filter(|name| !tasks_of(name).is_empty() && !drawn.contains(name.as_str())).map(|name| format!("window \"{name}\"")))
+        .collect()
 }
 
 /// Why `task` may not go to a born session now, if it may not: what the
@@ -457,7 +509,7 @@ impl Mux {
         let fields = ["#{pane_id}", "#{pane_dead}", "#{window_id}", "#{window_name}"]
             .into_iter()
             .map(str::to_string)
-            .chain([TASKS_OPTION, TITLE_OPTION, MODEL_OPTION, EFFORT_OPTION, STATE_OPTION, SINCE_OPTION, WAITS_OPTION].map(|option| format!("#{{{option}}}")))
+            .chain([TASKS_OPTION, TITLE_OPTION, MODEL_OPTION, EFFORT_OPTION, STATE_OPTION, SINCE_OPTION, WAITS_OPTION, PROJECT_OPTION].map(|option| format!("#{{{option}}}")))
             .collect::<Vec<_>>()
             .join("\t");
         let output = self.run(&["list-panes", "-s", "-t", &format!("={SESSION}"), "-F", &fields])?;
@@ -637,6 +689,9 @@ pub(crate) struct BornPane {
     /// Since when it is in its state, in seconds since the epoch.
     pub since: Option<i64>,
     pub waits: Option<String>,
+    /// The project whose tasks they are; none for a pane an ekko before
+    /// task 1727 opened.
+    pub project: Option<String>,
 }
 
 impl BornPane {
@@ -644,7 +699,7 @@ impl BornPane {
     /// value holds (`shown`); none for a pane `start` did not open.
     fn parse(line: &str) -> Option<BornPane> {
         let fields: Vec<&str> = line.split('\t').collect();
-        let [pane, dead, window_id, window, tasks, title, model, effort, state, since, waits] = fields.as_slice() else { return None };
+        let [pane, dead, window_id, window, tasks, title, model, effort, state, since, waits, project] = fields.as_slice() else { return None };
         let tasks: Vec<u32> = tasks.split(',').map(|id| id.trim().parse::<u32>()).collect::<Result<_, _>>().unwrap_or_default();
         if tasks.is_empty() {
             return None;
@@ -662,6 +717,7 @@ impl BornPane {
             state: state.to_string(),
             since: since.parse().ok(),
             waits: given(waits),
+            project: given(project),
         })
     }
 }

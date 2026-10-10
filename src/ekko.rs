@@ -22,6 +22,26 @@ use crate::item::{tally, Change, How, Item, Knowledge, Over, Setting, State};
 use crate::render::{Inversion, RoadmapStep, ProjectSummary, Renderer, Stats, TRASH_DAYS};
 use crate::storage::{Counters, ItemMap, Storage, StorageError};
 
+/// A setting of the project's ekko agents, the user's to set: a session
+/// ekko agents started is refused it (`EkkoError::AgentsNotBornFor`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentsSetting {
+    /// The command `ekko agents merge` tests a branch with (task 1714).
+    Test,
+    /// How many sessions `ekko agents start` runs at once (task 1727).
+    Limit,
+}
+
+impl AgentsSetting {
+    /// What it is, as a refusal names it.
+    pub fn named(self) -> &'static str {
+        match self {
+            AgentsSetting::Test => "test command",
+            AgentsSetting::Limit => "limit on sessions at once",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum EkkoError {
     MissingId,
@@ -75,9 +95,10 @@ pub enum EkkoError {
     /// (task 1716), and the tasks it was born for, as this board numbers
     /// them: the sequence is the orchestrator's and the user's.
     PhasesNotBornFor { born: Vec<u32> },
-    /// A change to the project's test command by a session ekko agents
-    /// started (task 1714): the test its own branch passes is the user's.
-    TestsNotBornFor { born: Vec<u32> },
+    /// A change to a setting of the project's ekko agents by a session ekko
+    /// agents started (tasks 1714 and 1727): the test its own branch passes,
+    /// and how many sessions run at once, are the user's.
+    AgentsNotBornFor { setting: AgentsSetting, born: Vec<u32> },
     /// An item asked for by the id or uid it had before it moved to another
     /// board (task 897), and where it went.
     Moved { asked: String, to: Box<crate::storage::Moved> },
@@ -135,7 +156,7 @@ impl EkkoError {
             EkkoError::RenamedFlag { .. } => "RENAMED_FLAG",
             EkkoError::RemovedFlag { .. } => "REMOVED_FLAG",
             EkkoError::CueIsUsers(_) => "CUE_IS_USERS",
-            EkkoError::NotBornFor { .. } | EkkoError::PhasesNotBornFor { .. } | EkkoError::TestsNotBornFor { .. } => "NOT_BORN_FOR",
+            EkkoError::NotBornFor { .. } | EkkoError::PhasesNotBornFor { .. } | EkkoError::AgentsNotBornFor { .. } => "NOT_BORN_FOR",
             EkkoError::Moved { .. } => "MOVED",
             EkkoError::SplitLinks(_) => "SPLIT_LINKS",
             EkkoError::Watched(_) => "WATCHED",
@@ -187,7 +208,7 @@ impl EkkoError {
             | EkkoError::CueIsUsers(_)
             | EkkoError::NotBornFor { .. }
             | EkkoError::PhasesNotBornFor { .. }
-            | EkkoError::TestsNotBornFor { .. }
+            | EkkoError::AgentsNotBornFor { .. }
             | EkkoError::Moved { .. }
             | EkkoError::SplitLinks(_)
             | EkkoError::Watched(_) => out.generic_error(&self.to_string()),
@@ -360,21 +381,26 @@ impl std::fmt::Display for EkkoError {
                     _ => format!("one of tasks {}", join_ids(born)),
                 },
             ),
-            EkkoError::TestsNotBornFor { born } => write!(
+            EkkoError::AgentsNotBornFor { setting, born } => write!(
                 f,
-                "The project's test command is not this session's to set: ekko agents started it for {}, and the test its branch \
-                 passes before it goes in is the user's to set, so nothing was written. Attach a note to {} saying what the test \
-                 command should be: a note is any session's to write",
+                "The project's {} is not this session's to set: ekko agents started it for {}, and {} is the user's to set, so \
+                 nothing was written. Attach a note to {} saying what the {} should be: a note is any session's to write",
+                setting.named(),
                 match born.as_slice() {
                     [] => "tasks of its own".to_string(),
                     [id] => format!("task {id}"),
                     _ => format!("tasks {}", join_ids(born)),
+                },
+                match setting {
+                    AgentsSetting::Test => "the test its branch passes before it goes in",
+                    AgentsSetting::Limit => "how many sessions run at once",
                 },
                 match born.as_slice() {
                     [] => "its tasks".to_string(),
                     [id] => format!("task {id}"),
                     _ => format!("one of tasks {}", join_ids(born)),
                 },
+                setting.named(),
             ),
             EkkoError::Moved { asked, to } => {
                 let board = crate::move_to::board_name(to.project.as_deref());
@@ -1326,21 +1352,36 @@ impl Ekko {
 
     /// Sets the command `ekko agents merge` tests a rebased branch with
     /// (task 1714): `Some` a command, `None` that the project has no tests.
-    /// Refused to a session ekko agents started, as `refuse_unborn_phases`
-    /// refuses it the phases: the gate its own branch passes is the user's.
     /// What is set now.
     pub fn set_agents_test(&self, test: Option<&str>) -> Result<crate::storage::AgentsSettings, EkkoError> {
+        self.change_agents(AgentsSetting::Test, |settings| {
+            settings.test = test.map(str::to_string);
+            settings.untested = test.is_none();
+        })
+    }
+
+    /// Sets how many sessions `ekko agents start` runs at once for the
+    /// project (task 1727). What is set now.
+    pub fn set_agents_limit(&self, limit: u32) -> Result<crate::storage::AgentsSettings, EkkoError> {
+        self.change_agents(AgentsSetting::Limit, |settings| settings.limit = Some(limit))
+    }
+
+    /// Changes `setting` of the project's ekko agents as `change` says.
+    /// Refused to a session ekko agents started, as `refuse_unborn_phases`
+    /// refuses it the phases: the gate its own branch passes and what the
+    /// sessions spend are the user's. A change to what is set already
+    /// writes nothing, and is no one's to refuse.
+    fn change_agents(&self, setting: AgentsSetting, change: impl FnOnce(&mut crate::storage::AgentsSettings)) -> Result<crate::storage::AgentsSettings, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let mut settings = self.storage.get_agents()?;
         let before = settings.clone();
-        settings.test = test.map(str::to_string);
-        settings.untested = test.is_none();
+        change(&mut settings);
         if settings == before {
             return Ok(settings);
         }
         if let Some(born) = &self.born_for {
             if self.actor.as_ref().is_some_and(|actor| !actor.is_person()) {
-                return Err(EkkoError::TestsNotBornFor { born: born_ids(born, &*self.storage.get_shared()?) });
+                return Err(EkkoError::AgentsNotBornFor { setting, born: born_ids(born, &*self.storage.get_shared()?) });
             }
         }
         self.storage.set_agents(&settings)?;

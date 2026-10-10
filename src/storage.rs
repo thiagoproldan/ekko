@@ -537,8 +537,9 @@ impl Storage {
 
 /// What `ekko agents` keeps for a project (task 1714), in `agents.json`
 /// beside `storage.json` for the reason `phases.json` is: the command
-/// `ekko agents merge` tests a branch with, once it is rebased. Set by the
-/// user, as the gate a branch passes is not the model's to choose.
+/// `ekko agents merge` tests a branch with, once it is rebased, and how
+/// many sessions run at once (task 1727). Set by the user, as the gate a
+/// branch passes and what the sessions spend are not the model's to choose.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentsSettings {
     /// Run through `sh -c` in the branch's worktree; a branch goes in only
@@ -549,6 +550,10 @@ pub struct AgentsSettings {
     /// in untested.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub untested: bool,
+    /// The most sessions `ekko agents start` runs at once for the project;
+    /// `agents::LIMIT` when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]

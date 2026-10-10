@@ -167,7 +167,13 @@ fn error_value(error: &EkkoError) -> Value {
         EkkoError::SplitLinks(splits) => Some(("links", json!(splits))),
         EkkoError::NotBornFor { ids, born } => Some(("notBornFor", json!({"ids": ids, "born": born}))),
         EkkoError::PhasesNotBornFor { born } => Some(("notBornFor", json!({"phases": true, "born": born}))),
-        EkkoError::TestsNotBornFor { born } => Some(("notBornFor", json!({"tests": true, "born": born}))),
+        EkkoError::AgentsNotBornFor { setting, born } => Some((
+            "notBornFor",
+            match setting {
+                crate::ekko::AgentsSetting::Test => json!({"tests": true, "born": born}),
+                crate::ekko::AgentsSetting::Limit => json!({"limit": true, "born": born}),
+            },
+        )),
         EkkoError::Watched(watched) => {
             Some(("watched", Value::Array(watched.iter().map(|(id, what)| json!({"id": id, "what": what})).collect())))
         }
