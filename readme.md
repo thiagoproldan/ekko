@@ -145,8 +145,11 @@ $ ekko --help
       --phase <NAME>      Scope work to one phase of a project
       --phases <NAME>...  Declare the project's ordered phase sequence
       --prime             Summarise the board for picking work back up
-      --hook              With --prime or --tasklist: answer a Claude Code hook's event on stdin
+      --hook              With --prime, --memory, --tasklist or --guard: answer a Claude Code hook's event on stdin
+      --memory            With --hook: put the project's memory page in a starting session's context
       --tasklist          With --hook: draw the board in the session's Claude Code task list
+      --guard             With --hook: refuse the Bash calls a gotcha's cue names
+      --refuse <REASON>   With --guard: another guard's refusal, which the user may let through
       --priority, -p      Update priority of task
       --project <NAME>    Work against a named project instead of the default board
       --projects          List the projects that exist
@@ -166,6 +169,7 @@ $ ekko --help
       --task, -t          Create task
       --timeline, -i      Display timeline view
       --version, -v       Display installed version
+      --with              Say who a task is with; no name, nobody
 
     Examples
       $ ekko
@@ -186,6 +190,7 @@ $ ekko --help
       $ ekko --project old --destroy
       $ ekko --json --task @coding Review PR #42
       $ ekko --list pending coding
+      $ ekko --list with:rodrigo
       $ ekko --move @1 cooking
       $ ekko --move-to zettelkasten 3 5
       $ ekko --next 5
@@ -203,7 +208,9 @@ $ ekko --help
       $ ekko --task @coding @reviews Review PR #42
       $ ekko --task @coding Improve documentation
       $ ekko --task Make some buttercream
+      $ ekko --task Send the contract with:rodrigo
       $ ekko --timeline
+      $ ekko --with @3 rodrigo
 ```
 
 ## Views

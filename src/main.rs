@@ -93,7 +93,7 @@ const HELP: &str = r#"
       --repeats           List the failed tool calls that repeat across this project's sessions
       --restore, -r       Restore items from archive
       --roadmap           Show the project's roadmap through its phases
-      --sessions         Show each Claude Code session on this board and its work
+      --sessions          Show each Claude Code session on this board and its work
       --set               Set item state idempotently (retry-safe)
       --since <MILLIS>    Only items changed at or after a timestamp
       --star, -s          Star/unstar item

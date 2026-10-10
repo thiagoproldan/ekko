@@ -54,6 +54,19 @@ fn no_test_here_writes_an_executable_it_runs() {
     }
 }
 
+/// The readme shows the help `ekko --help` prints, word for word (task
+/// 1654): a flag added to one and not the other is a test that fails.
+#[test]
+fn the_readme_shows_the_help_ekko_prints() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ekko")).arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    let readme = include_str!("../readme.md");
+    let (_, after) = readme.split_once("$ ekko --help\n").expect("the readme shows `$ ekko --help`");
+    let (block, _) = after.split_once("```").expect("the block that shows it ends");
+    assert_eq!(block, help, "the readme's block under `$ ekko --help` is not what ekko --help prints");
+}
+
 /// Writes a board big enough that its `--json` output cannot fit in a pipe
 /// buffer, so the child is still writing when the reader goes away. Built
 /// directly rather than by spawning the binary a few hundred times.
