@@ -182,6 +182,12 @@ fn main() -> ExitCode {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         return agents::close(&home_dir, &cwd, &args[1..]);
     }
+    // The watcher of a born session's permission prompt (task 1679).
+    if args.first().map(String::as_str) == Some(agents::ANSWER_ARG) {
+        let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        return agents::answer(&home_dir, &cwd, &args[1..]);
+    }
 
     // Handled before clap ever sees argv, same as meow's behavior this is
     // replacing: --help/--version anywhere in the invocation wins,

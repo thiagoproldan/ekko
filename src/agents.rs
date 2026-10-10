@@ -704,6 +704,13 @@ const GRACE: Duration = Duration::from_secs(1);
 /// be gone.
 const GONE_WITHIN: Duration = Duration::from_secs(10);
 
+/// The argument that runs ekko as the watcher of a born session's
+/// permission prompt, which its hook starts (task 1679): never typed.
+pub const ANSWER_ARG: &str = "__ekko_answer";
+
+/// How often the watcher reads Claude Code's record of the session.
+const ANSWER_EVERY: Duration = Duration::from_millis(100);
+
 /// What the hook keeps of a born session between its events, in ekko's
 /// state directory: how many prompts reached it, whether one reached it
 /// once its tasks were finished, what it waits on the user for, what the
@@ -765,7 +772,9 @@ pub const EVENTS: &[&str] = &["UserPromptSubmit", "Stop", "PermissionRequest", "
 /// it was to do, as the request for it said: on the board, on each of its
 /// tasks it holds, and in its window's name. Whichever event comes next --
 /// a tool that ran once the user let it, the user's prompt, the turn's
-/// end, a dialog answered -- says it moved on, and clears both.
+/// end, a dialog answered -- says it moved on, and clears both; for a
+/// permission prompt, the watcher it starts says so first, as the user
+/// answers (task 1679).
 ///
 /// Each prompt is counted, and whether the session's tasks were all
 /// finished -- done or cancelled -- when it came: the user talking to a
@@ -808,6 +817,16 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
                     show_state(home, session, &tasks, &mut born, WAITING, Some(&what));
                 }
                 write_born(home, session, &born);
+                // No event comes as the user answers a permission prompt,
+                // until the tool they let run ends (task 1679). Started once
+                // the wait is written, which is what it watches.
+                if born.waiting.is_some() && kind == "permission_prompt" {
+                    let process = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of);
+                    let watching = process.ok_or_else(|| "no Claude Code process is among its ancestors".to_string()).and_then(|process| spawn_watcher(session, &process));
+                    if let Err(why) = watching {
+                        log(home, session, &tasks, &format!("its answer is not watched: {why}"));
+                    }
+                }
             }
             return std::process::ExitCode::SUCCESS;
         }
@@ -816,7 +835,8 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
     if born.waiting.is_some() || born.asked.is_some() {
         born.asked = None;
         if let Some(waiting) = born.waiting.take() {
-            answered(home, cwd, &tasks, session, event, &waiting);
+            let process = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of);
+            answered(home, cwd, &tasks, session, event, &waiting, process.as_ref());
         }
         write_born(home, session, &born);
     }
@@ -942,11 +962,12 @@ fn wait_on_user(home: &Path, cwd: &Path, tasks: &str, session: &str, kind: &str,
 }
 
 /// Clears what `wait_on_user` marked, now that `event` says the session
-/// moved on. A window the user renamed meanwhile keeps their name.
-fn answered(home: &Path, cwd: &Path, tasks: &str, session: &str, event: &str, waiting: &Waiting) {
-    let board = match crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of) {
+/// moved on: on the board, for the tasks `process`, the session's Claude
+/// Code, holds. A window the user renamed meanwhile keeps their name.
+fn answered(home: &Path, cwd: &Path, tasks: &str, session: &str, event: &str, waiting: &Waiting, process: Option<&Process>) {
+    let board = match process {
         None => "left on the board: no Claude Code process is among its ancestors".to_string(),
-        Some(process) => match board(home, cwd).and_then(|ekko| mark_holds(&ekko, tasks, &process, None)) {
+        Some(process) => match board(home, cwd).and_then(|ekko| mark_holds(&ekko, tasks, process, None)) {
             Ok(ids) if ids.is_empty() => "nothing to clear on the board".to_string(),
             Ok(ids) => format!("cleared on task {}", listed(&ids)),
             Err(why) => format!("left on the board: {why}"),
@@ -1046,15 +1067,22 @@ fn finished(home: &Path, cwd: &Path, named: &str) -> Result<(), String> {
 /// hook's pipes, so that the hook returns at once and the closer outlives
 /// it.
 fn spawn_closer(session: &str, prompts: u64, process: &Process) -> Result<(), String> {
+    detached(&[CLOSER_ARG, session, &prompts.to_string(), &process.pid.to_string(), &process.start.to_string()]).map_err(|why| format!("its closer did not start: {why}"))
+}
+
+/// Starts the watcher of a permission prompt, as `spawn_closer` starts the
+/// closer.
+fn spawn_watcher(session: &str, process: &Process) -> Result<(), String> {
+    detached(&[ANSWER_ARG, session, &process.pid.to_string(), &process.start.to_string()]).map_err(|why| format!("its watcher did not start: {why}"))
+}
+
+/// Runs ekko with `args` in a session of its own, with none of this
+/// process's pipes, so that it outlives the hook that starts it.
+fn detached(args: &[&str]) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().map_err(|error| format!("ekko's own binary is not found: {error}"))?;
     let mut command = Command::new(exe);
-    command
-        .arg(CLOSER_ARG)
-        .args([session.to_string(), prompts.to_string(), process.pid.to_string(), process.start.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // SAFETY: the closure runs between fork and exec, and calls only setsid,
     // which is async-signal-safe.
     unsafe {
@@ -1063,7 +1091,65 @@ fn spawn_closer(session: &str, prompts: u64, process: &Process) -> Result<(), St
             Ok(())
         });
     }
-    command.spawn().map(drop).map_err(|error| format!("its closer did not start: {error}"))
+    command.spawn().map(drop).map_err(|error| error.to_string())
+}
+
+/// The watcher (ANSWER_ARG `<session> <pid> <start>`, task 1679): Claude
+/// Code fires no hook as the user answers a permission prompt, and the
+/// tool they let run may take minutes before PostToolUse says the session
+/// moved on. Its own record of the session does say it at once:
+/// `sessions/<pid>.json` in its config folder, which `claude agents --json`
+/// reports, whose `status` read `waiting` while the prompt showed and
+/// `busy` 17 to 26 ms after Enter answered it, in three runs of Claude
+/// Code 2.1.295. Every 100 ms the watcher reads it; once it has said
+/// `waiting` and then `busy` or `idle`, it clears the mark as the hook
+/// would, and the pane's state. It ends then, or once the session waits no
+/// more, the hook having cleared it, or its Claude Code has ended. A record
+/// that does not say `waiting` first, as one of another version might,
+/// leaves the mark to the hook.
+pub fn answer(home: &Path, cwd: &Path, args: &[String]) -> std::process::ExitCode {
+    use std::process::ExitCode;
+    let tasks = std::env::var(TASKS_VAR).unwrap_or_default();
+    let [session, pid, start] = args else { return ExitCode::FAILURE };
+    let (Ok(pid), Ok(start), Some(boot)) = (pid.parse::<u32>(), start.parse::<u64>(), crate::holder::boot()) else {
+        return ExitCode::FAILURE;
+    };
+    let process = Process { pid, start, boot };
+    let mut seen_waiting = false;
+    loop {
+        if !running(&process) || read_born(home, session).waiting.is_none() {
+            return ExitCode::SUCCESS;
+        }
+        let status = claude_status(home, session, pid);
+        match status.as_deref() {
+            Some("waiting") => seen_waiting = true,
+            Some(now @ ("busy" | "idle")) if seen_waiting => {
+                let _alone = lock_born(home, session);
+                let mut born = read_born(home, session);
+                if let Some(waiting) = born.waiting.take() {
+                    born.asked = None;
+                    answered(home, cwd, &tasks, session, &format!("answered: Claude Code's record says {now}"), &waiting, Some(&process));
+                    show_state(home, session, &tasks, &mut born, if now == "idle" { IDLE } else { WORKING }, None);
+                    write_born(home, session, &born);
+                }
+                return ExitCode::SUCCESS;
+            }
+            _ => {}
+        }
+        std::thread::sleep(ANSWER_EVERY);
+    }
+}
+
+/// The `status` Claude Code's record of the session gives, if the record
+/// at `sessions/<pid>.json`, under `CLAUDE_CONFIG_DIR` or else `~/.claude`,
+/// is this session's.
+fn claude_status(home: &Path, session: &str, pid: u32) -> Option<String> {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()).map_or_else(|| home.join(".claude"), PathBuf::from);
+    let record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("sessions").join(format!("{pid}.json"))).ok()?).ok()?;
+    if record["sessionId"].as_str() != Some(session) || record["pid"].as_u64() != Some(u64::from(pid)) {
+        return None;
+    }
+    record["status"].as_str().map(str::to_string)
 }
 
 /// The closer (CLOSER_ARG `<session> <prompts> <pid> <start>`): a second

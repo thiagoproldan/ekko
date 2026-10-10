@@ -2423,6 +2423,56 @@ fn a_multiplexer_that_refuses_the_options_still_runs_the_session() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// A permission prompt answered clears the mark then, not when the tool it
+/// let run ends (task 1679): no hook fires as the user answers, so the hook
+/// starts a watcher of Claude Code's own record of the session,
+/// `sessions/<pid>.json` in its config folder, which clears the mark -- on
+/// the board, in the window's name and on the pane -- once the record has
+/// said waiting and then busy. A record that has not said waiting first, or
+/// is another session's, clears nothing; the tool's end then has nothing
+/// left to clear.
+#[test]
+fn a_permission_prompt_answered_clears_the_mark_as_claude_code_s_record_says_so() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    agents.name_window("1 \u{b7} haiku");
+    let session = agents.session(&agents.uid(1));
+    session.ekko(&["--begin", "1"], "");
+    let pid = session.child.id();
+    let record = agents.home.join(".claude/sessions").join(format!("{pid}.json"));
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    let says = |status: &str, of: &str| {
+        let fresh = record.with_extension("new");
+        fs::write(&fresh, serde_json::json!({"pid": pid, "sessionId": of, "status": status, "statusUpdatedAt": 1}).to_string()).unwrap();
+        fs::rename(&fresh, &record).unwrap();
+    };
+    let marked = || agents.context("1").contains("waiting on you since");
+    let still = |what: &str| {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert!(marked() && agents.window().ends_with("waiting on you"), "{what}: the mark went");
+    };
+    says("busy", "s-1");
+    session.asks();
+    assert!(marked(), "{}", agents.context("1"));
+    still("busy before it said waiting");
+    says("waiting", "s-1");
+    still("waiting");
+    says("busy", "s-2");
+    still("another session's record");
+    says("busy", "s-1");
+    assert!(agents.logged("waits on you no more (answered: Claude Code's record says busy): cleared on task 1; its window named \"1 \u{b7} haiku\" again"), "{:?}", fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")));
+    assert!(!marked() && agents.window() == "1 \u{b7} haiku", "{}", agents.context("1"));
+    let states: Vec<String> = option_sets(agents.calls()).iter().flatten().filter(|command| command[4] == "@ekko_state").map(|command| command[5].clone()).collect();
+    assert_eq!(states.last().map(String::as_str), Some("working"), "{states:?}");
+    assert_eq!(states.iter().rev().nth(1).map(String::as_str), Some("waiting"), "{states:?}");
+    let calls = agents.calls().len();
+    session.ran();
+    assert_eq!(agents.calls().len(), calls, "the tool's end found nothing left to clear");
+    let log = fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")).unwrap();
+    assert_eq!(log.matches("waits on you no more").count(), 1, "{log}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// The edges of waiting on the user (task 1645): a turn over while the
 /// session waits on the board, through ekko's wait, is no wait on the user,
 /// and marks nothing; a permission prompt still does. A window the user
