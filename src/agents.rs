@@ -59,15 +59,32 @@ pub const WORKING: &str = "working";
 pub const WAITING: &str = "waiting";
 pub const IDLE: &str = "idle";
 
+/// A tmux format, true when a pane of the window it is drawn for is in
+/// `state` (task 1695): the window's own option would be its active pane's,
+/// which may be a shell split beside the session or the view in a floating
+/// pane over it.
+macro_rules! any_pane {
+    ($state:literal) => {
+        concat!("#{P:#{?#{==:#{@ekko_state},", $state, "},1,}}")
+    };
+}
+
 /// How a born session's window reads in the status line (task 1675): its
-/// index, then its name after a symbol for its pane's state -- ⚙ working,
-/// ● waiting on you, black on yellow, ○ idle, dimmed -- and tmux's flags,
-/// as tmux's own format ends. No colour of a status line hides it: tmux's
-/// own is green, which a green symbol would vanish into.
+/// index, then its name after a symbol for its session's state -- ⚙
+/// working, ● waiting on you, black on yellow, ○ idle, dimmed -- and tmux's
+/// flags, as tmux's own format ends. No colour of a status line hides it:
+/// tmux's own is green, which a green symbol would vanish into. The state
+/// is the panes' of the window, waiting first, whichever is active.
 pub const STATUS_FORMAT: &str = concat!(
-    "#I:#{?#{==:#{@ekko_state},waiting},#[fg=black#,bg=yellow#,bold]\u{25cf} #W#[default],",
-    "#{?#{==:#{@ekko_state},working},\u{2699} #W,",
-    "#{?#{==:#{@ekko_state},idle},#[dim]\u{25cb} #W#[default],#W}}}",
+    "#I:#{?",
+    any_pane!("waiting"),
+    ",#[fg=black#,bg=yellow#,bold]\u{25cf} #W#[default],",
+    "#{?",
+    any_pane!("working"),
+    ",\u{2699} #W,",
+    "#{?",
+    any_pane!("idle"),
+    ",#[dim]\u{25cb} #W#[default],#W}}}",
     "#{?window_flags,#{window_flags}, }"
 );
 

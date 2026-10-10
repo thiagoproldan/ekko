@@ -2387,9 +2387,12 @@ fn a_born_session_s_pane_holds_its_state_for_the_views_as_it_changes() {
             window("window-status-current-format"),
         ]
     );
+    // Each state read from every pane of the window, not its active one
+    // alone (task 1695): a pane beside the session's may be the active one.
     for (symbol, state) in [("\u{2699} #W", "working"), ("\u{25cf} #W", "waiting"), ("\u{25cb} #W", "idle")] {
-        assert!(format.contains(symbol) && format.contains(&format!("#{{==:#{{@ekko_state}},{state}}}")), "{state} in {format}");
+        assert!(format.contains(symbol) && format.contains(&format!("#{{P:#{{?#{{==:#{{@ekko_state}},{state}}},")), "{state} in {format}");
     }
+    assert!(!format.replace("#{P:#{?#{==:#{@ekko_state},", "").contains("@ekko_state"), "a state read from the active pane: {format}");
     assert!(format.starts_with("#I:") && format.ends_with("#{?window_flags,#{window_flags}, }"), "{format}");
 
     // Several tasks: the first one's title, and how many more.
@@ -2597,7 +2600,8 @@ fn the_wall_takes_every_running_born_session_and_unwall_gives_each_its_window_ba
         for option in &walled {
             let shed = commands.iter().any(|command| match &command[..] {
                 [set, flag, t, target, name] => (set, flag, t, target, name) == (&"set-option".into(), &"-wu".into(), &"-t".into(), &pane.to_string(), option),
-                [set, flag, t, target, name, value] => (set, flag, t, target, name) == (&"set-option".into(), &"-w".into(), &"-t".into(), &pane.to_string(), option) && value.starts_with("#I:#{?#{==:#{@ekko_state},waiting},"),
+                // start's status line: the symbol before the window's name.
+                [set, flag, t, target, name, value] => (set, flag, t, target, name) == (&"set-option".into(), &"-w".into(), &"-t".into(), &pane.to_string(), option) && ["\u{25cf} #W", "\u{2699} #W", "\u{25cb} #W"].iter().all(|symbol| value.contains(symbol)),
                 _ => false,
             });
             assert!(shed, "{option} of {pane}'s window: {commands:?}");
