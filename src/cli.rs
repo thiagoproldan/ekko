@@ -95,6 +95,17 @@ pub enum Agents {
         #[arg(long, short = 'j')]
         json: bool,
     },
+    /// Show the sessions it opened, by state, and the tasks they finished
+    /// today; step into one, or peek at it.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    View {
+        /// Print the screen once, with no keys read.
+        #[arg(long)]
+        once: bool,
+        /// A project's board other than the one found from the folder.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+    },
 }
 
 #[derive(Parser, Debug, Default)]

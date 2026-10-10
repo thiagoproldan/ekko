@@ -1638,7 +1638,9 @@ fn a_scratch_home_writes_nothing_on_a_board_it_found_outside_it() {
 /// which kill-pane writes. The window of pane %7 is named by the file
 /// `name`, which rename-window writes (task 1645). A set-option succeeds,
 /// recorded as every call is, with the commands after it, unless a file
-/// `refuse` says the multiplexer takes no such option (task 1675).
+/// `refuse` says the multiplexer takes no such option (task 1675). The
+/// panes of the session `ekko`, listed with their options, are the file
+/// `born-panes` (task 1676).
 const MUX: &str = r#"#!/bin/sh
 state="$(dirname "$0")/mux-state"
 mkdir -p "$state"
@@ -1656,7 +1658,7 @@ case "$1" in
     done
     env > "$state/env"
     echo %7 ;;
-  list-panes) [ -e "$state/dead" ] || echo '%7 0' ;;
+  list-panes) if [ "$2" = -s ]; then cat "$state/born-panes" 2>/dev/null; else [ -e "$state/dead" ] || echo '%7 0'; fi ;;
   kill-pane) touch "$state/dead" ;;
   display-message) cat "$state/name" ;;
   rename-window) eval "name=\${$#}"; printf '%s\n' "$name" > "$state/name" ;;
@@ -2451,6 +2453,64 @@ fn a_born_session_with_background_work_in_flight_waits_on_no_one_at_idle_prompt(
     idle();
     assert!(agents.logged("waits on you (idle_prompt): Claude is waiting for your input; marked on task 1"));
     assert!(agents.context("1").contains("waiting on you since"));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// `ekko agents view --once` (task 1676): the sessions the multiplexer
+/// lists in the session ekko, by the state on their panes, titled from the
+/// board, and below them the tasks born sessions finished today, by
+/// born.log, each with its closing note's first line; a pane start did not
+/// open is not shown.
+#[test]
+fn agents_view_shows_the_sessions_by_state_and_what_they_finished_today() {
+    let agents = Agents::new();
+    for task in ["Fix #3 in the parser\nwhere it reads dates", "Write the docs", "Review the plan", "Add the flag"] {
+        assert!(agents.ekko(&["--task", task]).status.success());
+    }
+    assert!(agents.ekko(&["--check", "4"]).status.success());
+    assert!(agents.ekko(&["--note", "Added --json to agents start\nand its test"]).status.success());
+    assert!(agents.ekko(&["--attached-to", "@5", "4"]).status.success());
+    let state = agents.home.join(".local/state/ekko/born");
+    fs::create_dir_all(&state).unwrap();
+    let now = chrono::Local::now();
+    fs::write(state.join("born.log"), format!("{} aaaaaaaa {} closed: its Claude Code ended\n", now.format("%Y-%m-%dT%H:%M:%S%.3f"), agents.uid(4))).unwrap();
+    let mux = agents.home.join("mux-state");
+    fs::create_dir_all(&mux).unwrap();
+    fs::write(mux.join("session"), "").unwrap();
+    let since = now.timestamp();
+    let panes = [
+        format!("%1\t0\t1 \u{b7} haiku\t1\tFix ##3 in the parser\thaiku\tlow\twaiting\t{since}\tClaude needs your permission -- Bash: echo ##3 > stamp.txt"),
+        format!("%2\t0\t2 \u{b7} sonnet\t2\tWrite the docs\tsonnet\t\tworking\t{since}\t"),
+        format!("%3\t0\t3 \u{b7} haiku\t3\tReview the plan\thaiku\t\tidle\t{since}\t"),
+        "%9\t0\tzsh\t\t\t\t\t\t\t".to_string(),
+    ];
+    fs::write(mux.join("born-panes"), panes.join("\n") + "\n").unwrap();
+    let output = agents.ekko(&["agents", "view", "--once"]);
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{said}{}", String::from_utf8_lossy(&output.stderr));
+    let at = now.format("%H:%M").to_string();
+    let lines: Vec<&str> = said.lines().collect();
+    assert!(lines[0].starts_with("ekko agents \u{b7} ") && lines[0].ends_with(" session ekko \u{b7} 3 running, 1 finished today"), "{said}");
+    assert_eq!(
+        lines[1..],
+        [
+            "",
+            "\u{25cf} Waiting on you",
+            &format!("  1  Fix #3 in the parser  haiku \u{b7} low  since {at}  Claude needs your permission -- Bash: echo #3 > stamp.txt"),
+            "",
+            "\u{2699} Working",
+            &format!("  2  Write the docs        sonnet       since {at}"),
+            "",
+            "\u{25cb} Idle",
+            &format!("  3  Review the plan       haiku        since {at}"),
+            "",
+            "\u{2713} Finished today",
+            &format!("  4  Add the flag          done {at}                Added --json to agents start"),
+        ],
+        "{said}"
+    );
+    let calls = agents.calls();
+    assert!(calls.iter().any(|call| call.contains(&"list-panes".to_string()) && call.contains(&"-s".to_string())), "{calls:?}");
     fs::remove_dir_all(&agents.home).ok();
 }
 

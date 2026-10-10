@@ -112,6 +112,7 @@ $ ekko --help
     $ ekko artifact <id> [--project <name>] [--no-open]
     $ ekko serve [--idle <seconds>] [--stop]
     $ ekko agents start <task>... --model <model> [--effort <level>] [--project <name>]
+    $ ekko agents view [--once] [--project <name>]
 
     Options
         none              Display board view
@@ -178,6 +179,7 @@ $ ekko --help
       $ ekko
       $ ekko init
       $ ekko agents start 12 --model sonnet --effort high
+      $ ekko agents view
       $ ekko --archive
       $ ekko --attached-to @16 12
       $ ekko --begin 2 3
@@ -994,6 +996,28 @@ The multiplexer can be any that speaks tmux's commands (task 1649). [ztmux](http
 A born session's state is on its pane, for whatever draws it (task 1675). `ekko agents start` sets user options on the pane it opens: `@ekko_tasks`, its tasks' numbers; `@ekko_title`, the first one's title, with `(+2)` for two more; `@ekko_model` and `@ekko_effort`; and `@ekko_state` -- `working`, `waiting` or `idle` -- with `@ekko_since`, when it took that state, in seconds since the epoch, and `@ekko_waits`, what it waits on, in the words the board's mark gives. The plugin's hooks keep the state: waiting when Claude Code says it waits on you, as the board is marked; idle when a turn ends with its tasks unfinished and no background work in flight; working at the prompt, the tool and the answered dialog that follow. And it sets that window's own `window-status-format` and `window-status-current-format`, nothing global, to draw the state before the window's name: `⚙ 12 · sonnet` working, `● 12 · sonnet · waiting on you` in bold black on yellow, `○ 12 · sonnet` dim. Every other window keeps what your `~/.tmux.conf` gives it, and the options are there for a format of your own, as `#{@ekko_state}`. A value is shown as given: a `#` in a title is doubled, so it draws as written and runs no format. A multiplexer that refuses an option still runs the session, and `--json` says whether it was `drawn`, and why not, as `undrawn`. Measured with three sessions on haiku (Claude Code 2.1.295), each on tmux 3.7c and on ztmux 3.7.47, the status line read every 0.5 s through a client attached in a pane of another tmux: each session's symbol showed and changed with its state -- waiting at its permission prompt, idle at a turn's end with its task pending, working again once the command it was let run had run -- 0.09 to 0.38 s after `born.log` recorded the change; the global `window-status-format` stayed as it was, and no user option was set globally or on the session.
 
 A permission prompt answered clears the mark then, not when the command it let run ends (task 1679). Claude Code fires no hook as you answer: the next one, PostToolUse, comes as the command ends, which left a session told to run `sleep 15 && date > stamp.txt` marked and drawn as waiting on you for 15.1 s after Enter. So the Notification hook that marks a permission prompt starts a watcher of Claude Code's own record of the session, `sessions/<pid>.json` in its config folder, which `claude agents --json` reports: it says `waiting` as the prompt shows and `busy` as it is answered. Read every 100 ms, once it has said `waiting` and then `busy` or `idle`, the watcher clears the mark as the hook would -- on the board, in the window's name, on the pane -- and ends; it ends too once the hook has cleared it, or the session has ended. A record that does not say `waiting` first, as one of another Claude Code might, leaves the mark to the hook, as before. Measured with that command on haiku (Claude Code 2.1.295): the record said `busy` 17 to 26 ms after Enter in three runs, and with the watcher, once on tmux 3.7c and once on ztmux 3.7.47, the mark was cleared 135 and 148 ms after Enter, 15 s before the command ended.
+
+`ekko agents view` shows them on one screen (task 1676), as Claude Code's agent view shows its sessions:
+
+```
+ekko agents · tmux session ekko · 3 running, 1 finished today
+
+● Waiting on you
+❯ 12  Fix the parser   sonnet · high  since 00:04  Claude needs your permission -- Bash: date > stamp.txt
+
+⚙ Working
+  13  Write the docs   haiku · low    since 00:12
+
+○ Idle
+  14  Review the plan  haiku          since 00:31
+
+✓ Finished today
+  11  Add the flag     done 23:58                  Added --json to agents start; tests pass
+
+↑↓ choose · Enter step in · Space peek · q leave
+```
+
+The sessions `start` opened in the session `ekko`, by the state on their panes, each with its tasks, the first one's title, its model and effort, since when it is in that state and what it waits on; then the tasks born sessions finished today -- those `born.log` names that are now done or cancelled -- with when, and the first line of the note last attached to each, its closing note. The arrows choose a session, Enter steps into its window, Space peeks at its screen until a key is pressed, q leaves, and it reads everything again every second. Run in a terminal of its own, Enter makes it a client of the multiplexer, attached to that session's pane; run in a popup of the multiplexer -- `bind-key a display-popup -E -w 90% -h 80% 'ekko agents view'` in `~/.tmux.conf`, with `-e EKKO_MUX=ztmux` for ztmux -- Enter moves the popup's client there, and the popup closes. With `--once`, or with no terminal, it prints the screen and leaves. Measured with three born sessions on haiku (Claude Code 2.1.295), one waiting on a permission prompt, one idle, one working, on tmux 3.7c and on ztmux 3.7.47: from a pane of another tmux, outside the multiplexer, and from a popup over a client of it, the view showed each session in its group, and Enter put the client on the chosen session's pane within 15 ms of the key; with a scratch board, Space showed the pane's screen and the task finished today showed with its note.
 
 
 ### Stable ids

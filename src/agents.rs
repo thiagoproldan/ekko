@@ -364,7 +364,7 @@ fn tasks_of(name: &str) -> Vec<u32> {
 /// the binary `EKKO_MUX` names, `tmux` otherwise, on the server some
 /// arguments name -- `-L <name>`, `-S <path>` -- or else the one it finds
 /// itself: the server this command runs inside, or the user's default.
-struct Mux {
+pub(crate) struct Mux {
     binary: OsString,
     server: Vec<OsString>,
     /// The environment it runs with; this process's own when `None`.
@@ -380,6 +380,39 @@ impl Mux {
         Mux { binary: set("EKKO_MUX").unwrap_or_else(|| "tmux".into()), server, environment: Some(environment) }
     }
 
+    /// The one `start` speaks to, as this process's environment has it:
+    /// inside a pane, without `EKKO_MUX_SOCKET`, the server of that pane, as
+    /// tmux finds it from TMUX (task 1676).
+    pub(crate) fn here() -> Mux {
+        let server = set("EKKO_MUX_SOCKET").map(|socket| vec!["-L".into(), socket]).unwrap_or_default();
+        Mux { binary: set("EKKO_MUX").unwrap_or_else(|| "tmux".into()), server, environment: None }
+    }
+
+    /// The arguments that run it on its server: the binary, then `-L` or
+    /// `-S` and the socket, if one is named.
+    pub(crate) fn argv(&self) -> Vec<OsString> {
+        std::iter::once(self.binary.clone()).chain(self.server.iter().cloned()).collect()
+    }
+
+    /// The panes of the session `ekko` that `start` opened, each with what it
+    /// keeps there for the views (task 1675); none without the session.
+    pub(crate) fn born_panes(&self) -> Result<Vec<BornPane>, String> {
+        if !self.has_session()? {
+            return Ok(Vec::new());
+        }
+        let fields = ["#{pane_id}", "#{pane_dead}", "#{window_name}"]
+            .into_iter()
+            .map(str::to_string)
+            .chain([TASKS_OPTION, TITLE_OPTION, MODEL_OPTION, EFFORT_OPTION, STATE_OPTION, SINCE_OPTION, WAITS_OPTION].map(|option| format!("#{{{option}}}")))
+            .collect::<Vec<_>>()
+            .join("\t");
+        let output = self.run(&["list-panes", "-s", "-t", &format!("={SESSION}"), "-F", &fields])?;
+        if !output.status.success() {
+            return Err(self.failed("list-panes", &output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).lines().filter_map(BornPane::parse).collect())
+    }
+
     /// The one whose pane this process runs in, as the server tells its
     /// panes: the socket before the first comma of TMUX.
     fn of_this_pane() -> Option<Mux> {
@@ -389,7 +422,7 @@ impl Mux {
         Some(Mux { binary: set("EKKO_MUX").unwrap_or_else(|| "tmux".into()), server, environment: None })
     }
 
-    fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Output, String> {
+    pub(crate) fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Output, String> {
         let mut command = Command::new(&self.binary);
         command.args(&self.server).args(args).stdin(Stdio::null());
         if let Some(environment) = &self.environment {
@@ -398,7 +431,7 @@ impl Mux {
         command.output().map_err(|error| format!("{} could not be run: {error}", self.binary.to_string_lossy()))
     }
 
-    fn failed(&self, what: &str, output: &Output) -> String {
+    pub(crate) fn failed(&self, what: &str, output: &Output) -> String {
         format!("{} {what} failed: {}", self.binary.to_string_lossy(), String::from_utf8_lossy(&output.stderr).trim())
     }
 
@@ -505,6 +538,56 @@ impl Mux {
         let server: String = self.server.iter().map(|arg| format!(" {}", arg.to_string_lossy())).collect();
         format!("{binary}{server} attach -t {SESSION}")
     }
+}
+
+/// A pane of the session `ekko` that `start` opened, as `born_panes` reads
+/// it: what its options say, `#` no longer doubled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BornPane {
+    pub pane: String,
+    pub dead: bool,
+    pub window: String,
+    pub tasks: Vec<u32>,
+    pub title: String,
+    pub model: String,
+    pub effort: Option<String>,
+    pub state: String,
+    /// Since when it is in its state, in seconds since the epoch.
+    pub since: Option<i64>,
+    pub waits: Option<String>,
+}
+
+impl BornPane {
+    /// A line of `born_panes`' list, its fields apart by tabs, which no
+    /// value holds (`shown`); none for a pane `start` did not open.
+    fn parse(line: &str) -> Option<BornPane> {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [pane, dead, window, tasks, title, model, effort, state, since, waits] = fields.as_slice() else { return None };
+        let tasks: Vec<u32> = tasks.split(',').map(|id| id.trim().parse::<u32>()).collect::<Result<_, _>>().unwrap_or_default();
+        if tasks.is_empty() {
+            return None;
+        }
+        let given = |value: &str| Some(value.replace("##", "#")).filter(|value| !value.is_empty());
+        Some(BornPane {
+            pane: pane.to_string(),
+            dead: *dead == "1",
+            window: window.to_string(),
+            tasks,
+            title: given(title).unwrap_or_default(),
+            model: model.to_string(),
+            effort: given(effort),
+            state: state.to_string(),
+            since: since.parse().ok(),
+            waits: given(waits),
+        })
+    }
+}
+
+/// What born sessions did today, by `born.log`: each line written since
+/// midnight, local time.
+pub(crate) fn born_today(home: &Path) -> Vec<String> {
+    let today = chrono::Local::now().format("%Y-%m-%dT").to_string();
+    std::fs::read_to_string(born_dir(home).join("born.log")).unwrap_or_default().lines().filter(|line| line.starts_with(&today)).map(str::to_string).collect()
 }
 
 /// The value of the variable `name`, unless it is unset or empty.

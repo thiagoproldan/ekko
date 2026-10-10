@@ -923,7 +923,7 @@ impl Settle {
 }
 
 /// The terminal's width, or a guess where it cannot say.
-fn columns() -> usize {
+pub(crate) fn columns() -> usize {
     // SAFETY: winsize is plain data, filled in by the ioctl when it succeeds.
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     if unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut size) } == 0 && size.ws_col > 0 {
@@ -941,11 +941,16 @@ extern "C" fn stop(_: libc::c_int) {
     STOP.store(true, Ordering::Relaxed);
 }
 
+/// Whether SIGTERM or SIGHUP came since `Raw::enter`.
+pub(crate) fn stopped() -> bool {
+    STOP.load(Ordering::Relaxed)
+}
+
 /// The terminal in raw mode, for keys one at a time, until dropped.
-struct Raw(libc::termios);
+pub(crate) struct Raw(libc::termios);
 
 impl Raw {
-    fn enter() -> Result<Raw, EkkoError> {
+    pub(crate) fn enter() -> Result<Raw, EkkoError> {
         if !io::stdin().is_terminal() {
             return Err(EkkoError::InvalidInput("the menu needs a terminal; give the answer's text after the id".into()));
         }
@@ -984,7 +989,7 @@ impl Drop for Raw {
 /// Standard input a byte at a time, with no buffer in between: a buffer would
 /// hold the rest of an arrow's escape sequence where `follows` cannot see
 /// it, and the arrow would read as Esc. It reads as ended once STOP is set.
-struct Keys;
+pub(crate) struct Keys;
 
 impl Read for Keys {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -1007,14 +1012,14 @@ impl Read for Keys {
 
 /// Whether another byte arrives within a few milliseconds: what tells the Esc
 /// key from the start of an arrow's escape sequence.
-fn follows() -> bool {
+pub(crate) fn follows() -> bool {
     let mut poll = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
     // SAFETY: one valid pollfd, for the length given.
     unsafe { libc::poll(&mut poll, 1, 30) > 0 }
 }
 
 /// The next key, or None when the terminal is gone.
-fn read_key(keys: &mut impl Read, follows: impl Fn() -> bool) -> Option<Key> {
+pub(crate) fn read_key(keys: &mut impl Read, follows: impl Fn() -> bool) -> Option<Key> {
     let mut byte = [0u8; 1];
     loop {
         keys.read_exact(&mut byte).ok()?;

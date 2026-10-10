@@ -1,5 +1,6 @@
 mod agent;
 mod agents;
+mod agents_view;
 mod anchors;
 mod artifact;
 mod claims;
@@ -49,6 +50,7 @@ const HELP: &str = r#"
     $ ekko artifact <id> [--project <name>] [--no-open]
     $ ekko serve [--idle <seconds>] [--stop]
     $ ekko agents start <task>... --model <model> [--effort <level>] [--project <name>]
+    $ ekko agents view [--once] [--project <name>]
 
     Options
         none              Display board view
@@ -115,6 +117,7 @@ const HELP: &str = r#"
       $ ekko
       $ ekko init
       $ ekko agents start 12 --model sonnet --effort high
+      $ ekko agents view
       $ ekko --archive
       $ ekko --attached-to @16 12
       $ ekko --begin 2 3
@@ -569,7 +572,22 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let cli::Agents::Start { ids, model, effort, project, json } = cli.command;
+    let (ids, model, effort, project, json) = match cli.command {
+        cli::Agents::Start { ids, model, effort, project, json } => (ids, model, effort, project, json),
+        // `ekko agents view` (task 1676).
+        cli::Agents::View { once, project } => {
+            let project_env = std::env::var("EKKO_PROJECT").ok();
+            let ekko_dir_env = std::env::var("EKKO_DIR").ok();
+            let shown = directory::locate(&home_dir, &cwd, None, ekko_dir_env.as_deref(), project.as_deref().or(project_env.as_deref()))
+                .map_err(EkkoError::from)
+                .and_then(|location| Ekko::at(&location))
+                .and_then(|ekko| agents_view::run(&ekko, &home_dir, once));
+            return match shown {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => finish_with_error(&err, json_first, &home_dir),
+            };
+        }
+    };
     let json_mode = json_first || json;
     let ekko_dir_env = std::env::var("EKKO_DIR").ok();
     let project_env = std::env::var("EKKO_PROJECT").ok();
