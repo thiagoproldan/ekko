@@ -56,6 +56,12 @@ const TEMP_FILE_ABANDONED: Duration = Duration::from_secs(600);
 const HISTORY_RECENT: usize = 50;
 const HISTORY_DAYS: u64 = 14;
 
+/// How many of the versions before the one a write replaced the write nudges,
+/// so that a watch two writes close together left on one of them moves on
+/// (see `Storage::nudge_versions_before`): a watch gets as many writes to move
+/// at.
+const NUDGED: usize = 4;
+
 /// Boards/timeline grouping iterates this in id order; a `BTreeMap` gives
 /// that for free and matches the JS version's behavior, where plain objects
 /// with integer-like string keys (`{"1": ..., "2": ...}`) iterate in
@@ -262,9 +268,11 @@ impl Storage {
         // good (task 1248). So history takes the new version before it is put
         // in place, and the old one only by copy, when no write kept it.
         self.keep_unkept_version();
+        let replaced = fs::metadata(&self.storage_file).ok().as_ref().and_then(version_time);
         let content = json::to_pretty_string(data)?;
         let version = replace_durably_keeping(&self.storage_file, &self.temp_dir, content.as_bytes(), Some(&self.history_dir))?;
         self.prune_history();
+        self.nudge_versions_before(replaced);
         // The version this write made is the map it wrote, so the read after
         // it -- the MCP server reads the board after every write -- parses
         // nothing (task 859). A later write by any process is a new inode.
@@ -362,14 +370,39 @@ impl Storage {
     /// every write replaces storage.json whole, so history is what undoes a
     /// bad write.
     fn prune_history(&self) {
-        let Ok(entries) = fs::read_dir(&self.history_dir) else { return };
-        let kept: Vec<u128> = entries
-            .flatten()
-            .filter_map(|entry| entry.file_name().to_str()?.strip_suffix(".json")?.parse().ok())
-            .collect();
-        for version in stale_versions(kept, SystemTime::now()) {
+        for version in stale_versions(self.history_versions(), SystemTime::now()) {
             let _ = fs::remove_file(self.history_dir.join(format!("{version}.json")));
         }
+    }
+
+    /// Nudges the versions of storage.json kept before `replaced`, the one a
+    /// write just replaced -- the newest `NUDGED` of them -- by setting each
+    /// file's mode to the mode it has: nothing changes, but it is an event on
+    /// its inode. Claude Code's FileChanged follows storage.json by its inode
+    /// and moves its watch only at an event on the inode it watches, and it
+    /// drops an event that comes within 5 ms of the one before, longer while
+    /// its event loop is busy. So two writes close together can leave the
+    /// watch on the version the first one made, which nothing replaces
+    /// again: deaf to every write after (task 1734). The next write's nudge
+    /// is that event, and the watch moves to the version in place then. A
+    /// watch on `replaced` itself moves with the rename that replaced it.
+    /// Best effort, like history.
+    fn nudge_versions_before(&self, replaced: Option<u128>) {
+        let Some(replaced) = replaced else { return };
+        let mut before: Vec<u128> = self.history_versions().into_iter().filter(|version| *version < replaced).collect();
+        before.sort_unstable_by(|a, b| b.cmp(a));
+        for version in before.into_iter().take(NUDGED) {
+            let file = self.history_dir.join(format!("{version}.json"));
+            if let Ok(meta) = fs::metadata(&file) {
+                let _ = fs::set_permissions(&file, meta.permissions());
+            }
+        }
+    }
+
+    /// The versions `history/` keeps, by the times their names hold.
+    fn history_versions(&self) -> Vec<u128> {
+        let Ok(entries) = fs::read_dir(&self.history_dir) else { return Vec::new() };
+        entries.flatten().filter_map(|entry| entry.file_name().to_str()?.strip_suffix(".json")?.parse().ok()).collect()
     }
 
     pub fn set_archive(&self, data: &ItemMap) -> Result<(), StorageError> {
@@ -929,7 +962,13 @@ fn link_into(history: &Path, file: &Path, meta: &fs::Metadata) -> Option<PathBuf
 /// The name `history/` keeps a version under: its modification time in
 /// nanoseconds, which orders the versions.
 fn history_name(meta: &fs::Metadata) -> Option<String> {
-    Some(format!("{}.json", meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos()))
+    Some(format!("{}.json", version_time(meta)?))
+}
+
+/// A version's modification time in nanoseconds, as its name in `history/`
+/// holds it.
+fn version_time(meta: &fs::Metadata) -> Option<u128> {
+    Some(meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos())
 }
 
 /// pid + nanosecond timestamp instead of the JS version's random hex --
@@ -1465,18 +1504,63 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// A watch left on an older version of storage.json -- the event that
+    /// would have moved it dropped, as Claude Code's watch drops one within
+    /// 5 ms of the one before when two writes come close together -- gets an
+    /// event at the next write, once storage.json names the version that
+    /// write made, so a watch that stats the path there moves to it (task
+    /// 1734). That is each of the `NUDGED` versions before the one the write
+    /// replaced, which moves with the rename itself; older ones get nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_write_nudges_the_versions_a_watch_could_be_left_on() {
+        let dir = temp_ekko_dir();
+        let storage = Storage::new(&dir).unwrap();
+        let file = dir.join("storage").join("storage.json");
+        let mut data = BTreeMap::new();
+        let mut kept = Vec::new();
+        for write in 1..=NUDGED as u32 + 3 {
+            data.insert(write, sample_item(write));
+            storage.set(&data).unwrap();
+            let meta = fs::metadata(&file).unwrap();
+            kept.push(dir.join("history").join(history_name(&meta).unwrap()));
+            // A version's name in history is its modification time, which
+            // the kernel takes from a clock that moves a tick at a time.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (older, newer) = kept.split_at(kept.len() - 1 - NUDGED);
+        let (nudged, replaced) = (&newer[..NUDGED], &newer[NUDGED]);
+        let quiet: Vec<i32> = older.iter().map(|version| watch_as_claude_code_does(version)).collect();
+        let named: Vec<_> = nudged.iter().map(|version| named_at_first_event(version, &file)).collect();
+        data.insert(99, sample_item(99));
+        storage.set(&data).unwrap();
+        let made = fs::metadata(&file).unwrap().ino();
+        for (version, named) in nudged.iter().zip(named) {
+            let named = named.join().unwrap();
+            assert!(named.is_some(), "no event on {} at the write after the one that replaced it", version.display());
+            assert_eq!(named, Some(made), "the event on {} came before storage.json named the version the write made", version.display());
+        }
+        for (version, fd) in older.iter().zip(quiet) {
+            assert!(!has_event(fd), "an event on {}, more than {NUDGED} versions before {}", version.display(), replaced.display());
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// The inode `file` names when the first event comes on the inode it
-    /// names now, as a watch that stats the path at each event sees it: with
-    /// the events Claude Code's watch asks for (mask c06 in its fdinfo).
+    /// names now, as a watch that stats the path at each event sees it.
     /// `None` when no event comes within 5 s. Armed when it returns.
     #[cfg(target_os = "linux")]
     fn inode_at_first_event(file: &Path) -> std::thread::JoinHandle<Option<u64>> {
-        use std::os::unix::ffi::OsStrExt as _;
-        let path = std::ffi::CString::new(file.as_os_str().as_bytes()).unwrap();
-        let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
-        assert!(fd >= 0, "inotify_init1");
-        let mask = libc::IN_MODIFY | libc::IN_ATTRIB | libc::IN_DELETE_SELF | libc::IN_MOVE_SELF;
-        assert!(unsafe { libc::inotify_add_watch(fd, path.as_ptr(), mask) } >= 0, "inotify_add_watch");
+        named_at_first_event(file, file)
+    }
+
+    /// The inode `file` names when the first event comes on the inode
+    /// `watched` names now: a watch left on `watched`, an older version of
+    /// `file`, stats `file` at the event. `None` when no event comes within
+    /// 5 s. Armed when it returns.
+    #[cfg(target_os = "linux")]
+    fn named_at_first_event(watched: &Path, file: &Path) -> std::thread::JoinHandle<Option<u64>> {
+        let fd = watch_as_claude_code_does(watched);
         let file = file.to_path_buf();
         std::thread::spawn(move || {
             let mut ready = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
@@ -1484,6 +1568,29 @@ mod tests {
             unsafe { libc::close(fd) };
             named
         })
+    }
+
+    /// An inotify descriptor watching the inode `file` names now, for the
+    /// events Claude Code's watch asks for (mask c06 in its fdinfo).
+    #[cfg(target_os = "linux")]
+    fn watch_as_claude_code_does(file: &Path) -> i32 {
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = std::ffi::CString::new(file.as_os_str().as_bytes()).unwrap();
+        let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+        assert!(fd >= 0, "inotify_init1");
+        let mask = libc::IN_MODIFY | libc::IN_ATTRIB | libc::IN_DELETE_SELF | libc::IN_MOVE_SELF;
+        assert!(unsafe { libc::inotify_add_watch(fd, path.as_ptr(), mask) } >= 0, "inotify_add_watch");
+        fd
+    }
+
+    /// Whether an event waits on `fd`, which it closes. Without waiting: the
+    /// call that makes an event queues it before it returns.
+    #[cfg(target_os = "linux")]
+    fn has_event(fd: i32) -> bool {
+        let mut ready = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let waiting = unsafe { libc::poll(&mut ready, 1, 0) } == 1;
+        unsafe { libc::close(fd) };
+        waiting
     }
 
     /// History keeps the newest 50 versions, then the newest of each day for
