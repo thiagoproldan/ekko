@@ -1,5 +1,6 @@
 mod agent;
 mod agents;
+mod agents_merge;
 mod agents_view;
 mod anchors;
 mod artifact;
@@ -50,6 +51,8 @@ const HELP: &str = r#"
     $ ekko artifact <id> [--project <name>] [--no-open]
     $ ekko serve [--idle <seconds>] [--stop]
     $ ekko agents start <task>... --model <model> [--effort <level>] [--project <name>]
+    $ ekko agents merge <task>... [--keep] [--project <name>]
+    $ ekko agents test [<command> | --none] [--project <name>]
     $ ekko agents view [--once] [--project <name>]
     $ ekko agents wall
     $ ekko agents unwall
@@ -119,6 +122,7 @@ const HELP: &str = r#"
       $ ekko
       $ ekko init
       $ ekko agents start 12 --model sonnet --effort high
+      $ ekko agents merge 12
       $ ekko agents view
       $ ekko --archive
       $ ekko --attached-to @16 12
@@ -576,6 +580,11 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
     };
     let (ids, model, effort, project, json) = match cli.command {
         cli::Agents::Start { ids, model, effort, project, json } => (ids, model, effort, project, json),
+        // `ekko agents merge` (task 1714).
+        cli::Agents::Merge { ids, keep, project, json } => return run_merge(&home_dir, &cwd, &ids, keep, project.as_deref(), json_first || json),
+        cli::Agents::Test { command, none, project, json } => {
+            return run_agents_test(&home_dir, &cwd, command.as_deref(), none, project.as_deref(), json_first || json);
+        }
         // `ekko agents view` (task 1676).
         cli::Agents::View { once, project } => {
             let project_env = std::env::var("EKKO_PROJECT").ok();
@@ -658,6 +667,153 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
         println!("  its state is not drawn in the status line: {why}");
     }
     ExitCode::SUCCESS
+}
+
+/// The board `ekko agents merge` and `test` work on, found as every command
+/// finds it, acting for the session that runs them, or for the user.
+fn agents_board(home_dir: &Path, cwd: &Path, project: Option<&str>) -> Result<(directory::Location, Ekko), EkkoError> {
+    let ekko_dir_env = std::env::var("EKKO_DIR").ok();
+    let project_env = std::env::var("EKKO_PROJECT").ok();
+    let location = directory::locate(home_dir, cwd, None, ekko_dir_env.as_deref(), project.or(project_env.as_deref())).map_err(EkkoError::from)?;
+    let ekko = Ekko::at(&location)?
+        .acting_as(holder::Actor::of_this_command().with_registry(holder::Registry::at(agent::processes_dir(home_dir))))
+        .in_folder(location.project.as_ref().and_then(|project| project.root.clone()))
+        .born_for(agents::born_tasks());
+    Ok((location, ekko))
+}
+
+/// `ekko agents test`: the command `ekko agents merge` tests a rebased
+/// branch with, shown, or set as the user says (task 1714).
+fn run_agents_test(home_dir: &Path, cwd: &Path, command: Option<&str>, none: bool, project: Option<&str>, json_mode: bool) -> ExitCode {
+    let settings = agents_board(home_dir, cwd, project).and_then(|(location, ekko)| {
+        if location.project.is_none() {
+            return Err(EkkoError::InvalidInput("ekko agents works on a project's board, whose sessions work in worktrees of the project's repository; this is the default board".into()));
+        }
+        match (command, none) {
+            (Some(command), _) if command.trim().is_empty() => {
+                Err(EkkoError::InvalidInput("An empty command tests nothing: ekko agents test --none says the project has no tests".into()))
+            }
+            (Some(command), _) => ekko.set_agents_test(Some(command)),
+            (None, true) => ekko.set_agents_test(None),
+            (None, false) => ekko.storage.get_agents().map_err(EkkoError::from),
+        }
+    });
+    let settings = match settings {
+        Ok(settings) => settings,
+        Err(err) => return finish_with_error(&err, json_mode, home_dir),
+    };
+    if json_mode {
+        println!("{}", serde_json::json!({"ok": true, "command": "agents test", "test": settings.test, "untested": settings.untested}));
+        return ExitCode::SUCCESS;
+    }
+    match (&settings.test, settings.untested) {
+        (Some(command), _) => println!("ekko agents merge tests each branch with `{command}`, in its worktree once rebased, and merges it only if that exits 0"),
+        (None, true) => println!("This project has no tests, as the user said: ekko agents merge merges a rebased branch untested"),
+        (None, false) => println!(
+            "No test command is set: ekko agents merge refuses until the user sets one with ekko agents test 'COMMAND', or says the project has none with ekko agents test --none"
+        ),
+    }
+    ExitCode::SUCCESS
+}
+
+/// `ekko agents merge`: the branch a born session committed its tasks' work
+/// on, into the branch the project's checkout is on -- rebased, tested,
+/// fast-forwarded -- or handed back to the tasks (task 1714). Fails, exit
+/// 1, when it merged nothing.
+fn run_merge(home_dir: &Path, cwd: &Path, ids: &[String], keep: bool, project: Option<&str>, json_mode: bool) -> ExitCode {
+    let merged = agents_board(home_dir, cwd, project).and_then(|(location, ekko)| {
+        let test = agents_merge::test_command(&ekko)?;
+        agents_merge::merge(&ekko, &location, home_dir, ids, &test, keep)
+    });
+    let outcome = match merged {
+        Ok(outcome) => outcome,
+        Err(err) => return finish_with_error(&err, json_mode, home_dir),
+    };
+    let ids_of = |ids: &[u32]| ids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+    match outcome {
+        agents_merge::Outcome::Merged(merged) => {
+            let left = match &merged.left {
+                agents_merge::Left::Removed => serde_json::json!("removed"),
+                agents_merge::Left::Kept => serde_json::json!("kept"),
+                agents_merge::Left::NotRemoved(why) => serde_json::json!({"kept": why}),
+            };
+            let tested = match &merged.tested {
+                agents_merge::Tested::Passed { command, seconds, log } => serde_json::json!({"command": command, "seconds": seconds, "log": log}),
+                agents_merge::Tested::Untested => serde_json::json!("untested"),
+                agents_merge::Tested::Unneeded => serde_json::Value::Null,
+            };
+            if json_mode {
+                let out = serde_json::json!({
+                    "ok": true,
+                    "command": "agents merge",
+                    "tasks": merged.tasks,
+                    "branch": merged.branch,
+                    "into": merged.into,
+                    "from": merged.from,
+                    "to": merged.to,
+                    "commits": merged.commits,
+                    "tested": tested,
+                    "worktree": left,
+                    "notes": merged.notes,
+                });
+                println!("{out}");
+                return ExitCode::SUCCESS;
+            }
+            let how = match &merged.tested {
+                agents_merge::Tested::Passed { command, seconds, .. } => format!("tested with `{command}` ({seconds:.1} s)"),
+                agents_merge::Tested::Untested => "untested, as the project has no tests".to_string(),
+                agents_merge::Tested::Unneeded => String::new(),
+            };
+            if merged.commits == 0 {
+                println!("Nothing to merge: {} has every commit of {} already", merged.into, merged.branch);
+            } else {
+                println!(
+                    "Merged {} into {}: {} commit{}, {how}; {} is at {} now",
+                    merged.branch,
+                    merged.into,
+                    merged.commits,
+                    if merged.commits == 1 { "" } else { "s" },
+                    merged.into,
+                    merged.to.get(..7).unwrap_or(&merged.to)
+                );
+            }
+            match &merged.left {
+                agents_merge::Left::Removed => println!("  its worktree and the branch {} were removed", merged.branch),
+                agents_merge::Left::Kept => println!("  its worktree and the branch {} were kept", merged.branch),
+                agents_merge::Left::NotRemoved(why) => println!("  its worktree and the branch {} were kept: {why}", merged.branch),
+            }
+            println!("  note {} on task {}", ids_of(&merged.notes), ids_of(&merged.tasks));
+            ExitCode::SUCCESS
+        }
+        agents_merge::Outcome::HandedBack(back) => {
+            if json_mode {
+                let out = serde_json::json!({
+                    "ok": false,
+                    "command": "agents merge",
+                    "code": "NOT_MERGED",
+                    "tasks": back.tasks,
+                    "branch": back.branch,
+                    "into": back.into,
+                    "why": back.why,
+                    "notes": back.notes,
+                    "reopened": back.reopened,
+                    "notReopened": back.not_reopened,
+                    "log": back.log,
+                });
+                println!("{out}");
+                return ExitCode::FAILURE;
+            }
+            println!("Not merged: {}; {} and {} are as they were", back.why, back.into, back.branch);
+            match &back.not_reopened {
+                None => println!("  task {} is pending again, with note {} saying what to do", ids_of(&back.reopened), ids_of(&back.notes)),
+                Some(why) => println!("  note {} says what to do; the task was not set back to pending: {why}", ids_of(&back.notes)),
+            }
+            if let Some(log) = &back.log {
+                println!("  the tests' output: {}", log.display());
+            }
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `ekko serve`: the local server of artifact pages, in the foreground, or

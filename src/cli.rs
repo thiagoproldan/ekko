@@ -95,6 +95,40 @@ pub enum Agents {
         #[arg(long, short = 'j')]
         json: bool,
     },
+    /// Merge the branch a session committed the tasks' work on into the
+    /// branch the project's checkout is on: rebased onto it, tested, then
+    /// fast-forwarded; on a conflict or a failing test, handed back.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Merge {
+        /// The tasks, by id or uid, as they were started together.
+        #[arg(required = true, value_name = "TASK")]
+        ids: Vec<String>,
+        /// Keep the branch's worktree and the branch once merged.
+        #[arg(long)]
+        keep: bool,
+        /// A project's board other than the one found from the folder.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
+    /// Show the command merge tests a branch with, or set it: the user's to
+    /// set, once for the project.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Test {
+        /// The command, quoted: run through `sh -c` in the branch's
+        /// worktree, once rebased; the branch goes in if it exits 0.
+        #[arg(value_name = "COMMAND", conflicts_with = "none")]
+        command: Option<String>,
+        /// The project has no tests: a branch goes in untested.
+        #[arg(long)]
+        none: bool,
+        /// A project's board other than the one found from the folder.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
     /// Show the sessions it opened, by state, and the tasks they finished
     /// today; step into one, or peek at it.
     #[command(disable_help_flag = true, disable_version_flag = true)]

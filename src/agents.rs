@@ -395,7 +395,7 @@ fn first_prompt(ids: &[u32], branch: &str, worktree: &Path) -> String {
 }
 
 /// `1`, `1 and 2`, `1, 2 and 3`.
-fn listed(ids: &[u32]) -> String {
+pub(crate) fn listed(ids: &[u32]) -> String {
     match ids.split_last() {
         Some((last, [])) => last.to_string(),
         Some((last, rest)) => format!("{} and {last}", joined(rest, ", ")),
@@ -403,13 +403,13 @@ fn listed(ids: &[u32]) -> String {
     }
 }
 
-fn joined(ids: &[u32], between: &str) -> String {
+pub(crate) fn joined(ids: &[u32], between: &str) -> String {
     ids.iter().map(u32::to_string).collect::<Vec<_>>().join(between)
 }
 
 /// The tasks a window's name says it was opened for: the ids before its
 /// first ` · `, as `start` names it; none for a name it did not give.
-fn tasks_of(name: &str) -> Vec<u32> {
+pub(crate) fn tasks_of(name: &str) -> Vec<u32> {
     let Some((ids, _)) = name.split_once(" \u{b7} ") else { return Vec::new() };
     ids.split(',').map(|id| id.trim().parse::<u32>()).collect::<Result<_, _>>().unwrap_or_default()
 }
@@ -539,7 +539,7 @@ impl Mux {
     }
 
     /// The names of the windows in the session `ekko`; none without it.
-    fn windows(&self) -> Result<Vec<String>, String> {
+    pub(crate) fn windows(&self) -> Result<Vec<String>, String> {
         if !self.has_session()? {
             return Ok(Vec::new());
         }
@@ -812,8 +812,8 @@ fn set(name: &str) -> Option<OsString> {
 
 /// A born session's worktree: where it is, the top of its repository, and
 /// whether this start made it.
-struct Worktree {
-    path: PathBuf,
+pub(crate) struct Worktree {
+    pub(crate) path: PathBuf,
     top: PathBuf,
     made: bool,
 }
@@ -824,7 +824,7 @@ struct Worktree {
 /// of that checkout, unpushed commits and all -- Claude Code's default
 /// branches from the remote's -- or, where an earlier start left one for
 /// the branch, that one: the work of a session that stopped short goes on.
-fn worktree(root: &Path, branch: &str) -> Result<Worktree, String> {
+pub(crate) fn worktree(root: &Path, branch: &str) -> Result<Worktree, String> {
     let top = git(root, &["rev-parse", "--show-toplevel"])
         .map_err(|why| format!("{} is in no git repository, and a born session works in a worktree of its own: {why}", root.display()))?;
     let top = PathBuf::from(top);
@@ -856,7 +856,7 @@ fn worktree(root: &Path, branch: &str) -> Result<Worktree, String> {
 }
 
 /// `git -C dir args`: what it printed, trimmed, or else what it said.
-fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String, String> {
+pub(crate) fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String, String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -872,7 +872,7 @@ fn git<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<String, String> {
 }
 
 /// Whether two paths name the same place, through symlinks.
-fn same(one: &Path, other: &Path) -> bool {
+pub(crate) fn same(one: &Path, other: &Path) -> bool {
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     real(one) == real(other)
 }
@@ -893,7 +893,8 @@ pub fn born_tasks() -> Option<Vec<String>> {
 /// it a write to another's task (`EkkoError::NotBornFor`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Limit {
-    /// What sends its branch out: `git push`, and `gh pr create` or `merge`.
+    /// What sends its branch out: `git push`, `gh pr create` or `merge`, and
+    /// `ekko agents merge` (task 1714).
     Push,
     /// What releases or deploys: a `gh release` that writes, a `publish` of
     /// `cargo`, `npm`, `pnpm` or `yarn`, `nixos-rebuild switch`, `boot` or
@@ -1029,7 +1030,11 @@ pub fn limit_of(call: &crate::shell::Call, folder: &Path, mux: Option<&str>) -> 
             let operands = operands(&["--flake", "-I", "--target-host", "--build-host", "--profile-name", "-p", "--specialisation", "-c"]);
             operands.iter().any(|operand| matches!(*operand, "switch" | "boot" | "test")).then_some(Limit::Release)
         }
-        "ekko" => operands(&[]).starts_with(&["agents", "start"]).then_some(Limit::Session),
+        "ekko" => match operands(&[]).as_slice() {
+            ["agents", "start", ..] => Some(Limit::Session),
+            ["agents", "merge", ..] => Some(Limit::Push),
+            _ => None,
+        },
         "claude" => {
             let asks = call.args.iter().any(|arg| matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h"));
             match operands(CLAUDE_VALUED).first() {
@@ -1085,7 +1090,7 @@ const GRACE: Duration = Duration::from_secs(1);
 
 /// How long the closer waits for the session's process, then its pane, to
 /// be gone.
-const GONE_WITHIN: Duration = Duration::from_secs(10);
+pub(crate) const GONE_WITHIN: Duration = Duration::from_secs(10);
 
 /// The argument that runs ekko as the watcher of a born session's
 /// permission prompt, which its hook starts (task 1679): never typed.

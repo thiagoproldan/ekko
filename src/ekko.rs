@@ -75,6 +75,9 @@ pub enum EkkoError {
     /// (task 1716), and the tasks it was born for, as this board numbers
     /// them: the sequence is the orchestrator's and the user's.
     PhasesNotBornFor { born: Vec<u32> },
+    /// A change to the project's test command by a session ekko agents
+    /// started (task 1714): the test its own branch passes is the user's.
+    TestsNotBornFor { born: Vec<u32> },
     /// An item asked for by the id or uid it had before it moved to another
     /// board (task 897), and where it went.
     Moved { asked: String, to: Box<crate::storage::Moved> },
@@ -132,7 +135,7 @@ impl EkkoError {
             EkkoError::RenamedFlag { .. } => "RENAMED_FLAG",
             EkkoError::RemovedFlag { .. } => "REMOVED_FLAG",
             EkkoError::CueIsUsers(_) => "CUE_IS_USERS",
-            EkkoError::NotBornFor { .. } | EkkoError::PhasesNotBornFor { .. } => "NOT_BORN_FOR",
+            EkkoError::NotBornFor { .. } | EkkoError::PhasesNotBornFor { .. } | EkkoError::TestsNotBornFor { .. } => "NOT_BORN_FOR",
             EkkoError::Moved { .. } => "MOVED",
             EkkoError::SplitLinks(_) => "SPLIT_LINKS",
             EkkoError::Watched(_) => "WATCHED",
@@ -184,6 +187,7 @@ impl EkkoError {
             | EkkoError::CueIsUsers(_)
             | EkkoError::NotBornFor { .. }
             | EkkoError::PhasesNotBornFor { .. }
+            | EkkoError::TestsNotBornFor { .. }
             | EkkoError::Moved { .. }
             | EkkoError::SplitLinks(_)
             | EkkoError::Watched(_) => out.generic_error(&self.to_string()),
@@ -345,6 +349,22 @@ impl std::fmt::Display for EkkoError {
                 "The board's phases are not this session's to change: ekko agents started it for {}, and the phases are the \
                  orchestrator's and the user's, so nothing was written. Its own tasks take any phase the board declares; attach a \
                  note to {} saying what the phases should be: a note is any session's to write",
+                match born.as_slice() {
+                    [] => "tasks of its own".to_string(),
+                    [id] => format!("task {id}"),
+                    _ => format!("tasks {}", join_ids(born)),
+                },
+                match born.as_slice() {
+                    [] => "its tasks".to_string(),
+                    [id] => format!("task {id}"),
+                    _ => format!("one of tasks {}", join_ids(born)),
+                },
+            ),
+            EkkoError::TestsNotBornFor { born } => write!(
+                f,
+                "The project's test command is not this session's to set: ekko agents started it for {}, and the test its branch \
+                 passes before it goes in is the user's to set, so nothing was written. Attach a note to {} saying what the test \
+                 command should be: a note is any session's to write",
                 match born.as_slice() {
                     [] => "tasks of its own".to_string(),
                     [id] => format!("task {id}"),
@@ -1302,6 +1322,29 @@ impl Ekko {
             return Ok(());
         }
         Err(EkkoError::PhasesNotBornFor { born: born_ids(born, data) })
+    }
+
+    /// Sets the command `ekko agents merge` tests a rebased branch with
+    /// (task 1714): `Some` a command, `None` that the project has no tests.
+    /// Refused to a session ekko agents started, as `refuse_unborn_phases`
+    /// refuses it the phases: the gate its own branch passes is the user's.
+    /// What is set now.
+    pub fn set_agents_test(&self, test: Option<&str>) -> Result<crate::storage::AgentsSettings, EkkoError> {
+        let _lock = self.storage.acquire_lock()?;
+        let mut settings = self.storage.get_agents()?;
+        let before = settings.clone();
+        settings.test = test.map(str::to_string);
+        settings.untested = test.is_none();
+        if settings == before {
+            return Ok(settings);
+        }
+        if let Some(born) = &self.born_for {
+            if self.actor.as_ref().is_some_and(|actor| !actor.is_person()) {
+                return Err(EkkoError::TestsNotBornFor { born: born_ids(born, &*self.storage.get_shared()?) });
+            }
+        }
+        self.storage.set_agents(&settings)?;
+        Ok(settings)
     }
 
     /// `save_touching` against the board as the caller read it, under the

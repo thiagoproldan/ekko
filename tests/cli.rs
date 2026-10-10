@@ -1764,6 +1764,30 @@ impl Agents {
         fs::canonicalize(&self.app).unwrap().join(".claude").join("worktrees").join(branch)
     }
 
+    /// ekko, as `ekko` runs it, with an identity for the commits a rebase
+    /// writes: these tests' git reads no configuration of the user's.
+    fn merging(&self, args: &[&str]) -> process::Output {
+        let mut command = self.command(args);
+        for (name, value) in [("GIT_AUTHOR_NAME", "ekko"), ("GIT_AUTHOR_EMAIL", "ekko@example.com"), ("GIT_COMMITTER_NAME", "ekko"), ("GIT_COMMITTER_EMAIL", "ekko@example.com")] {
+            command.env(name, value);
+        }
+        command.output().expect("failed to run ekko")
+    }
+
+    /// Whether the repository has the branch `branch`.
+    fn has_branch(&self, branch: &str) -> bool {
+        common::command("git")
+            .arg("-C")
+            .arg(&self.app)
+            .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
     /// Runs the born hook on `event` in the session `session`, started for
     /// `tasks` (none: a session ekko agents did not start), in the pane %7,
     /// under a stand-in Claude Code: a process named claude that outlives
@@ -2411,6 +2435,263 @@ fn an_orchestrator_waiting_on_a_born_session_s_task_is_woken_when_it_waits_on_th
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// `ekko agents merge` (task 1714, answer 1708): a done task's branch goes
+/// into the branch the project's checkout is on, rebased onto it, tested
+/// with the command the user set, then fast-forwarded, and its worktree and
+/// branch go. A test that fails, a conflict or work left uncommitted leave
+/// main and the branch as they were and hand the task back, pending, with
+/// a note saying why and what to do. Refused, changing nothing, until a
+/// test command is set, for a task not done, and where main's checkout has
+/// a file in the way.
+#[test]
+fn ekko_agents_merge_takes_a_tested_branch_in_and_hands_a_failing_one_back() {
+    let agents = Agents::new();
+    let app = fs::canonicalize(&agents.app).unwrap();
+    fs::write(app.join("check.sh"), "echo checking\ntest ! -e broken\n").unwrap();
+    fs::write(app.join("a.txt"), "a\n").unwrap();
+    agents.git(&app, &["add", "check.sh", "a.txt"]);
+    agents.git(&app, &["commit", "-q", "-m", "check"]);
+    for text in ["Add b", "Break the check", "Change a", "Add c", "Leave work uncommitted", "Add d"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    // Each task's branch as start makes it, with its session's commit.
+    let made = |n: u32, file: &str| {
+        let branch = format!("task-{n}");
+        let worktree = agents.worktree(&branch);
+        agents.git(&app, &["worktree", "add", "-q", "-b", &branch, worktree.to_str().unwrap(), "HEAD"]);
+        fs::write(worktree.join(file), format!("{file} of task {n}\n")).unwrap();
+        agents.git(&worktree, &["add", file]);
+        agents.git(&worktree, &["commit", "-q", "-m", &format!("Task {n}")]);
+        worktree
+    };
+    let worktrees = [made(1, "b.txt"), made(2, "broken"), made(3, "a.txt"), made(4, "c.txt"), made(5, "e.txt"), made(6, "d.txt")];
+    fs::write(worktrees[4].join("e.txt"), "changed, and not committed\n").unwrap();
+    fs::write(app.join("a.txt"), "main's\n").unwrap();
+    agents.git(&app, &["commit", "-q", "-am", "Main changes a"]);
+    assert!(agents.ekko(&["--check", "1", "2", "3", "4", "5", "6"]).status.success());
+    let main = || agents.git(&app, &["rev-parse", "main"]);
+    let tip = |branch: &str| agents.git(&app, &["rev-parse", branch]);
+    let on = |worktree: &std::path::Path| agents.git(worktree, &["symbolic-ref", "--short", "HEAD"]);
+    let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
+    let state = |id: u32| {
+        let task = &board()[id.to_string()];
+        (task["isComplete"].as_bool().unwrap(), task["inProgress"].as_bool().unwrap())
+    };
+    let note = |id: u64| board()[id.to_string()]["description"].as_str().unwrap().to_string();
+    let json = |output: process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
+    };
+
+    // No test command yet: refused, and nothing changed.
+    let before = main();
+    let unset = json(agents.merging(&["--json", "agents", "merge", "1"]));
+    assert!(unset["error"].as_str().unwrap().starts_with("No test command is set for this project"), "{unset}");
+    let shown = String::from_utf8(agents.ekko(&["agents", "test"]).stdout).unwrap();
+    assert!(shown.starts_with("No test command is set: ekko agents merge refuses until the user sets one"), "{shown}");
+    let empty = agents.ekko(&["agents", "test", " "]);
+    assert!(!empty.status.success() && String::from_utf8_lossy(&empty.stdout).contains("An empty command tests nothing"), "{empty:?}");
+    assert!(!agents.home.join("app/.ekko/storage/agents.json").exists());
+    assert!(agents.ekko(&["agents", "test", "sh check.sh"]).status.success());
+    let shown = String::from_utf8(agents.ekko(&["agents", "test"]).stdout).unwrap();
+    assert!(shown.starts_with("ekko agents merge tests each branch with `sh check.sh`"), "{shown}");
+    assert_eq!((main(), state(1)), (before.clone(), (true, false)));
+
+    // Merged: rebased onto main, tested, fast-forwarded, and gone.
+    let merged = json(agents.merging(&["--json", "agents", "merge", "1"]));
+    assert_eq!((merged["ok"].as_bool(), merged["commits"].as_u64(), merged["into"].as_str()), (Some(true), Some(1), Some("main")), "{merged}");
+    assert_eq!((merged["from"].as_str(), merged["to"].as_str(), merged["worktree"].as_str()), (Some(before.as_str()), Some(main().as_str()), Some("removed")), "{merged}");
+    assert_eq!(merged["tested"]["command"], "sh check.sh", "{merged}");
+    assert_eq!(tip("main~1"), before, "task-1's commit, on main as it was");
+    assert_eq!(agents.git(&app, &["show", "main:b.txt"]), "b.txt of task 1");
+    assert!(!worktrees[0].exists() && !agents.has_branch("task-1"), "its worktree and branch are gone");
+    let said = note(merged["notes"][0].as_u64().unwrap());
+    assert!(said.starts_with(&format!("Merged into main by ekko agents merge: 1 commit of task-1, rebased onto main at {}, passed `sh check.sh` in ", &before[..7])), "{said}");
+    assert_eq!(state(1), (true, false), "still done");
+
+    // A test that fails: main and the branch as they were, the task back.
+    let (before, two) = (main(), tip("task-2"));
+    let failed = agents.merging(&["--json", "agents", "merge", "2"]);
+    assert!(!failed.status.success());
+    let failed = json(failed);
+    assert_eq!((failed["ok"].as_bool(), failed["code"].as_str(), failed["reopened"].clone()), (Some(false), Some("NOT_MERGED"), serde_json::json!([2])), "{failed}");
+    assert!(failed["why"].as_str().unwrap().starts_with("rebased onto main, task-2 failed `sh check.sh` (exit code 1, after "), "{failed}");
+    assert_eq!((main(), tip("task-2"), on(&worktrees[1])), (before.clone(), two, "task-2".to_string()));
+    assert_eq!(agents.git(&worktrees[1], &["status", "--porcelain"]), "");
+    assert_eq!(state(2), (false, false), "pending again");
+    let said = note(failed["notes"][0].as_u64().unwrap());
+    assert!(said.starts_with("Not merged into main: rebased onto main, task-2 failed `sh check.sh` (exit code 1, after "), "{said}");
+    let to_do = format!("To do: in {}, rebase task-2 onto main (git rebase main), make `sh check.sh` pass, commit, and set the task done again.", worktrees[1].display());
+    assert!(said.contains(&to_do) && said.contains("The end of its output:\n```\nchecking\n```"), "{said}");
+    assert_eq!(fs::read_to_string(failed["log"].as_str().unwrap()).unwrap(), "checking\n");
+    let pending = String::from_utf8(agents.merging(&["agents", "merge", "2"]).stdout).unwrap();
+    assert!(pending.contains("task 2 is pending: ekko agents merge takes the branch of tasks their session set done"), "{pending}");
+
+    // A conflict: the same.
+    let three = tip("task-3");
+    let conflict = json(agents.merging(&["--json", "agents", "merge", "3"]));
+    assert_eq!((conflict["why"].as_str(), conflict["reopened"].clone()), (Some("rebased onto main, task-3 conflicts in a.txt"), serde_json::json!([3])), "{conflict}");
+    assert_eq!((main(), tip("task-3"), on(&worktrees[2]), state(3)), (before.clone(), three, "task-3".to_string(), (false, false)));
+    let said = note(conflict["notes"][0].as_u64().unwrap());
+    assert!(said.contains("resolve the conflicts, run `sh check.sh`, commit, and set the task done again.") && said.contains("The rebase was undone"), "{said}");
+
+    // A file in the way in main's checkout: refused, and nothing changed;
+    // gone, merged and, as --keep asks, kept.
+    fs::write(app.join("c.txt"), "the user's own\n").unwrap();
+    let four = tip("task-4");
+    let blocked = json(agents.merging(&["--json", "agents", "merge", "4"]));
+    let why = blocked["error"].as_str().unwrap();
+    assert!(why.starts_with("main was not moved, and task-4 is as its session left it: ") && why.contains("c.txt"), "{blocked}");
+    assert_eq!((main(), tip("task-4"), on(&worktrees[3]), state(4)), (before.clone(), four, "task-4".to_string(), (true, false)));
+    assert_eq!(fs::read_to_string(app.join("c.txt")).unwrap(), "the user's own\n");
+    fs::remove_file(app.join("c.txt")).unwrap();
+    let kept = json(agents.merging(&["--json", "agents", "merge", "4", "--keep"]));
+    assert_eq!((kept["ok"].as_bool(), kept["worktree"].as_str()), (Some(true), Some("kept")), "{kept}");
+    assert_eq!((tip("task-4"), on(&worktrees[3])), (main(), "task-4".to_string()), "kept, at main");
+
+    // Work left uncommitted: the task back.
+    let before = main();
+    let uncommitted = json(agents.merging(&["--json", "agents", "merge", "5"]));
+    assert_eq!(uncommitted["why"], "its worktree holds work not committed on task-5", "{uncommitted}");
+    let said = note(uncommitted["notes"][0].as_u64().unwrap());
+    assert!(said.contains("```\n M e.txt\n```"), "{said}");
+    assert_eq!((main(), state(5)), (before, (false, false)));
+
+    // No tests, as the user said: in untested.
+    assert!(agents.ekko(&["agents", "test", "--none"]).status.success());
+    let untested = json(agents.merging(&["--json", "agents", "merge", "6"]));
+    assert_eq!((untested["ok"].as_bool(), untested["tested"].as_str()), (Some(true), Some("untested")), "{untested}");
+    assert!(note(untested["notes"][0].as_u64().unwrap()).contains(", untested, as the user said the project has no tests; main is at "), "{untested}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// `ekko agents merge` waits while a session of the tasks closes itself,
+/// and refuses, changing nothing, while one stays: someone talks to it, and
+/// its worktree is not to move under it (task 1714). Nor does what is not
+/// the branch's to fix hand it back: another merge running, a rebase git
+/// refuses for want of an identity, main moving while the tests run. A
+/// merge cut short, which left the worktree on a detached HEAD, is put back
+/// on its branch and taken up; a detached HEAD no merge left is not touched.
+#[test]
+fn ekko_agents_merge_waits_for_the_session_to_close_and_takes_up_a_merge_cut_short() {
+    use std::os::fd::AsRawFd as _;
+    let agents = Agents::new();
+    let app = fs::canonicalize(&agents.app).unwrap();
+    for n in 1..=4 {
+        assert!(agents.ekko(&["--task", &format!("Add {n}")]).status.success());
+        let branch = format!("task-{n}");
+        let worktree = agents.worktree(&branch);
+        agents.git(&app, &["worktree", "add", "-q", "-b", &branch, worktree.to_str().unwrap(), "HEAD"]);
+        fs::write(worktree.join(format!("{n}.txt")), "added\n").unwrap();
+        agents.git(&worktree, &["add", "."]);
+        agents.git(&worktree, &["commit", "-q", "-m", &format!("Task {n}")]);
+    }
+    assert!(agents.ekko(&["--check", "1", "2", "3", "4"]).status.success());
+    assert!(agents.ekko(&["agents", "test", "true"]).status.success());
+    // Main moves, so each merge rebases: one onto main as it is is no
+    // rebase, and runs no hook.
+    agents.git(&app, &["commit", "-q", "--allow-empty", "-m", "Main moves"]);
+    let main = || agents.git(&app, &["rev-parse", "main"]);
+    let before = main();
+    let done = |id: u32| -> bool {
+        let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
+        board[id.to_string()]["isComplete"].as_bool().unwrap()
+    };
+    let refused = |output: process::Output| -> String {
+        let said = String::from_utf8(output.stdout).unwrap();
+        assert!(!output.status.success(), "{said}");
+        said
+    };
+    let four = agents.worktree("task-4");
+    let unmoved = || {
+        assert_eq!((main(), agents.git(&four, &["symbolic-ref", "--short", "HEAD"]), done(4)), (before.clone(), "task-4".to_string(), true));
+    };
+
+    // Another merge runs.
+    let lock = fs::OpenOptions::new().write(true).create(true).truncate(false).open(app.join(".git/ekko-merge.lock")).unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    let said = refused(agents.merging(&["agents", "merge", "4"]));
+    assert!(said.contains("another ekko agents merge runs on "), "{said}");
+    drop(lock);
+    unmoved();
+    // A hook that refuses the rebase.
+    let hook = app.join(".git/hooks/pre-rebase");
+    write_executable(&hook, "#!/bin/sh\necho 'not today' >&2\nexit 1\n");
+    let said = refused(agents.merging(&["agents", "merge", "4"]));
+    assert!(said.contains("task-4 could not be rebased onto main, for a reason other than a conflict, so main and task-4 are as they were: "), "{said}");
+    assert!(said.contains("not today"), "{said}");
+    fs::remove_file(&hook).unwrap();
+    unmoved();
+    // main moves while the tests run.
+    let moving = format!("git -C {} commit -q --allow-empty -m Moved", app.display());
+    assert!(agents.ekko(&["agents", "test", &moving]).status.success());
+    let said = refused(agents.merging(&["agents", "merge", "4"]));
+    assert!(said.contains(&format!("main was not moved, and task-4 is as its session left it: main moved while the tests ran, from {} to ", &before[..7])), "{said}");
+    agents.git(&app, &["reset", "-q", "--hard", &before]);
+    unmoved();
+    // The project's checkout leaves main while the tests run.
+    let leaving = format!("git -C {} checkout -q -b elsewhere", app.display());
+    assert!(agents.ekko(&["agents", "test", &leaving]).status.success());
+    let said = refused(agents.merging(&["agents", "merge", "4"]));
+    assert!(said.contains("main was not moved, and task-4 is as its session left it: the project's checkout left main for elsewhere while the tests ran"), "{said}");
+    agents.git(&app, &["checkout", "-q", "main"]);
+    unmoved();
+    assert!(agents.ekko(&["agents", "test", "true"]).status.success());
+    // A task cancelled, none done; tasks with no branch, or one of a group.
+    assert!(agents.ekko(&["--task", "Dropped"]).status.success() && agents.ekko(&["--set", "cancelled", "5"]).status.success());
+    let said = refused(agents.merging(&["agents", "merge", "5"]));
+    assert!(said.contains("task 5 is cancelled: no work of its goes in"), "{said}");
+    assert!(agents.ekko(&["--task", "Never started"]).status.success() && agents.ekko(&["--check", "6"]).status.success());
+    let said = refused(agents.merging(&["agents", "merge", "6"]));
+    assert!(said.contains("there is no branch task-6 in ") && said.contains(": ekko agents start makes one for the tasks it starts together, and none of these tasks has one"), "{said}");
+    agents.git(&app, &["branch", "task-6-7"]);
+    let said = refused(agents.merging(&["agents", "merge", "6"]));
+    assert!(said.contains(", and theirs is task-6-7: ekko agents merge 6 7"), "{said}");
+    unmoved();
+
+    // A session of task 1 stays: refused once the wait is over.
+    let mux = agents.home.join("mux-state");
+    fs::create_dir_all(&mux).unwrap();
+    fs::write(mux.join("session"), "").unwrap();
+    fs::write(mux.join("windows"), "1 \u{b7} haiku\n").unwrap();
+    let started = std::time::Instant::now();
+    let stays = agents.merging(&["agents", "merge", "1"]);
+    let said = String::from_utf8(stays.stdout).unwrap();
+    assert!(!stays.status.success() && said.contains("a session for these tasks still runs, in window 1 \u{b7} haiku of session ekko, 10 s after"), "{said}");
+    assert!(started.elapsed() >= std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    assert_eq!(main(), before);
+    // It closes while the merge waits: merged.
+    let closes = {
+        let windows = mux.join("windows");
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            fs::write(windows, "").unwrap();
+        })
+    };
+    let started = std::time::Instant::now();
+    let merged = agents.merging(&["agents", "merge", "1"]);
+    closes.join().unwrap();
+    assert!(merged.status.success(), "{}", String::from_utf8_lossy(&merged.stdout));
+    assert!((1..10).contains(&started.elapsed().as_secs()), "{:?}", started.elapsed());
+    assert_eq!(agents.git(&app, &["rev-parse", "main~1"]), before);
+
+    // Cut short: detached, with the file a merge leaves there.
+    let two = agents.worktree("task-2");
+    agents.git(&two, &["checkout", "-q", "--detach"]);
+    let underway = agents.git(&two, &["rev-parse", "--path-format=absolute", "--git-path", "ekko-merge"]);
+    fs::write(&underway, format!("{}\n", agents.git(&two, &["rev-parse", "HEAD"]))).unwrap();
+    let taken_up = agents.merging(&["agents", "merge", "2"]);
+    assert!(taken_up.status.success(), "{}", String::from_utf8_lossy(&taken_up.stdout));
+    assert_eq!(agents.git(&app, &["show", "main:2.txt"]), "added");
+    // Detached by someone else: left as it is.
+    let three = agents.worktree("task-3");
+    agents.git(&three, &["checkout", "-q", "--detach"]);
+    let theirs = agents.merging(&["agents", "merge", "3"]);
+    let said = String::from_utf8(theirs.stdout).unwrap();
+    assert!(!theirs.status.success() && said.contains("is a worktree on no branch, not task-3"), "{said}");
+    assert!(common::command("git").arg("-C").arg(&three).args(["symbolic-ref", "-q", "HEAD"]).output().unwrap().status.code() == Some(1), "still detached");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// The commands of each call that sets options, each its arguments, from
 /// the first `set-option` of the call on, split where tmux splits them.
 fn option_sets(calls: Vec<Vec<String>>) -> Vec<Vec<Vec<String>>> {
@@ -2969,6 +3250,8 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         ("bash scripts/release.sh 1.2.3 notes.md", &[RELEASE]),
         ("ekko agents start 5", &[SESSION]),
         ("ekko --json agents start 5 --model haiku", &[SESSION]),
+        ("ekko agents merge 1", &[PUSH]),
+        ("ekko --json agents merge 1 2 --keep", &[PUSH]),
         ("claude", &[SESSION]),
         ("claude -p 'review the diff'", &[SESSION]),
         ("claude --bg 'write the docs'", &[SESSION]),
@@ -3017,6 +3300,7 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         "claude mcp list",
         "claude --settings /tmp/settings.json plugin list",
         "ekko agents --help",
+        "ekko agents test",
         "ekko --list pending",
         "grep -rn 'git push' docs",
         "claude stop --help",
@@ -3093,6 +3377,16 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     assert!(born.ekko(&["--json", "--phases", "build"], "").contains("\"ok\":true"));
     assert!(born.ekko(&["--json", "--phase", "build", "--task", "Built on the way"], "").contains("\"ok\":true"));
     assert_eq!(fs::read_to_string(agents.home.join("app/.ekko/storage/phases.json")).unwrap().matches('"').count(), 2, "build alone");
+    // The test its branch passes before it goes in (task 1714): the user's
+    // to set, as the phases are.
+    let test = born.ekko(&["--json", "agents", "test", "true"], "");
+    let test: serde_json::Value = serde_json::from_str(&test).unwrap_or_else(|_| panic!("{test}"));
+    assert_eq!((test["code"].as_str(), test["notBornFor"].clone()), (Some("NOT_BORN_FOR"), serde_json::json!({"tests": true, "born": [1]})), "{test}");
+    let said = test["error"].as_str().unwrap();
+    assert!(said.starts_with("The project's test command is not this session's to set: ekko agents started it for task 1,"), "{said}");
+    assert!(born.ekko(&["--json", "agents", "test", "--none"], "").contains("NOT_BORN_FOR"));
+    assert!(!agents.home.join("app/.ekko/storage/agents.json").exists());
+    assert!(born.ekko(&["--json", "agents", "test"], "").contains("\"ok\":true"), "read");
     let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
     let second = board()["2"].clone();
     assert_eq!((second["isComplete"].as_bool(), second["isStarred"].as_bool(), second["inProgress"].as_bool()), (Some(false), Some(false), Some(false)), "{second}");
@@ -3104,6 +3398,11 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     assert_eq!(board()["3"]["isStarred"], false, "starred by the session, and by the user no more");
     let mut typed = agents.command(&["--json", "--phases", "build", "test"]);
     assert!(String::from_utf8(typed.env("EKKO_AGENT_TASK", &uid).output().unwrap().stdout).unwrap().contains("\"ok\":true"), "the user's phases");
+    let mut typed = agents.command(&["--json", "agents", "test", "cargo test"]);
+    assert!(String::from_utf8(typed.env("EKKO_AGENT_TASK", &uid).output().unwrap().stdout).unwrap().contains("\"ok\":true"), "the user's test");
+    let born = agents.session(&uid);
+    assert!(born.ekko(&["--json", "agents", "test", "cargo test"], "").contains("\"ok\":true"), "the test it has, unchanged");
+    drop(born);
 
     let orchestrator = agents.orchestrator();
     let branch = orchestrator.ekko(&["--guard", "--hook"], &event("git checkout -b task-2"));
@@ -3111,6 +3410,7 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     assert!(orchestrator.ekko(&["--json", "--check", "2"], "").contains("\"ok\":true"));
     assert_eq!(board()["2"]["isComplete"], true, "{}", board()["2"]);
     assert!(orchestrator.ekko(&["--json", "--phases", "build", "ship"], "").contains("\"ok\":true"));
+    assert!(orchestrator.ekko(&["--json", "agents", "test", "--none"], "").contains("\"ok\":true"), "the orchestrator, at the user's word");
     drop(orchestrator);
     fs::remove_dir_all(&agents.home).ok();
 }

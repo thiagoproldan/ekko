@@ -535,6 +535,49 @@ impl Storage {
     }
 }
 
+/// What `ekko agents` keeps for a project (task 1714), in `agents.json`
+/// beside `storage.json` for the reason `phases.json` is: the command
+/// `ekko agents merge` tests a branch with, once it is rebased. Set by the
+/// user, as the gate a branch passes is not the model's to choose.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentsSettings {
+    /// Run through `sh -c` in the branch's worktree; a branch goes in only
+    /// if it exits 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<String>,
+    /// Set where the user said the project has no tests: a branch then goes
+    /// in untested.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untested: bool,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+impl Storage {
+    fn agents_file(&self) -> PathBuf {
+        self.storage_file.with_file_name("agents.json")
+    }
+
+    /// What is set, or nothing when nothing is.
+    pub fn get_agents(&self) -> Result<AgentsSettings, StorageError> {
+        let path = self.agents_file();
+        if !path.exists() {
+            return Ok(AgentsSettings::default());
+        }
+        Ok(serde_json::from_str(&fs::read_to_string(&path)?)?)
+    }
+
+    /// Replaces it wholesale, as `set_phases` does the phases.
+    pub fn set_agents(&self, settings: &AgentsSettings) -> Result<(), StorageError> {
+        self.writable()?;
+        replace_durably(&self.agents_file(), &self.temp_dir, serde_json::to_string_pretty(settings)?.as_bytes())?;
+        self.copy_out(&self.agents_file());
+        Ok(())
+    }
+}
+
 /// Where an item that left this board for another went (task 897), kept in
 /// `moved.json` beside `storage.json` for the reason `phases.json` is. The
 /// display id it had here is never handed out again, so the old number keeps
@@ -1551,7 +1594,7 @@ mod tests {
     /// Every public method of `Storage` that only reads, and every one that
     /// writes the board's folder: the writes are what a refused storage
     /// refuses (task 1576).
-    const READS: [&str; 11] = [
+    const READS: [&str; 12] = [
         "get",
         "get_shared",
         "get_archive",
@@ -1563,8 +1606,9 @@ mod tests {
         "get_counters",
         "read_journal",
         "last_journal_rev",
+        "get_agents",
     ];
-    const WRITES: [&str; 7] = ["set", "set_archive", "acquire_lock", "set_phases", "set_moved", "set_counters", "append_journal"];
+    const WRITES: [&str; 8] = ["set", "set_archive", "acquire_lock", "set_phases", "set_moved", "set_counters", "append_journal", "set_agents"];
 
     /// Each file and folder under `dir`, with its inode and its bytes: what a
     /// write anywhere in it changes.
@@ -1604,6 +1648,7 @@ mod tests {
                 "set_moved" => refused.set_moved(&[]),
                 "set_counters" => refused.set_counters(&Counters::default()),
                 "append_journal" => refused.append_journal(&serde_json::json!({"rev": 1})),
+                "set_agents" => refused.set_agents(&AgentsSettings { test: Some("true".to_string()), ..AgentsSettings::default() }),
                 other => panic!("{other} writes, and this test does not call it"),
             };
             assert!(matches!(&result, Err(StorageError::Refused(why)) if why == "a scratch HOME"), "{name}: {result:?}");
