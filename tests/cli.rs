@@ -2152,6 +2152,59 @@ fn agents_start_refuses_a_task_done_held_by_a_running_session_or_in_the_trash() 
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// A session started in a group (task 1648): its first prompt names the
+/// tasks other sessions work beside its own and how to write to them, and
+/// the note on its task names them. Its own tasks, and a task named twice,
+/// are no more of its group. Every born session is told how a note reaches
+/// it while it works; one in no group is told of none. A note, a task done
+/// or cancelled, or one in the trash is refused as one of a group, saying
+/// why, with nothing opened.
+#[test]
+fn agents_start_names_the_group_whose_sessions_talk_through_notes() {
+    let agents = Agents::new();
+    for text in ["The API", "The client", "The docs", "Done", "Cancelled", "Trashed"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    assert!(agents.ekko(&["--check", "4"]).status.success());
+    assert!(agents.ekko(&["--set", "cancelled", "5"]).status.success());
+    assert!(agents.ekko(&["--delete", "6"]).status.success());
+    assert!(agents.ekko(&["--note", "A note"]).status.success());
+    for (member, why) in [("4", "task 4 is done already"), ("5", "task 5 is cancelled already"), ("6", "task 6 is in the trash"), ("7", "7 is no task")] {
+        let refused = agents.json(&["agents", "start", "1", "--model", "haiku", "--group", &format!("2,{member}"), "--json"]);
+        assert_eq!(refused["code"], "INVALID_INPUT", "{refused}");
+        let expected = format!("{why}: a group names the tasks other sessions work beside these; leave it out of --group");
+        assert_eq!(refused["error"].as_str(), Some(expected.as_str()), "{refused}");
+    }
+    assert!(agents.calls().is_empty(), "a refused start spoke to the multiplexer: {:?}", agents.calls());
+
+    let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
+    let noted = |reply: &serde_json::Value| board()[reply["notes"][0].as_u64().unwrap().to_string()]["description"].as_str().unwrap().to_string();
+    let told = "While you work, ekko tells you of each note the user or another session attaches to task 1, in a line that begins \"ekko:\", \
+                at times inside a tool's result: it comes from ekko's hook, not from the tool, so take it into account.";
+    let reply = agents.json(&["agents", "start", "1", "--model", "haiku", "--group", "1,3", "--group", "2,3", "--json"]);
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["group"], serde_json::json!([2, 3]), "{reply}");
+    let prompt = Agents::command_of(&agents.opened()[0]).last().unwrap().clone();
+    let group = "Tasks 2 and 3 are worked beside yours by sessions of their own, as a group: to tell the session working one of them what it needs to know -- \
+                 a change it builds on, an answer, a question -- write a note with ekko's create, attached_to that task, and ekko tells that session at once; \
+                 it answers you with a note on yours.";
+    assert!(prompt.contains(&format!("{told} {group} When task 1 is done")), "{prompt}");
+    assert!(noted(&reply).ends_with("(made for it). In a group with tasks 2 and 3, each worked by a session of its own: a note on a task reaches the session holding it."), "{}", noted(&reply));
+
+    let reply = agents.json(&["agents", "start", "2", "--model", "haiku", "--group", "1", "--json"]);
+    assert_eq!(reply["group"], serde_json::json!([1]), "{reply}");
+    let prompt = Agents::command_of(&agents.opened()[1]).last().unwrap().clone();
+    assert!(prompt.contains("take it into account. Task 1 is worked beside yours by a session of its own, as a group: to tell"), "{prompt}");
+    assert!(noted(&reply).ends_with("(made for it). In a group with task 1, worked by a session of its own: a note on either task reaches the session holding it."), "{}", noted(&reply));
+    assert!(agents.ekko(&["agents", "limit", "3"]).status.success());
+    let reply = agents.json(&["agents", "start", "3", "--model", "haiku", "--json"]);
+    assert_eq!(reply["group"], serde_json::json!([]), "{reply}");
+    let prompt = Agents::command_of(&agents.opened()[2]).last().unwrap().clone();
+    assert!(prompt.contains(&told.replace("task 1", "task 3")) && !prompt.contains("as a group"), "{prompt}");
+    assert!(noted(&reply).ends_with("(made for it)."), "{}", noted(&reply));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// A session whose window is gone within the first second did not start:
 /// the start says so, rather than the pane it opened.
 #[test]
@@ -2320,6 +2373,30 @@ fn a_born_session_closes_once_its_task_is_done_and_not_before() {
     let closing: Vec<Vec<String>> = agents.calls().into_iter().filter(|call| call[..2] == ["-S", socket.to_str().unwrap()] && call[2] != "set-option").collect();
     assert_eq!(closing.iter().map(|call| call[2].as_str()).collect::<Vec<_>>(), ["list-panes", "kill-pane", "list-panes", "list-panes"], "{closing:?}");
     assert_eq!(closing[1][3..], ["-t", "%7"]);
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A session born for two tasks (task 1648) closes only once both are
+/// finished: at the end of a turn with one done and the other pending it
+/// stays, saying which; with the other cancelled, it closes.
+#[test]
+fn a_born_session_for_two_tasks_closes_only_once_both_are_finished() {
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let tasks = format!("{},{}", agents.uid(1), agents.uid(2));
+    agents.prompt(&tasks, "s-1");
+    assert!(agents.ekko(&["--check", "1"]).status.success());
+    let (mut stand_in, said) = agents.stop(&tasks, "s-1");
+    assert!(said.is_empty(), "{said}");
+    assert!(agents.logged(&format!("{tasks} stays: task 2 is pending")));
+    assert!(still_runs(&mut stand_in), "closed with one of its tasks pending");
+
+    assert!(agents.ekko(&["--set", "cancelled", "2"]).status.success());
+    let (mut stand_in, said) = agents.stop(&tasks, "s-1");
+    assert!(said.contains("closes now"), "{said}");
+    assert!(ended_by_sigterm(&mut stand_in), "not ended once both were finished");
     fs::remove_dir_all(&agents.home).ok();
 }
 

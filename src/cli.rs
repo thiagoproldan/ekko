@@ -89,6 +89,10 @@ pub enum Agents {
         /// The effort it runs at, as Claude Code's --effort takes it.
         #[arg(long, value_name = "LEVEL", value_parser = clap::builder::PossibleValuesParser::new(crate::agents::EFFORTS))]
         effort: Option<String>,
+        /// The tasks of its group, comma-separated: worked beside these by
+        /// sessions of their own, which talk through notes on each other's.
+        #[arg(long, value_name = "TASK,...", value_delimiter = ',')]
+        group: Vec<String>,
         /// A project's board other than the one found from the folder.
         #[arg(long, value_name = "NAME")]
         project: Option<String>,

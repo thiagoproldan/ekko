@@ -1970,6 +1970,38 @@ fn a_session_waiting_on_another_is_told_once_it_is_over() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// Two sessions of a group (task 1648) talk through notes on each other's
+/// tasks: a note one attaches to the task the other holds is told to that
+/// one once, in its next reply, naming who wrote it and the task the writer
+/// holds, where its answer goes; the writer is told nothing of its own.
+#[test]
+fn a_note_on_a_task_a_session_holds_is_told_to_it_once() {
+    let home = temp_home();
+    let mut api = Session::start(&home);
+    let mut client = Session::start(&home);
+    api.call("create", json!({"text": "The API"}));
+    client.call("create", json!({"text": "The client"}));
+    api.call("set_state", json!({"items": [1], "state": "progress"}));
+    client.call("set_state", json!({"items": [2], "state": "progress"}));
+
+    let written = client.call("create", json!({"text": "Which route lists the items?", "attached_to": 1}));
+    assert!(written.starts_with("{\"ok\":true,\"items\":[{\"id\":3,"), "{written}");
+    let told = api.call("next", json!({}));
+    assert!(told.contains("\n\nekko: Note 3 on task 1 (The API), which this session holds, from the session holding task 2 ("), "{told}");
+    assert!(told.ends_with("): Which route lists the items?\n"), "{told}");
+    assert!(!api.call("next", json!({})).contains("ekko: "), "told once");
+
+    api.call("create", json!({"text": "GET /v2/items", "attached_to": 2}));
+    let answer = client.call("next", json!({}));
+    assert!(answer.contains("\n\nekko: Note 4 on task 2 (The client), which this session holds, from the session holding task 1 ("), "{answer}");
+    assert!(!answer.contains("Note 3"), "its own note: {answer}");
+    assert!(!api.call("next", json!({})).contains("ekko: "), "the writer of note 4 told of it");
+
+    api.close();
+    client.close();
+    fs::remove_dir_all(&home).ok();
+}
+
 /// A session waits on a task of a board the user linked to its own (task
 /// 1443): the wait is kept on that board, beside the task, and its holder
 /// there is told of it; once the holder completes the task, the session

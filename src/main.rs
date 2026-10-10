@@ -50,7 +50,7 @@ const HELP: &str = r#"
     $ ekko docs [<folder>] [--project <name>]
     $ ekko artifact <id> [--project <name>] [--no-open]
     $ ekko serve [--idle <seconds>] [--stop]
-    $ ekko agents start <task>... --model <model> [--effort <level>] [--project <name>]
+    $ ekko agents start <task>... --model <model> [--effort <level>] [--group <task>,...] [--project <name>]
     $ ekko agents merge <task>... [--keep] [--project <name>]
     $ ekko agents test [<command> | --none] [--project <name>]
     $ ekko agents limit [<n>] [--project <name>]
@@ -579,8 +579,8 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (ids, model, effort, project, json) = match cli.command {
-        cli::Agents::Start { ids, model, effort, project, json } => (ids, model, effort, project, json),
+    let (ids, group, model, effort, project, json) = match cli.command {
+        cli::Agents::Start { ids, group, model, effort, project, json } => (ids, group, model, effort, project, json),
         // `ekko agents merge` (task 1714).
         cli::Agents::Merge { ids, keep, project, json } => return run_merge(&home_dir, &cwd, &ids, keep, project.as_deref(), json_first || json),
         cli::Agents::Test { command, none, project, json } => {
@@ -623,7 +623,7 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
     let json_mode = json_first || json;
     // As the session that runs it, whose notes the start's are.
     let started = agents_board(&home_dir, &cwd, project.as_deref())
-        .and_then(|(location, ekko)| agents::start(&ekko, &location, &home_dir, &ids, &model, effort.as_deref()));
+        .and_then(|(location, ekko)| agents::start(&ekko, &location, &home_dir, &ids, &group, &model, effort.as_deref()));
     let started = match started {
         Ok(started) => started,
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
@@ -644,6 +644,7 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
             "attach": started.attach,
             "drawn": started.undrawn.is_none(),
             "notes": started.notes,
+            "group": started.beside,
         });
         if let Some(why) = &started.undrawn {
             out["undrawn"] = serde_json::json!(why);
@@ -664,6 +665,11 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
     println!("Started {tasks} with {model}{at}, in window \"{}\" of session {} (pane {})", started.window, agents::SESSION, started.pane);
     let worktree = if started.made { "made for it" } else { "an earlier start's, taken up again" };
     println!("  in {}, on branch {} ({worktree})", started.worktree.display(), started.branch);
+    match started.beside.as_slice() {
+        [] => {}
+        [id] => println!("  in a group with task {id}: a note on either task reaches the session holding it"),
+        beside => println!("  in a group with tasks {}: a note on a task reaches the session holding it", agents::listed(beside)),
+    }
     println!("  to see it: {}", started.attach);
     if let Some(why) = &started.undrawn {
         println!("  its state is not drawn in the status line: {why}");

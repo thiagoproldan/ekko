@@ -28,14 +28,18 @@ push is the user's.
    progress, with someone, or waiting on open work is not for a session.
    Tasks of one context that would edit the same files go to one session
    together (`ekko agents start 6 7 ...`); a task others wait on goes
-   first.
+   first. Related tasks that must agree but touch different files -- an
+   API and its client -- go to sessions of their own as a group: start
+   each with `--group` naming every task of the group, and they talk
+   through notes on each other's tasks. A group runs at once, so it needs
+   the limit to let all of it run.
 
 2. **Start**, no more than the limit at once. For each task choose a model
    and an effort by its size and risk -- haiku at low effort for a small,
    well-specified change; sonnet for most work; opus at high effort for
    design or delicate code -- and run, in Bash:
 
-       ekko agents start N --model MODEL --effort EFFORT
+       ekko agents start N --model MODEL --effort EFFORT [--group N,M,...]
 
    It records the model and effort on the task. It refuses past the limit,
    and refuses a task whose blocker's branch is not merged yet: merge that
@@ -48,7 +52,9 @@ push is the user's.
    permission prompt, a question, or because it stopped short of its task
    and wrote a handoff. Then tell the user which window waits and what
    for, read the handoff if there is one, and wait on the task again. Do
-   not do the tasks' work yourself while their sessions run.
+   not do the tasks' work yourself while their sessions run. To tell a
+   session at work something -- the user's word, a change of plan --
+   attach a note to its task: ekko tells it between its tool calls.
 
 4. **Review.** Woken by a task done, read it with ekko's `context`, detail
    full -- its whole text, not its title alone, and its closing note --

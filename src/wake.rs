@@ -6,7 +6,9 @@
 //! session's next ekko reply carries the same lines, for a client without
 //! that hook. The session holding a task is told, once and only in a reply,
 //! that another waits on it. So are the sessions working an artifact, by the
-//! hook too, of the user's feedback from its page (task 1108). A wait on an
+//! hook too, of the user's feedback from its page (task 1108), and the session
+//! holding a task of each note the user or another session writes on it
+//! (task 1648), which the hook tells it between its tool calls. A wait on an
 //! item of a linked board is kept on that board, beside the item, and told
 //! the same ways: the session watches each linked board's file too (task
 //! 1443).
@@ -31,6 +33,11 @@ const QUOTED: usize = 300;
 
 /// How much of the title of the item waited on a line quotes.
 const TITLED: usize = 80;
+
+/// How much of a note written for a task the session holds a line quotes:
+/// more than of a wait, as it is what another session has to say to this
+/// one, which reads the rest with context.
+const NOTED: usize = 1000;
 
 /// What one Claude Code process was told, and which of the questions it
 /// asked it was left waiting on: a marker file each.
@@ -158,11 +165,12 @@ fn forget_ended(home: &Path) {
 
 /// What `me` has not been told yet on the board `ekko` has open, each line
 /// marked as told as it is returned: the user's feedback on an artifact it
-/// works, its waits that another's write ended, and the answers to the
-/// questions its ask left open -- and, with
-/// `holding`, the waits other sessions keep on the tasks it holds. Only what
-/// moved after `since`, the cursor its session last started from: its prime,
-/// or the changes its resume was given, already said what came before.
+/// works, its waits that another's write ended, the answers to the
+/// questions its ask left open, and the notes others write on the tasks it
+/// holds -- and, with `holding`, the waits other sessions keep on the tasks
+/// it holds. Only what moved after `since`, the cursor its session last
+/// started from: its prime, or the changes its resume was given, already
+/// said what came before.
 pub fn untold(ekko: &Ekko, me: &Actor, told: &Told, since: u64, holding: bool) -> Result<Vec<String>, EkkoError> {
     let all = ekko.storage.get_shared()?;
     let registry = me.registry.as_ref();
@@ -310,7 +318,42 @@ pub fn untold(ekko: &Ekko, me: &Actor, told: &Told, since: u64, holding: bool) -
             }
         }
     }
+    // The notes others write for the tasks it holds (task 1648): each note
+    // the user or another session attaches to a task this session holds,
+    // once it took the task, told once -- by the hook too, which reaches a
+    // session between its tool calls (note 1741). So sessions working
+    // related tasks talk through notes on each other's, and the user or the
+    // orchestrator steers one at work. A question there is the user's, a
+    // wait is told above, and a comment or a review from an artifact's page
+    // is the feedback told first, once sent.
+    for note in all.values() {
+        if note.trashed.is_some() || note.stashed.is_some() || note.question.is_some() || note.wait.is_some() || note.comment.is_some() || note.review.is_some() {
+            continue;
+        }
+        let (Some(uid), Some(rev)) = (note.uid.as_deref(), note.rev) else { continue };
+        let Some(task) = note.attached_to.as_deref().and_then(|on| by_uid.get(on).copied()).filter(|task| holds(task)) else { continue };
+        let Some(holder) = task.held_by.as_ref() else { continue };
+        if rev <= since || note.timestamp < holder.since || note.created_by.as_ref().is_some_and(mine) || !told.mark(&format!("note-{uid}")) {
+            continue;
+        }
+        let from = note.created_by.as_ref().map_or_else(|| "someone".to_string(), |by| writer(&all, by, &name(by)));
+        lines.push(format!("Note {} on task {} ({}), which this session holds, from {from}: {}", note.id, task.id, titled(task), agent::clip(&note.description, NOTED)));
+    }
     Ok(lines)
+}
+
+/// Who wrote a note, as the session it is told to reads it: the user, or a
+/// session by `label` and, where it holds tasks in progress, by them -- the
+/// tasks a reply to it is attached to.
+fn writer(all: &crate::storage::ItemMap, by: &Holder, label: &str) -> String {
+    let Some(process) = by.process() else { return label.to_string() };
+    let mut held: Vec<u32> = all.values().filter(|task| task.held_by.as_ref().and_then(Holder::process).as_ref() == Some(&process)).map(|task| task.id).collect();
+    held.sort_unstable();
+    match held.as_slice() {
+        [] => label.to_string(),
+        [id] => format!("the session holding task {id} ({label})"),
+        _ => format!("the session holding tasks {} ({label})", crate::agents::listed(&held)),
+    }
 }
 
 /// The line telling a session that the one holding the task it waited on,
@@ -449,6 +492,68 @@ mod tests {
 
         set(&as_(&me), 2, "progress", true);
         assert!(untold(&as_(&me), &me, &mine, 0, false).unwrap().is_empty(), "its own write ended it: {fix}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session holding a task is told once, by the hook too, of each note
+    /// the user or another session attaches to it once the session took it
+    /// (task 1648), saying who wrote it and which tasks that one holds. Not
+    /// of its own note, of one written before it took the task or before the
+    /// cursor it started from, of a question, a wait, a trashed or a stashed
+    /// note there, of a note on a task it does not hold, nor of any once it
+    /// no longer holds the task.
+    #[test]
+    fn a_session_is_told_of_each_note_another_writes_on_a_task_it_holds() {
+        let (me, other, _) = crate::holder::test_sessions();
+        let dir = crate::paths::test_dir("ekko-wake-notes");
+        let home = dir.join("home");
+        let as_ = |actor: &Actor| Ekko::new(Storage::new(&dir).unwrap()).acting_as(actor.clone());
+        let note = |actor: &Actor, task: u32, text: &str| crate::agents_merge::noted(&as_(actor), &[task], text).unwrap()[0];
+        let afresh = |name: &str| Told::within(&home.join(name), me.process.as_ref().unwrap());
+        as_(&other).create_task(&["Add the API".to_string()]).unwrap();
+        as_(&other).create_task(&["Use the API".to_string()]).unwrap();
+        note(&other, 1, "written before it was taken");
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        set(&as_(&me), 1, "progress", false);
+        set(&as_(&other), 2, "progress", false);
+
+        // None of these is for it.
+        note(&me, 1, "its own note");
+        note(&other, 2, "on the task the other holds");
+        let asker = as_(&other);
+        let mut draft = Draft::open(&asker).unwrap();
+        draft.ask("Ship it?", Some(&Ref::Id(1))).unwrap();
+        draft.commit(false).unwrap();
+        let waited = wait_on(&asker, 1, "done", "use the API");
+        let person = as_(&Actor::person());
+        let trashed = note(&other, 1, "trashed");
+        let stashed = note(&other, 1, "stashed");
+        person.set_trashed(&[trashed.to_string()], true).unwrap();
+        person.set_stashed(&[stashed.to_string()], true).unwrap();
+        let board = as_(&me);
+        assert!(untold(&board, &me, &afresh("none"), 0, false).unwrap().is_empty());
+        let held = untold(&board, &me, &afresh("held"), 0, true).unwrap();
+        assert!(held.len() == 1 && held[0].starts_with(&format!("default on pts/2 waits on 1 (Add the API), which this session holds, until done (note {waited})")), "{held:?}");
+
+        let theirs = note(&other, 1, "The route is /v2/items now.");
+        let users = note(&Actor::person(), 1, "Keep the old route too.");
+        let lines = vec![
+            format!("Note {theirs} on task 1 (Add the API), which this session holds, from the session holding task 2 (default on pts/2): The route is /v2/items now."),
+            format!("Note {users} on task 1 (Add the API), which this session holds, from the user: Keep the old route too."),
+        ];
+        assert_eq!(untold(&board, &me, &afresh("peek"), 0, false).unwrap(), lines);
+        let input = serde_json::json!({"hook_event_name": "FileChanged", "file_path": board.storage.storage_path()}).to_string();
+        let mine = Told::of(&home, me.process.as_ref().unwrap());
+        assert_eq!(hook(&board, &input, &home, "default board"), ExitCode::from(2));
+        assert_eq!(hook(&board, &input, &home, "default board"), ExitCode::SUCCESS, "once");
+        assert!(untold(&board, &me, &mine, 0, false).unwrap().is_empty(), "once, whichever way");
+
+        let later = note(&other, 1, "One more.");
+        let revision = board.storage.get_counters().unwrap().revision;
+        assert!(untold(&board, &me, &afresh("cursor"), revision, false).unwrap().is_empty(), "before the cursor: {later}");
+        set(&board, 1, "done", false);
+        note(&other, 1, "After it was done.");
+        assert!(untold(&board, &me, &afresh("done"), 0, false).unwrap().is_empty(), "a task it no longer holds");
         std::fs::remove_dir_all(&dir).ok();
     }
 

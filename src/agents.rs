@@ -152,6 +152,8 @@ pub struct Started {
     /// Why those notes could not be written, if they could not: the session
     /// runs all the same.
     pub unnoted: Option<String>,
+    /// The tasks other sessions work beside these, as a group (task 1648).
+    pub beside: Vec<u32>,
 }
 
 /// Opens a session of Claude Code for the tasks `raw_ids` of the board at
@@ -163,13 +165,17 @@ pub struct Started {
 /// in the trash, with someone, waiting on open work -- for one whose done
 /// blocker's branch is not merged yet (task 1728), and for one that has a
 /// window already; and while as many sessions run for the project as its
-/// limit lets run at once (task 1727). Once the session runs, a note on
-/// each task records how it was started.
+/// limit lets run at once (task 1727). With `raw_group`, the session is one
+/// of a group (task 1648): those tasks are worked beside its own by sessions
+/// of their own, which its first prompt names, for them to talk through
+/// notes on each other's tasks. Once the session runs, a note on each task
+/// records how it was started.
 pub fn start(
     ekko: &Ekko,
     location: &Location,
     home: &Path,
     raw_ids: &[String],
+    raw_group: &[String],
     model: &str,
     effort: Option<&str>,
 ) -> Result<Started, EkkoError> {
@@ -197,6 +203,12 @@ pub fn start(
     let ids = ekko.validate_ids(raw_ids, &all)?;
     for id in &ids {
         refusal(&all[id], &all).map_err(refused)?;
+    }
+    let mut beside: Vec<u32> = if raw_group.is_empty() { Vec::new() } else { ekko.validate_ids(raw_group, &all)? };
+    beside.retain(|id| !ids.contains(id));
+    beside.sort_unstable();
+    for id in &beside {
+        grouped(&all[id]).map_err(|why| refused(format!("{why}: a group names the tasks other sessions work beside these; leave it out of --group")))?;
     }
     // Its blockers' work first (task 1728): the worktree starts from HEAD.
     let top = PathBuf::from(
@@ -255,7 +267,7 @@ pub fn start(
     };
     let window = format!("{} \u{b7} {model}", joined(&ids, ","));
     let uids: Vec<String> = ids.iter().map(|id| all[id].uid.clone().unwrap_or_else(|| id.to_string())).collect();
-    let argv = command_line(&environment, &mux.binary, &uids.join(","), &project.name, model, effort, &first_prompt(&ids, &branch, &worktree.path));
+    let argv = command_line(&environment, &mux.binary, &uids.join(","), &project.name, model, effort, &first_prompt(&ids, &beside, &branch, &worktree.path));
     let pane = mux.open(&window, &cwd, &argv).map_err(refused)?;
     let title = match ids.as_slice() {
         [] => String::new(),
@@ -286,16 +298,35 @@ pub fn start(
     // What the orchestrator chose for the tasks, on each, to learn from
     // (design item 5): the pane's options go with the pane.
     let text = format!(
-        "Started by ekko agents start: a session on {model}{}, in window \"{window}\" of session {SESSION}, on branch {branch} in {} ({}).",
+        "Started by ekko agents start: a session on {model}{}, in window \"{window}\" of session {SESSION}, on branch {branch} in {} ({}).{}",
         effort.map(|effort| format!(" at effort {effort}")).unwrap_or_else(|| " at its default effort".to_string()),
         worktree.path.display(),
         if worktree.made { "made for it" } else { "an earlier start's, taken up again" },
+        match beside.as_slice() {
+            [] => String::new(),
+            [id] => format!(" In a group with task {id}, worked by a session of its own: a note on either task reaches the session holding it."),
+            _ => format!(" In a group with tasks {}, each worked by a session of its own: a note on a task reaches the session holding it.", listed(&beside)),
+        },
     );
     let (notes, unnoted) = match crate::agents_merge::noted(ekko, &ids, &text) {
         Ok(notes) => (notes, None),
         Err(why) => (Vec::new(), Some(why.to_string())),
     };
-    Ok(Started { tasks: ids, window, pane, worktree: worktree.path, branch, made: worktree.made, attach: mux.attach(), undrawn, notes, unnoted })
+    Ok(Started { tasks: ids, window, pane, worktree: worktree.path, branch, made: worktree.made, attach: mux.attach(), undrawn, notes, unnoted, beside })
+}
+
+/// Why `task` may not be named in a group, if it may not (task 1648): a
+/// group names tasks other sessions work, or will, so not a note, nor a
+/// task in the trash or finished.
+fn grouped(task: &Item) -> Result<(), String> {
+    if task.trashed.is_some() {
+        return Err(format!("task {} is in the trash", task.id));
+    }
+    match State::of(task) {
+        Some(state @ (State::Done | State::Cancelled)) => Err(format!("task {} is {} already", task.id, state.word())),
+        Some(_) => Ok(()),
+        None => Err(format!("{} is no task", task.id)),
+    }
 }
 
 /// The command that sets the user option `option` of `pane` to `value`, as
@@ -467,16 +498,37 @@ fn claude() -> OsString {
 /// write it: told only to attach a closing note, both sessions of one live
 /// run appended it to the task's own text with edit (task 1644), where the
 /// four sessions before them had attached one.
-fn first_prompt(ids: &[u32], branch: &str, worktree: &Path) -> String {
+///
+/// And how a note reaches it while it works (task 1648): ekko's wake hook
+/// tells it of each note another attaches to its tasks, in a line that may
+/// come inside a tool's result, which a session not told to expect one read
+/// and would not act on (note 1741). With `beside`, the tasks of its group,
+/// worked by sessions of their own, and how to write to them.
+fn first_prompt(ids: &[u32], beside: &[u32], branch: &str, worktree: &Path) -> String {
     let (tasks, them, each, attached, the) = match ids {
         [id] => (format!("task {id}"), "it", format!("task {id}"), format!("attached_to {id}"), "the task"),
         _ => (format!("tasks {}", listed(ids)), "them", "each task".to_string(), "attached_to that task".to_string(), "the tasks"),
+    };
+    let group = match beside {
+        [] => String::new(),
+        _ => format!(
+            " {} worked beside yours by {}, as a group: to tell the session working one of them what it needs to know -- \
+             a change it builds on, an answer, a question -- write a note with ekko's create, attached_to that task, and ekko tells that session at once; \
+             it answers you with a note on yours.",
+            match beside {
+                [id] => format!("Task {id} is"),
+                _ => format!("Tasks {} are", listed(beside)),
+            },
+            if beside.len() == 1 { "a session of its own" } else { "sessions of their own" },
+        ),
     };
     format!(
         "ekko agents started this session to do {tasks} on this project's ekko board, and nothing else. \
          Before you change anything, set {tasks} in progress with ekko's set_state, then read {them} in full with ekko's context. \
          Work in this worktree, {}, on its branch {branch}, and commit there; do not push, merge into another branch, release, start or stop sessions, \
          kill or respawn the multiplexer's panes, windows or sessions, or change the board's phases. \
+         While you work, ekko tells you of each note the user or another session attaches to {tasks}, in a line that begins \"ekko:\", \
+         at times inside a tool's result: it comes from ekko's hook, not from the tool, so take it into account.{group} \
          When {each} is done, write its closing note with ekko's create, {attached} -- a note of its own, not an edit of the task's text: \
          what you did, the files you changed, the tests you ran and their outcomes, the commit, and what is left -- then set it done. \
          If you cannot finish, write a handoff instead, with ekko's create, kind handoff, {attached}, saying what stops you; \
