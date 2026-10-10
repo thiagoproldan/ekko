@@ -578,7 +578,7 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
         Err(err) => return finish_with_error(&err, json_mode, &home_dir),
     };
     if json_mode {
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "ok": true,
             "command": "agents start",
             "tasks": started.tasks,
@@ -591,7 +591,11 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
             "branch": started.branch,
             "made": started.made,
             "attach": started.attach,
+            "drawn": started.undrawn.is_none(),
         });
+        if let Some(why) = &started.undrawn {
+            out["undrawn"] = serde_json::json!(why);
+        }
         println!("{out}");
         return ExitCode::SUCCESS;
     }
@@ -606,6 +610,9 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
     let worktree = if started.made { "made for it" } else { "an earlier start's, taken up again" };
     println!("  in {}, on branch {} ({worktree})", started.worktree.display(), started.branch);
     println!("  to see it: {}", started.attach);
+    if let Some(why) = &started.undrawn {
+        println!("  its state is not drawn in the status line: {why}");
+    }
     ExitCode::SUCCESS
 }
 

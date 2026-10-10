@@ -1636,7 +1636,9 @@ fn a_scratch_home_writes_nothing_on_a_board_it_found_outside_it() {
 /// for the session `ekko`: whether it is there, its windows' names, a new
 /// window's pane, and that pane running unless a file `dead` says it ended,
 /// which kill-pane writes. The window of pane %7 is named by the file
-/// `name`, which rename-window writes (task 1645).
+/// `name`, which rename-window writes (task 1645). A set-option succeeds,
+/// recorded as every call is, with the commands after it, unless a file
+/// `refuse` says the multiplexer takes no such option (task 1675).
 const MUX: &str = r#"#!/bin/sh
 state="$(dirname "$0")/mux-state"
 mkdir -p "$state"
@@ -1658,6 +1660,7 @@ case "$1" in
   kill-pane) touch "$state/dead" ;;
   display-message) cat "$state/name" ;;
   rename-window) eval "name=\${$#}"; printf '%s\n' "$name" > "$state/name" ;;
+  set-option) if [ -e "$state/refuse" ]; then echo 'unknown flag -p' >&2; exit 1; fi ;;
   *) exit 1 ;;
 esac
 "#;
@@ -2158,7 +2161,8 @@ fn a_born_session_closes_once_its_task_is_done_and_not_before() {
     assert!(agents.logged("closed: its Claude Code ended, and its pane %7 is gone"), "{:?}", fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")));
     assert!(ended_by_sigterm(&mut stand_in), "not ended by SIGTERM once its task was done");
     let socket = agents.home.join("tmux-socket");
-    let closing: Vec<Vec<String>> = agents.calls().into_iter().filter(|call| call[..2] == ["-S", socket.to_str().unwrap()]).collect();
+    // Its state set as it changed is another test's (task 1675).
+    let closing: Vec<Vec<String>> = agents.calls().into_iter().filter(|call| call[..2] == ["-S", socket.to_str().unwrap()] && call[2] != "set-option").collect();
     assert_eq!(closing.iter().map(|call| call[2].as_str()).collect::<Vec<_>>(), ["list-panes", "kill-pane", "list-panes", "list-panes"], "{closing:?}");
     assert_eq!(closing[1][3..], ["-t", "%7"]);
     fs::remove_dir_all(&agents.home).ok();
@@ -2249,8 +2253,11 @@ fn a_born_session_waiting_on_the_user_says_so_on_its_task_and_window_until_it_mo
     assert_eq!(agents.window(), "1 \u{b7} haiku \u{b7} waiting on you");
     assert!(agents.logged("waits on you (permission_prompt): Claude needs your permission -- Bash: date > stamp.txt; marked on task 1; its window named \"1 \u{b7} haiku \u{b7} waiting on you\""));
     let socket = agents.home.join("tmux-socket");
-    let said: Vec<Vec<String>> = agents.calls().into_iter().filter(|call| call[..2] == ["-S", socket.to_str().unwrap()]).map(|call| call[2..].to_vec()).collect();
-    assert_eq!(said, [vec!["display-message", "-p", "-t", "%7", "#{window_name}"], vec!["rename-window", "-t", "%7", "1 \u{b7} haiku \u{b7} waiting on you"]]);
+    // The pane's state, set alongside, is another test's (task 1675).
+    let named = |calls: Vec<Vec<String>>| -> Vec<Vec<String>> {
+        calls.into_iter().filter(|call| call[..2] == ["-S", socket.to_str().unwrap()] && call[2] != "set-option").map(|call| call[2..].to_vec()).collect()
+    };
+    assert_eq!(named(agents.calls()), [vec!["display-message", "-p", "-t", "%7", "#{window_name}"], vec!["rename-window", "-t", "%7", "1 \u{b7} haiku \u{b7} waiting on you"]]);
 
     assert_eq!(session.ran(), "", "a PostToolUse hook prints nothing");
     let context = agents.context("1");
@@ -2260,11 +2267,11 @@ fn a_born_session_waiting_on_the_user_says_so_on_its_task_and_window_until_it_mo
     assert_eq!(agents.window(), "1 \u{b7} haiku");
     assert!(agents.logged("waits on you no more (PostToolUse): cleared on task 1; its window named \"1 \u{b7} haiku\" again"));
 
-    let (calls, board) = (agents.calls().len(), fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap());
+    let (calls, board) = (named(agents.calls()).len(), fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap());
     for event in ["PostToolUse", "PostToolUseFailure", "ElicitationResult", "UserPromptSubmit", "Stop"] {
         session.hook(event, serde_json::json!({"background_tasks": [], "session_crons": []}));
     }
-    assert_eq!(agents.calls().len(), calls, "the multiplexer was spoken to with nothing to clear");
+    assert_eq!(named(agents.calls()).len(), calls, "the multiplexer was spoken to with nothing to clear");
     assert_eq!(fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap(), board, "the board was written with nothing to clear");
 
     // A permission granted within the six seconds leaves nothing behind: a
@@ -2274,6 +2281,145 @@ fn a_born_session_waiting_on_the_user_says_so_on_its_task_and_window_until_it_mo
     session.ran();
     session.hook("Notification", serde_json::json!({"notification_type": "permission_prompt", "message": "Claude needs your permission"}));
     assert!(agents.logged("waits on you (permission_prompt): Claude needs your permission; marked on task 1;"), "{:?}", fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// The commands of each call that sets options, each its arguments, from
+/// the first `set-option` of the call on, split where tmux splits them.
+fn option_sets(calls: Vec<Vec<String>>) -> Vec<Vec<Vec<String>>> {
+    calls
+        .into_iter()
+        .filter_map(|call| {
+            let at = call.iter().position(|arg| arg == "set-option")?;
+            Some(call[at..].split(|arg| arg == ";").map(<[String]>::to_vec).collect())
+        })
+        .collect()
+}
+
+/// A born session's pane holds what the views draw (task 1675): start sets
+/// its tasks, the first one's title, its model, effort and state, and its
+/// window's status line, in one call, on that pane and window alone; the
+/// hook sets its state as it changes -- working on a prompt or a tool,
+/// waiting on the user with what for, idle at the end of a turn that leaves
+/// it open, working while background work runs -- and calls the
+/// multiplexer for a change only.
+#[test]
+fn a_born_session_s_pane_holds_its_state_for_the_views_as_it_changes() {
+    let agents = Agents::new();
+    for task in ["Fix #3 in the parser; then ship;", "Second", "Third"] {
+        assert!(agents.ekko(&["--task", task]).status.success());
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let started = agents.json(&["agents", "start", "1", "--model", "haiku", "--effort", "low", "--json"]);
+    assert_eq!(started["drawn"], true, "{started}");
+    assert!(started.get("undrawn").is_none(), "{started}");
+    let sets = option_sets(agents.calls());
+    assert_eq!(sets.len(), 1, "one call: {sets:?}");
+    let pane = |option: &str, value: &str| ["set-option", "-p", "-t", "%7", option, value].map(str::to_string).to_vec();
+    let since = sets[0][5][5].parse::<i64>().unwrap_or_else(|_| panic!("{:?}", sets[0][5]));
+    assert!((now - 5..=now + 60).contains(&since), "{since} against {now}");
+    let format = sets[0][7][5].clone();
+    let window = |option: &str| ["set-option", "-w", "-t", "%7", option, &format].map(str::to_string).to_vec();
+    assert_eq!(
+        sets[0],
+        [
+            pane("@ekko_tasks", "1"),
+            // A `#` doubled and a last `;` escaped, as a status line and tmux read them.
+            pane("@ekko_title", "Fix ##3 in the parser; then ship\\;"),
+            pane("@ekko_model", "haiku"),
+            pane("@ekko_effort", "low"),
+            pane("@ekko_state", "working"),
+            pane("@ekko_since", &since.to_string()),
+            ["set-option", "-p", "-u", "-t", "%7", "@ekko_waits"].map(str::to_string).to_vec(),
+            window("window-status-format"),
+            window("window-status-current-format"),
+        ]
+    );
+    for (symbol, state) in [("\u{2699} #W", "working"), ("\u{25cf} #W", "waiting"), ("\u{25cb} #W", "idle")] {
+        assert!(format.contains(symbol) && format.contains(&format!("#{{==:#{{@ekko_state}},{state}}}")), "{state} in {format}");
+    }
+    assert!(format.starts_with("#I:") && format.ends_with("#{?window_flags,#{window_flags}, }"), "{format}");
+
+    // Several tasks: the first one's title, and how many more.
+    let started = agents.json(&["agents", "start", "2", "3", "--model", "sonnet", "--json"]);
+    assert_eq!(started["drawn"], true, "{started}");
+    let sets = option_sets(agents.calls());
+    assert_eq!(sets[1][..4], [pane("@ekko_tasks", "2,3"), pane("@ekko_title", "Second (+1)"), pane("@ekko_model", "sonnet"), ["set-option", "-p", "-u", "-t", "%7", "@ekko_effort"].map(str::to_string).to_vec()]);
+    assert!(sets.iter().flatten().all(|command| !command.contains(&"-g".to_string())), "a global option set: {sets:?}");
+
+    // The hook, as the session lives.
+    let session = agents.session(&agents.uid(1));
+    session.ekko(&["--begin", "1"], "");
+    let socket = agents.home.join("tmux-socket");
+    let states = || -> Vec<(String, Option<String>)> {
+        let calls = agents.calls().into_iter().filter(|call| call[..2] == ["-S", socket.to_str().unwrap()]).collect();
+        option_sets(calls)
+            .into_iter()
+            .map(|commands| {
+                let value = |option: &str| commands.iter().find(|command| command[4..].first().is_some_and(|at| at == option) && command[2] == "-t").map(|command| command[5].clone());
+                let unset = commands.iter().any(|command| command[..4] == ["set-option", "-p", "-u", "-t"] && command[5] == "@ekko_waits");
+                assert!(value("@ekko_since").is_some_and(|at| at.parse::<i64>().is_ok()), "{commands:?}");
+                assert_eq!(value("@ekko_waits").is_none(), unset, "{commands:?}");
+                (value("@ekko_state").unwrap(), value("@ekko_waits"))
+            })
+            .collect()
+    };
+    let working = ("working".to_string(), None);
+    session.hook("UserPromptSubmit", serde_json::json!({"prompt": "go on"}));
+    assert_eq!(states(), std::slice::from_ref(&working));
+    session.ran();
+    assert_eq!(states(), std::slice::from_ref(&working), "a tool ran while it worked: no call");
+    session.asks();
+    let waiting = ("waiting".to_string(), Some("Claude needs your permission -- Bash: date > stamp.txt".to_string()));
+    assert_eq!(states(), [working.clone(), waiting.clone()]);
+    session.ran();
+    assert_eq!(states(), [working.clone(), waiting.clone(), working.clone()]);
+    let stop = |background: serde_json::Value| session.hook("Stop", serde_json::json!({"background_tasks": background, "session_crons": []}));
+    stop(serde_json::json!([]));
+    let idle = ("idle".to_string(), None);
+    assert_eq!(states(), [working.clone(), waiting.clone(), working.clone(), idle.clone()]);
+    stop(serde_json::json!([]));
+    assert_eq!(states().len(), 4, "idle again: no call");
+    assert!(agents.ekko(&["--check", "1"]).status.success());
+    stop(serde_json::json!([{"id": "b-1", "type": "shell", "status": "running"}]));
+    assert_eq!(states(), [working.clone(), waiting, working.clone(), idle, working]);
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A multiplexer that refuses the options still runs the session (task
+/// 1675): start says its state is not drawn, and why, in --json and in
+/// words; the hook says so in born.log, and sets the state at the next
+/// change once the options are taken.
+#[test]
+fn a_multiplexer_that_refuses_the_options_still_runs_the_session() {
+    let agents = Agents::new();
+    for task in ["Write hello", "Write the docs"] {
+        assert!(agents.ekko(&["--task", task]).status.success());
+    }
+    let refuse = agents.home.join("mux-state").join("refuse");
+    fs::create_dir_all(refuse.parent().unwrap()).unwrap();
+    fs::write(&refuse, "").unwrap();
+    let started = agents.json(&["agents", "start", "1", "--model", "haiku", "--json"]);
+    assert_eq!((&started["ok"], &started["drawn"]), (&serde_json::json!(true), &serde_json::json!(false)), "{started}");
+    assert!(started["undrawn"].as_str().is_some_and(|why| why.ends_with("set-option failed: unknown flag -p")), "{started}");
+    let output = agents.ekko(&["agents", "start", "2", "--model", "haiku"]);
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && said.contains("Started task 2"), "{said}");
+    assert!(said.lines().any(|line| line.starts_with("  its state is not drawn in the status line: ") && line.ends_with("set-option failed: unknown flag -p")), "{said}");
+    assert_eq!(agents.opened().len(), 2, "both windows opened");
+
+    let session = agents.session(&agents.uid(1));
+    session.ekko(&["--begin", "1"], "");
+    session.hook("UserPromptSubmit", serde_json::json!({"prompt": "go on"}));
+    assert!(agents.logged("its pane's state, working, not set: ") && agents.logged("set-option failed: unknown flag -p"), "{:?}", fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")));
+    fs::remove_file(&refuse).unwrap();
+    let tried = option_sets(agents.calls()).len();
+    session.ran();
+    let sets = option_sets(agents.calls());
+    assert_eq!(sets.len(), tried + 1, "set once taken: {sets:?}");
+    assert_eq!(sets[tried][0], ["set-option", "-p", "-t", "%7", "@ekko_state", "working"]);
+    session.ran();
+    assert_eq!(option_sets(agents.calls()).len(), tried + 1, "set already: no call");
     fs::remove_dir_all(&agents.home).ok();
 }
 

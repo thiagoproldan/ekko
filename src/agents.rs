@@ -5,7 +5,8 @@
 //! and may step into it and talk to it. Its hook (task 1643) closes it once
 //! its tasks are finished, unless the user talks to it after that, and says
 //! on the board and in its window's name when it waits on the user (task
-//! 1645).
+//! 1645). What it is for and what it does now are kept on its pane, for
+//! the views to draw (task 1675).
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -38,6 +39,38 @@ pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultraco
 /// refuses to start, ends well within it.
 const SETTLE: Duration = Duration::from_secs(1);
 
+/// The user options a born session's pane holds for the views (task 1675,
+/// decision 1674), which every view reads and none writes: its tasks' ids,
+/// the first one's title, its model and effort, set as it starts; its state
+/// -- `working`, `waiting` on the user or `idle` -- and since when, in
+/// seconds since the epoch, set by its hook as it changes; and what it
+/// waits on, while it does. On the pane, not its window, so they go with it
+/// into another window.
+pub const TASKS_OPTION: &str = "@ekko_tasks";
+pub const TITLE_OPTION: &str = "@ekko_title";
+pub const MODEL_OPTION: &str = "@ekko_model";
+pub const EFFORT_OPTION: &str = "@ekko_effort";
+pub const STATE_OPTION: &str = "@ekko_state";
+pub const SINCE_OPTION: &str = "@ekko_since";
+pub const WAITS_OPTION: &str = "@ekko_waits";
+
+/// The states `STATE_OPTION` takes.
+pub const WORKING: &str = "working";
+pub const WAITING: &str = "waiting";
+pub const IDLE: &str = "idle";
+
+/// How a born session's window reads in the status line (task 1675): its
+/// index, then its name after a symbol for its pane's state -- ⚙ working,
+/// ● waiting on you, black on yellow, ○ idle, dimmed -- and tmux's flags,
+/// as tmux's own format ends. No colour of a status line hides it: tmux's
+/// own is green, which a green symbol would vanish into.
+pub const STATUS_FORMAT: &str = concat!(
+    "#I:#{?#{==:#{@ekko_state},waiting},#[fg=black#,bg=yellow#,bold]\u{25cf} #W#[default],",
+    "#{?#{==:#{@ekko_state},working},\u{2699} #W,",
+    "#{?#{==:#{@ekko_state},idle},#[dim]\u{25cb} #W#[default],#W}}}",
+    "#{?window_flags,#{window_flags}, }"
+);
+
 /// What `start` opened.
 pub struct Started {
     pub tasks: Vec<u32>,
@@ -50,6 +83,9 @@ pub struct Started {
     pub made: bool,
     /// The command that shows the session's window.
     pub attach: String,
+    /// Why the pane's options and its window's status line could not be
+    /// set, if they could not: the session runs all the same.
+    pub undrawn: Option<String>,
 }
 
 /// Opens a session of Claude Code for the tasks `raw_ids` of the board at
@@ -112,6 +148,22 @@ pub fn start(
     let uids: Vec<String> = ids.iter().map(|id| all[id].uid.clone().unwrap_or_else(|| id.to_string())).collect();
     let argv = command_line(&environment, &mux.binary, &uids.join(","), &project.name, model, effort, &first_prompt(&ids, &branch, &worktree.path));
     let pane = mux.open(&window, &cwd, &argv).map_err(refused)?;
+    let title = match ids.as_slice() {
+        [] => String::new(),
+        [first] => crate::ekko::title(&all[first].description).to_string(),
+        [first, rest @ ..] => format!("{} (+{})", crate::ekko::title(&all[first].description), rest.len()),
+    };
+    let mut drawn = vec![
+        set_pane(&pane, TASKS_OPTION, &joined(&ids, ",")),
+        set_pane(&pane, TITLE_OPTION, &title),
+        set_pane(&pane, MODEL_OPTION, model),
+        effort.map_or_else(|| unset_pane(&pane, EFFORT_OPTION), |effort| set_pane(&pane, EFFORT_OPTION, effort)),
+    ];
+    drawn.extend(state_commands(&pane, WORKING, None));
+    for option in ["window-status-format", "window-status-current-format"] {
+        drawn.push(["set-option", "-w", "-t", &pane, option, STATUS_FORMAT].map(str::to_string).to_vec());
+    }
+    let undrawn = mux.batch(&drawn).err();
     std::thread::sleep(SETTLE);
     if !mux.alive(&pane) {
         return Err(refused(format!(
@@ -121,7 +173,44 @@ pub fn start(
             cwd.display()
         )));
     }
-    Ok(Started { tasks: ids, window, pane, worktree: worktree.path, branch, made: worktree.made, attach: mux.attach() })
+    Ok(Started { tasks: ids, window, pane, worktree: worktree.path, branch, made: worktree.made, attach: mux.attach(), undrawn })
+}
+
+/// The command that sets the user option `option` of `pane` to `value`, as
+/// a status line or a border shows it (`shown`).
+fn set_pane(pane: &str, option: &str, value: &str) -> Vec<String> {
+    ["set-option", "-p", "-t", pane, option].map(str::to_string).into_iter().chain([shown(value)]).collect()
+}
+
+/// The command that unsets the user option `option` of `pane`.
+fn unset_pane(pane: &str, option: &str) -> Vec<String> {
+    ["set-option", "-p", "-u", "-t", pane, option].map(str::to_string).to_vec()
+}
+
+/// The commands that set `pane`'s state, since now, and what it waits on --
+/// or that it waits on nothing.
+fn state_commands(pane: &str, state: &str, waits: Option<&str>) -> Vec<Vec<String>> {
+    let since = chrono::Local::now().timestamp().to_string();
+    vec![
+        set_pane(pane, STATE_OPTION, state),
+        set_pane(pane, SINCE_OPTION, &since),
+        match waits {
+            Some(what) => set_pane(pane, WAITS_OPTION, what),
+            None => unset_pane(pane, WAITS_OPTION),
+        },
+    ]
+}
+
+/// `value` as a status line or a pane's border shows it, kept as given: on
+/// one line, its `#` doubled, which would start a style or a variable there,
+/// and a `;` at its end escaped, which tmux would take for the end of the
+/// command (both measured on tmux 3.7c and ztmux 3.7.47, task 1675).
+fn shown(value: &str) -> String {
+    let line = value.replace(['\n', '\r', '\t'], " ").replace('#', "##");
+    match line.strip_suffix(';') {
+        Some(rest) => format!("{rest}\\;"),
+        None => line,
+    }
 }
 
 /// Why `task` may not go to a born session now, if it may not: what the
@@ -311,6 +400,24 @@ impl Mux {
 
     fn failed(&self, what: &str, output: &Output) -> String {
         format!("{} {what} failed: {}", self.binary.to_string_lossy(), String::from_utf8_lossy(&output.stderr).trim())
+    }
+
+    /// Runs `commands` in one call, as tmux runs a sequence: each separated
+    /// from the next by a `;` of its own, in order, up to the first that
+    /// fails.
+    fn batch(&self, commands: &[Vec<String>]) -> Result<(), String> {
+        let mut args: Vec<&str> = Vec::new();
+        for command in commands {
+            if !args.is_empty() {
+                args.push(";");
+            }
+            args.extend(command.iter().map(String::as_str));
+        }
+        let output = self.run(&args)?;
+        if !output.status.success() {
+            return Err(self.failed("set-option", &output));
+        }
+        Ok(())
     }
 
     fn has_session(&self) -> Result<bool, String> {
@@ -599,8 +706,8 @@ const GONE_WITHIN: Duration = Duration::from_secs(10);
 
 /// What the hook keeps of a born session between its events, in ekko's
 /// state directory: how many prompts reached it, whether one reached it
-/// once its tasks were finished, what it waits on the user for, and what
-/// the permission it asks for is for.
+/// once its tasks were finished, what it waits on the user for, what the
+/// permission it asks for is for, and the state its pane was last given.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Born {
     prompts: u64,
@@ -609,6 +716,10 @@ struct Born {
     waiting: Option<Waiting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     asked: Option<String>,
+    /// `STATE_OPTION`'s value as the hook last set it (task 1675), so the
+    /// multiplexer is called only as it changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -693,6 +804,9 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
                 }
                 let what = crate::agent::clip(&what, 200);
                 born.waiting = wait_on_user(home, cwd, &tasks, session, kind, &what);
+                if born.waiting.is_some() {
+                    show_state(home, session, &tasks, &mut born, WAITING, Some(&what));
+                }
                 write_born(home, session, &born);
             }
             return std::process::ExitCode::SUCCESS;
@@ -713,6 +827,7 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
                 born.talked = true;
                 log(home, session, &tasks, "a prompt reached it after its tasks were finished: it stays, the user's now");
             }
+            show_state(home, session, &tasks, &mut born, WORKING, None);
             write_born(home, session, &born);
         }
         "Stop" => {
@@ -725,6 +840,10 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
             };
             if let Some(why) = stays {
                 log(home, session, &tasks, &format!("stays: {why}"));
+                let state = if busy("background_tasks") || busy("session_crons") { WORKING } else { IDLE };
+                if show_state(home, session, &tasks, &mut born, state, None) {
+                    write_born(home, session, &born);
+                }
                 return std::process::ExitCode::SUCCESS;
             }
             let process = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of);
@@ -737,9 +856,36 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
                 Err(why) => log(home, session, &tasks, &format!("not closed: {why}")),
             }
         }
-        _ => {}
+        // A tool ran, or a dialog was answered: the turn goes on.
+        _ => {
+            if show_state(home, session, &tasks, &mut born, WORKING, None) {
+                write_born(home, session, &born);
+            }
+        }
     }
     std::process::ExitCode::SUCCESS
+}
+
+/// Sets the state of the session's pane for the views (task 1675) --
+/// `state`, since now, and what it waits on, if it does -- unless the hook
+/// set it so last; in no multiplexer's pane, nothing. Whether it set it.
+fn show_state(home: &Path, session: &str, tasks: &str, born: &mut Born, state: &str, waits: Option<&str>) -> bool {
+    if born.state.as_deref() == Some(state) && waits.is_none() {
+        return false;
+    }
+    let (Some(mux), Some(pane)) = (Mux::of_this_pane(), set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned())) else {
+        return false;
+    };
+    match mux.batch(&state_commands(&pane, state, waits)) {
+        Ok(()) => {
+            born.state = Some(state.to_string());
+            true
+        }
+        Err(why) => {
+            log(home, session, tasks, &format!("its pane's state, {state}, not set: {why}"));
+            false
+        }
+    }
 }
 
 /// What a permission request is for, as a person reads it: the tool, and
@@ -1071,6 +1217,21 @@ mod tests {
         for command in NO_SESSION {
             assert_eq!(limit(&[command]), None, "{command}");
         }
+    }
+
+    /// A value a pane holds for the views reads back as given in a status
+    /// line or a border (task 1675): on one line, a `#` doubled, which
+    /// would start a style there, and a `;` that ends it escaped, which
+    /// tmux would take for the end of the command; a `;` inside is tmux's
+    /// to keep.
+    #[test]
+    fn a_value_for_the_views_is_shown_as_given() {
+        assert_eq!(shown("Fix #3 #[fg=red]"), "Fix ##3 ##[fg=red]");
+        assert_eq!(shown("then ship;"), "then ship\\;");
+        assert_eq!(shown(";"), "\\;");
+        assert_eq!(shown("a ; b;c"), "a ; b;c");
+        assert_eq!(shown("two\nlines\tand a tab"), "two lines and a tab");
+        assert_eq!(shown("plain"), "plain");
     }
 
     #[test]
