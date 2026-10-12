@@ -7652,6 +7652,35 @@ mod tests {
             Ok(draft.commit(false)?.notices)
         }
 
+        /// A plan, and the tasks its approval makes of its steps, are not
+        /// filed as a create files a task: neither is told it may repeat an
+        /// open task, though both hold its rare names (task 1582).
+        #[test]
+        fn neither_a_plan_nor_its_steps_tasks_are_told_they_may_repeat_an_open_task() {
+            let home = crate::paths::test_dir("ekko-artifact-alike");
+            let dir = home.join(".ekko");
+            let (session, _, _) = test_sessions();
+            let (as_session, as_user) = (ekko_at(&dir, &session), ekko_at(&dir, &Actor::person()));
+            let names = "alpha_beta_gamma fails in src/delta.rs:12 with EpsilonError.";
+            let alike = |notices: &[String]| notices.iter().any(|notice| notice.contains(" may be the same as open "));
+            apply(&as_session, json!({"op": "create", "text": format!("Fix the delta\n{names}")})).unwrap();
+            let control = apply(&as_session, json!({"op": "create", "text": format!("The delta again\n{names}")})).unwrap();
+            assert!(control.iter().any(|notice| notice.starts_with("2 may be the same as open 1 (")), "the control: {control:?}");
+
+            let steps = json!([{"key": "fix", "text": format!("Fix it\n{names}")}, {"key": "test", "text": format!("Test it\n{names}"), "after": ["fix"]}]);
+            let spec = serde_json::from_value::<ArtifactSpec>(json!({"text": plan("Ship the delta").replace("Text.", names), "steps": steps})).unwrap();
+            let mut draft = Draft::open(&as_session).unwrap();
+            let target = draft.artifact(&spec).unwrap();
+            let planned = draft.commit(false).unwrap().notices;
+            assert!(!alike(&planned), "{planned:?}");
+            let approval = ask(&as_session, &home, target).unwrap();
+            let approved = answer(&as_user, approval, "Aprovar").unwrap();
+            let made = as_user.storage.get().unwrap()[&target].artifact.as_ref().unwrap().steps.iter().filter(|step| step.task.is_some()).count();
+            assert_eq!(made, 2, "{approved:?}");
+            assert!(!alike(&approved), "{approved:?}");
+            std::fs::remove_dir_all(&home).ok();
+        }
+
         #[test]
         fn the_users_first_answer_makes_tasks_of_the_steps_and_nothing_else_does() {
             let home = crate::paths::test_dir("ekko-artifact-approve");

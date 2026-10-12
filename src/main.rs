@@ -1,4 +1,5 @@
 mod agent;
+mod alike;
 mod agents;
 mod agents_merge;
 mod agents_view;

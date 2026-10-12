@@ -273,7 +273,7 @@ Ekko has a frontend for each kind of reader: the board for a person, and for an 
 | `search` | items matching a text and/or the `--list` filters, with a count of the stashed ones that match as well |
 | `changes` | what was written since a cursor, including items stashed or trashed since |
 | `roadmap` | as the flag of the same name |
-| `create` | a task, a note, a handoff, or a decision, gotcha or procedure, with every field apart from the text, relations included |
+| `create` | a task, a note, a handoff, or a decision, gotcha or procedure, with every field apart from the text, relations included; a task's reply names, as a notice, the open tasks it may repeat: those holding three of its names in code -- a test's name, a file:line, an error's name -- that few others on the board hold |
 | `set_state`, `force_state` | idempotent state changes; `force_state` overrides the dependency rule and a running session's hold, and is a tool of its own so it can be permissioned apart |
 | `edit` | the whole text, one exact replacement, or an append -- optionally conditioned on the `updatedAt` last read |
 | `update` | boards, priority, due date, who a task is with, phase, star, a note's kind |

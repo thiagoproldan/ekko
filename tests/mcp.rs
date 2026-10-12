@@ -582,6 +582,76 @@ fn a_typed_notes_rests_on_line_is_read_and_the_reply_names_what_does_not_hold() 
     fs::remove_dir_all(&home).ok();
 }
 
+/// Over stdio: a task filed while an open one holds the same failure's rare
+/// names is told so in create's reply, as a notice, and still written (task
+/// 1582). The texts are the board's own: 1579 filed 85 s after 1577, and
+/// 1598 filed while 1579 was open and note 1580 on it held 1598's own test.
+/// Their first lines share almost no words; their bodies share the test's
+/// name, the file:line, ExecutableFileBusy and ETXTBSY.
+#[test]
+fn a_task_filed_on_an_open_tasks_failure_is_told_which_one_it_may_repeat() {
+    let first = "Two stand-in tests failed at spawn in other sessions' runs, passing on rerun\n\
+        the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks panicked at tests/cli.rs:1022:10, \
+        the unwrap of Command::spawn of the `claude` stand-in the test wrote just before. The likeliest, not confirmed: \
+        ETXTBSY (\"Text file busy\", io::ErrorKind::ExecutableFileBusy).";
+    let second = "tests/cli.rs: a doctor test failed once to spawn the script it had just written\n\
+        During a full `nix develop --command cargo test --locked`: \
+        the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks panicked at tests/cli.rs:1022:10, \
+        the `.unwrap()` of `Command::new, then spawn()`. Likely mechanism, not confirmed: ETXTBSY -- the race \
+        tests/serve.rs's from_bash already retries on (ErrorKind::ExecutableFileBusy, up to 100 tries 20 ms apart).";
+    let unrelated = "Search ranks a title above a body\n\
+        lexical::rank scores every field alike, so src/lexical.rs should weigh a hit in the first line more; \
+        PreToolUse and the guard are not involved.";
+    let note = "A second test, in a second session: the_guard_records_each_bash_call_it_sees_for_its_session \
+        panicked at tests/cli.rs:1392:14 -- the unwrap of Command::new, then spawn() in `guarded`.";
+    let fresh = "Both filed at once\nalpha_beta_gamma fails in src/delta.rs:12 with EpsilonError.";
+    let third = "CLI tests fail at times: a stand-in written, then run, gets Text file busy\n\
+        One full cargo test failed in the_guard_records_each_bash_call_it_sees_for_its_session (tests/cli.rs:1392, \
+        the stand-in's spawn): Os { code: 26, kind: ExecutableFileBusy, message: \"Text file busy\" }, and in \
+        the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks. Mechanism: ETXTBSY.";
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
+            call(2, "create", json!({"text": first})),
+            call(3, "create", json!({"text": second})),
+            call(4, "create", json!({"text": unrelated})),
+            call(5, "set_state", json!({"items": [1], "state": "cancelled"})),
+            call(6, "create", json!({"text": note, "attached_to": 2})),
+            call(7, "create", json!({"text": third})),
+            call(8, "create", json!({"text": third, "blocked_by": [2]})),
+            call(9, "batch", json!({"ops": [{"op": "create", "text": fresh}, {"op": "create", "text": fresh}]})),
+        ],
+    );
+    let notices = |id: &str| serde_json::from_str::<Value>(text(&replies[id])).unwrap()["notices"].clone();
+
+    assert_eq!(notices("2"), Value::Null, "nothing open to repeat: {}", text(&replies["2"]));
+    assert_eq!(
+        notices("3"),
+        json!([
+            "2 may be the same as open 1 (shares the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks, \
+             tests/cli.rs:1022:10, executablefilebusy, errorkind): read it with context, and if it is, cancel one in \
+             the other's favour, carrying over what it adds"
+        ]),
+        "{}",
+        text(&replies["3"])
+    );
+    assert_eq!(notices("4"), Value::Null, "an unrelated task names nothing: {}", text(&replies["4"]));
+    let told = |id: &str| notices(id)[0].as_str().unwrap_or_else(|| panic!("{}", text(&replies[id]))).to_string();
+    let fifth = told("7");
+    assert!(fifth.starts_with("5 may be the same as open 2 (shares "), "by note 4 on it, never cancelled 1: {fifth}");
+    assert!(fifth.contains("the_guard_records_each_bash_call_it_sees_for_its_session"), "{fifth}");
+    let sixth = told("8");
+    assert!(sixth.starts_with("6 may be the same as open 5 (shares ") && !sixth.contains("; 2 ("), "its blocker is known to it: {sixth}");
+    assert_eq!(notices("9"), Value::Null, "tasks filed together are not named for each other: {}", text(&replies["9"]));
+    let board: Value = serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+    assert_eq!(board.as_object().unwrap().len(), 8, "every create was written: {board}");
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// The version of Claude Code a session runs is the one its client says
 /// (task 1325): in initialize under the handshake, for every call after it,
 /// and under 2026-07-28 on each request, which no earlier one stands in for.

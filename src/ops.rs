@@ -621,6 +621,9 @@ pub struct Draft<'a> {
     claims: Vec<u32>,
     /// What an operation found worth saying though it wrote nothing wrong.
     notices: Vec<String>,
+    /// Tasks a create filed, as a session or the user wrote them -- not an
+    /// artifact or its steps: `commit` names the open tasks each may repeat.
+    filed: Vec<u32>,
 }
 
 /// What a commit wrote, what `force` pushed past to write it, and the tasks
@@ -653,6 +656,7 @@ impl<'a> Draft<'a> {
             texts: Vec::new(),
             claims: Vec::new(),
             notices: Vec::new(),
+            filed: Vec::new(),
         })
     }
 
@@ -1248,7 +1252,18 @@ impl<'a> Draft<'a> {
         result
     }
 
+    /// Creates an item, and of a task keeps that it was filed, for `commit`
+    /// to name the open tasks it may repeat (task 1582).
     pub fn create(&mut self, spec: &Create) -> Result<u32, EkkoError> {
+        let id = self.make(spec)?;
+        if self.data[&id].is_task {
+            self.filed.push(id);
+        }
+        Ok(id)
+    }
+
+    /// Creates an item, as `create` does, without marking it filed.
+    fn make(&mut self, spec: &Create) -> Result<u32, EkkoError> {
         let text = spec.text.trim();
         if text.is_empty() {
             return Err(EkkoError::MissingDesc);
@@ -1512,7 +1527,7 @@ impl<'a> Draft<'a> {
                 supersedes: None,
                 starred: false,
             };
-            let id = self.create(&spec)?;
+            let id = self.make(&spec)?;
             let uid = self.data[&id].uid.clone().ok_or_else(|| invalid(format!("task {id} was made without a uid")))?;
             tasks.insert(step.key.clone(), uid.clone());
             made.push((step.key.clone(), id, uid));
@@ -1562,7 +1577,7 @@ impl<'a> Draft<'a> {
                 supersedes: None,
                 starred: false,
             };
-            let id = self.create(&create)?;
+            let id = self.make(&create)?;
             self.item(id).artifact =
                 Some(Box::new(Artifact { steps, version: 1, earlier: Vec::new(), approved_version: None, unknown: Default::default() }));
             self.notices.extend(told);
@@ -2299,6 +2314,7 @@ impl<'a> Draft<'a> {
     pub fn commit(mut self, force: bool) -> Result<Committed, EkkoError> {
         let (overridden, reopened) = Ekko::refuse_broken_dependencies(&self.before, &self.data, force)?;
         let mut notices = std::mem::take(&mut self.notices);
+        notices.extend(self.alike_told());
         notices.extend(self.kept_references());
         notices.extend(self.settle_holders(force)?);
         notices.extend(self.loose_notes_of_the_done());
@@ -2309,6 +2325,28 @@ impl<'a> Draft<'a> {
         notices.extend(self.rests_told(&saved.rests_read));
         notices.extend(self.next_to_claim());
         Ok(Committed { data: self.data, overridden, reopened, released: saved.released, blocked: saved.blocked, notices })
+    }
+
+    /// The open tasks each task this write filed may repeat, by the rare
+    /// terms they share (task 1582): a notice, the task written all the same.
+    /// Against the board as the lock found it, so tasks filed together are
+    /// not named for each other, and leaving out what the new task already
+    /// names as its blockers.
+    fn alike_told(&self) -> Vec<String> {
+        self.filed
+            .iter()
+            .filter_map(|id| {
+                let task = self.data.get(id)?;
+                let blockers = task.blocked_by.as_deref().unwrap_or_default();
+                let left_out: Vec<u32> = self
+                    .before
+                    .values()
+                    .filter(|item| item.uid.as_ref().is_some_and(|uid| blockers.contains(uid)))
+                    .map(|item| item.id)
+                    .collect();
+                crate::alike::told(*id, &crate::alike::alike(&self.before, &task.description, &left_out))
+            })
+            .collect()
     }
 
     /// What each decision, gotcha or procedure this write wrote rests on,
