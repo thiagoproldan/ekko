@@ -1248,6 +1248,111 @@ fn the_doctor_names_a_session_running_a_swapped_binary_or_without_its_hooks() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// `ekko --doctor` finds a session's transcript where Claude Code moved it
+/// (task 1564): a stand-in for Claude Code (procedure 1552) runs ekko's MCP
+/// server, recorded with its transcript in the project's folder of the
+/// config directory, as its SessionStart hook would. Its guard ran for its
+/// last Bash call, and the doctor says so with the transcript in place,
+/// moved to the worktree's folder as EnterWorktree moves it, and moved back
+/// as ExitWorktree does; and with the record naming a folder the transcript
+/// never reached, as a resume from another folder does (note 1628). Once no
+/// folder holds it, the doctor says it cannot be read.
+#[test]
+fn the_doctor_reads_a_transcript_claude_code_moved_to_a_worktrees_folder() {
+    use std::io::Write as _;
+    use std::time::Duration;
+    let dir = temp_ekko_dir();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    copy_executable(env!("CARGO_BIN_EXE_ekko"), &bin.join("ekko"));
+    let claude = dir.join("claude");
+    write_executable(&claude, "#!/bin/sh\nekko --mcp\nexit $?\n");
+    let mut session = common::command(&claude)
+        .env("PATH", &bin)
+        .env("HOME", &dir)
+        .env("EKKO_DIR", dir.join(".ekko"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = session.id();
+    let server = (0..100).any(|_| {
+        let found = fs::read_dir("/proc").unwrap().flatten().any(|entry| {
+            let at = entry.path();
+            let parent = fs::read_to_string(at.join("stat")).ok().and_then(|stat| stat.rsplit(')').next()?.split_whitespace().nth(1)?.parse::<u32>().ok());
+            parent == Some(pid) && fs::read(at.join("cmdline")).is_ok_and(|args| args == b"ekko\0--mcp\0")
+        });
+        if !found {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        found
+    });
+    assert!(server, "the stand-in's server did not start");
+
+    // Its SessionStart at 2026-01-01 00:00 UTC, its last Bash call a minute
+    // later, and the guard's record of that very call.
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let start: u64 = stat.rsplit(')').next().unwrap().split_whitespace().nth(19).unwrap().parse().unwrap();
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap().trim().to_string();
+    let boot8: String = boot.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+    let state = dir.join(".local/state/ekko");
+    let record_file = state.join("processes").join(format!("{boot8}-{pid}-{start}.json"));
+    fs::create_dir_all(record_file.parent().unwrap()).unwrap();
+    let told = state.join("told").join(format!("{boot8}-{pid}-{start}"));
+    fs::create_dir_all(&told).unwrap();
+    fs::write(told.join("guarded"), r#"{"tool_use_id":"toolu_1","at":1767225660100}"#).unwrap();
+    let projects = dir.join(".claude").join("projects");
+    let conversation = "0e1d2c3b-4a59-4687-9a1b-2c3d4e5f6a7b";
+    let at = |folder: &str| projects.join(folder).join(format!("{conversation}.jsonl"));
+    let record = |folder: &str| {
+        let board = dir.join(".ekko/storage/storage.json");
+        let record = serde_json::json!({"pid": pid, "start": start, "boot": boot, "board": board, "conversation": conversation, "since": 0, "transcript": at(folder)});
+        fs::write(&record_file, record.to_string()).unwrap();
+        let started = UNIX_EPOCH + Duration::from_secs(1_767_225_600);
+        fs::File::options().write(true).open(&record_file).unwrap().set_modified(started).unwrap();
+    };
+    let call = serde_json::json!([{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}]);
+    let row = serde_json::json!({"type": "assistant", "timestamp": "2026-01-01T00:01:00Z", "isSidechain": false, "message": {"role": "assistant", "content": call}});
+    let (project, worktree) = ("-app", "-app--claude-worktrees-task-1");
+    fs::create_dir_all(projects.join(project)).unwrap();
+    fs::write(at(project), format!("{row}\n")).unwrap();
+    let move_to = |from: &str, to: &str| {
+        fs::create_dir_all(projects.join(to)).unwrap();
+        fs::rename(at(from), at(to)).unwrap();
+    };
+    let guard = || -> (String, String) {
+        let output = common::ekko().args(["--doctor", "--json"]).env("HOME", &dir).output().unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let check = reply["checks"].as_array().unwrap().iter().find(|check| check["session"]["pid"] == pid && check["check"] == "Guard ran").cloned();
+        let check = check.unwrap_or_else(|| panic!("no Guard ran check on the stand-in: {reply}"));
+        (check["verdict"].as_str().unwrap().to_string(), check["says"].as_str().unwrap().to_string())
+    };
+    let ran = |what: &str| {
+        let (verdict, says) = guard();
+        assert_eq!(verdict, "ok", "{what}: {says}");
+        assert!(says.starts_with("its guard ran for its last Bash call"), "{what}: {says}");
+    };
+
+    record(project);
+    ran("the transcript where its SessionStart hook was told");
+    move_to(project, worktree);
+    ran("moved to the worktree's folder");
+    move_to(worktree, project);
+    ran("moved back");
+    record("-home-user-elsewhere");
+    ran("resumed from another folder, its transcript left where it was");
+    fs::remove_file(at(project)).unwrap();
+    let (verdict, says) = guard();
+    assert_eq!(verdict, "skipped", "{says}");
+    assert!(says.starts_with("its transcript cannot be read"), "{says}");
+
+    session.stdin.take().unwrap().write_all(b"").unwrap();
+    let ended = session.wait().unwrap();
+    assert!(ended.success(), "{ended:?}");
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// The prime names the sessions on its board that need a restart (task
 /// 1287): a stand-in for Claude Code, a script named `claude` (procedure
 /// 1552), runs ekko's MCP server in project `app`, and its SessionStart

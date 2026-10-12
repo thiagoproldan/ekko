@@ -336,8 +336,9 @@ pub struct Running {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<PathBuf>,
     /// The transcript of the conversation it runs, as the SessionStart hook
-    /// was given it. The transcripts beside it say which conversation was
-    /// moved to this one (`continued_in`).
+    /// was given it, which Claude Code may have moved since: `transcript_at`
+    /// finds it. The transcripts beside it say which conversation was moved
+    /// to this one (`continued_in`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<PathBuf>,
     /// The conversation it runs now, or ran last.
@@ -456,8 +457,32 @@ impl Registry {
 /// last Claude Code writes there, and nothing measured followed it.
 const TAIL: u64 = 16 * 1024;
 
+/// Where the transcript a hook named `recorded` is now: there while a file
+/// is, and otherwise the file of that name in another project folder beside
+/// it, under the same `projects/` of Claude Code's config directory -- the
+/// one written last, if more than one holds it. Claude Code 2.1.295 moves a
+/// conversation's transcript to the worktree's folder at EnterWorktree, and
+/// back at ExitWorktree; and it hands a conversation resumed from another
+/// folder a path in that folder, while it goes on writing the old one (task
+/// 1564). `None` when no folder holds it.
+pub fn transcript_at(recorded: &Path) -> Option<PathBuf> {
+    if recorded.is_file() {
+        return Some(recorded.to_path_buf());
+    }
+    let name = recorded.file_name()?;
+    let projects = recorded.parent()?.parent()?;
+    fs::read_dir(projects)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path().join(name))
+        .filter_map(|path| Some((fs::metadata(&path).ok().filter(fs::Metadata::is_file)?.modified().ok()?, path)))
+        .max()
+        .map(|(_, path)| path)
+}
+
 /// The session Claude Code continued `conversation` in, read off the end of
-/// its transcript in `dir`. Moving a conversation out of its process, to a
+/// its transcript in `dir`, or where Claude Code moved it (`transcript_at`).
+/// Moving a conversation out of its process, to a
 /// background session, Claude Code 2.1.283 appends
 /// `{"type":"continued-in","continuedInSessionId":...}` to it, and reads it
 /// back from the end, where a message after it means the conversation went
@@ -468,7 +493,7 @@ pub fn continued_in(dir: &Path, conversation: &str) -> Option<String> {
     if conversation.is_empty() || !conversation.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return None;
     }
-    let mut file = fs::File::open(dir.join(format!("{conversation}.jsonl"))).ok()?;
+    let mut file = fs::File::open(transcript_at(&dir.join(format!("{conversation}.jsonl")))?).ok()?;
     let length = file.metadata().ok()?.len();
     file.seek(SeekFrom::Start(length.saturating_sub(TAIL))).ok()?;
     let mut tail = Vec::new();
@@ -623,6 +648,48 @@ mod tests {
         assert_eq!(running.earlier, ["a6b026e6-85d5-4e5c-ae3b-e5a4a676878a"]);
         assert_eq!((running.profile.as_deref(), running.tty.as_deref()), (Some("trabalho"), Some("pts/5")));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A transcript Claude Code moved to another project folder of its config
+    /// directory -- a worktree's, at EnterWorktree (task 1564) -- is found
+    /// there, and where it was moved to a background session, read there;
+    /// the one written last when two folders hold it; none when no folder
+    /// does, nor in a folder outside `projects/`.
+    #[test]
+    fn a_transcript_moved_to_another_project_folder_is_found_there() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let dir = crate::paths::test_dir("ekko-transcript-moved");
+        let projects = dir.join("projects");
+        let (project, worktree) = (projects.join("-app"), projects.join("-app--claude-worktrees-task-1"));
+        for folder in [&project, &worktree, &dir.join("elsewhere")] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let recorded = project.join("c-1.jsonl");
+        let moved = serde_json::json!({"type": "continued-in", "sessionId": "c-1", "continuedInSessionId": "c-2"});
+        fs::write(&recorded, format!("{moved}\n")).unwrap();
+        assert_eq!(transcript_at(&recorded), Some(recorded.clone()), "in place");
+        assert_eq!(continued_in(&project, "c-1").as_deref(), Some("c-2"));
+
+        fs::rename(&recorded, worktree.join("c-1.jsonl")).unwrap();
+        assert_eq!(transcript_at(&recorded), Some(worktree.join("c-1.jsonl")), "moved to the worktree's folder");
+        assert_eq!(continued_in(&project, "c-1").as_deref(), Some("c-2"), "read where it was moved");
+        assert_eq!(transcript_at(&projects.join("-gone").join("c-1.jsonl")), Some(worktree.join("c-1.jsonl")), "a folder that never was");
+
+        fs::write(&recorded, "{}\n").unwrap();
+        let at = |path: &Path, secs: u64| fs::File::options().write(true).open(path).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(secs)).unwrap();
+        at(&recorded, 1_000);
+        at(&worktree.join("c-1.jsonl"), 2_000);
+        let gone = projects.join("-gone").join("c-1.jsonl");
+        assert_eq!(transcript_at(&gone), Some(worktree.join("c-1.jsonl")), "the one written last");
+        at(&recorded, 3_000);
+        assert_eq!(transcript_at(&gone), Some(recorded.clone()), "the one written last");
+
+        assert_eq!(transcript_at(&project.join("c-9.jsonl")), None, "no folder holds it");
+        assert_eq!(continued_in(&project, "c-9"), None);
+        fs::rename(worktree.join("c-1.jsonl"), dir.join("elsewhere").join("c-1.jsonl")).unwrap();
+        fs::remove_file(&recorded).unwrap();
+        assert_eq!(transcript_at(&recorded), None, "a folder outside projects/");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

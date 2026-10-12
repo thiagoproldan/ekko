@@ -600,10 +600,12 @@ fn checks(all: &[Proc], records: &Records) -> Vec<Check> {
         let (verdict, says) = wake_heard(version(board), started, heard.as_ref(), before.as_deref(), records.now);
         let brief_wake = brief(verdict, "its FileChanged hook missed the board's last write");
         found.push(Check { check: WAKE_HEARD, verdict, about: named.clone(), session: session.clone(), says, brief: brief_wake });
-        // The conversation it runs, whose transcript holds its Bash calls.
-        let Some(transcript) = record.as_ref().and_then(|running| running.transcript.as_deref()).filter(|_| records.transcripts) else { continue };
+        // The conversation it runs, whose transcript holds its Bash calls,
+        // where Claude Code moved it since, if it did (task 1564).
+        let Some(recorded) = record.as_ref().and_then(|running| running.transcript.as_deref()).filter(|_| records.transcripts) else { continue };
+        let transcript = crate::holder::transcript_at(recorded).unwrap_or_else(|| recorded.to_path_buf());
         let guarded = Told::within(records.told, &process).last_guarded();
-        let (verdict, says) = guard_ran(last_bash(transcript, TAIL), started, guarded.as_ref(), before.as_deref(), records.now);
+        let (verdict, says) = guard_ran(last_bash(&transcript, TAIL), started, guarded.as_ref(), before.as_deref(), records.now);
         found.push(Check { check: GUARD_RAN, verdict, about: named, session, says, brief: brief(verdict, "its guard missed its last Bash call") });
     }
     found
