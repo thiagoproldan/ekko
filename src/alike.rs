@@ -265,6 +265,12 @@ mod tests {
         let mut done = open.clone();
         done.is_complete = Some(true);
         assert_eq!(named(&board(vec![done]), &format!("Again\n{FAILURE}")), Vec::<u32>::new(), "done work is not repeated");
+        // A task in the trash is not named, though trash leaves its notes out
+        // of it, still holding the names.
+        let mut trashed = task(5, "Fix it");
+        trashed.trashed = Some(1);
+        let left = note(6, &format!("Seen again: {FAILURE}"), &trashed);
+        assert_eq!(named(&board(vec![trashed, left]), &format!("Again\n{FAILURE}")), Vec::<u32>::new(), "a task in the trash is not named");
         assert_eq!(alike(&board(vec![open.clone()]), &format!("Again\n{FAILURE}"), &[1]), [], "its blocker is left out");
 
         // Its notes are the task's: two of the names here, one there.
