@@ -159,7 +159,7 @@ pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, ra
     if agents::git(&top, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err() {
         return Err(refused(no_branch(&top, &branch, &ids)));
     }
-    gone(&ids).map_err(refused)?;
+    gone(&project.name, &ids).map_err(refused)?;
     let _lock = lock(&top).map_err(refused)?;
     let into = agents::git(&top, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .map_err(|_| refused(format!("the project's checkout, {}, is on no branch: ekko agents merge fast-forwards the branch it is on", top.display())))?;
@@ -290,16 +290,15 @@ fn no_branch(top: &Path, branch: &str, ids: &[u32]) -> String {
 /// Whether every born session of the tasks has gone, waiting the while one
 /// takes to close itself once they are done; why not, if one stays: it is
 /// someone's to talk to, and its worktree is not to move under it.
-fn gone(ids: &[u32]) -> Result<(), String> {
+fn gone(project: &str, ids: &[u32]) -> Result<(), String> {
     let mux = Mux::here();
     let started = Instant::now();
     loop {
         let panes = mux.born_panes().unwrap_or_default();
-        let pane = panes.iter().find(|pane| !pane.dead && pane.tasks.iter().any(|id| ids.contains(id)));
-        let window = mux.windows().unwrap_or_default().into_iter().find(|name| agents::tasks_of(name).iter().any(|id| ids.contains(id)));
-        let running = match (pane, window) {
-            (Some(pane), _) => format!("in pane {} of window {}", pane.pane, pane.window),
-            (None, Some(window)) => format!("in window {window}"),
+        let windows = mux.windows().unwrap_or_default();
+        let running = match (agents::pane_of(project, ids, &panes), agents::window_of(project, ids, &windows, &panes)) {
+            (Some((_, pane)), _) => format!("in pane {} of window {}", pane.pane, pane.window),
+            (None, Some((_, window))) => format!("in window {window}"),
             (None, None) => return Ok(()),
         };
         if started.elapsed() >= agents::GONE_WITHIN {

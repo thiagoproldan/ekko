@@ -2210,6 +2210,52 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// Another project's session of a same-numbered task, in the one session
+/// `ekko` that every project's windows share, neither blocks `ekko agents
+/// start` of this project's task, by its window's name or by its pane; one
+/// that names this project, or none, still does (task 1731).
+#[test]
+fn agents_start_is_not_blocked_by_another_projects_same_numbered_session() {
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let state = agents.home.join("mux-state");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("session"), "").unwrap();
+    // Task 1 of project `other`, in a window named for it alone; task 2 of it
+    // on the wall's way, in a window whose name gives no task.
+    let pane = |project: &str| {
+        format!(
+            "%3\t0\t@3\t1 \u{b7} haiku\t1\tOther's task\thaiku\t\tworking\t1\t\t{project}\n%4\t0\t@4\twall\t2\tOther's task\thaiku\t\tworking\t1\t\t{project}\n"
+        )
+    };
+    let lay = |project: &str| {
+        fs::write(state.join("windows"), "1 \u{b7} haiku\nwall\n").unwrap();
+        fs::write(state.join("born-panes"), pane(project)).unwrap();
+    };
+    let refusal = |id: &str| {
+        let output = agents.json(&["agents", "start", id, "--model", "haiku", "--json"]);
+        output["error"].as_str().map(str::to_string)
+    };
+
+    // This project's own, or one that names none: refused, as before.
+    lay("app");
+    assert!(refusal("1").is_some_and(|why| why.contains("task 1 has a window already, 1 \u{b7} haiku")));
+    assert!(refusal("2").is_some_and(|why| why.contains("task 2 has a session already, in pane %4")));
+    lay("");
+    assert!(refusal("1").is_some_and(|why| why.contains("task 1 has a window already")));
+    assert!(refusal("2").is_some_and(|why| why.contains("task 2 has a session already")));
+    assert!(agents.opened().is_empty());
+
+    // Another project's: neither blocks.
+    lay("other");
+    assert_eq!(refusal("1"), None);
+    assert_eq!(refusal("2"), None);
+    assert_eq!(agents.opened().len(), 2, "{:?}", agents.opened());
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// A task done, held by a session that still runs, or in the trash is
 /// refused, each saying why, with no word to the multiplexer and no
 /// worktree made; a task that may be taken up, beside them, is started.
@@ -3013,10 +3059,23 @@ fn ekko_agents_merge_waits_for_the_session_to_close_and_takes_up_a_merge_cut_sho
     assert!(said.contains(", and theirs is task-6-7: ekko agents merge 6 7"), "{said}");
     unmoved();
 
-    // A session of task 1 stays: refused once the wait is over.
     let mux = agents.home.join("mux-state");
     fs::create_dir_all(&mux).unwrap();
     fs::write(mux.join("session"), "").unwrap();
+    // Another project's window and pane for task 1 do not delay it (task
+    // 1731): it goes on at once, to be refused further on, the checkout on
+    // no branch.
+    fs::write(mux.join("windows"), "1 \u{b7} haiku\n").unwrap();
+    fs::write(mux.join("born-panes"), "%3\t0\t@3\t1 \u{b7} haiku\t1\tOther's task\thaiku\t\tworking\t1\t\tother\n").unwrap();
+    agents.git(&app, &["checkout", "-q", "--detach"]);
+    let started = std::time::Instant::now();
+    let said = refused(agents.merging(&["agents", "merge", "1"]));
+    assert!(said.contains("is on no branch") && !said.contains("still runs"), "{said}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    agents.git(&app, &["checkout", "-q", "main"]);
+    fs::remove_file(mux.join("born-panes")).unwrap();
+    unmoved();
+    // A session of task 1 stays: refused once the wait is over.
     fs::write(mux.join("windows"), "1 \u{b7} haiku\n").unwrap();
     let started = std::time::Instant::now();
     let stays = agents.merging(&["agents", "merge", "1"]);

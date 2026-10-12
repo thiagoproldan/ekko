@@ -229,18 +229,14 @@ pub fn start(
     let environment = starting_environment().map_err(refused)?;
     let mux = Mux::new(environment.clone());
     let windows = mux.windows().map_err(refused)?;
-    for name in &windows {
-        if let Some(id) = ids.iter().find(|id| tasks_of(name).contains(id)) {
-            return Err(refused(format!("task {id} has a window already, {name} in session {SESSION}: step into it there")));
-        }
+    let born = mux.born_panes().map_err(refused)?;
+    if let Some((id, name)) = window_of(&project.name, &ids, &windows, &born) {
+        return Err(refused(format!("task {id} has a window already, {name} in session {SESSION}: step into it there")));
     }
     // A session on the wall has no window of its own (task 1677): its pane
     // says what it is for.
-    let born = mux.born_panes().map_err(refused)?;
-    for pane in born.iter().filter(|pane| !pane.dead) {
-        if let Some(id) = ids.iter().find(|id| pane.tasks.contains(id)) {
-            return Err(refused(format!("task {id} has a session already, in pane {} of window {} in session {SESSION}: step into it there", pane.pane, pane.window)));
-        }
+    if let Some((id, pane)) = pane_of(&project.name, &ids, &born) {
+        return Err(refused(format!("task {id} has a session already, in pane {} of window {} in session {SESSION}: step into it there", pane.pane, pane.window)));
     }
     let limit = ekko.storage.get_agents()?.at_once();
     let running = running_for(&project.name, &windows, &born);
@@ -364,6 +360,31 @@ fn shown(value: &str) -> String {
         Some(rest) => format!("{rest}\\;"),
         None => line,
     }
+}
+
+/// Whether the window `name` is another project's: every pane of the session
+/// that sits in a window of that name names another project. One session of
+/// the multiplexer holds every project's windows, named by display id alone
+/// (task 1731); a window whose panes name none, or this project, or that has
+/// no pane listed, stays any project's.
+fn window_is_foreign(name: &str, project: &str, born: &[BornPane]) -> bool {
+    let mut panes = born.iter().filter(|pane| pane.window == name).peekable();
+    panes.peek().is_some() && panes.all(|pane| pane.project.as_deref().is_some_and(|other| other != project))
+}
+
+/// The first of `ids`, and the window, among `windows` whose name gives
+/// that task and that is not another project's (task 1731).
+pub(crate) fn window_of<'a>(project: &str, ids: &[u32], windows: &'a [String], born: &[BornPane]) -> Option<(u32, &'a String)> {
+    windows.iter().filter(|name| !window_is_foreign(name, project, born)).find_map(|name| ids.iter().find(|id| tasks_of(name).contains(id)).map(|id| (*id, name)))
+}
+
+/// The first of `ids`, and the pane that still lives, among `born` whose
+/// tasks hold it and that is not another project's (task 1731): a pane that
+/// names no project is any project's.
+pub(crate) fn pane_of<'a>(project: &str, ids: &[u32], born: &'a [BornPane]) -> Option<(u32, &'a BornPane)> {
+    born.iter()
+        .filter(|pane| !pane.dead && pane.project.as_deref().is_none_or(|name| name == project))
+        .find_map(|pane| ids.iter().find(|id| pane.tasks.contains(id)).map(|id| (*id, pane)))
 }
 
 /// The sessions `start` opened that count toward `project`'s limit (task
@@ -2161,6 +2182,42 @@ fn log(home: &Path, session: &str, tasks: &str, what: &str) {
 mod tests {
     use super::*;
 
+    fn pane_in(window: &str, tasks: &[u32], project: Option<&str>, dead: bool) -> BornPane {
+        BornPane {
+            pane: "%1".into(),
+            dead,
+            window_id: "@1".into(),
+            window: window.into(),
+            tasks: tasks.to_vec(),
+            title: String::new(),
+            model: "haiku".into(),
+            effort: None,
+            state: "working".into(),
+            since: None,
+            waits: None,
+            project: project.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn another_projects_session_of_the_same_task_is_not_this_projects_window_or_pane() {
+        let windows = vec!["3 \u{b7} haiku".to_string(), "wall".to_string()];
+        let there = [pane_in("3 \u{b7} haiku", &[3], Some("site"), false), pane_in("wall", &[4], Some("site"), false)];
+        assert_eq!(window_of("app", &[3], &windows, &there), None, "its window names another project");
+        assert_eq!(pane_of("app", &[3, 4], &there).map(|(id, _)| id), None);
+        // This project's, or one that names none (before task 1727), or a window no pane lists.
+        for project in [Some("app"), None] {
+            let here = [pane_in("3 \u{b7} haiku", &[3], project, false), pane_in("wall", &[4], project, false)];
+            assert_eq!(window_of("app", &[3], &windows, &here).map(|(id, _)| id), Some(3));
+            assert_eq!(pane_of("app", &[4], &here).map(|(id, _)| id), Some(4));
+        }
+        assert_eq!(window_of("app", &[3], &windows, &[]).map(|(id, _)| id), Some(3));
+        // Two windows of one name, one of each project: this one's still holds it.
+        let both = [pane_in("3 \u{b7} haiku", &[3], Some("site"), false), pane_in("3 \u{b7} haiku", &[3], Some("app"), false)];
+        assert_eq!(window_of("app", &[3], &windows, &both).map(|(id, _)| id), Some(3));
+        // A dead pane holds nothing, whoever's.
+        assert_eq!(pane_of("app", &[3], &[pane_in("x", &[3], Some("app"), true)]).map(|(id, _)| id), None);
+    }
     #[test]
     fn a_window_names_its_tasks_before_its_first_dot() {
         assert_eq!(tasks_of("12 \u{b7} haiku"), vec![12]);
