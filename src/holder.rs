@@ -415,6 +415,25 @@ impl Registry {
         entries.flatten().filter_map(|entry| serde_json::from_str(&fs::read_to_string(entry.path()).ok()?).ok()).collect()
     }
 
+    /// The processes recorded that run now, read from the file names alone
+    /// -- boot, pid and start tick -- so that the records of the ones that
+    /// ended, kept for `ENDED_KEPT`, are never opened (task 1861).
+    pub fn running(&self) -> Vec<Running> {
+        let Some(boot) = boot() else { return Vec::new() };
+        let boot: String = boot.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+        let Ok(entries) = fs::read_dir(&self.dir) else { return Vec::new() };
+        let runs = |name: &str| {
+            let mut parts = name.strip_suffix(".json")?.splitn(3, '-');
+            let (recorded, pid, start) = (parts.next()?, parts.next()?.parse::<u32>().ok()?, parts.next()?.parse::<u64>().ok()?);
+            Some(recorded == boot && stat(pid).is_some_and(|(_, at)| at == start))
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.file_name().to_str().and_then(runs).unwrap_or(false))
+            .filter_map(|entry| serde_json::from_str(&fs::read_to_string(entry.path()).ok()?).ok())
+            .collect()
+    }
+
     /// Records `now`, what a process runs and where, keeping the
     /// conversations it ran before and when the one it runs began; and
     /// forgets on the way the processes that ended more than `ENDED_KEPT` ago.
@@ -602,6 +621,39 @@ mod tests {
         assert!(!Process { boot: "another boot".into(), ..me.clone() }.alive());
     }
 
+    /// `running` lists the processes that run, by the file names alone: not
+    /// one that ended, one whose pid another process took, or one of
+    /// another boot.
+    #[test]
+    fn the_registry_lists_the_running_without_opening_the_records_of_the_ended() {
+        let dir = std::env::temp_dir().join(format!("ekko-running-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let registry = Registry::at(dir.clone());
+        let me = Process::of(std::process::id()).unwrap();
+        let record = |process: &Process, conversation: &str| {
+            let now = Running {
+                pid: process.pid,
+                start: process.start,
+                boot: process.boot.clone(),
+                profile: None,
+                tty: None,
+                config_dir: None,
+                board: None,
+                transcript: None,
+                conversation: conversation.to_string(),
+                earlier: Vec::new(),
+                since: 0,
+            };
+            registry.record(now).unwrap();
+        };
+        record(&me, "mine");
+        record(&Process { start: me.start + 1, ..me.clone() }, "pid taken");
+        record(&Process { boot: "another boot".into(), ..me.clone() }, "other boot");
+        record(&Process { pid: me.pid + 100_000_000, ..me.clone() }, "ended");
+        assert_eq!(registry.all().len(), 4);
+        let running: Vec<String> = registry.running().into_iter().map(|running| running.conversation).collect();
+        assert_eq!(running, ["mine"]);
+        fs::remove_dir_all(dir).ok();
+    }
     #[test]
     fn a_holder_is_named_by_profile_and_terminal_or_as_the_user() {
         let actor = Actor {

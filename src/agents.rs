@@ -974,6 +974,17 @@ pub(crate) fn born_today(home: &Path) -> Vec<String> {
     std::fs::read_to_string(born_dir(home).join("born.log")).unwrap_or_default().lines().filter(|line| line.starts_with(&today)).map(str::to_string).collect()
 }
 
+/// Whether a Claude Code process ekko recorded is a session `ekko agents
+/// start` opened (task 1861): the tasks it was born for are in its
+/// environment, as `starting_environment` gave them, or its hook has kept a
+/// file for its conversation.
+pub(crate) fn is_born(home: &Path, running: &crate::holder::Running) -> bool {
+    let environment = std::fs::read(format!("/proc/{}/environ", running.pid)).unwrap_or_default();
+    let named = format!("{TASKS_VAR}=");
+    environment.split(|byte| *byte == 0).any(|entry| entry.starts_with(named.as_bytes()))
+        || std::iter::once(&running.conversation).chain(&running.earlier).any(|conversation| born_file(home, conversation).exists())
+}
+
 /// The value of the variable `name`, unless it is unset or empty.
 fn set(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
@@ -2137,7 +2148,7 @@ fn born_dir(home: &Path) -> PathBuf {
     crate::agent::state_dir(home).join("born")
 }
 
-fn born_file(home: &Path, session: &str) -> PathBuf {
+pub(crate) fn born_file(home: &Path, session: &str) -> PathBuf {
     let name: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
     born_dir(home).join(format!("{}.json", if name.is_empty() { "unknown" } else { &name }))
 }
@@ -2548,6 +2559,48 @@ mod tests {
         ] {
             assert_eq!(reached(command), [], "{command}");
         }
+    }
+
+    /// A Claude Code process is a born session when its environment names
+    /// the tasks it was started for, or its conversation has a born file;
+    /// the check reads a process, not the environment of this one.
+    #[test]
+    fn a_process_is_born_by_its_environment_or_by_its_conversation_s_born_file() {
+        let home = std::env::temp_dir().join(format!("ekko-is-born-{}", std::process::id()));
+        let spawn = |born: bool| {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("30").env_remove(TASKS_VAR);
+            if born {
+                command.env(TASKS_VAR, "uid-1");
+            }
+            command.spawn().unwrap()
+        };
+        let running = |child: &std::process::Child, conversation: &str| {
+            let process = Process::of(child.id()).unwrap();
+            crate::holder::Running {
+                pid: process.pid,
+                start: process.start,
+                boot: process.boot,
+                profile: None,
+                tty: None,
+                config_dir: None,
+                board: None,
+                transcript: None,
+                conversation: conversation.to_string(),
+                earlier: vec!["before".to_string()],
+                since: 0,
+            }
+        };
+        let (mut born, mut plain) = (spawn(true), spawn(false));
+        assert!(is_born(&home, &running(&born, "c-1")));
+        assert!(!is_born(&home, &running(&plain, "c-2")));
+        write_born(&home, "before", &Born::default());
+        assert!(is_born(&home, &running(&plain, "c-2")), "its hook kept a file for a conversation it ran before");
+        born.kill().ok();
+        plain.kill().ok();
+        born.wait().ok();
+        plain.wait().ok();
+        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A value a pane holds for the views reads back as given in a status

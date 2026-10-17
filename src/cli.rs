@@ -147,7 +147,7 @@ pub enum Agents {
         json: bool,
     },
     /// Show the sessions it opened, by state, and the tasks they finished
-    /// today; step into one, or peek at it.
+    /// today, in every project; step into one, or peek at it.
     #[command(disable_help_flag = true, disable_version_flag = true)]
     View {
         /// Print the screen once, with no keys read.
@@ -156,6 +156,8 @@ pub enum Agents {
         /// A project's board other than the one found from the folder.
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
+        #[arg(long, short = 'j')]
+        json: bool,
     },
     /// Put every session it opened side by side in one window, the wall.
     #[command(disable_help_flag = true, disable_version_flag = true)]

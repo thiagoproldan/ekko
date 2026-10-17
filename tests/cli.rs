@@ -3492,6 +3492,94 @@ fn agents_view_shows_the_sessions_by_state_and_what_they_finished_today() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// `ekko agents view --json` (task 1861): the sessions of every project the
+/// multiplexer lists, each read on the board of its project, with the tasks
+/// finished today wherever their uids are, and the count of the other
+/// Claude Code sessions running on the boards -- not the ones ekko agents
+/// started -- all within a status line's time.
+#[test]
+fn agents_view_json_gives_every_project_s_sessions_and_the_count_of_the_others() {
+    let agents = Agents::new();
+    let lib = agents.home.join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    assert!(agents.running(env!("CARGO_BIN_EXE_ekko"), &["init"]).current_dir(&lib).output().unwrap().status.success());
+    let in_lib = |args: &[&str]| agents.running(env!("CARGO_BIN_EXE_ekko"), args).current_dir(&lib).output().unwrap();
+    for task in ["Fix #3 in the parser", "Write the docs"] {
+        assert!(agents.ekko(&["--task", task]).status.success());
+    }
+    for task in ["Cache the index", "Ship the flag"] {
+        assert!(in_lib(&["--task", task]).status.success());
+    }
+    assert!(in_lib(&["--check", "2"]).status.success());
+    let lib_uid = {
+        let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(lib.join(".ekko/storage/storage.json")).unwrap()).unwrap();
+        board["2"]["uid"].as_str().unwrap().to_string()
+    };
+    let state = agents.home.join(".local/state/ekko");
+    fs::create_dir_all(state.join("born")).unwrap();
+    let now = chrono::Local::now();
+    fs::write(state.join("born/born.log"), format!("{} aaaaaaaa {lib_uid} closed: its Claude Code ended\n", now.format("%Y-%m-%dT%H:%M:%S%.3f"))).unwrap();
+    let mux = agents.home.join("mux-state");
+    fs::create_dir_all(&mux).unwrap();
+    fs::write(mux.join("session"), "").unwrap();
+    let since = now.timestamp();
+    let panes = [
+        format!("%1\t0\t@1\t1 \u{b7} haiku\t1\tFix the parser\thaiku\tlow\twaiting\t{since}\tClaude needs your permission\tapp"),
+        format!("%2\t0\t@2\t1 \u{b7} sonnet\t1\tCache the index\tsonnet\t\tworking\t{since}\t\tlib"),
+        "%9\t0\t@9\tzsh\t\t\t\t\t\t\t\t".to_string(),
+    ];
+    fs::write(mux.join("born-panes"), panes.join("\n") + "\n").unwrap();
+    // Three Claude Code processes the registry knows: one on each board,
+    // and one of ekko agents' own, which is none of the others.
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap().trim().to_string();
+    let children: Vec<process::Child> = (0..3)
+        .map(|n| {
+            let mut sleeping = common::command("sleep");
+            sleeping.arg("60").env_remove("EKKO_AGENT_TASK");
+            if n == 2 {
+                sleeping.env("EKKO_AGENT_TASK", "uid-1");
+            }
+            sleeping.spawn().unwrap()
+        })
+        .collect();
+    let processes = state.join("processes");
+    fs::create_dir_all(&processes).unwrap();
+    for (child, board) in children.iter().zip([agents.app.join(".ekko"), lib.join(".ekko"), agents.app.join(".ekko")]) {
+        let stat = fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
+        let start: u64 = stat[stat.rfind(')').unwrap() + 1..].split_whitespace().nth(19).unwrap().parse().unwrap();
+        let record = serde_json::json!({
+            "pid": child.id(), "start": start, "boot": boot, "board": fs::canonicalize(board).unwrap().join("storage/storage.json"),
+            "conversation": format!("c-{}", child.id()), "since": 0,
+        });
+        let name: String = boot.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+        fs::write(processes.join(format!("{name}-{}-{start}.json", child.id())), record.to_string()).unwrap();
+    }
+    let began = std::time::Instant::now();
+    let output = agents.ekko(&["agents", "view", "--json"]);
+    let took = began.elapsed();
+    let said: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)));
+    for mut child in children {
+        child.kill().ok();
+        child.wait().ok();
+    }
+    assert!(output.status.success(), "{said}");
+    assert!(took < std::time::Duration::from_secs(2), "a status line cannot wait {took:?} for this");
+    let sessions = said["sessions"].as_array().unwrap();
+    let shown: Vec<(&str, &str, &str, Option<&str>)> =
+        sessions.iter().map(|s| (s["state"].as_str().unwrap(), s["project"].as_str().unwrap(), s["title"].as_str().unwrap(), s["pane"].as_str())).collect();
+    assert_eq!(
+        shown,
+        [("waiting", "app", "Fix #3 in the parser", Some("%1")), ("working", "lib", "Cache the index", Some("%2")), ("done", "lib", "Ship the flag", None)],
+        "{said}"
+    );
+    assert_eq!((sessions[0]["model"].as_str(), sessions[0]["effort"].as_str(), sessions[0]["since"].as_i64()), (Some("haiku"), Some("low"), Some(since)));
+    assert_eq!(sessions[0]["tasks"], serde_json::json!([1]));
+    assert_eq!(sessions[1]["effort"], serde_json::Value::Null);
+    assert_eq!(said["counts"], serde_json::json!({"working": 1, "waiting": 1, "idle": 0, "done": 1}));
+    assert_eq!(said["others"], serde_json::json!({"total": 2, "byProject": {"app": 1, "lib": 1}}), "{said}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// A permission prompt answered clears the mark then, not when the tool it
 /// let run ends (task 1679): no hook fires as the user answers, so the hook
 /// starts a watcher of Claude Code's own record of the session,

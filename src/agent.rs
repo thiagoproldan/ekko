@@ -2607,7 +2607,7 @@ fn remember(state: &Path, session: &str, board: &str, cursor: i64, rechecked: Op
 /// running process -- a background session -- with that process: no session
 /// of its own, its work is the one's the conversation goes on in (tasks 862,
 /// 871).
-fn moved_out(recorded: &[crate::holder::Running]) -> Vec<(crate::holder::Process, crate::holder::Process)> {
+pub(crate) fn moved_out(recorded: &[crate::holder::Running]) -> Vec<(crate::holder::Process, crate::holder::Process)> {
     recorded
         .iter()
         .filter(|running| running.process().alive())

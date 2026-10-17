@@ -349,6 +349,13 @@ pub fn boards(home: &Path) -> Vec<(PathBuf, PathBuf)> {
     registry.projects.iter().filter(|entry| !missing(entry)).map(|entry| (entry.path.clone(), entry.path.join(EKKO_DIR_NAME))).collect()
 }
 
+/// The name of every registered project whose folder still holds its board,
+/// in registry order: the boards a view across projects reads (task 1861).
+pub fn registered(home: &Path) -> Vec<String> {
+    let Ok(registry) = read_registry(home) else { return Vec::new() };
+    registry.projects.iter().filter(|entry| !missing(entry)).map(|entry| entry.name.clone()).collect()
+}
+
 /// The projects linked to `project` (task 811), in name order: each still
 /// registered and in its folder, where a session reaches its board. None for
 /// a project without an id, a legacy one `ekko init` has not adopted.

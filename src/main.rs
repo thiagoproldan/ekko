@@ -55,7 +55,7 @@ const HELP: &str = r#"
     $ ekko agents merge <task>... [--keep] [--project <name>]
     $ ekko agents test [<command> | --none] [--project <name>]
     $ ekko agents limit [<n>] [--project <name>]
-    $ ekko agents view [--once] [--project <name>]
+    $ ekko agents view [--once] [--json] [--project <name>]
     $ ekko agents wall
     $ ekko agents unwall
 
@@ -590,13 +590,16 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
         // `ekko agents limit` (task 1727).
         cli::Agents::Limit { limit, project, json } => return run_agents_limit(&home_dir, &cwd, limit, project.as_deref(), json_first || json),
         // `ekko agents view` (task 1676).
-        cli::Agents::View { once, project } => {
+        cli::Agents::View { once, project, json } => {
             let project_env = std::env::var("EKKO_PROJECT").ok();
             let ekko_dir_env = std::env::var("EKKO_DIR").ok();
             let shown = directory::locate(&home_dir, &cwd, None, ekko_dir_env.as_deref(), project.as_deref().or(project_env.as_deref()))
                 .map_err(EkkoError::from)
-                .and_then(|location| Ekko::at(&location))
-                .and_then(|ekko| agents_view::run(&ekko, &home_dir, once));
+                .and_then(|location| {
+                    let current = location.project.as_ref().map(|project| project.name.clone());
+                    Ekko::at(&location).map(|ekko| (ekko, current))
+                })
+                .and_then(|(ekko, current)| agents_view::run(&ekko, &home_dir, current, once, json_first || json));
             return match shown {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => finish_with_error(&err, json_first, &home_dir),
