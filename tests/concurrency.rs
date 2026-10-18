@@ -272,12 +272,13 @@ fn a_lock_holder_killed_outright_does_not_wedge_later_writers() {
     holder.kill().expect("failed to kill the holder");
     holder.wait().ok();
 
-    let start = Instant::now();
+    // No bound on how long the write takes: the write fsyncs, and an fsync
+    // beside heavy disk writes took 2.5 to 4.4 s here with the lock free
+    // (task 1973), so a time bound failed for load alone. A wedge cannot
+    // pass unseen without one: a lock still held makes the writer give up
+    // after the lock timeout, exit non-zero and write nothing.
     let output = run_task_create(exe, &dir, "after the holder was killed").child.wait_with_output().expect("failed to wait on ekko");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
-    let elapsed = start.elapsed();
-
-    assert!(elapsed < Duration::from_secs(2), "a killed holder wedged the lock for {elapsed:?}");
+    assert!(output.status.success(), "a killed holder wedged the lock: {}", String::from_utf8_lossy(&output.stdout));
     assert_eq!(read_storage(&dir).len(), 2);
 
     fs::remove_dir_all(&dir).ok();
