@@ -189,6 +189,22 @@ pub enum Agents {
         #[arg(long, short = 'j')]
         json: bool,
     },
+    /// Show what every session start opens is told in its first prompt, or
+    /// set it: the user's to set, once for the project.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Brief {
+        /// The text, quoted: put in each session's first prompt.
+        #[arg(value_name = "TEXT", conflicts_with = "none")]
+        text: Option<String>,
+        /// Tell the sessions nothing of the project's own.
+        #[arg(long)]
+        none: bool,
+        /// A project's board other than the one found from the folder.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
     /// Show the sessions it opened, by state, and the tasks they finished
     /// today, in every project; step into one, or peek at it.
     #[command(disable_help_flag = true, disable_version_flag = true)]

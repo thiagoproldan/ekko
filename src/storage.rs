@@ -597,6 +597,11 @@ pub struct AgentsSettings {
     /// (task 1828).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copy: Vec<String>,
+    /// What the project tells every session `ekko agents start` opens, in its
+    /// first prompt (task 1927): the project's own text -- which code tools
+    /// it has, and to reach for them first -- none by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]

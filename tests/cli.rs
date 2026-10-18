@@ -2692,6 +2692,57 @@ fn agents_limit_default_is_taken_by_a_project_without_its_own() {
     assert_eq!(started["ok"], true, "{started}");
 }
 
+/// The project's brief (task 1927): what the user sets with `ekko agents
+/// brief` is in the first prompt of each session `start` opens, once, between
+/// how the session decides and how it ends; a project that set none, or took
+/// it back, gets the prompt without it.
+#[test]
+fn agents_brief_is_in_the_first_prompt_only_where_the_project_set_one() {
+    let agents = Agents::new();
+    for text in ["One", "Two", "Three"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let brief = "Before grep or whole files, use graff's MCP tools: def and callers take `symbol`, outline takes `file`, search takes `words`; e.g. outline file=src/main.rs.";
+    let shown = agents.json(&["agents", "brief", "--json"]);
+    assert_eq!((shown["ok"].as_bool(), shown["brief"].clone()), (Some(true), serde_json::Value::Null), "{shown}");
+    assert!(String::from_utf8(agents.ekko(&["agents", "brief"]).stdout).unwrap().starts_with("No brief is set:"));
+    let empty = agents.json(&["agents", "brief", "  ", "--json"]);
+    assert_eq!(empty["code"], "INVALID_INPUT", "{empty}");
+    assert!(!agents.home.join("app/.ekko/storage/agents.json").exists(), "an empty brief wrote");
+
+    let windows = agents.home.join("mux-state/windows");
+    let prompt_of = |agents: &Agents, n: usize| Agents::command_of(&agents.opened()[n]).last().unwrap().clone();
+
+    // None set: the prompt as it was, with no word of a brief.
+    let started = agents.json(&["agents", "start", "1", "--model", "haiku", "--json"]);
+    assert_eq!(started["ok"], true, "{started}");
+    let bare = prompt_of(&agents, 0);
+    assert!(!bare.contains("brief") && !bare.contains("graff"), "{bare}");
+
+    // Set: in the prompt of the next start, once, before how it ends.
+    let set = agents.json(&["agents", "brief", brief, "--json"]);
+    assert_eq!((set["ok"].as_bool(), set["brief"].as_str()), (Some(true), Some(brief)), "{set}");
+    assert_eq!(agents.json(&["agents", "brief", "--json"])["brief"].as_str(), Some(brief));
+    assert!(String::from_utf8(agents.ekko(&["agents", "brief"]).stdout).unwrap().contains(brief));
+    fs::write(&windows, "").unwrap();
+    let started = agents.json(&["agents", "start", "2", "--model", "haiku", "--json"]);
+    assert_eq!(started["ok"], true, "{started}");
+    let briefed = prompt_of(&agents, 1);
+    assert_eq!(briefed.matches(brief).count(), 1, "{briefed}");
+    let after = format!("for the review at merge. The project's brief for its sessions: {brief} When task 2 is done, write its closing note");
+    assert!(briefed.contains(&after), "{briefed}");
+    assert!(briefed.ends_with("answers with a note on the task, which reaches you."), "{briefed}");
+
+    // Taken back: the prompt as it was.
+    let cleared = agents.json(&["agents", "brief", "--none", "--json"]);
+    assert_eq!((cleared["ok"].as_bool(), cleared["brief"].clone()), (Some(true), serde_json::Value::Null), "{cleared}");
+    fs::write(&windows, "").unwrap();
+    let started = agents.json(&["agents", "start", "3", "--model", "haiku", "--json"]);
+    assert_eq!(started["ok"], true, "{started}");
+    let cleared = prompt_of(&agents, 2);
+    assert!(!cleared.contains("brief") && !cleared.contains("graff"), "{cleared}");
+}
+
 /// `ekko agents test --derive` (task 1902): the gate the repository
 /// declares, by the fixed rule, set and said where it came from; nothing
 /// set where nothing is declared, nor over what is set already.
@@ -4567,6 +4618,12 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     let said = limit["error"].as_str().unwrap();
     assert!(said.starts_with("The project's limit on sessions at once is not this session's to set: ekko agents started it for task 1, and how many sessions run at once is the user's to set"), "{said}");
     assert!(born.ekko(&["--json", "agents", "limit"], "").contains("\"limit\":2"), "read");
+    // What every session is told in its first prompt (task 1927): the user's too.
+    let brief = born.ekko(&["--json", "agents", "brief", "Use graff first"], "");
+    let brief: serde_json::Value = serde_json::from_str(&brief).unwrap_or_else(|_| panic!("{brief}"));
+    assert_eq!((brief["code"].as_str(), brief["notBornFor"].clone()), (Some("NOT_BORN_FOR"), serde_json::json!({"brief": true, "born": [1]})), "{brief}");
+    assert!(brief["error"].as_str().unwrap().starts_with("The project's brief for its sessions is not this session's to set: ekko agents started it for task 1,"), "{brief}");
+    assert!(born.ekko(&["--json", "agents", "brief"], "").contains("\"ok\":true"), "read");
     assert!(!agents.home.join("app/.ekko/storage/agents.json").exists());
     // The machine's default (task 1902), and the gate ekko derives: the user's too.
     assert!(born.ekko(&["--json", "agents", "limit", "5", "--default"], "").contains("NOT_BORN_FOR"));

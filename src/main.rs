@@ -58,6 +58,7 @@ const HELP: &str = r#"
     $ ekko agents limit [<n>] [--default] [--project <name>]
     $ ekko agents env [<NAME=VALUE>... | --remove <NAME>...] [--project <name>]
     $ ekko agents copy [<path>... | --remove <path>...] [--project <name>]
+    $ ekko agents brief [<text> | --none] [--project <name>]
     $ ekko agents view [--once] [--json] [--project <name>]
     $ ekko agents wall
     $ ekko agents unwall
@@ -601,6 +602,10 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
         cli::Agents::Copy { paths, remove, project, json } => {
             return run_agents_copy(&home_dir, &cwd, &paths, remove, project.as_deref(), json_first || json);
         }
+        // `ekko agents brief` (task 1927).
+        cli::Agents::Brief { text, none, project, json } => {
+            return run_agents_brief(&home_dir, &cwd, text.as_deref(), none, project.as_deref(), json_first || json);
+        }
         // `ekko agents view` (task 1676).
         cli::Agents::View { once, project, json } => {
             let project_env = std::env::var("EKKO_PROJECT").ok();
@@ -947,6 +952,38 @@ fn run_agents_copy(home_dir: &Path, cwd: &Path, given: &[String], remove: bool, 
         for path in &settings.copy {
             println!("  {path}");
         }
+    }
+    ExitCode::SUCCESS
+}
+
+/// `ekko agents brief`: what ekko agents start puts in every session's
+/// first prompt besides its own words, shown, or set as the user says (task
+/// 1927): the project's text, as which code tools it has.
+fn run_agents_brief(home_dir: &Path, cwd: &Path, text: Option<&str>, none: bool, project: Option<&str>, json_mode: bool) -> ExitCode {
+    let settings = agents_board(home_dir, cwd, project).and_then(|(location, ekko)| {
+        if location.project.is_none() {
+            return Err(EkkoError::InvalidInput("ekko agents works on a project's board, whose sessions work in worktrees of the project's repository; this is the default board".into()));
+        }
+        match (text, none) {
+            (Some(text), _) if text.trim().is_empty() => {
+                Err(EkkoError::InvalidInput("An empty brief says nothing: ekko agents brief --none tells the sessions nothing of the project's own".into()))
+            }
+            (Some(text), _) => ekko.set_agents_brief(Some(text.trim())),
+            (None, true) => ekko.set_agents_brief(None),
+            (None, false) => ekko.storage.get_agents().map_err(EkkoError::from),
+        }
+    });
+    let settings = match settings {
+        Ok(settings) => settings,
+        Err(err) => return finish_with_error(&err, json_mode, home_dir),
+    };
+    if json_mode {
+        println!("{}", serde_json::json!({"ok": true, "command": "agents brief", "brief": settings.brief}));
+        return ExitCode::SUCCESS;
+    }
+    match &settings.brief {
+        Some(brief) => println!("ekko agents start puts this in each session's first prompt, as the user set:\n{brief}"),
+        None => println!("No brief is set: each session's first prompt says nothing of the project's own. The user sets one with ekko agents brief 'TEXT'"),
     }
     ExitCode::SUCCESS
 }

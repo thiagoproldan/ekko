@@ -37,6 +37,15 @@ push is the user's.
   `ekko agents limit N --default`, else 2. Do not ask, and do not raise it
   yourself.
 
+- `ekko agents brief` shows what every session is told in its first prompt
+  besides the task. Where the project has code tools its sessions should
+  reach for first (graff, for a project it maps), see that a brief names
+  them, and set one if none is: `ekko agents brief 'TEXT'`, naming each
+  tool, the argument names it takes and one example call -- a note on a
+  task barely moves a session's use of a tool (note 2002), and models trip
+  on argument names. Where the project has none, set none: ekko depends on
+  no tool of the project's.
+
 ## The loop
 
 1. **Pick.** Take the tasks the user named -- the ARGUMENTS below, if any

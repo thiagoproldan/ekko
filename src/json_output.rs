@@ -174,6 +174,7 @@ fn error_value(error: &EkkoError) -> Value {
                 crate::ekko::AgentsSetting::Limit => json!({"limit": true, "born": born}),
                 crate::ekko::AgentsSetting::Env => json!({"env": true, "born": born}),
                 crate::ekko::AgentsSetting::Copy => json!({"copy": true, "born": born}),
+                crate::ekko::AgentsSetting::Brief => json!({"brief": true, "born": born}),
             },
         )),
         EkkoError::Watched(watched) => {

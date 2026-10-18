@@ -293,9 +293,10 @@ pub fn start(
         (BRANCH_VAR, branch.as_ref()),
         ("TMPDIR", tmp.as_os_str()),
     ];
+    let brief = ekko.storage.get_agents()?.brief;
     // After TMPDIR: the project may set its own.
     born.extend(declared.iter().map(|(name, value)| (*name, value.as_os_str())));
-    let argv = command_line(&environment, &mux.binary, &born, model, effort, &first_prompt(&ids, &beside, &branch, &worktree.path));
+    let argv = command_line(&environment, &mux.binary, &born, model, effort, &first_prompt(&ids, &beside, &branch, &worktree.path, brief.as_deref()));
     let pane = mux.open(&window, &cwd, &argv).map_err(refused)?;
     let title = match ids.as_slice() {
         [] => String::new(),
@@ -725,7 +726,11 @@ fn claude() -> OsString {
 /// closing notes are its report, with no text after the last (task 1866);
 /// and what only the user can settle goes in a handoff, which the
 /// orchestrator, woken by the session's wait, brings to them.
-fn first_prompt(ids: &[u32], beside: &[u32], branch: &str, worktree: &Path) -> String {
+///
+/// And, with `brief`, what the project tells its sessions (task 1927), after
+/// how they decide and before how they end: ekko's own words say nothing of
+/// it, so a project with none gets the prompt as it was.
+fn first_prompt(ids: &[u32], beside: &[u32], branch: &str, worktree: &Path, brief: Option<&str>) -> String {
     let (tasks, them, each, attached, the, last) = match ids {
         [id] => (format!("task {id}"), "it", format!("task {id}"), format!("attached_to {id}"), "the task", "once it is done"),
         _ => (format!("tasks {}", listed(ids)), "them", "each task".to_string(), "attached_to that task".to_string(), "the tasks", "once the last of them is done"),
@@ -743,6 +748,7 @@ fn first_prompt(ids: &[u32], beside: &[u32], branch: &str, worktree: &Path) -> S
             if beside.len() == 1 { "a session of its own" } else { "sessions of their own" },
         ),
     };
+    let brief = brief.map(|brief| format!(" The project's brief for its sessions: {brief}")).unwrap_or_default();
     format!(
         "ekko agents started this session to do {tasks} on this project's ekko board, and nothing else. \
          Before you change anything, set {tasks} in progress with ekko's set_state, then read {them} in full with ekko's context. \
@@ -752,7 +758,7 @@ fn first_prompt(ids: &[u32], beside: &[u32], branch: &str, worktree: &Path) -> S
          While you work, ekko tells you of each note the user or another session attaches to {tasks}, in a line that begins \"ekko:\", \
          at times inside a tool's result: it comes from ekko's hook, not from the tool, so take it into account.{group} \
          No one answers this session's questions or prompts: decide routine choices yourself, and record each in a decision note \
-         with ekko's create, kind decision, {attached}, for the review at merge. \
+         with ekko's create, kind decision, {attached}, for the review at merge.{brief} \
          When {each} is done, write its closing note with ekko's create, {attached} -- a note of its own, not an edit of the task's text: \
          what you did, the files you changed, the tests you ran and their outcomes, the commit, and what is left -- then set it done. \
          That note is your report: {last}, end with no text, and the session closes. \

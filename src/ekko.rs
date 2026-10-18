@@ -34,6 +34,9 @@ pub enum AgentsSetting {
     Env,
     /// The ignored paths each session's worktree is given (task 1828).
     Copy,
+    /// What every session `ekko agents start` opens is told in its first
+    /// prompt (task 1927).
+    Brief,
 }
 
 impl AgentsSetting {
@@ -44,6 +47,7 @@ impl AgentsSetting {
             AgentsSetting::Limit => "limit on sessions at once",
             AgentsSetting::Env => "environment of the sessions",
             AgentsSetting::Copy => "paths copied into the sessions' worktrees",
+            AgentsSetting::Brief => "brief for its sessions",
         }
     }
 }
@@ -402,6 +406,7 @@ impl std::fmt::Display for EkkoError {
                     AgentsSetting::Limit => "how many sessions run at once",
                     AgentsSetting::Env => "the variables a session starts with",
                     AgentsSetting::Copy => "the ignored paths copied into its worktree",
+                    AgentsSetting::Brief => "what every session is told in its first prompt",
                 },
                 match born.as_slice() {
                     [] => "its tasks".to_string(),
@@ -1411,6 +1416,12 @@ impl Ekko {
                 settings.copy.sort();
             }
         })
+    }
+
+    /// Sets what every session `ekko agents start` opens is told in its first
+    /// prompt (task 1927): `Some` a text, `None` nothing. What is set now.
+    pub fn set_agents_brief(&self, brief: Option<&str>) -> Result<crate::storage::AgentsSettings, EkkoError> {
+        self.change_agents(AgentsSetting::Brief, |settings| settings.brief = brief.map(str::to_string))
     }
 
     /// Sets the machine's default limit on sessions at once, in
