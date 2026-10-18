@@ -20,8 +20,9 @@
 //! it unwraps `nix develop -c` and its kin, and leaves out the message a call
 //! is given. The third reads a quoted or escaped operator as the shell does,
 //! as a word (task 1718). The fourth leaves a substitution the shell would
-//! not run -- single-quoted, escaped, in a comment -- as text (task 1848).
-//! `calls` keeps the Python's reading, which the corpus test holds the port
+//! not run -- single-quoted, escaped, in a comment -- as text (task 1848),
+//! and runs one in a here-document's body when bash does, its delimiter
+//! unquoted (task 1920). `calls` keeps the Python's reading, which the corpus test holds the port
 //! to.
 
 use std::collections::HashMap;
@@ -72,7 +73,10 @@ pub struct Reading {
     /// it, while one bare or in double quotes still runs (task 1848). ctx's
     /// lexer takes them out wherever they are, so `echo '$(kill 1)'` names
     /// kill. A single-quoted `bash -c` script is still read as a command of
-    /// its own, substitutions and all.
+    /// its own, substitutions and all. A here-document's delimiter is read as
+    /// bash reads the word, and the body of one left unquoted runs its
+    /// substitutions, as double quotes do (task 1920); ctx's lexer leaves
+    /// every body it cuts as text.
     pub quotes: bool,
 }
 
@@ -376,6 +380,9 @@ struct Parse {
     /// and the one after the last.
     owners: Vec<Option<(usize, Option<usize>)>>,
     spans: Vec<Option<(usize, usize)>>,
+    /// With `reading.quotes`, the substitutions of the here-documents' bodies
+    /// `cut_heredocs` just cut, for `calls_into` to read with the text's.
+    from_bodies: Vec<(usize, String, bool)>,
     reading: Reading,
 }
 
@@ -429,7 +436,9 @@ impl Parse {
     /// call around it, so it counts as shown.
     fn calls_into(&mut self, command: &str, sink: Sink) {
         let cut = self.cut_heredocs(command);
-        let (top, inner) = self.blanked(&cut);
+        let from_bodies = std::mem::take(&mut self.from_bodies);
+        let (top, mut inner) = self.blanked(&cut, false);
+        inner.extend(from_bodies);
         let start = self.found.len();
         match tokens(&top) {
             Ok(tokens) => self.simple_calls(tokens),
@@ -473,15 +482,29 @@ impl Parse {
     /// dot matching newlines, replaced by its first group, the header line.
     /// The body goes to `bodies`, and a mark after the delimiter, where the
     /// call redirecting from it finds it.
+    ///
+    /// With `reading.quotes`, the delimiter is read as bash reads a word, and
+    /// the body of one left unquoted is read as the inside of double quotes:
+    /// its `$(...)` and backticks run, each marked after the body's own mark,
+    /// so the call redirecting from the body owns them (task 1920). A
+    /// delimiter quoted anywhere -- `'EOF'`, `"EOF"`, `\EOF`, `E"OF"` --
+    /// leaves the body as text.
     fn cut_heredocs(&mut self, command: &str) -> String {
         let chars: Vec<char> = command.chars().collect();
         let mut out = String::with_capacity(command.len());
         let mut i = 0;
         while i < chars.len() {
-            match heredoc_at(&chars, i) {
+            match heredoc_at(&chars, i, self.reading.quotes) {
                 Some(found) => {
                     out.extend(&chars[i..found.delimiter_end]);
                     out.push_str(&mark('h', self.bodies.len()));
+                    if self.reading.quotes && !found.quoted {
+                        let (_, inner) = self.blanked(&found.body, true);
+                        for (number, _, _) in &inner {
+                            out.push_str(&mark('s', *number));
+                        }
+                        self.from_bodies.extend(inner);
+                    }
                     out.extend(&chars[found.delimiter_end..found.header_end]);
                     self.bodies.push((found.body, false));
                     i = found.end;
@@ -499,23 +522,25 @@ impl Parse {
     /// `` `...` `` put back as one word, marked with its number, and what
     /// each held: `(number, inside, captured)`. Quoted or not: a
     /// double-quoted "$(git stash drop)" is one word to shlex, and still runs.
-    /// With `reading.quotes`, one the shell leaves as text stays in it.
-    fn blanked(&mut self, text: &str) -> Blanked {
+    /// With `reading.quotes`, one the shell leaves as text stays in it, and
+    /// a here-document's `body` reads as the inside of double quotes, whose
+    /// own quotes are text there.
+    fn blanked(&mut self, text: &str, body: bool) -> Blanked {
         let first = self.owners.len();
-        match self.blanked_as(text, self.reading.quotes) {
+        match self.blanked_as(text, self.reading.quotes, body) {
             Some(found) => found,
             None => {
                 // Quotes left open: bash refuses the command, so read every
                 // substitution as ctx does rather than hide one.
                 self.owners.truncate(first);
                 self.spans.truncate(first);
-                self.blanked_as(text, false).unwrap_or_default()
+                self.blanked_as(text, false, false).unwrap_or_default()
             }
         }
     }
 
     /// `blanked`, minding quotes or not: `None` when they are left open.
-    fn blanked_as(&mut self, text: &str, aware: bool) -> Option<Blanked> {
+    fn blanked_as(&mut self, text: &str, aware: bool, body: bool) -> Option<Blanked> {
         let chars: Vec<char> = text.chars().collect();
         let (mut out, mut inner, mut i) = (String::with_capacity(text.len()), Vec::new(), 0);
         // Minding quotes, an escape is consumed with what it escapes.
@@ -528,6 +553,8 @@ impl Parse {
                 // How many characters from i are text, closing or opening a
                 // quote on the way.
                 let text_run = match (quote, c) {
+                    // In a body only a backslash quotes, what follows it.
+                    _ if body => usize::from(c == '\\') * 2,
                     (Some('\''), _) | (Some('$'), _) if c == '\'' => {
                         quote = None;
                         1
@@ -563,7 +590,7 @@ impl Parse {
             }
             // In double quotes, `<(` and `>(` are text: only `$(` and
             // backticks run.
-            let process = !(aware && quote.is_some());
+            let process = !(aware && (quote.is_some() || body));
             let taken = if matches!((chars[i], chars.get(i + 1)), ('$', Some('('))) && !escaped(i)
                 || matches!((chars[i], chars.get(i + 1)), ('<' | '>', Some('('))) && !escaped(i) && process
             {
@@ -794,13 +821,19 @@ struct HeredocMatch {
     /// newline that follows it.
     end: usize,
     body: String,
+    /// Whether any of the delimiter is quoted, which leaves the body as text.
+    quoted: bool,
 }
 
 /// HEREDOC's match at `start`, with the regex's backtracking: the word is
 /// tried from its longest to its shortest, since the terminator must repeat
-/// it.
-fn heredoc_at(chars: &[char], start: usize) -> Option<HeredocMatch> {
+/// it. With `shell`, the delimiter is the word bash reads there instead, its
+/// quotes removed, and a `<<<` is no here-document.
+fn heredoc_at(chars: &[char], start: usize, shell: bool) -> Option<HeredocMatch> {
     if chars.get(start) != Some(&'<') || chars.get(start + 1) != Some(&'<') {
+        return None;
+    }
+    if shell && (chars.get(start + 2) == Some(&'<') || start > 0 && chars[start - 1] == '<') {
         return None;
     }
     let mut at = start + 2;
@@ -809,6 +842,16 @@ fn heredoc_at(chars: &[char], start: usize) -> Option<HeredocMatch> {
     }
     while chars.get(at).is_some_and(|c| py_isspace(*c)) {
         at += 1;
+    }
+    if shell {
+        let (word, quoted, delimiter_end) = delimiter_at(chars, at)?;
+        return terminated(chars, &word, delimiter_end).map(|(header_end, end, body)| HeredocMatch {
+            delimiter_end,
+            header_end,
+            end,
+            body,
+            quoted,
+        });
     }
     let quote = chars.get(at).copied().filter(|c| *c == '\'' || *c == '"');
     if quote.is_some() {
@@ -827,35 +870,72 @@ fn heredoc_at(chars: &[char], start: usize) -> Option<HeredocMatch> {
             next += 1;
         }
         let delimiter_end = next;
-        while chars.get(next).is_some_and(|c| *c != '\n') {
-            next += 1;
-        }
-        if next >= chars.len() {
-            continue;
-        }
-        let (header_end, body_start) = (next, next + 1);
-        let word = &chars[word_start..word_end];
-        for body_end in body_start..chars.len() {
-            if chars[body_end] != '\n' {
-                continue;
-            }
-            let mut t = body_end + 1;
-            while chars.get(t).is_some_and(|c| *c == ' ' || *c == '\t') {
-                t += 1;
-            }
-            if chars.len() < t + word.len() || &chars[t..t + word.len()] != word {
-                continue;
-            }
-            t += word.len();
-            while chars.get(t).is_some_and(|c| *c == ' ' || *c == '\t') {
-                t += 1;
-            }
-            if t == chars.len() || chars[t] == '\n' {
-                return Some(HeredocMatch { delimiter_end, header_end, end: t, body: chars[body_start..body_end].iter().collect() });
-            }
+        if let Some((header_end, end, body)) = terminated(chars, &chars[word_start..word_end], delimiter_end) {
+            return Some(HeredocMatch { delimiter_end, header_end, end, body, quoted: quote.is_some() });
         }
     }
     None
+}
+
+/// The rest of HEREDOC's match after a delimiter `word` ending at `from`:
+/// the header line's end, the match's end, and the body, when a line of the
+/// word alone, blanks around it, follows the header.
+fn terminated(chars: &[char], word: &[char], from: usize) -> Option<(usize, usize, String)> {
+    let mut next = from;
+    while chars.get(next).is_some_and(|c| *c != '\n') {
+        next += 1;
+    }
+    if next >= chars.len() {
+        return None;
+    }
+    let (header_end, body_start) = (next, next + 1);
+    for body_end in body_start..chars.len() {
+        if chars[body_end] != '\n' {
+            continue;
+        }
+        let mut t = body_end + 1;
+        while chars.get(t).is_some_and(|c| *c == ' ' || *c == '\t') {
+            t += 1;
+        }
+        if chars.len() < t + word.len() || &chars[t..t + word.len()] != word {
+            continue;
+        }
+        t += word.len();
+        while chars.get(t).is_some_and(|c| *c == ' ' || *c == '\t') {
+            t += 1;
+        }
+        if t == chars.len() || chars[t] == '\n' {
+            return Some((header_end, t, chars[body_start..body_end].iter().collect()));
+        }
+    }
+    None
+}
+
+/// The here-document delimiter bash reads at `at`: the word, its quotes and
+/// backslashes removed, whether any of it was quoted, and where it ends.
+fn delimiter_at(chars: &[char], mut at: usize) -> Option<(Vec<char>, bool, usize)> {
+    let (mut word, mut quoted) = (Vec::new(), false);
+    while let Some(&c) = chars.get(at) {
+        match c {
+            '\\' if chars.get(at + 1).is_some_and(|next| *next != '\n') => {
+                quoted = true;
+                word.push(chars[at + 1]);
+                at += 2;
+            }
+            '\'' | '"' => {
+                let close = find(chars, c, at + 1)?;
+                quoted = true;
+                word.extend(&chars[at + 1..close]);
+                at = close + 1;
+            }
+            c if py_isspace(c) || PUNCTUATION.contains(c) => break,
+            c => {
+                word.push(c);
+                at += 1;
+            }
+        }
+    }
+    (!word.is_empty()).then_some((word, quoted, at))
 }
 
 fn find(chars: &[char], wanted: char, from: usize) -> Option<usize> {
@@ -1488,6 +1568,46 @@ mod tests {
         // Quotes left open: bash refuses the command, and every form still counts.
         assert!(runs("echo 'open $(kill 1)", true));
         assert!(runs("echo \"open `kill 1`", true));
+    }
+
+    /// With `quotes`, a substitution in a here-document's body runs when its
+    /// delimiter is unquoted, as in double quotes, and none runs when any of
+    /// the delimiter is quoted: each delimiter form with each substitution
+    /// form. The answers are bash 5's, measured with a `zap` on PATH that
+    /// recorded each run (task 1920).
+    #[test]
+    fn a_substitution_in_a_here_document_runs_where_bash_runs_it() {
+        let runs = |command: &str, quotes: bool| calls_read(command, Reading { quotes, ..Reading::default() }).iter().any(|call| call.name == "kill");
+        let delimiters = [("EOF", true), ("-EOF", true), ("'EOF'", false), ("\"EOF\"", false), ("\\EOF", false), ("-'EOF'", false), ("E\"OF\"", false), ("\"E\"OF", false)];
+        let substitutions = [
+            ("$(kill 1)", true),
+            ("`kill 1`", true),
+            ("$((0$(kill 1)))", true),
+            ("\"$(kill 1)\"", true),
+            ("'$(kill 1)'", true),
+            ("it's $(kill 1)", true),
+            ("\\$(kill 1)", false),
+            ("\\`kill 1\\`", false),
+            ("<(kill 1)", false),
+        ];
+        for (delimiter, unquoted) in delimiters {
+            for (substitution, runs_unquoted) in substitutions {
+                let command = format!("cat <<{delimiter} > f\nplain {substitution}\n\tEOF\necho done");
+                assert_eq!(runs(&command, true), unquoted && runs_unquoted, "{command}");
+            }
+        }
+        // As ctx reads it, a body cut is never read, and one its regex cannot
+        // cut is read as commands.
+        assert!(!runs("cat <<EOF > f\nplain $(kill 1)\nEOF", false));
+        assert!(runs("cat <<\\EOF > f\nplain $(kill 1)\nEOF", false));
+        // A body's substitution belongs to the call reading the body.
+        let found = calls_read("cat <<EOF > f\n$(kill 1)\nEOF\nls", Reading::GUARD);
+        let kill = found.iter().position(|call| call.name == "kill").unwrap();
+        assert_eq!((found[kill].sink, found[kill].parent), (Sink::Captured, None));
+        assert!(fed(&found, 0).iter().any(|text| text.contains("kill 1")), "{:?}", fed(&found, 0));
+        // A here-string is no here-document: what follows it runs.
+        assert!(runs("cat <<< 'x'\nkill 1\nx", true));
+        assert!(!runs("cat <<< 'x'\nkill 1\nx", false), "as ctx reads it");
     }
 
     #[test]
