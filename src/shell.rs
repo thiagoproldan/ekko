@@ -15,12 +15,14 @@
 //! there too, so a GraphQL mutation passed through `-f query="$(cat <<'EOF'`
 //! is seen, while a here-document written to a file still names nothing.
 //!
-//! The guard reads past that lexer in three ways, `Reading::GUARD`. Two the
+//! The guard reads past that lexer in four ways, `Reading::GUARD`. Two the
 //! user chose on a replay of this machine's calls (decision 1569, note 1561):
 //! it unwraps `nix develop -c` and its kin, and leaves out the message a call
 //! is given. The third reads a quoted or escaped operator as the shell does,
-//! as a word (task 1718). `calls` keeps the Python's reading, which the corpus
-//! test holds the port to.
+//! as a word (task 1718). The fourth leaves a substitution the shell would
+//! not run -- single-quoted, escaped, in a comment -- as text (task 1848).
+//! `calls` keeps the Python's reading, which the corpus test holds the port
+//! to.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -65,11 +67,18 @@ pub struct Reading {
     /// The lexer gives the same word for both, which ctx takes for the
     /// operator.
     pub literal: bool,
+    /// A `$(...)`, `<(...)`, `>(...)` or backticks inside single quotes,
+    /// `$'...'`, a comment or after a backslash is text, as the shell reads
+    /// it, while one bare or in double quotes still runs (task 1848). ctx's
+    /// lexer takes them out wherever they are, so `echo '$(kill 1)'` names
+    /// kill. A single-quoted `bash -c` script is still read as a command of
+    /// its own, substitutions and all.
+    pub quotes: bool,
 }
 
 impl Reading {
     /// The guard's: every part.
-    pub const GUARD: Reading = Reading { unwrap: true, messages: true, literal: true };
+    pub const GUARD: Reading = Reading { unwrap: true, messages: true, literal: true, quotes: true };
 }
 
 /// Where what a call prints ends up.
@@ -370,6 +379,10 @@ struct Parse {
     reading: Reading,
 }
 
+/// A text with its substitutions taken out, and what each held:
+/// `(number, inside, captured)`.
+type Blanked = (String, Vec<(usize, String, bool)>);
+
 /// What a mark in a word stands for, by its number.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mark {
@@ -486,12 +499,74 @@ impl Parse {
     /// `` `...` `` put back as one word, marked with its number, and what
     /// each held: `(number, inside, captured)`. Quoted or not: a
     /// double-quoted "$(git stash drop)" is one word to shlex, and still runs.
-    fn blanked(&mut self, text: &str) -> (String, Vec<(usize, String, bool)>) {
+    /// With `reading.quotes`, one the shell leaves as text stays in it.
+    fn blanked(&mut self, text: &str) -> Blanked {
+        let first = self.owners.len();
+        match self.blanked_as(text, self.reading.quotes) {
+            Some(found) => found,
+            None => {
+                // Quotes left open: bash refuses the command, so read every
+                // substitution as ctx does rather than hide one.
+                self.owners.truncate(first);
+                self.spans.truncate(first);
+                self.blanked_as(text, false).unwrap_or_default()
+            }
+        }
+    }
+
+    /// `blanked`, minding quotes or not: `None` when they are left open.
+    fn blanked_as(&mut self, text: &str, aware: bool) -> Option<Blanked> {
         let chars: Vec<char> = text.chars().collect();
         let (mut out, mut inner, mut i) = (String::with_capacity(text.len()), Vec::new(), 0);
-        let escaped = |i: usize| i > 0 && chars[i - 1] == '\\';
+        // Minding quotes, an escape is consumed with what it escapes.
+        let escaped = |i: usize| !aware && i > 0 && chars[i - 1] == '\\';
+        // The quote open: `'`, `"`, or `$` for `$'...'`.
+        let mut quote: Option<char> = None;
         while i < chars.len() {
-            let taken = if matches!((chars[i], chars.get(i + 1)), ('$' | '<' | '>', Some('('))) && !escaped(i) {
+            if aware {
+                let c = chars[i];
+                // How many characters from i are text, closing or opening a
+                // quote on the way.
+                let text_run = match (quote, c) {
+                    (Some('\''), _) | (Some('$'), _) if c == '\'' => {
+                        quote = None;
+                        1
+                    }
+                    (Some('\''), _) => 1,
+                    (Some(_), '\\') => 2,
+                    (Some('$'), _) => 1,
+                    (Some(_), '"') => {
+                        quote = None;
+                        1
+                    }
+                    (Some(_), _) => 0,
+                    (None, '\\') => 2,
+                    (None, '\'' | '"') => {
+                        quote = Some(c);
+                        1
+                    }
+                    (None, '$') if chars.get(i + 1) == Some(&'\'') => {
+                        quote = Some('$');
+                        2
+                    }
+                    (None, '#') if i == 0 || " \t\n;&|(".contains(chars[i - 1]) => {
+                        chars[i..].iter().position(|&c| c == '\n').unwrap_or(chars.len() - i)
+                    }
+                    (None, _) => 0,
+                };
+                if text_run > 0 {
+                    let end = (i + text_run).min(chars.len());
+                    out.extend(&chars[i..end]);
+                    i = end;
+                    continue;
+                }
+            }
+            // In double quotes, `<(` and `>(` are text: only `$(` and
+            // backticks run.
+            let process = !(aware && quote.is_some());
+            let taken = if matches!((chars[i], chars.get(i + 1)), ('$', Some('('))) && !escaped(i)
+                || matches!((chars[i], chars.get(i + 1)), ('<' | '>', Some('('))) && !escaped(i) && process
+            {
                 let (mut depth, mut end) = (0i64, i + 2);
                 while end < chars.len() && depth >= 0 {
                     depth += match chars[end] {
@@ -509,6 +584,9 @@ impl Parse {
                     end = find(&chars, '`', at + 1);
                 }
                 let Some(end) = end else {
+                    if aware {
+                        return None;
+                    }
                     out.extend(&chars[i..]);
                     break;
                 };
@@ -532,7 +610,10 @@ impl Parse {
                 }
             }
         }
-        (out, inner)
+        if quote.is_some() {
+            return None;
+        }
+        Some((out, inner))
     }
 
     /// The calls of the words, as shell_calls.simple_calls finds them.
@@ -1347,6 +1428,66 @@ mod tests {
         assert_eq!(read("git status && git push", true), vec![pair("git", &["status"]), pair("git", &["push"])]);
         assert_eq!(read("echo a > out", true), vec![pair("echo", &["a"])]);
         assert_eq!(read("tmux new-window \\; kill-pane", false), vec![pair("tmux", &["new-window"]), pair("kill-pane", &[])]);
+    }
+
+    /// With `quotes`, a substitution runs where bash runs it, and is text
+    /// where bash prints it: each substitution form in each quote context.
+    /// The answers are bash 5's, measured with a `zap` on PATH that
+    /// recorded each run (task 1848). Without `quotes`, ctx's reading, every
+    /// form runs wherever it is.
+    #[test]
+    fn a_substitution_runs_where_bash_runs_it_with_quotes() {
+        let runs = |command: &str, quotes: bool| calls_read(command, Reading { quotes, ..Reading::default() }).iter().any(|call| call.name == "kill");
+        let cases = [
+            // none
+            ("echo $(kill 1)", true),
+            ("echo `kill 1`", true),
+            ("cat <(kill 1)", true),
+            // single
+            ("echo '$(kill 1)'", false),
+            ("echo '`kill 1`'", false),
+            ("echo '<(kill 1)'", false),
+            // double: a process substitution is text there
+            ("echo \"$(kill 1)\"", true),
+            ("echo \"`kill 1`\"", true),
+            ("echo \"<(kill 1)\"", false),
+            // escaped
+            ("echo \\$\\(kill 1\\)", false),
+            ("echo \\`kill 1\\`", false),
+            ("echo \\<\\(kill 1\\)", false),
+            ("echo \"\\$(kill 1)\"", false),
+            ("echo \"\\`kill 1\\`\"", false),
+            // a bash -c script, single-quoted, is a command of its own
+            ("bash -c 'echo $(kill 1)'", true),
+            ("bash -c 'echo `kill 1`'", true),
+            ("bash -c 'cat <(kill 1)'", true),
+            // ANSI-C quotes
+            ("echo $'$(kill 1)'", false),
+            ("echo $'`kill 1`'", false),
+            ("echo $'<(kill 1)'", false),
+            ("echo $'it\\'s $(kill 1)'", false),
+            // a quote that opens none
+            ("echo it\\'s $(kill 1)", true),
+            ("echo \"it's $(kill 1)\"", true),
+            ("echo \"a \\\" $(kill 1)\"", true),
+            ("echo 'a' \"$(kill 1)\" 'b'", true),
+            ("echo \\\\$(kill 1)", true),
+            // a comment
+            ("echo hi # it's $(kill 1)", false),
+            ("echo hi # note\necho $(kill 1)", true),
+            // the case the task was found on
+            ("sed -i '16s#upstream `kill(-1, 0)` asked#x#' docs/PORTING.md", false),
+        ];
+        for (command, bash) in cases {
+            assert_eq!(runs(command, true), bash, "{command}");
+            assert!(!bash || runs(command, false), "as ctx reads it: {command}");
+        }
+        for command in ["echo '$(kill 1)'", "echo '`kill 1`'", "echo '<(kill 1)'", "echo $'$(kill 1)'", "echo hi # it's $(kill 1)"] {
+            assert!(runs(command, false), "as ctx reads it: {command}");
+        }
+        // Quotes left open: bash refuses the command, and every form still counts.
+        assert!(runs("echo 'open $(kill 1)", true));
+        assert!(runs("echo \"open `kill 1`", true));
     }
 
     #[test]

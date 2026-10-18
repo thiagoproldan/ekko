@@ -2553,6 +2553,8 @@ mod tests {
             "killall claude",
             "killall",
             "skill -9 claude",
+            "echo \"`kill 1`\"",
+            "echo \"$(kill 1)\"",
         ] {
             assert_eq!(reached(command), [Limit::Signal], "{command}");
         }
@@ -2568,6 +2570,10 @@ mod tests {
             "pgrep -f claude",
             "echo kill 4242",
             "git commit -m 'kill 4242'",
+            // Single-quoted, a substitution is text (task 1848).
+            "echo '`kill 1`'",
+            "echo '$(kill 1)'",
+            "sed -i '16s#upstream `kill(-1, 0)` asked#x#' docs/PORTING.md",
         ] {
             assert_eq!(reached(command), [], "{command}");
         }
