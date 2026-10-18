@@ -587,6 +587,16 @@ pub struct AgentsSettings {
     /// `agents::LIMIT` when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Variables set in each session's environment (task 1828), by name; a
+    /// value's `{dir}` stands for the session's folder under ekko's state
+    /// directory, which survives a reboot.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Paths under the repository's top, git-ignored inputs that exist only
+    /// in the project's checkout, copied into each session's worktree
+    /// (task 1828).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy: Vec<String>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]

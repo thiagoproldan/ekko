@@ -56,6 +56,8 @@ const HELP: &str = r#"
     $ ekko agents merge <task>... [--keep] [--project <name>]
     $ ekko agents test [<command> | --none | --derive] [--project <name>]
     $ ekko agents limit [<n>] [--default] [--project <name>]
+    $ ekko agents env [<NAME=VALUE>... | --remove <NAME>...] [--project <name>]
+    $ ekko agents copy [<path>... | --remove <path>...] [--project <name>]
     $ ekko agents view [--once] [--json] [--project <name>]
     $ ekko agents wall
     $ ekko agents unwall
@@ -592,6 +594,13 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
         cli::Agents::Limit { limit, default, project, json } => {
             return run_agents_limit(&home_dir, &cwd, limit, default, project.as_deref(), json_first || json);
         }
+        // `ekko agents env` and `ekko agents copy` (task 1828).
+        cli::Agents::Env { settings, remove, project, json } => {
+            return run_agents_env(&home_dir, &cwd, &settings, remove, project.as_deref(), json_first || json);
+        }
+        cli::Agents::Copy { paths, remove, project, json } => {
+            return run_agents_copy(&home_dir, &cwd, &paths, remove, project.as_deref(), json_first || json);
+        }
         // `ekko agents view` (task 1676).
         cli::Agents::View { once, project, json } => {
             let project_env = std::env::var("EKKO_PROJECT").ok();
@@ -867,6 +876,77 @@ fn run_agents_limit(home_dir: &Path, cwd: &Path, limit: Option<u32>, default: bo
         "project" => println!("ekko agents start runs at most {at_once} {sessions} at once for this project, as the user set"),
         "default" => println!("ekko agents start runs at most {at_once} {sessions} at once for this project, the machine's default, until the user sets another limit with ekko agents limit N"),
         _ => println!("ekko agents start runs at most {at_once} {sessions} at once for this project, until the user sets another limit with ekko agents limit N"),
+    }
+    ExitCode::SUCCESS
+}
+
+/// `ekko agents env`: the variables each session `ekko agents start` opens
+/// starts with, beside its TMPDIR, shown, or set as the user says (task
+/// 1828).
+fn run_agents_env(home_dir: &Path, cwd: &Path, given: &[String], remove: bool, project: Option<&str>, json_mode: bool) -> ExitCode {
+    let settings = agents_board(home_dir, cwd, project).and_then(|(location, ekko)| {
+        if location.project.is_none() {
+            return Err(EkkoError::InvalidInput("ekko agents works on a project's board, whose sessions work in worktrees of the project's repository; this is the default board".into()));
+        }
+        let mut settings = ekko.storage.get_agents()?;
+        for text in given {
+            settings = match (remove, text.split_once('=')) {
+                (true, None) => ekko.set_agents_env(text, None)?,
+                (false, Some((name, value))) => ekko.set_agents_env(name, Some(value))?,
+                (true, Some(_)) => return Err(EkkoError::InvalidInput(format!("`{text}` names a value, and --remove takes names alone: ekko agents env --remove NAME"))),
+                (false, None) => return Err(EkkoError::InvalidInput(format!("`{text}` is no NAME=VALUE: ekko agents env NAME=VALUE sets it, ekko agents env --remove NAME takes it away"))),
+            };
+        }
+        Ok(settings)
+    });
+    let settings = match settings {
+        Ok(settings) => settings,
+        Err(err) => return finish_with_error(&err, json_mode, home_dir),
+    };
+    if json_mode {
+        println!("{}", serde_json::json!({"ok": true, "command": "agents env", "env": settings.env}));
+        return ExitCode::SUCCESS;
+    }
+    if settings.env.is_empty() {
+        println!("No variable is set for the sessions of this project beyond their TMPDIR: the user sets one with ekko agents env NAME=VALUE, where {{dir}} is the session's own folder");
+    } else {
+        println!("ekko agents start sets in each session's environment, after its TMPDIR, the user's:");
+        for (name, value) in &settings.env {
+            println!("  {name}={value}");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// `ekko agents copy`: the paths of the project's checkout `ekko agents
+/// start` copies into each session's worktree, shown, or set as the user
+/// says (task 1828).
+fn run_agents_copy(home_dir: &Path, cwd: &Path, given: &[String], remove: bool, project: Option<&str>, json_mode: bool) -> ExitCode {
+    let settings = agents_board(home_dir, cwd, project).and_then(|(location, ekko)| {
+        if location.project.is_none() {
+            return Err(EkkoError::InvalidInput("ekko agents works on a project's board, whose sessions work in worktrees of the project's repository; this is the default board".into()));
+        }
+        let mut settings = ekko.storage.get_agents()?;
+        for path in given {
+            settings = ekko.set_agents_copy(path, !remove)?;
+        }
+        Ok(settings)
+    });
+    let settings = match settings {
+        Ok(settings) => settings,
+        Err(err) => return finish_with_error(&err, json_mode, home_dir),
+    };
+    if json_mode {
+        println!("{}", serde_json::json!({"ok": true, "command": "agents copy", "copy": settings.copy}));
+        return ExitCode::SUCCESS;
+    }
+    if settings.copy.is_empty() {
+        println!("No path is copied into the worktrees of this project's sessions: the user adds one with ekko agents copy PATH, relative to the repository's top");
+    } else {
+        println!("ekko agents start copies into each session's worktree, where the worktree lacks it, from the project's checkout, the user's:");
+        for path in &settings.copy {
+            println!("  {path}");
+        }
     }
     ExitCode::SUCCESS
 }

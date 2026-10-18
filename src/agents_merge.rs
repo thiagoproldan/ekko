@@ -419,8 +419,17 @@ fn run_test(home: &Path, folder: &Path, project: &str, branch: &str, test: &str)
     let log = dir.join(format!("{name}.log"));
     let out = std::fs::File::create(&log).map_err(|error| format!("{} could not be written: {error}", log.display()))?;
     let err = out.try_clone().map_err(|error| format!("{} could not be written: {error}", log.display()))?;
+    // CI has no Claude Code session around its tests (task 1942): they run
+    // without what a born session's window is started without (task 1803).
+    // Where the session's own environment cannot be read, the variables named
+    // outright still go.
+    let environment = agents::starting_environment().unwrap_or_else(|_| std::env::vars_os().collect());
     let started = Instant::now();
-    let status = Command::new("sh")
+    let mut command = Command::new("sh");
+    for name in agents::session_variables(&environment) {
+        command.env_remove(name);
+    }
+    let status = command
         .args([OsStr::new("-c"), OsStr::new(test)])
         .current_dir(folder)
         .stdin(Stdio::null())

@@ -30,6 +30,10 @@ pub enum AgentsSetting {
     Test,
     /// How many sessions `ekko agents start` runs at once (task 1727).
     Limit,
+    /// The variables each session starts with (task 1828).
+    Env,
+    /// The ignored paths each session's worktree is given (task 1828).
+    Copy,
 }
 
 impl AgentsSetting {
@@ -38,6 +42,8 @@ impl AgentsSetting {
         match self {
             AgentsSetting::Test => "test command",
             AgentsSetting::Limit => "limit on sessions at once",
+            AgentsSetting::Env => "environment of the sessions",
+            AgentsSetting::Copy => "paths copied into the sessions' worktrees",
         }
     }
 }
@@ -394,6 +400,8 @@ impl std::fmt::Display for EkkoError {
                 match setting {
                     AgentsSetting::Test => "the test its branch passes before it goes in",
                     AgentsSetting::Limit => "how many sessions run at once",
+                    AgentsSetting::Env => "the variables a session starts with",
+                    AgentsSetting::Copy => "the ignored paths copied into its worktree",
                 },
                 match born.as_slice() {
                     [] => "its tasks".to_string(),
@@ -1364,6 +1372,45 @@ impl Ekko {
     /// project (task 1727). What is set now.
     pub fn set_agents_limit(&self, limit: u32) -> Result<crate::storage::AgentsSettings, EkkoError> {
         self.change_agents(AgentsSetting::Limit, |settings| settings.limit = Some(limit))
+    }
+
+    /// Sets, or with `None` takes away, the variable `name` each session
+    /// starts with (task 1828). The name is one a shell takes and none of
+    /// ekko's or Claude Code's own, which a session's start sets itself.
+    /// What is set now.
+    pub fn set_agents_env(&self, name: &str, value: Option<&str>) -> Result<crate::storage::AgentsSettings, EkkoError> {
+        let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return Err(EkkoError::InvalidInput(format!("`{name}` is no name of an environment variable: letters, digits and _, not starting with a digit")));
+        }
+        if name.starts_with("EKKO_") || name.starts_with("CLAUDE") || crate::agents::TERMINAL_ADDRESSES.contains(&name) {
+            return Err(EkkoError::InvalidInput(format!(
+                "{name} is one ekko or Claude Code sets for a session itself (EKKO_*, CLAUDE*, the user's terminal tab): a session would not keep what is set here"
+            )));
+        }
+        self.change_agents(AgentsSetting::Env, |settings| match value {
+            Some(value) => {
+                settings.env.insert(name.to_string(), value.to_string());
+            }
+            None => {
+                settings.env.remove(name);
+            }
+        })
+    }
+
+    /// Adds `path`, or with `add` false takes it away, from the paths copied
+    /// from the project's checkout into each session's worktree (task
+    /// 1828). A path is relative to the repository's top and stays under it.
+    /// What is set now.
+    pub fn set_agents_copy(&self, path: &str, add: bool) -> Result<crate::storage::AgentsSettings, EkkoError> {
+        let wanted = crate::agents::copy_path(path).map_err(EkkoError::InvalidInput)?;
+        self.change_agents(AgentsSetting::Copy, |settings| {
+            settings.copy.retain(|set| *set != wanted);
+            if add {
+                settings.copy.push(wanted.clone());
+                settings.copy.sort();
+            }
+        })
     }
 
     /// Sets the machine's default limit on sessions at once, in

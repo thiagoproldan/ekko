@@ -277,12 +277,24 @@ pub fn start(
     let window = format!("{} \u{b7} {model}", joined(&ids, ","));
     let uids: Vec<String> = ids.iter().map(|id| all[id].uid.clone().unwrap_or_else(|| id.to_string())).collect();
     let uids = uids.join(",");
-    let born: [(&str, &OsStr); 4] = [
+    // Its own folder for what it keeps, which a reboot does not empty, and the
+    // ignored inputs the project names (task 1828).
+    let folder = session_folder(home, &project.name, &branch);
+    let tmp = folder.join("tmp");
+    std::fs::create_dir_all(&tmp).map_err(|error| refused(format!("{} could not be made: {error}", tmp.display())))?;
+    let settings = ekko.storage.get_agents()?;
+    copy_ignored(&settings.copy, &worktree.top, &worktree.path).map_err(refused)?;
+    let declared: Vec<(&str, OsString)> =
+        settings.env.iter().map(|(name, value)| (name.as_str(), OsString::from(value.replace("{dir}", &folder.to_string_lossy())))).collect();
+    let mut born: Vec<(&str, &OsStr)> = vec![
         (TASKS_VAR, uids.as_ref()),
         ("EKKO_PROJECT", project.name.as_ref()),
         (WORKTREE_VAR, worktree.path.as_os_str()),
         (BRANCH_VAR, branch.as_ref()),
+        ("TMPDIR", tmp.as_os_str()),
     ];
+    // After TMPDIR: the project may set its own.
+    born.extend(declared.iter().map(|(name, value)| (*name, value.as_os_str())));
     let argv = command_line(&environment, &mux.binary, &born, model, effort, &first_prompt(&ids, &beside, &branch, &worktree.path));
     let pane = mux.open(&window, &cwd, &argv).map_err(refused)?;
     let title = match ids.as_slice() {
@@ -509,7 +521,7 @@ fn refusal(task: &Item, all: &ItemMap) -> Result<(), String> {
 /// command to it (CLAUDECODE, CLAUDE_CODE_SESSION_ID, CLAUDE_PID and more,
 /// which a version may add to) and has a Claude Code started there refuse to
 /// run, nested in another. This command's own otherwise: a person's.
-fn starting_environment() -> Result<Vec<(OsString, OsString)>, String> {
+pub(crate) fn starting_environment() -> Result<Vec<(OsString, OsString)>, String> {
     if std::env::var_os("CLAUDECODE").is_none() {
         return Ok(std::env::vars_os().collect());
     }
@@ -531,16 +543,57 @@ fn starting_environment() -> Result<Vec<(OsString, OsString)>, String> {
     Ok(environment)
 }
 
+/// The variables of a terminal's tab or window that name where the user is
+/// typing (task 1803): ctx types `/clear` into "the session's Konsole tab"
+/// through KONSOLE_DBUS_*, and the others are the same kind of address in
+/// the terminals ekko knows. A born session lives in a multiplexer pane, not
+/// in the user's tab, and a test the gate runs has no tab at all.
+pub(crate) const TERMINAL_ADDRESSES: &[&str] = &[
+    "KONSOLE_DBUS_SERVICE",
+    "KONSOLE_DBUS_SESSION",
+    "KONSOLE_DBUS_WINDOW",
+    "KITTY_WINDOW_ID",
+    "KITTY_LISTEN_ON",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "ITERM_SESSION_ID",
+    "TERM_SESSION_ID",
+    "WT_SESSION",
+    "WINDOWID",
+];
+
+/// The variables a command started from this process must not inherit: one
+/// list for a born session's window (task 1803) and for the test that gates
+/// a merge (task 1942). Every variable this process has that `environment`
+/// -- what the launcher gave the Claude Code session, as
+/// `starting_environment` reads it -- has not, which are those Claude Code
+/// adds to each command it runs; CLAUDECODE, whatever a version adds; the
+/// Claude Code profile, where the launcher named none; and the addresses of
+/// the user's terminal tab, which the launcher did give.
+pub(crate) fn session_variables(environment: &[(OsString, OsString)]) -> Vec<OsString> {
+    let started: HashSet<&OsStr> = environment.iter().map(|(name, _)| name.as_os_str()).collect();
+    let mut unset: Vec<OsString> = std::env::vars_os().map(|(name, _)| name).filter(|name| !started.contains(name.as_os_str())).collect();
+    unset.push("CLAUDECODE".into());
+    if !started.contains(OsStr::new("CLAUDE_CONFIG_DIR")) {
+        unset.push("CLAUDE_CONFIG_DIR".into());
+    }
+    unset.extend(TERMINAL_ADDRESSES.iter().map(OsString::from));
+    unset.sort();
+    unset.dedup();
+    unset
+}
+
 /// What a born session's window runs: Claude Code through env(1), which
-/// unsets CLAUDECODE and every other variable this command has and
-/// `environment` has not -- a multiplexer's server started by a session's
-/// command holds them all -- sets the Claude Code profile `environment`
-/// names, CLAUDE_CONFIG_DIR, or unsets it for the default one, and sets
-/// `born` -- the tasks, the project, the worktree and its branch -- and the
-/// multiplexer's binary, for the hooks that guard the session and close its
-/// window. The rest is the multiplexer's, as in any window the user opens
-/// there: no value but these goes on a command line, which any process on
-/// the machine may read.
+/// unsets `session_variables` -- CLAUDECODE, every other variable this
+/// command has and `environment` has not (a multiplexer's server started by
+/// a session's command holds them all), the user's terminal tab -- sets the
+/// Claude Code profile `environment` names, CLAUDE_CONFIG_DIR, or unsets it
+/// for the default one, and sets `born` -- the tasks, the project, the
+/// worktree and its branch, the session's TMPDIR and what the project
+/// declares (task 1828) -- and the multiplexer's binary, for the hooks that
+/// guard the session and close its window. The rest is the multiplexer's, as
+/// in any window the user opens there: no value but these goes on a command
+/// line, which any process on the machine may read.
 fn command_line(
     environment: &[(OsString, OsString)],
     mux: &OsStr,
@@ -549,15 +602,8 @@ fn command_line(
     effort: Option<&str>,
     prompt: &str,
 ) -> Vec<OsString> {
-    let started: HashSet<&OsStr> = environment.iter().map(|(name, _)| name.as_os_str()).collect();
-    let mut unset: Vec<OsString> = std::env::vars_os().map(|(name, _)| name).filter(|name| !started.contains(name.as_os_str())).collect();
-    unset.push("CLAUDECODE".into());
+    let unset = session_variables(environment);
     let profile = environment.iter().find(|(name, _)| name == "CLAUDE_CONFIG_DIR").map(|(_, dir)| dir);
-    if profile.is_none() {
-        unset.push("CLAUDE_CONFIG_DIR".into());
-    }
-    unset.sort();
-    unset.dedup();
     // env(1) reads its options up to the first assignment: every -u first.
     let mut argv: Vec<OsString> = vec!["env".into()];
     for name in unset {
@@ -589,6 +635,62 @@ fn command_line(
     }
     argv.push(prompt.into());
     argv
+}
+
+/// The folder of a born session's own, under ekko's state directory, which
+/// a reboot does not empty as it does /tmp (task 1828): the session's
+/// TMPDIR is its `tmp`, and `{dir}` in a variable the project declares is the
+/// folder itself.
+pub(crate) fn session_folder(home: &Path, project: &str, branch: &str) -> PathBuf {
+    let clean = |text: &str| -> String {
+        let clean: String = text.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_') { c } else { '_' }).collect();
+        if clean.chars().all(|c| c == '.') { "_".to_string() } else { clean }
+    };
+    crate::agent::state_dir(home).join("agents").join(clean(project)).join(clean(branch))
+}
+
+/// `path` as a copied path is kept (task 1828): relative to the repository's
+/// top, under it, and not git's own folder.
+pub(crate) fn copy_path(path: &str) -> Result<String, String> {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+    if path.starts_with('/') || parts.is_empty() || parts.iter().any(|part| *part == ".." || *part == ".git") {
+        return Err(format!("`{path}` is no path under the repository's top: write it relative to the top, as `evals/private`, without .. or .git"));
+    }
+    Ok(parts.join("/"))
+}
+
+/// Copies each of `paths` from the repository's top `from` into the worktree
+/// `to`, where it is not already: what git ignores exists only in the
+/// checkout, and a worktree is made without it (task 1828). A path the
+/// checkout does not have is skipped.
+fn copy_ignored(paths: &[String], from: &Path, to: &Path) -> Result<(), String> {
+    for path in paths {
+        let (source, target) = (from.join(path), to.join(path));
+        if std::fs::symlink_metadata(&source).is_err() || std::fs::symlink_metadata(&target).is_ok() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| format!("{} could not be made: {error}", parent.display()))?;
+        }
+        copy_tree(&source, &target).map_err(|error| format!("{path} could not be copied from {} into {}: {error}", from.display(), to.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_tree(source: &Path, target: &Path) -> std::io::Result<()> {
+    let kind = std::fs::symlink_metadata(source)?.file_type();
+    if kind.is_symlink() {
+        std::os::unix::fs::symlink(std::fs::read_link(source)?, target)
+    } else if kind.is_dir() {
+        std::fs::create_dir(target)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &target.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(source, target).map(|_| ())
+    }
 }
 
 /// The tools a born session runs without (task 1868): AskUserQuestion,

@@ -123,6 +123,9 @@ fn every_variable_ekko_reads_is_one_the_tests_keep_set_or_let_through() {
         // The environment a born session starts with, passed on whole.
         "agents.rs: env::vars_os()",
         "agents.rs: env::vars_os()",
+        // The environment the test that gates a merge starts from, where the
+        // session's own cannot be read (task 1942).
+        "agents_merge.rs: env::vars_os()",
         // EKKO_DIR and EKKO_PROJECT, passed on to the menu.
         "menu.rs: env::var(name)",
         // A command's own $VARIABLES, which place it.
@@ -1985,7 +1988,7 @@ impl Agents {
         let claude = dir.join("claude");
         write_executable(
             &claude,
-            "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\nexport CLAUDECODE=1\nn=0\nwhile :; do\n  n=$((n + 1))\n  while [ ! -e \"$dir/$n.go\" ]; do sleep 0.02; done\n  sh \"$dir/$n.go\" < \"$dir/$n.in\" > \"$dir/$n.out\" 2> \"$dir/$n.err\"\n  touch \"$dir/$n.done\"\ndone\n",
+            "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\nexport CLAUDECODE=1 EKKO_TEST_ADDED_BY_CLAUDE_CODE=1\nn=0\nwhile :; do\n  n=$((n + 1))\n  while [ ! -e \"$dir/$n.go\" ]; do sleep 0.02; done\n  sh \"$dir/$n.go\" < \"$dir/$n.in\" > \"$dir/$n.out\" 2> \"$dir/$n.err\"\n  touch \"$dir/$n.done\"\ndone\n",
         );
         let mut command = self.running(&claude, &[]);
         command
@@ -2234,6 +2237,140 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert!(refused["error"].as_str().unwrap().contains("task 3 has a window already, 2,3 \u{b7} sonnet"), "{refused}");
     assert_eq!(agents.opened().len(), 2);
     assert!(!agents.worktree("task-3").exists());
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A born session lives in a multiplexer pane, not in the user's terminal
+/// tab, so its window is started without the tab's address (task 1803):
+/// ctx types into "the session's Konsole tab" through KONSOLE_DBUS_*. What
+/// else the launcher gave it stays.
+#[test]
+fn agents_start_leaves_the_users_terminal_tab_out_of_the_sessions_environment() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    let tab = [
+        ("KONSOLE_DBUS_SERVICE", ":1.17312"),
+        ("KONSOLE_DBUS_SESSION", "/Sessions/3"),
+        ("KONSOLE_DBUS_WINDOW", "/Windows/1"),
+        ("KITTY_WINDOW_ID", "4"),
+        ("WEZTERM_PANE", "2"),
+        ("WINDOWID", "77"),
+    ];
+    // A stand-in Claude Code that records the environment it was started with.
+    let dump = agents.home.join("dump-env.sh");
+    write_executable(&dump, "#!/bin/sh\nenv > \"$(dirname \"$0\")/dumped\"\n");
+    let mut start = agents.command(&["agents", "start", "1", "--model", "haiku", "--json"]);
+    start.env("EKKO_CLAUDE", &dump).env("KEEP_THIS", "yes");
+    for (name, value) in tab {
+        start.env(name, value);
+    }
+    let output = start.output().unwrap();
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let command = Agents::command_of(&agents.opened()[0]);
+    for (name, _) in tab {
+        assert!(unsets(&command, name), "{name}: {command:?}");
+    }
+    assert!(!unsets(&command, "KEEP_THIS"), "{command:?}");
+
+    // Run as the window runs it, from the environment ekko had: the dump
+    // holds none of the tab. The control: the stand-in run without env(1)
+    // holds them all, so the dump can say yes.
+    let run = |argv: &[String]| -> String {
+        let mut run = common::command(&argv[0]);
+        run.args(&argv[1..]).env_clear().env("PATH", std::env::var_os("PATH").unwrap()).env("KEEP_THIS", "yes");
+        for (name, value) in tab {
+            run.env(name, value);
+        }
+        assert!(run.status().unwrap().success());
+        fs::read_to_string(agents.home.join("dumped")).unwrap()
+    };
+    let bare = run(&[dump.to_str().unwrap().to_string()]);
+    for (name, value) in tab {
+        assert!(bare.lines().any(|line| line == format!("{name}={value}")), "the control lost {name}: {bare}");
+    }
+    let dumped = run(&command);
+    for (name, _) in tab {
+        assert!(!dumped.lines().any(|line| line.starts_with(&format!("{name}="))), "{name} reached the session: {dumped}");
+    }
+    assert!(dumped.lines().any(|line| line == "KEEP_THIS=yes"), "{dumped}");
+    assert!(dumped.lines().any(|line| line == "EKKO_AGENT_BRANCH=task-1"), "{dumped}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A worktree isolates what git tracks, not the runtime (task 1828): each
+/// session gets a TMPDIR of its own in a folder a reboot does not empty,
+/// the variables the project declares -- `{dir}` the session's folder --
+/// and the ignored paths it names copied from the checkout. All the user's
+/// to set; a session started for tasks is refused them.
+#[test]
+fn agents_start_gives_each_session_a_tmpdir_the_projects_variables_and_its_ignored_files() {
+    let agents = Agents::new();
+    let app = fs::canonicalize(&agents.app).unwrap();
+    fs::write(app.join(".gitignore"), "private/\n.env.local\n").unwrap();
+    agents.git(&app, &["add", ".gitignore"]);
+    agents.git(&app, &["commit", "-q", "-m", "ignore"]);
+    fs::create_dir_all(app.join("private/deep")).unwrap();
+    fs::write(app.join("private/deep/data.txt"), "only in the checkout\n").unwrap();
+    fs::write(app.join(".env.local"), "TOKEN=1\n").unwrap();
+    for text in ["Write hello", "Write the docs"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+
+    let nothing = String::from_utf8(agents.ekko(&["agents", "env"]).stdout).unwrap();
+    assert!(nothing.starts_with("No variable is set for the sessions of this project beyond their TMPDIR"), "{nothing}");
+    let nothing = String::from_utf8(agents.ekko(&["agents", "copy"]).stdout).unwrap();
+    assert!(nothing.starts_with("No path is copied into the worktrees"), "{nothing}");
+    let set = agents.json(&["--json", "agents", "env", "CACHE={dir}/cache", "FLAG=a=b"]);
+    assert_eq!(set["env"], serde_json::json!({"CACHE": "{dir}/cache", "FLAG": "a=b"}), "{set}");
+    let set = agents.json(&["--json", "agents", "copy", "private", "./.env.local", "missing"]);
+    assert_eq!(set["copy"], serde_json::json!([".env.local", "missing", "private"]), "{set}");
+
+    // What is refused is refused whole: a name of the session's own, one no
+    // shell takes, a value where a name is wanted, a path outside the top.
+    for (args, why) in [
+        (&["agents", "env", "EKKO_AGENT_TASK=x"][..], "one ekko or Claude Code sets for a session itself"),
+        (&["agents", "env", "CLAUDECODE=1"], "one ekko or Claude Code sets for a session itself"),
+        (&["agents", "env", "KONSOLE_DBUS_SESSION=/Sessions/3"], "one ekko or Claude Code sets for a session itself"),
+        (&["agents", "env", "1X=1"], "no name of an environment variable"),
+        (&["agents", "env", "NOEQUALS"], "is no NAME=VALUE"),
+        (&["agents", "env", "--remove", "FLAG=a"], "names a value"),
+        (&["agents", "copy", "../outside"], "no path under the repository's top"),
+        (&["agents", "copy", "/etc"], "no path under the repository's top"),
+        (&["agents", "copy", ".git/config"], "no path under the repository's top"),
+    ] {
+        let refused = String::from_utf8(agents.ekko(&[&["--json"][..], args].concat()).stdout).unwrap();
+        assert!(refused.contains(why), "{args:?}: {refused}");
+    }
+    assert_eq!(agents.json(&["--json", "agents", "env"])["env"].as_object().unwrap().len(), 2);
+    let removed = agents.json(&["--json", "agents", "copy", "--remove", "missing"]);
+    assert_eq!(removed["copy"], serde_json::json!([".env.local", "private"]), "{removed}");
+
+    let started = agents.json(&["agents", "start", "1", "--model", "haiku", "--json"]);
+    assert_eq!(started["ok"], true, "{started}");
+    let worktree = agents.worktree("task-1");
+    let folder = agents.home.join(".local/state/ekko/agents/app/task-1");
+    let command = Agents::command_of(&agents.opened()[0]);
+    assert_eq!(assigned(&command, "TMPDIR"), folder.join("tmp").to_str(), "{command:?}");
+    assert!(folder.join("tmp").is_dir());
+    assert_eq!(assigned(&command, "CACHE"), folder.join("cache").to_str(), "{command:?}");
+    assert_eq!(assigned(&command, "FLAG"), Some("a=b"), "{command:?}");
+    assert_eq!(fs::read_to_string(worktree.join("private/deep/data.txt")).unwrap(), "only in the checkout\n");
+    assert_eq!(fs::read_to_string(worktree.join(".env.local")).unwrap(), "TOKEN=1\n");
+    assert!(!worktree.join("missing").exists());
+    assert_eq!(agents.git(&worktree, &["status", "--porcelain"]), "", "ignored, so the worktree is clean");
+
+    // Its own folder: another session's differs. The project may set TMPDIR
+    // itself, after ekko's own.
+    assert!(agents.ekko(&["agents", "env", "TMPDIR={dir}/elsewhere"]).status.success());
+    let started = agents.json(&["agents", "start", "2", "--model", "haiku", "--json"]);
+    assert_eq!(started["ok"], true, "{started}");
+    let command = Agents::command_of(&agents.opened()[1]);
+    let other = agents.home.join(".local/state/ekko/agents/app/task-2");
+    let at = command.iter().rposition(|arg| arg.starts_with("TMPDIR=")).unwrap();
+    assert_eq!(command[at], format!("TMPDIR={}", other.join("elsewhere").display()), "{command:?}");
+    assert!(other.join("tmp").is_dir() && other != folder);
+    let removed = agents.json(&["--json", "agents", "env", "--remove", "TMPDIR", "CACHE", "FLAG"]);
+    assert_eq!(removed["env"], serde_json::json!({}), "{removed}");
     fs::remove_dir_all(&agents.home).ok();
 }
 
@@ -3407,6 +3544,39 @@ fn a_task_starts_and_merges_only_after_its_blockers_branches_are_in_main() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// The test that gates a merge runs as CI runs it, with no Claude Code
+/// session around it (task 1942): not the orchestrator's CLAUDECODE, nor
+/// what Claude Code adds to each command it runs, nor its terminal tab
+/// (task 1803) -- the variables a born session's window is started without
+/// -- while the rest of its environment is the test's.
+#[test]
+fn ekko_agents_merge_runs_the_test_without_the_orchestrators_session_variables() {
+    let agents = Agents::new();
+    let app = fs::canonicalize(&agents.app).unwrap();
+    assert!(agents.ekko(&["--task", "Add it"]).status.success());
+    let worktree = agents.worktree("task-1");
+    agents.git(&app, &["worktree", "add", "-q", "-b", "task-1", worktree.to_str().unwrap(), "HEAD"]);
+    fs::write(worktree.join("it.txt"), "added\n").unwrap();
+    agents.git(&worktree, &["add", "."]);
+    agents.git(&worktree, &["commit", "-q", "-m", "Task 1"]);
+    assert!(agents.ekko(&["--check", "1"]).status.success());
+    let dumped = agents.home.join("gate-env");
+    assert!(agents.ekko(&["agents", "test", &format!("env > {}", dumped.display())]).status.success());
+
+    // Run by the orchestrator: a Claude Code process whose commands carry
+    // CLAUDECODE and what a version of it adds (the stand-in exports both).
+    let orchestrator = agents.orchestrator();
+    let merged = orchestrator.ekko(&["--json", "agents", "merge", "1"], "");
+    assert!(merged.contains("\"ok\":true"), "{merged}");
+    let gate = fs::read_to_string(&dumped).unwrap();
+    for name in ["CLAUDECODE", "EKKO_TEST_ADDED_BY_CLAUDE_CODE"] {
+        assert!(!gate.lines().any(|line| line.starts_with(&format!("{name}="))), "{name} reached the test: {gate}");
+    }
+    assert!(gate.lines().any(|line| line.starts_with("HOME=")), "the rest of the environment is the test's: {gate}");
+    assert!(gate.lines().any(|line| line.starts_with("EKKO_PROJECT=")), "the orchestrator's own launcher variables stay: {gate}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// `ekko agents merge` waits while a session of the tasks closes itself,
 /// and refuses, changing nothing, while one stays: someone talks to it, and
 /// its worktree is not to move under it (task 1714). Nor does what is not
@@ -4406,6 +4576,18 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     fs::remove_file(agents.home.join("app/Cargo.toml")).unwrap();
     assert!(!agents.home.join("app/.ekko/storage/agents.json").exists());
     assert!(born.ekko(&["--json", "agents", "test"], "").contains("\"ok\":true"), "read");
+    // The sessions' variables and the paths copied into their worktrees
+    // (task 1828): the user's too, and read freely.
+    let env = born.ekko(&["--json", "agents", "env", "CACHE={dir}/c"], "");
+    let env: serde_json::Value = serde_json::from_str(&env).unwrap_or_else(|_| panic!("{env}"));
+    assert_eq!((env["code"].as_str(), env["notBornFor"].clone()), (Some("NOT_BORN_FOR"), serde_json::json!({"env": true, "born": [1]})), "{env}");
+    assert!(env["error"].as_str().unwrap().starts_with("The project's environment of the sessions is not this session's to set"), "{env}");
+    let copy = born.ekko(&["--json", "agents", "copy", "private"], "");
+    let copy: serde_json::Value = serde_json::from_str(&copy).unwrap_or_else(|_| panic!("{copy}"));
+    assert_eq!((copy["code"].as_str(), copy["notBornFor"].clone()), (Some("NOT_BORN_FOR"), serde_json::json!({"copy": true, "born": [1]})), "{copy}");
+    assert!(born.ekko(&["--json", "agents", "env"], "").contains("\"ok\":true"), "read");
+    assert!(born.ekko(&["--json", "agents", "copy"], "").contains("\"ok\":true"), "read");
+    assert!(!agents.home.join("app/.ekko/storage/agents.json").exists());
     let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
     let second = board()["2"].clone();
     assert_eq!((second["isComplete"].as_bool(), second["isStarred"].as_bool(), second["inProgress"].as_bool()), (Some(false), Some(false), Some(false)), "{second}");

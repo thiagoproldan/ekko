@@ -155,6 +155,40 @@ pub enum Agents {
         #[arg(long, short = 'j')]
         json: bool,
     },
+    /// Show the variables each session starts with, or set them: the user's
+    /// to set, once for the project.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Env {
+        /// NAME=VALUE, quoted: set in each session's environment; `{dir}` in
+        /// the value is the session's own folder. With --remove, the names.
+        #[arg(value_name = "NAME=VALUE")]
+        settings: Vec<String>,
+        /// Take the variables named away instead.
+        #[arg(long)]
+        remove: bool,
+        /// A project's board other than the one found from the folder.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
+    /// Show the paths copied from the project's checkout into each session's
+    /// worktree, or add some: the user's to set, once for the project.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Copy {
+        /// Paths relative to the repository's top, which git ignores and
+        /// the checkout alone has.
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
+        /// Take the paths named away instead.
+        #[arg(long)]
+        remove: bool,
+        /// A project's board other than the one found from the folder.
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
     /// Show the sessions it opened, by state, and the tasks they finished
     /// today, in every project; step into one, or peek at it.
     #[command(disable_help_flag = true, disable_version_flag = true)]
