@@ -2433,6 +2433,10 @@ pub const CLOSER_ARG: &str = "__ekko_close";
 /// a prompt that reaches it meanwhile keeps it.
 const GRACE: Duration = Duration::from_secs(1);
 
+/// The variable that sets GRACE in milliseconds: a test sets it so that a
+/// loaded machine does not outrun the window it acts within (task 2022).
+const GRACE_VAR: &str = "EKKO_BORN_GRACE_MS";
+
 /// How long the closer waits for the session's process, then its pane, to
 /// be gone.
 pub(crate) const GONE_WITHIN: Duration = Duration::from_secs(10);
@@ -3068,7 +3072,7 @@ pub fn close(home: &Path, cwd: &Path, args: &[String]) -> std::process::ExitCode
     let (Ok(prompts), Ok(pid), Ok(start), Some(boot)) = (prompts.parse::<u64>(), pid.parse::<u32>(), start.parse::<u64>(), crate::holder::boot()) else {
         return ExitCode::FAILURE;
     };
-    std::thread::sleep(GRACE);
+    std::thread::sleep(set(GRACE_VAR).and_then(|ms| ms.to_str()?.parse().ok()).map_or(GRACE, Duration::from_millis));
     if read_born(home, session).prompts != prompts {
         log(home, session, &tasks, "stays: a prompt reached it as it was closing");
         return ExitCode::SUCCESS;

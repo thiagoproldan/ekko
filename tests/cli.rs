@@ -1922,6 +1922,12 @@ impl Agents {
     /// `born`, not waiting for the hook: the stand-in, whose output closes
     /// as the hook returns.
     fn born_start(&self, tasks: Option<&str>, session: &str, event: &str, extra: serde_json::Value) -> process::Child {
+        self.born_start_within(None, tasks, session, event, extra)
+    }
+
+    /// `born_start`, with the closer's grace window set to `grace_ms` (none:
+    /// its own second).
+    fn born_start_within(&self, grace_ms: Option<u64>, tasks: Option<&str>, session: &str, event: &str, extra: serde_json::Value) -> process::Child {
         use std::io::Write as _;
         let claude = self.home.join("claude");
         if !claude.exists() {
@@ -1933,6 +1939,9 @@ impl Agents {
             .env("EKKO_PROJECT", "app")
             .env("TMUX", format!("{},1,0", self.home.join("tmux-socket").display()))
             .env("TMUX_PANE", "%7");
+        if let Some(grace_ms) = grace_ms {
+            command.env("EKKO_BORN_GRACE_MS", grace_ms.to_string());
+        }
         if let Some(tasks) = tasks {
             command.env("EKKO_AGENT_TASK", tasks);
         }
@@ -1955,10 +1964,29 @@ impl Agents {
         self.born(Some(tasks), session, "Stop", serde_json::json!({"background_tasks": [], "session_crons": []}))
     }
 
+    /// `stop`, the closer waiting 10 s where it waits 1: what a test does in
+    /// the window it leaves is a few processes started, which a machine
+    /// under load took over 4 s to start (task 2022).
+    fn stop_with_a_wide_window(&self, tasks: &str, session: &str) -> (process::Child, String) {
+        let mut stand_in = self.born_start_within(Some(10_000), Some(tasks), session, "Stop", serde_json::json!({"background_tasks": [], "session_crons": []}));
+        let mut said = String::new();
+        stand_in.stdout.take().unwrap().read_to_string(&mut said).unwrap();
+        (stand_in, said)
+    }
+
+    fn born_log(&self) -> String {
+        fs::read_to_string(self.home.join(".local/state/ekko/born/born.log")).unwrap_or_default()
+    }
+
     /// Whether a line of born.log holds `what` within 5 s.
     fn logged(&self, what: &str) -> bool {
+        self.logged_within(what, 100)
+    }
+
+    /// `logged`, polling every 50 ms up to `polls` times.
+    fn logged_within(&self, what: &str, polls: u32) -> bool {
         let log = self.home.join(".local/state/ekko/born/born.log");
-        (0..100).any(|_| {
+        (0..polls).any(|_| {
             let found = fs::read_to_string(&log).is_ok_and(|log| log.contains(what));
             if !found {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -3097,20 +3125,20 @@ fn a_prompt_mid_task_does_not_keep_a_born_session_but_one_as_it_closes_does() {
 
     agents.prompt(&two, "s-2");
     assert!(agents.ekko(&["--check", "2"]).status.success());
-    let (mut stand_in, said) = agents.stop(&two, "s-2");
+    let (mut stand_in, said) = agents.stop_with_a_wide_window(&two, "s-2");
     assert!(said.contains("closes now"), "{said}");
     agents.prompt(&two, "s-2");
+    assert!(agents.logged_within(&format!("{two} stays: a prompt reached it as it was closing"), 300), "{}", agents.born_log());
     assert!(still_runs(&mut stand_in), "closed after a prompt reached it in its last second");
-    assert!(agents.logged(&format!("{two} stays: a prompt reached it as it was closing")));
 
     let three = agents.uid(3);
     agents.prompt(&three, "s-3");
     assert!(agents.ekko(&["--check", "3"]).status.success());
-    let (mut stand_in, said) = agents.stop(&three, "s-3");
+    let (mut stand_in, said) = agents.stop_with_a_wide_window(&three, "s-3");
     assert!(said.contains("closes now"), "{said}");
     assert!(agents.ekko(&["--check", "3"]).status.success(), "reopened");
+    assert!(agents.logged_within(&format!("{three} stays: task 3 is pending"), 300), "{}", agents.born_log());
     assert!(still_runs(&mut stand_in), "closed with its task reopened in its last second");
-    assert!(agents.logged(&format!("{three} stays: task 3 is pending")));
     fs::remove_dir_all(&agents.home).ok();
 }
 
