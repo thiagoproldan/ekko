@@ -594,15 +594,20 @@ impl Parse {
             let taken = if matches!((chars[i], chars.get(i + 1)), ('$', Some('('))) && !escaped(i)
                 || matches!((chars[i], chars.get(i + 1)), ('<' | '>', Some('('))) && !escaped(i) && process
             {
-                let (mut depth, mut end) = (0i64, i + 2);
-                while end < chars.len() && depth >= 0 {
-                    depth += match chars[end] {
-                        '(' => 1,
-                        ')' => -1,
-                        _ => 0,
-                    };
-                    end += 1;
-                }
+                let end = if aware {
+                    closing_paren(&chars, i + 2)?
+                } else {
+                    let (mut depth, mut end) = (0i64, i + 2);
+                    while end < chars.len() && depth >= 0 {
+                        depth += match chars[end] {
+                            '(' => 1,
+                            ')' => -1,
+                            _ => 0,
+                        };
+                        end += 1;
+                    }
+                    end
+                };
                 let held: String = chars[i + 2..end.saturating_sub(1).max(i + 2)].iter().collect();
                 Some((held, chars[i] == '$', end))
             } else if chars[i] == '`' && !escaped(i) {
@@ -936,6 +941,53 @@ fn delimiter_at(chars: &[char], mut at: usize) -> Option<(Vec<char>, bool, usize
         }
     }
     (!word.is_empty()).then_some((word, quoted, at))
+}
+
+/// Where the `(...)` whose inside starts at `from` ends, just past its `)`,
+/// read as bash reads a command: a paren in quotes, `$'...'`, backticks, a
+/// comment or after a backslash is text, and a `$(...)` in double quotes
+/// nests (task 1953). The text's end when it never closes, as before;
+/// `None` when a quote is left open, so `blanked` reads it as ctx does.
+fn closing_paren(chars: &[char], from: usize) -> Option<usize> {
+    let (mut depth, mut i) = (0usize, from);
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '\'' => i = find(chars, '\'', i + 1)?,
+            '$' if chars.get(i + 1) == Some(&'\'') => i = escaped_end(chars, '\'', i + 2)?,
+            '`' => i = escaped_end(chars, '`', i + 1)?,
+            '"' => {
+                i += 1;
+                while chars.get(i) != Some(&'"') {
+                    match chars.get(i)? {
+                        '\\' => i += 1,
+                        '`' => i = escaped_end(chars, '`', i + 1)?,
+                        '$' if chars.get(i + 1) == Some(&'(') => i = closing_paren(chars, i + 2)? - 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            '#' if i == from || " \t\n;&|(".contains(chars[i - 1]) => {
+                i = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |at| i + at);
+            }
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(i + 1),
+            ')' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(chars.len())
+}
+
+/// The `closing` character that ends the quote whose inside starts at `i`,
+/// past those a backslash escapes: a `$'...'`'s quote, or a backtick.
+fn escaped_end(chars: &[char], closing: char, mut i: usize) -> Option<usize> {
+    while *chars.get(i)? != closing {
+        i += if chars[i] == '\\' { 2 } else { 1 };
+    }
+    Some(i)
 }
 
 fn find(chars: &[char], wanted: char, from: usize) -> Option<usize> {
@@ -1608,6 +1660,40 @@ mod tests {
         // A here-string is no here-document: what follows it runs.
         assert!(runs("cat <<< 'x'\nkill 1\nx", true));
         assert!(!runs("cat <<< 'x'\nkill 1\nx", false), "as ctx reads it");
+    }
+
+    /// With `quotes`, a `$(...)` ends at the `)` bash ends it at: one in
+    /// quotes, `$'...'`, backticks, a comment, after a backslash or in a
+    /// `$(...)` nested in double quotes is text, so what follows it still
+    /// runs -- in a here-document's body, in double quotes and bare. The
+    /// answers are bash 5.3's, measured with a `zap` on PATH that recorded
+    /// each run: every one ran (task 1953).
+    #[test]
+    fn a_substitution_ends_where_bash_ends_it() {
+        let runs = |command: &str| calls_read(command, Reading::GUARD).iter().any(|call| call.name == "kill");
+        let hidden = [
+            "$(echo \")\" ; kill 1)",
+            "$(echo ')' ; kill 1)",
+            "$(echo $')' ; kill 1)",
+            "$(echo $'\\')' ; kill 1)",
+            "$(echo `echo \")\"` ; kill 1)",
+            "$(echo `case a in a) echo;; esac` ; kill 1)",
+            "$(echo \"`echo \")\"`\" ; kill 1)",
+            "$(echo # )\nkill 1)",
+            "$(echo \\) ; kill 1)",
+            "$(echo \"$(echo \")\")\" ; kill 1)",
+            "$(echo \"a\\\")\" ; kill 1)",
+        ];
+        for substitution in hidden {
+            for command in [format!("cat <<EOF > f\n{substitution}\nEOF"), format!("echo \"{substitution}\""), format!("echo {substitution}")] {
+                assert!(runs(&command), "{command}");
+            }
+            // A quoted delimiter still leaves the body as text.
+            assert!(!runs(&format!("cat <<'EOF' > f\n{substitution}\nEOF")), "{substitution}");
+        }
+        // The `)` that ends it ends it: what follows is the outer text again.
+        assert!(!runs("echo \"$(echo ')') ; kill 1\""));
+        assert!(!runs("cat <<EOF > f\n$(echo ')') ; kill 1\nEOF"));
     }
 
     #[test]
