@@ -53,6 +53,10 @@ push is the user's.
    It records the model and effort on the task. It refuses past the limit,
    and refuses a task whose blocker's branch is not merged yet: merge that
    first, so the session starts from a main that has its blocker's work.
+   It also refuses a project whose repository root is not trusted in Claude
+   Code on the profile the sessions use -- they would stop at the trust
+   dialog, unseen -- and says how to trust it: the user opens Claude Code
+   at the root once and accepts; trust is theirs to give (task 1755).
 
 3. **Wait.** Call ekko's `wait` on each started task -- `item` the task,
    `text` what you will do once the wait is over, such as "review and merge
@@ -72,9 +76,10 @@ push is the user's.
    attach a note to the task saying what is missing, set it back to
    pending, and start a session for it again: the new one takes up the
    same worktree and branch, and reads the note. This holds for a task
-   started alone. For a task that ran as part of a group, start again with
-   the same ids: a start given only part of them makes a new branch from
-   main (task 1851).
+   started alone. For a task that ran as part of a group, start it again with
+   its own id or with the group's: a start given only part of the ids takes
+   up the group's branch, if main does not have its work yet, and refuses,
+   naming the branches, if two groups hold the task (task 1851).
 
 5. **Merge** a branch only once you reviewed it as step 4 says, one at a
    time, in Bash, with a timeout that fits the project's tests:

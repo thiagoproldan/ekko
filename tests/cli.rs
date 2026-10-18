@@ -1795,7 +1795,18 @@ impl Agents {
         agents.git(&agents.app, &["commit", "-q", "--allow-empty", "-m", "first"]);
         write_executable(&agents.mux, MUX);
         assert!(agents.ekko(&["init"]).status.success());
+        agents.trust(&agents.home.join(".claude.json"));
         agents
+    }
+
+    /// Claude Code's global config at `config`, as it holds a repository
+    /// whose trust dialog the user accepted (task 1755): the project's root
+    /// with hasTrustDialogAccepted true.
+    fn trust(&self, config: &std::path::Path) {
+        let root = fs::canonicalize(&self.app).unwrap();
+        let json = serde_json::json!({"projects": {root.to_str().unwrap(): {"hasTrustDialogAccepted": true}}});
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(config, json.to_string()).unwrap();
     }
 
     fn git(&self, folder: &std::path::Path, args: &[&str]) -> String {
@@ -2373,6 +2384,122 @@ fn agents_start_says_when_the_session_ended_at_once() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// A start refuses a repository whose root is not trusted on the profile
+/// the born sessions use (task 1755), opening nothing: its sessions would
+/// stop at Claude Code's trust dialog, where no hook runs. The profile is
+/// the CLAUDE_CONFIG_DIR the orchestrator started with, else the default
+/// one's `~/.claude.json`; a trusted parent folder, a root with the flag
+/// false and trust on another profile do not count, and the start does not
+/// write the config.
+#[test]
+fn agents_start_refuses_a_repository_whose_root_is_not_trusted_on_the_sessions_profile() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    let root = fs::canonicalize(&agents.app).unwrap();
+    let home_config = agents.home.join(".claude.json");
+    let profile = agents.home.join("profile");
+
+    let refuse = |config: &std::path::Path, profile: Option<&std::path::Path>, why: &str| {
+        let mut command = agents.command(&["agents", "start", "1", "--model", "haiku", "--json"]);
+        if let Some(profile) = profile {
+            command.env("CLAUDE_CONFIG_DIR", profile);
+        }
+        let output = command.output().unwrap();
+        let refused: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stderr)));
+        assert_eq!(refused["code"], "INVALID_INPUT", "{why}: {refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(
+            error.contains(&format!("{} is not trusted", root.display())) && error.contains(&format!("in {}", config.display())) && error.contains("open Claude Code"),
+            "{why}: {refused}"
+        );
+        assert!(agents.calls().is_empty(), "{why}: a refused start spoke to the multiplexer: {:?}", agents.calls());
+        assert!(!agents.worktree("task-1").exists(), "{why}: a worktree was made");
+    };
+
+    // No config at all, and the root with the flag false.
+    fs::remove_file(&home_config).unwrap();
+    refuse(&home_config, None, "no config");
+    fs::write(&home_config, serde_json::json!({"projects": {root.to_str().unwrap(): {"hasTrustDialogAccepted": false}}}).to_string()).unwrap();
+    refuse(&home_config, None, "the flag false");
+    // A parent folder trusted is no root trusted.
+    let parent = root.parent().unwrap().to_str().unwrap().to_string();
+    fs::write(&home_config, serde_json::json!({"projects": {parent: {"hasTrustDialogAccepted": true}}}).to_string()).unwrap();
+    refuse(&home_config, None, "a trusted parent");
+    // The default profile trusted, the session's own not.
+    agents.trust(&home_config);
+    refuse(&profile.join(".claude.json"), Some(&profile), "trust on another profile");
+    let before = fs::read_to_string(&home_config).unwrap();
+
+    // Trusted on the profile the session runs under: it starts, and the
+    // config is as it was.
+    agents.trust(&profile.join(".claude.json"));
+    let started = agents
+        .command(&["agents", "start", "1", "--model", "haiku", "--json"])
+        .env("CLAUDE_CONFIG_DIR", &profile)
+        .output()
+        .unwrap();
+    let started: serde_json::Value = serde_json::from_slice(&started.stdout).unwrap();
+    assert_eq!(started["ok"], true, "{started}");
+    assert_eq!(fs::read_to_string(&home_config).unwrap(), before);
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A start given part of the tasks a group's last start made a branch for
+/// takes that branch up (task 1851), as the start given all of them does,
+/// rather than make a branch from HEAD that leaves the group's work behind;
+/// a branch of exactly its own tasks comes first; a group branch HEAD has
+/// already is no branch to take up; two groups are refused, naming both.
+#[test]
+fn agents_start_given_part_of_a_group_takes_up_the_groups_branch() {
+    let agents = Agents::new();
+    for text in ["One", "Two", "Three"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let windows = agents.home.join("mux-state/windows");
+    let started = agents.json(&["agents", "start", "1", "2", "--model", "haiku", "--json"]);
+    assert_eq!(started["ok"], true, "{started}");
+    let group = agents.worktree("task-1-2");
+    assert!(group.is_dir());
+    agents.git(&group, &["commit", "-q", "--allow-empty", "-m", "the group's work"]);
+
+    // The group's window is gone: task 2 alone goes on on its branch.
+    fs::write(&windows, "").unwrap();
+    let again = agents.json(&["agents", "start", "2", "--model", "haiku", "--json"]);
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(again["branch"], "task-1-2", "{again}");
+    assert_eq!(again["made"], false, "{again}");
+    assert_eq!(again["worktree"].as_str().unwrap(), group.to_str().unwrap(), "{again}");
+    assert!(!agents.has_branch("task-2"), "a branch from HEAD was made");
+    assert!(!agents.worktree("task-2").exists());
+    let command = Agents::command_of(agents.opened().last().unwrap());
+    assert_eq!(assigned(&command, "EKKO_AGENT_BRANCH"), Some("task-1-2"), "{command:?}");
+
+    // HEAD has the group's work: task 2 starts a branch of its own.
+    fs::write(&windows, "").unwrap();
+    agents.git(&agents.app, &["merge", "-q", "--ff-only", "task-1-2"]);
+    let own = agents.json(&["agents", "start", "2", "--model", "haiku", "--json"]);
+    assert_eq!(own["branch"], "task-2", "{own}");
+    assert_eq!(own["made"], true, "{own}");
+
+    // A branch named for exactly the tasks is the one taken up, a group's
+    // beside it or not.
+    fs::write(&windows, "").unwrap();
+    for name in ["task-3-1", "task-3-2"] {
+        agents.git(&agents.app, &["switch", "-q", "-c", name]);
+        agents.git(&agents.app, &["commit", "-q", "--allow-empty", "-m", name]);
+        agents.git(&agents.app, &["switch", "-q", "main"]);
+    }
+    let refused = agents.json(&["agents", "start", "3", "--model", "haiku", "--json"]);
+    assert_eq!(refused["code"], "INVALID_INPUT", "{refused}");
+    let error = refused["error"].as_str().unwrap();
+    assert!(error.contains("task 3 was started in groups before, on branches task-3-1, task-3-2 that HEAD does not have yet"), "{refused}");
+    assert!(!agents.has_branch("task-3"), "a refused start made a branch");
+    agents.git(&agents.app, &["branch", "-q", "task-3"]);
+    let exact = agents.json(&["agents", "start", "3", "--model", "haiku", "--json"]);
+    assert_eq!(exact["branch"], "task-3", "{exact}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// At most the project's limit of sessions run at once (task 1727): two
 /// until the user sets another with `ekko agents limit`. A start past it is
 /// refused, naming those that run, with nothing opened. A session counts
@@ -2464,6 +2591,7 @@ fn a_born_session_starts_with_the_environment_its_orchestrator_started_with() {
     let claude = agents.home.join("claude");
     write_executable(&claude, "#!/bin/sh\nexport CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=s-1 AI_AGENT=claude-code\n\"$@\"\nexit $?\n");
     let profile = agents.home.join("profile");
+    agents.trust(&profile.join(".claude.json"));
     let output = agents
         .running(&claude, &[env!("CARGO_BIN_EXE_ekko"), "agents", "start", "1", "--model", "haiku", "--json"])
         .env("KEPT_FROM_THE_START", "yes")

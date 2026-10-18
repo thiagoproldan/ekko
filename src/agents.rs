@@ -232,6 +232,7 @@ pub fn start(
     }
 
     let environment = starting_environment().map_err(refused)?;
+    trusted(&environment, home, &top).map_err(refused)?;
     let mux = Mux::new(environment.clone());
     let windows = mux.windows().map_err(refused)?;
     let born = mux.born_panes().map_err(refused)?;
@@ -259,7 +260,7 @@ pub fn start(
             },
         )));
     }
-    let branch = format!("task-{}", joined(&ids, "-"));
+    let branch = branch_for(&top, &ids).map_err(refused)?;
     let worktree = worktree(root, &branch).map_err(refused)?;
     let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let cwd = match real_root.strip_prefix(&worktree.top) {
@@ -321,6 +322,66 @@ pub fn start(
         Err(why) => (Vec::new(), Some(why.to_string())),
     };
     Ok(Started { tasks: ids, window, pane, worktree: worktree.path, branch, made: worktree.made, attach: mux.attach(), undrawn, notes, unnoted, beside })
+}
+
+/// Whether the repository whose top is `top` is trusted on the Claude Code
+/// profile a born session will run under (task 1755): `environment`'s
+/// CLAUDE_CONFIG_DIR, else the default profile, whose global config is
+/// `~/.claude.json`. A repository's root not trusted there has every born
+/// session stop at Claude Code's trust dialog before any hook runs, unseen:
+/// its task stays unclaimed and no wait on it ends. A trusted parent folder
+/// does not count, and trusting the root covers its worktrees (note 1835).
+/// ekko does not write that config: trust is the user's to give.
+fn trusted(environment: &[(OsString, OsString)], home: &Path, top: &Path) -> Result<(), String> {
+    let config = match environment.iter().find(|(name, dir)| name == "CLAUDE_CONFIG_DIR" && !dir.is_empty()) {
+        Some((_, dir)) => Path::new(dir).join(".claude.json"),
+        None => home.join(".claude.json"),
+    };
+    let root = std::fs::canonicalize(top).unwrap_or_else(|_| top.to_path_buf());
+    let accepted = std::fs::read(&config)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|json| json["projects"][root.to_string_lossy().as_ref()]["hasTrustDialogAccepted"] == true);
+    if accepted {
+        return Ok(());
+    }
+    Err(format!(
+        "{root} is not trusted on the Claude Code profile the born sessions use: projects[\"{root}\"].hasTrustDialogAccepted is not true in {}. \
+         Each session would stop at Claude Code's trust dialog (\"Is this a project you created or one you trust?\"), where no hook runs: \
+         its task stays unclaimed and no wait on it ends. A trusted parent folder does not count. Trust is the user's to give: open Claude Code \
+         in {root} once, on that profile, and accept the dialog; ekko does not write Claude Code's config",
+        config.display(),
+        root = root.display(),
+    ))
+}
+
+/// The branch a session started for `ids` works on (task 1851): the one
+/// named for exactly those tasks, `task-12-13`; or, where none is, the one
+/// an earlier start made for a group holding them all and more, if its work
+/// is not in the checkout's HEAD yet -- a group handed back with one of its
+/// tasks left to do goes on there, not on a new branch from HEAD that leaves
+/// the group's work behind. More than one such branch is refused, naming them.
+fn branch_for(top: &Path, ids: &[u32]) -> Result<String, String> {
+    let own = format!("task-{}", joined(ids, "-"));
+    if git(top, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{own}")]).is_ok() {
+        return Ok(own);
+    }
+    let mut groups = Vec::new();
+    for branch in git(top, &["for-each-ref", "--format=%(refname:short)", "refs/heads/task-*"])?.lines() {
+        let made_for = branch_tasks(branch);
+        if made_for.len() > ids.len() && ids.iter().all(|id| made_for.contains(id)) && !has(top, "HEAD", branch)? {
+            groups.push(branch.to_string());
+        }
+    }
+    match groups.as_slice() {
+        [] => Ok(own),
+        [group] => Ok(group.clone()),
+        _ => Err(format!(
+            "{} started in groups before, on branches {} that HEAD does not have yet: a start takes up one branch, so merge or drop all but one first",
+            if ids.len() == 1 { format!("task {} was", ids[0]) } else { format!("tasks {} were", listed(ids)) },
+            groups.join(", ")
+        )),
+    }
 }
 
 /// Why `task` may not be named in a group, if it may not (task 1648): a
