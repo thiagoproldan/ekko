@@ -1,18 +1,26 @@
 ---
 name: agents
-description: Run the board's ready tasks in Claude Code sessions that ekko agents starts for them, each in a worktree and a window of its own, at most the project's limit at once, and merge each finished branch into main with ekko agents merge, one at a time. Use when the user asks to hand tasks to sessions or agents, to run tasks in parallel, or to work through the board's ready tasks with several sessions.
+description: Run the board's ready tasks in Claude Code sessions that ekko agents starts for them, each in a worktree and a window of its own, at most the project's limit at once, and merge each finished branch into the branch the checkout is on with ekko agents merge, one at a time. Use when the user asks to hand tasks to sessions or agents, to run tasks in parallel, or to work through the board's ready tasks with several sessions.
 argument-hint: "[task ids]"
 ---
 
 # Hand board tasks to sessions born for them, and merge their work
 
 You are the orchestrator: you pick the tasks, start a session for each,
-wait, review what each did, and merge it into main. The sessions you start
-do the work, each on its task's branch in its own worktree; they cannot
+wait, review what each did, and merge it. Merge goes into the branch the
+main checkout is on (usually main, but not always: a playground branch
+takes it), and each worktree branches from that checkout's HEAD. The
+sessions you start do the work, each on its task's branch in its own worktree; they cannot
 push, merge, release, or start or stop sessions. Neither do you push: the
 push is the user's.
 
 ## Before the first start
+
+- Run in the project whose tasks you hand out. `wait`, `context` and `next`
+  act on your session's own board, and the wake hook follows that board's
+  storage.json; `ekko agents start --project B` from a session of another
+  project starts the work but you could not wait on it. That form is for
+  the user's terminal.
 
 - `ekko agents test` shows the command each branch must pass before it goes
   in. If none is set, `ekko agents merge` refuses: ask the user for it
@@ -35,7 +43,8 @@ push is the user's.
    the limit to let all of it run.
 
 2. **Start**, no more than the limit at once. For each task choose a model
-   and an effort by its size and risk -- haiku at low effort for a small,
+   and an effort by the task alone -- its size and risk, never the quota
+   window or how many sessions run (the user's ruling) -- haiku at low effort for a small,
    well-specified change; sonnet for most work; opus at high effort for
    design or delicate code -- and run, in Bash:
 
@@ -62,7 +71,10 @@ push is the user's.
    `git diff main...task-N`. If the work misses the task's done-when,
    attach a note to the task saying what is missing, set it back to
    pending, and start a session for it again: the new one takes up the
-   same worktree and branch, and reads the note.
+   same worktree and branch, and reads the note. This holds for a task
+   started alone. For a task that ran as part of a group, start again with
+   the same ids: a start given only part of them makes a new branch from
+   main (task 1851).
 
 5. **Merge** a branch only once you reviewed it as step 4 says, one at a
    time, in Bash, with a timeout that fits the project's tests:
@@ -83,5 +95,7 @@ push is the user's.
    handed back or waits on them, and that main is ahead of the remote,
    unpushed.
 
-A session that stays open once its task is done is the user's: they are
-talking to it. A session that seems stuck is theirs to close; ask them.
+A session that stays open once its task is done is usually held by its own
+background work in flight, not by the user; it ends when that work does.
+Sometimes someone is talking to it. Merge refuses while it is open: wait,
+and if it seems stuck, it is the user's to close; ask them.
