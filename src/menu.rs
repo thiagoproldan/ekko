@@ -217,9 +217,7 @@ impl Window {
         }
         self.reminded = true;
         let text: String = question.lines().next().unwrap_or_default().chars().take(200).collect();
-        let _ = Command::new("busctl")
-            .args(["--user", "call", "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "Notify"])
-            .args(["susssasa{sv}i", "ekko", "0", "dialog-question", "ekko: a question is waiting for you", &text, "0", "0", "15000"])
+        let _ = notifier("ekko: a question is waiting for you", &text)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -240,6 +238,16 @@ impl Window {
         let mut child = self.child;
         std::thread::spawn(move || child.wait());
     }
+}
+
+/// A desktop notification, `summary` over `body`, shown 15 s, through the
+/// user's session bus: the command, to spawn or to run.
+pub(crate) fn notifier(summary: &str, body: &str) -> Command {
+    let mut command = Command::new("busctl");
+    command
+        .args(["--user", "call", "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "Notify"])
+        .args(["susssasa{sv}i", "ekko", "0", "dialog-question", summary, body, "0", "0", "15000"]);
+    command
 }
 
 /// Where the menu started on `file` writes its pid.

@@ -2480,6 +2480,10 @@ struct Born {
     /// the work's end wakes the session itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     background: bool,
+    /// The uid of the last handoff of its own the hook stopped the session
+    /// at (task 2028), so a later write does not stop it again for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handoff: Option<String>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -2494,6 +2498,10 @@ struct Waiting {
     what: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     window: Option<String>,
+    /// What marked it: the notification's type, `api_error`, or `handoff`
+    /// (task 2028), which the turn's end that follows does not clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -2595,7 +2603,13 @@ fn writes_the_board(tool: &str, input: &serde_json::Value) -> bool {
 /// follows in the pane -- and starts the closer, whether or not Claude Code
 /// fires Stop after such a stop (task 1866). A turn an API error ends,
 /// StopFailure, closes it as Stop would, or else marks it waiting on the
-/// user with the error (task 1798).
+/// user with the error (task 1798). A write that leaves a handoff of its own
+/// on a task it holds marks it waiting, with the handoff, and ends its turn
+/// there, starting no closer: it waits for the answer (task 2028).
+///
+/// Each run makes sure the session's Claude Code process has its watcher
+/// (`watch`), which speaks for it once it has ended, and tells the user of
+/// a wait gone long (tasks 1827, 1729 and 1832).
 pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
     let Some(tasks) = std::env::var(TASKS_VAR).ok().filter(|tasks| !tasks.trim().is_empty()) else {
         return std::process::ExitCode::SUCCESS;
@@ -2608,6 +2622,13 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
     }
     let _alone = lock_born(home, session);
     let mut born = read_born(home, session);
+    // Its watcher, which outlives the session's process (tasks 1827, 1729
+    // and 1832): started once for each Claude Code process.
+    if let Some(process) = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of) {
+        if let Err(why) = spawn_watch(home, session, &process) {
+            log(home, session, &tasks, &format!("not watched: {why}"));
+        }
+    }
     match event {
         // Kept for the notification that may follow, whose message names
         // no tool: "Claude needs your permission", in Claude Code 2.1.295.
@@ -2658,7 +2679,10 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
         }
         _ => {}
     }
-    if born.waiting.is_some() || born.asked.is_some() {
+    // A handoff's wait outlasts the turn its stop ends (task 2028): the
+    // session waits for the answer still.
+    let handing_over = born.waiting.as_ref().is_some_and(|waiting| waiting.kind.as_deref() == Some(HANDOFF)) && TURN_ENDS.contains(&event);
+    if (born.waiting.is_some() || born.asked.is_some()) && !handing_over {
         born.asked = None;
         if let Some(waiting) = born.waiting.take() {
             let process = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of);
@@ -2693,6 +2717,9 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
             };
             if let Some(why) = stays {
                 log(home, session, &tasks, &format!("stays: {why}"));
+                if handing_over {
+                    return std::process::ExitCode::SUCCESS;
+                }
                 // A turn an API error ended (task 1798) waits on the user:
                 // nothing else starts it again, and no idle_prompt came in
                 // 101 s for 1564's session. Claude Code ignores this event's
@@ -2726,13 +2753,31 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
         _ => {
             if event == "PostToolUse" && !born.talked && writes_the_board(input["tool_name"].as_str().unwrap_or_default(), &input["tool_input"]) {
                 let process = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of);
-                let noted = process.is_some_and(|process| finished(home, cwd, &tasks).is_ok() && closed(home, cwd, &tasks, &process).is_ok());
+                let noted = process.as_ref().is_some_and(|process| finished(home, cwd, &tasks).is_ok() && closed(home, cwd, &tasks, process).is_ok());
                 if noted && closing(home, session, &tasks, born.prompts) {
                     log(home, session, &tasks, "its last task is finished, each with its closing note: stopped after the write that finished it");
                     println!(
                         "{}",
                         serde_json::json!({"continue": false, "stopReason": "ekko: this session's tasks are finished, each with its closing note, so it closes now"})
                     );
+                } else if let Some(handoff) = process.as_ref().and_then(|process| handed_over(home, cwd, &tasks, process, born.handoff.as_deref())) {
+                    // A handoff of its own on a task it holds (task 2028): it
+                    // waits for the answer from here, marked at once, and its
+                    // turn ends with no text. It stays open for the note that
+                    // answers it.
+                    let what = crate::agent::clip(&format!("its handoff, note {}, on task {}: {}", handoff.note, handoff.task, handoff.headline), 200);
+                    born.handoff = Some(handoff.uid);
+                    born.waiting = wait_on_user(home, cwd, &tasks, session, HANDOFF, &what);
+                    if born.waiting.is_some() {
+                        show_state(home, session, &tasks, &mut born, WAITING, Some(&what));
+                    }
+                    write_born(home, session, &born);
+                    log(home, session, &tasks, &format!("stopped after its handoff, note {}: it waits for the answer", handoff.note));
+                    println!(
+                        "{}",
+                        serde_json::json!({"continue": false, "stopReason": format!("ekko: this session wrote its handoff on task {} and waits; the answer comes as a note on the task", handoff.task)})
+                    );
+                    return std::process::ExitCode::SUCCESS;
                 }
             }
             if show_state(home, session, &tasks, &mut born, WORKING, None) {
@@ -2805,12 +2850,21 @@ fn wait_on_user(home: &Path, cwd: &Path, tasks: &str, session: &str, kind: &str,
     let board = match process.zip(ekko) {
         None => "not marked on the board: no Claude Code process is among its ancestors".to_string(),
         Some((process, ekko)) => {
+            // A session that waits before it took its tasks up (task 1729)
+            // takes them up now, so the mark has a claim to go on and the
+            // orchestrator's wait on them ends.
+            let claimed = match ekko.as_ref().map(|_| claim_unheld(home, cwd, tasks, &process)) {
+                Ok(Ok(ids)) if !ids.is_empty() => format!("claimed task {}, which it had not taken up; ", listed(&ids)),
+                Ok(Err(why)) => format!("its tasks not claimed: {why}; "),
+                _ => String::new(),
+            };
             let on = crate::holder::OnUser { since, what: what.to_string(), window, unknown: BTreeMap::new() };
-            match ekko.and_then(|ekko| mark_holds(&ekko, tasks, &process, Some(on))) {
+            let marked = match ekko.and_then(|ekko| mark_holds(&ekko, tasks, &process, Some(on))) {
                 Ok(ids) if ids.is_empty() => "no task of its own in progress to mark on the board".to_string(),
                 Ok(ids) => format!("marked on task {}", listed(&ids)),
                 Err(why) => format!("not marked on the board: {why}"),
-            }
+            };
+            format!("{claimed}{marked}")
         }
     };
     let renamed = found.and_then(|(mux, pane, name, wall)| {
@@ -2828,7 +2882,7 @@ fn wait_on_user(home: &Path, cwd: &Path, tasks: &str, session: &str, kind: &str,
         Err(why) => format!("its window not renamed: {why}"),
     };
     log(home, session, tasks, &format!("waits on you ({kind}): {what}; {board}; {window}"));
-    Some(Waiting { since, what: what.to_string(), window: renamed.ok(), unknown: BTreeMap::new() })
+    Some(Waiting { since, what: what.to_string(), window: renamed.ok(), kind: Some(kind.to_string()), unknown: BTreeMap::new() })
 }
 
 /// Clears what `wait_on_user` marked, now that `event` says the session
@@ -2979,6 +3033,316 @@ fn closing(home: &Path, session: &str, tasks: &str, prompts: u64) -> bool {
             false
         }
     }
+}
+
+/// A handoff of the session's own on a task it holds (task 2028): the
+/// task, the note, its uid and its first line.
+struct Handoff {
+    task: u32,
+    note: u32,
+    uid: String,
+    headline: String,
+}
+
+/// The newest handoff `process` wrote on one of the tasks `named` that it
+/// holds in progress, unless it is `last`, which the hook stopped it at
+/// already.
+fn handed_over(home: &Path, cwd: &Path, named: &str, process: &Process, last: Option<&str>) -> Option<Handoff> {
+    let all = board(home, cwd).ok()?.storage.get_shared().ok()?;
+    let index = crate::ekko::uid_index(&all);
+    let mut found: Option<Handoff> = None;
+    for name in named.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        let Some(task) = index.get(name).copied().or_else(|| name.parse::<u32>().ok()).and_then(|id| all.get(&id)) else { continue };
+        let held = State::of(task) == Some(State::Progress) && task.held_by.as_ref().and_then(crate::holder::Holder::process).as_ref() == Some(process);
+        if !held {
+            continue;
+        }
+        let keys = [task.uid.clone(), Some(task.id.to_string())];
+        let newest = all
+            .values()
+            .filter(|note| !note.is_task && note.handoff && note.trashed.is_none() && note.stashed.is_none())
+            .filter(|note| note.attached_to.as_ref().is_some_and(|on| keys.iter().flatten().any(|key| key == on)))
+            .filter(|note| note.created_by.as_ref().and_then(crate::holder::Holder::process).as_ref() == Some(process))
+            .max_by_key(|note| note.id);
+        let Some(note) = newest else { continue };
+        let Some(uid) = note.uid.clone().filter(|uid| Some(uid.as_str()) != last) else { continue };
+        if found.as_ref().is_none_or(|found| found.note < note.id) {
+            found = Some(Handoff { task: task.id, note: note.id, uid, headline: crate::agent::headline(&note.description, false, 120) });
+        }
+    }
+    found
+}
+
+/// Whom a write for `process` is by: that Claude Code process, named as
+/// `like`, its claim on a task, names it, else as this one names its own.
+fn actor_of(home: &Path, process: &Process, like: Option<&crate::holder::Holder>) -> crate::holder::Actor {
+    crate::holder::Actor {
+        process: Some(process.clone()),
+        profile: like.and_then(|holder| holder.profile.clone()).or_else(crate::holder::profile),
+        tty: like.and_then(|holder| holder.tty.clone()).or_else(|| crate::holder::tty(process.pid)),
+        registry: Some(crate::holder::Registry::at(crate::agent::processes_dir(home))),
+    }
+}
+
+/// Claims for `process` the tasks `named` that are open and that no one
+/// still running holds, when it holds none of them in progress (task 1729):
+/// a session that waits on the user before its model took its tasks up. The
+/// ids it claimed.
+fn claim_unheld(home: &Path, cwd: &Path, named: &str, process: &Process) -> Result<Vec<u32>, String> {
+    let ekko = board(home, cwd)?.acting_as(actor_of(home, process, None));
+    let all = ekko.storage.get_shared().map_err(|error| EkkoError::from(error).to_string())?;
+    let index = crate::ekko::uid_index(&all);
+    let tasks: Vec<&Item> = named
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| index.get(name).copied().or_else(|| name.parse::<u32>().ok()).and_then(|id| all.get(&id)))
+        .collect();
+    let progress = |task: &Item| State::of(task) == Some(State::Progress);
+    if tasks.iter().any(|task| progress(task) && task.held_by.as_ref().and_then(crate::holder::Holder::process).as_ref() == Some(process)) {
+        return Ok(Vec::new());
+    }
+    let free: Vec<u32> = tasks
+        .iter()
+        .filter(|task| State::of(task).is_some_and(State::is_open))
+        .filter(|task| !(progress(task) && task.held_by.as_ref().is_some_and(crate::holder::Holder::alive)))
+        .map(|task| task.id)
+        .collect();
+    if free.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut draft = crate::ops::Draft::open(&ekko).map_err(|error| error.to_string())?;
+    let refs: Vec<crate::ops::Ref> = free.iter().map(|id| crate::ops::Ref::Id(*id)).collect();
+    draft.set_state(&refs, "progress").map_err(|error| error.to_string())?;
+    draft.commit(false).map_err(|error| error.to_string())?;
+    Ok(free)
+}
+
+/// What marks a born session's wait for the answer to its handoff.
+const HANDOFF: &str = "handoff";
+
+/// The argument that runs ekko as a born session's watcher (tasks 1827,
+/// 1729 and 1832), which its hook starts: never typed.
+pub const WATCH_ARG: &str = "__ekko_watch";
+
+/// How often the watcher looks at the session's process and its wait.
+const WATCH_EVERY: Duration = Duration::from_millis(500);
+
+/// How long a born session waits on the user before the watcher tells them
+/// directly (task 1832): ten minutes, or the seconds TELL_AFTER_VAR gives.
+const TELL_AFTER: Duration = Duration::from_secs(600);
+
+/// The variable that gives the watcher, in seconds, how long a wait goes
+/// before the user is told.
+pub const TELL_AFTER_VAR: &str = "EKKO_AGENTS_TELL_AFTER";
+
+/// The lock a watcher of `process` holds while it runs, beside born.log.
+fn watch_file(home: &Path, process: &Process) -> PathBuf {
+    born_dir(home).join(format!("{}-{}.watch", process.pid, process.start))
+}
+
+/// The lock at `path`, taken at once, or `None` where another holds it or
+/// it cannot be made.
+fn try_lock(path: &Path) -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd as _;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).ok()?;
+    // SAFETY: flock(2) on a descriptor this function owns.
+    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    locked.then_some(file)
+}
+
+/// Starts the watcher of `process`, unless one watches it already.
+fn spawn_watch(home: &Path, session: &str, process: &Process) -> Result<(), String> {
+    std::fs::create_dir_all(born_dir(home)).map_err(|error| format!("its watcher's lock has nowhere to go: {error}"))?;
+    let Some(free) = try_lock(&watch_file(home, process)) else { return Ok(()) };
+    drop(free);
+    detached(&[WATCH_ARG, session, &process.pid.to_string(), &process.start.to_string()]).map_err(|why| format!("its watcher did not start: {why}"))
+}
+
+/// The watcher (WATCH_ARG `<session> <pid> <start>`): runs as long as the
+/// session's Claude Code, which nothing else outlives to speak for it.
+///
+/// Once its process is gone -- the window closed, a crash, a kill -- with a
+/// task of its own unfinished, the watcher says so on the board (tasks 1827
+/// and 1729): see `ended`. While the session waits on the user, after
+/// TELL_AFTER it tells them with a desktop notification, once a wait (task
+/// 1832): the orchestrator is told at once, but may be busy, or not this
+/// board's, and on 2026-10-12 a born session waited all day.
+pub fn watch(home: &Path, cwd: &Path, args: &[String]) -> std::process::ExitCode {
+    use std::process::ExitCode;
+    let tasks = std::env::var(TASKS_VAR).unwrap_or_default();
+    let [session, pid, start] = args else { return ExitCode::FAILURE };
+    let (Ok(pid), Ok(start), Some(boot)) = (pid.parse::<u32>(), start.parse::<u64>(), crate::holder::boot()) else {
+        return ExitCode::FAILURE;
+    };
+    let process = Process { pid, start, boot };
+    let lock = watch_file(home, &process);
+    let Some(_held) = try_lock(&lock) else { return ExitCode::SUCCESS };
+    let after = std::env::var(TELL_AFTER_VAR).ok().and_then(|seconds| seconds.trim().parse::<u64>().ok()).map_or(TELL_AFTER, Duration::from_secs);
+    let after = i64::try_from(after.as_millis()).unwrap_or(i64::MAX);
+    let mut told: Option<i64> = None;
+    loop {
+        if !running(&process) {
+            // Where ekko's state is gone with its home, as a test's is once
+            // it has run, nothing is left to tell, nor made again.
+            if born_dir(home).is_dir() {
+                ended(home, cwd, session, &tasks, &process);
+                let _ = std::fs::remove_file(&lock);
+            }
+            return ExitCode::SUCCESS;
+        }
+        if let Some(waiting) = read_born(home, session).waiting {
+            let now = chrono::Local::now().timestamp_millis();
+            if told != Some(waiting.since) && now - waiting.since >= after {
+                told = Some(waiting.since);
+                tell_user(home, cwd, session, &tasks, &waiting, now);
+            }
+        }
+        std::thread::sleep(WATCH_EVERY);
+    }
+}
+
+/// Tells the user, with a desktop notification, that the session has
+/// waited on them since `waiting.since`: for what, on which tasks, and in
+/// which window of which session, where they find it.
+fn tell_user(home: &Path, cwd: &Path, session: &str, tasks: &str, waiting: &Waiting, now: i64) {
+    let waited = (now - waiting.since).max(0) / 1000;
+    let waited = if waited < 60 { format!("{waited} s") } else { format!("{} min", waited / 60) };
+    let all = board(home, cwd).ok().and_then(|ekko| ekko.storage.get_shared().ok());
+    let ids: Vec<u32> = all.as_ref().map_or_else(Vec::new, |all| {
+        let index = crate::ekko::uid_index(all);
+        tasks.split(',').map(str::trim).filter_map(|name| index.get(name).copied().or_else(|| name.parse::<u32>().ok())).collect()
+    });
+    let named = match ids.as_slice() {
+        [] => "a session ekko agents started".to_string(),
+        [id] => format!("task {id}'s session"),
+        _ => format!("the session of tasks {}", listed(&ids)),
+    };
+    let summary = format!("ekko: {named} has waited on you for {waited}");
+    let window = waiting.window.as_deref().map(|name| name.strip_suffix(WAITING_ON_YOU).unwrap_or(name));
+    let project = std::env::var("EKKO_PROJECT").ok().filter(|name| !name.is_empty()).map(|name| format!(", project {name}")).unwrap_or_default();
+    let place = match window {
+        Some(window) => format!("Window \"{window}\" of session {SESSION}{project}."),
+        None => format!("A window of session {SESSION}{project}."),
+    };
+    let body = crate::agent::clip(&format!("{}. {place}", waiting.what.trim_end_matches('.')), 300);
+    let shown = crate::menu::notifier(&summary, &body).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output();
+    match shown {
+        Ok(output) if output.status.success() => log(home, session, tasks, &format!("told the user it has waited on them for {waited}: {body}")),
+        Ok(output) => log(home, session, tasks, &format!("not told the user it waits: busctl said {}", String::from_utf8_lossy(&output.stderr).trim())),
+        Err(error) => log(home, session, tasks, &format!("not told the user it waits: busctl did not run: {error}")),
+    }
+}
+
+/// What the watcher writes once the session's process `process` is gone
+/// (tasks 1827 and 1729), in one write, for each of the tasks `named` that
+/// is unfinished and that no one still running holds: a task it held in
+/// progress goes to paused, which lets it go, every wait on such a task
+/// ends, saying its session ended, and a note on it says where the work
+/// stands -- the worktree, the branch, its uncommitted files and last
+/// commit -- and how to go on. A task it never took up, that nothing waits
+/// on, is left as it was. The claim was a lease, as a job queue's visibility
+/// timeout is: its holder gone, the work goes back with a record, and
+/// whoever waits is told.
+fn ended(home: &Path, cwd: &Path, session: &str, named: &str, process: &Process) {
+    // Only a board whose file is there: opening one makes its folders.
+    let (ekko_dir, project) = (std::env::var("EKKO_DIR").ok(), std::env::var("EKKO_PROJECT").ok());
+    let located = crate::directory::locate(home, cwd, None, ekko_dir.as_deref(), project.as_deref());
+    if !located.is_ok_and(|location| crate::storage::storage_file(&location.dir).is_file()) {
+        return;
+    }
+    let Ok(ekko) = board(home, cwd) else { return };
+    let Ok(all) = ekko.storage.get_shared() else { return };
+    let index = crate::ekko::uid_index(&all);
+    let tasks: Vec<&Item> = named
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| index.get(name).copied().or_else(|| name.parse::<u32>().ok()).and_then(|id| all.get(&id)))
+        .collect();
+    let waited = |task: &Item| {
+        all.values().any(|note| {
+            note.trashed.is_none() && note.stashed.is_none() && note.wait.as_ref().is_some_and(|wait| wait.over.is_none() && Some(&wait.on) == task.uid.as_ref())
+        })
+    };
+    let held_here = |task: &Item| State::of(task) == Some(State::Progress) && task.held_by.as_ref().and_then(crate::holder::Holder::process).as_ref() == Some(process);
+    let held_by_another = |task: &Item| State::of(task) == Some(State::Progress) && task.held_by.as_ref().is_some_and(crate::holder::Holder::alive);
+    let left: Vec<(u32, bool)> = tasks
+        .iter()
+        .filter(|task| State::of(task).is_some_and(State::is_open))
+        .filter(|task| held_here(task) || (!held_by_another(task) && waited(task)))
+        .map(|task| (task.id, held_here(task)))
+        .collect();
+    if left.is_empty() {
+        return;
+    }
+    let like = tasks.iter().find(|task| held_here(task)).and_then(|task| task.held_by.as_ref());
+    let ekko = ekko.acting_as(actor_of(home, process, like));
+    let stands = where_it_stands(cwd);
+    let at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let written = (|| -> Result<Vec<String>, EkkoError> {
+        let mut draft = crate::ops::Draft::open(&ekko)?;
+        let mut said = Vec::new();
+        for (id, held) in &left {
+            if *held {
+                draft.set_state(&[crate::ops::Ref::Id(*id)], "paused")?;
+            }
+            let waits = draft.end_waits_as_ended(*id);
+            let how = if *held { "with the task in progress: ekko paused it, which lets it go" } else { "before it took the task up" };
+            let told = match waits.as_slice() {
+                [] => String::new(),
+                [one] => format!(" The wait of note {one} on it is over, and its session told."),
+                _ => format!(" The waits of notes {} on it are over, and their sessions told.", listed(&waits)),
+            };
+            let text = format!(
+                "The session ekko agents started for task {id} ended at {at}, its Claude Code process (pid {}) gone {how}.{told}\n{stands}\nTo go on: ekko agents start {id}, in the project's folder, takes this worktree up again as it is.",
+                process.pid
+            );
+            let spec = crate::ops::Create {
+                kind: Some(crate::ops::Kind::Note),
+                text,
+                boards: Vec::new(),
+                priority: None,
+                due: None,
+                with: None,
+                phase: None,
+                blocked_by: Vec::new(),
+                attached_to: Some(crate::ops::Ref::Id(*id)),
+                supersedes: None,
+                starred: false,
+            };
+            let note = draft.create(&spec)?;
+            said.push(format!("task {id} {}, note {note}{}", if *held { "paused" } else { "left as it was" }, if waits.is_empty() { String::new() } else { format!(", waits {} ended", listed(&waits)) }));
+        }
+        draft.commit(false)?;
+        Ok(said)
+    })();
+    match written {
+        Ok(said) => log(home, session, named, &format!("its Claude Code, pid {}, ended with its work unfinished: {}", process.pid, said.join("; "))),
+        Err(error) => log(home, session, named, &format!("its Claude Code, pid {}, ended with its work unfinished, and the board was not written: {error}", process.pid)),
+    }
+}
+
+/// Where a born session's work stands in its worktree, for the note the
+/// watcher writes as it ends: the worktree and branch, the files with
+/// uncommitted changes, and the last commit.
+fn where_it_stands(cwd: &Path) -> String {
+    let worktree = set(WORKTREE_VAR).map_or_else(|| git(cwd, &["rev-parse", "--show-toplevel"]).map(PathBuf::from).unwrap_or_else(|_| cwd.to_path_buf()), PathBuf::from);
+    let branch = set(BRANCH_VAR).map(|branch| branch.to_string_lossy().into_owned()).or_else(|| git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok());
+    let on = branch.map(|branch| format!(", on branch {branch}")).unwrap_or_default();
+    let changed = match git(&worktree, &["status", "--porcelain", "--untracked-files=all"]) {
+        Ok(status) if status.is_empty() => "Nothing uncommitted.".to_string(),
+        Ok(status) => {
+            let files: Vec<&str> = status.lines().map(str::trim).collect();
+            let shown = files.iter().take(20).copied().collect::<Vec<_>>().join(", ");
+            let more = files.len().saturating_sub(20);
+            let more = if more > 0 { format!(", and {more} more") } else { String::new() };
+            format!("Uncommitted, {} file{}: {shown}{more}.", files.len(), if files.len() == 1 { "" } else { "s" })
+        }
+        Err(why) => format!("Its git status could not be read: {why}."),
+    };
+    let last = git(&worktree, &["log", "-1", "--format=%h %s"]).map_or_else(|_| String::new(), |last| format!(" Last commit: {last}."));
+    format!("Its worktree: {}{on}. {changed}{last}", worktree.display())
 }
 
 /// Starts the closer: ekko again, in a session of its own with none of the

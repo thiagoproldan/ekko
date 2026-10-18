@@ -283,6 +283,9 @@ pub fn untold(ekko: &Ekko, me: &Actor, told: &Told, since: u64, holding: bool) -
                             let by = over.by.as_ref().filter(|_| over.how != How::Ended).map(|by| format!(", by {}", name(by))).unwrap_or_default();
                             let now = match (over.how, target.and_then(State::of)) {
                                 (How::Released, Some(state)) => format!(", now {}", state.word()),
+                                // Paused by the watcher of the born session
+                                // that ended (task 1827), with a note on it.
+                                (How::Ended, Some(state)) if state != State::Progress => format!(", now {} (its notes say where it stood)", state.word()),
                                 _ => String::new(),
                             };
                             lines.push(format!("{named} {}{now}{by}. {waited}", agent::ended_phrase(over.how, true)));

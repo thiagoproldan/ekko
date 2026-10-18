@@ -1946,6 +1946,30 @@ impl<'a> Draft<'a> {
         Ok(mine)
     }
 
+    /// Ends every open wait on task `task`, whoever waits and until what,
+    /// as its holder's session ended (task 1827): the watcher of a born
+    /// session whose process is gone pauses the task in the same write, and
+    /// a wait until done would not end on a paused task. No write ended it,
+    /// so none is named. The notes it ended.
+    pub fn end_waits_as_ended(&mut self, task: u32) -> Vec<u32> {
+        let Some(on) = self.data.get(&task).and_then(|item| item.uid.clone()) else { return Vec::new() };
+        let now = chrono::Local::now().timestamp_millis();
+        let mut ended: Vec<u32> = self
+            .data
+            .values()
+            .filter(|note| note.trashed.is_none() && note.stashed.is_none())
+            .filter(|note| note.wait.as_ref().is_some_and(|wait| wait.over.is_none() && wait.on == on))
+            .map(|note| note.id)
+            .collect();
+        ended.sort_unstable();
+        for id in &ended {
+            if let Some(wait) = self.item(*id).wait.as_mut() {
+                wait.over = Some(crate::item::Over { how: How::Ended, by: None, at: now, rev: 0, unknown: Default::default() });
+            }
+        }
+        ended
+    }
+
     /// Makes note `id` the handoff of `task`: an open task only, since a
     /// finished one has nothing left to hand over. The handoff it replaces
     /// stays on the task as an ordinary note, which the new one supersedes,

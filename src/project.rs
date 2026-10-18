@@ -527,6 +527,55 @@ pub fn init(
     name: Option<&str>,
     now_millis: i64,
 ) -> Result<Initialized, DirectoryError> {
+    // The board the folder used until now: the default board, or an outer
+    // project's, which the sessions already running there watch.
+    let asked = folder.map_or_else(|| cwd.to_path_buf(), |folder| crate::paths::resolve_path(home, cwd, folder));
+    let before = fs::canonicalize(&asked)
+        .ok()
+        .and_then(|asked| crate::directory::locate(home, &asked, None, None, None).ok())
+        .map(|location| crate::storage::storage_file(&location.dir));
+    let done = init_folder(home, cwd, folder, name, now_millis)?;
+    // A folder that was a project already found its own board before, which
+    // is no other to tell of.
+    tell_sessions(&done.root.join(EKKO_DIR_NAME), before.as_deref());
+    Ok(done)
+}
+
+/// Tells the Claude Code sessions running in a folder `init` has just made
+/// a project that their board moved (task 1838): they watch the board the
+/// folder used when they started, `before`, and a board made since is one
+/// they do not hear. The new board's file is made, empty, for them to watch
+/// -- a write makes it otherwise, and a watch on no file hears nothing --
+/// then `before`'s file is touched, its time set to now, which fires their
+/// FileChanged hook: `ekko --tasklist --hook` finds the folder's board now,
+/// and answers with it to watch. Best effort: a folder is a project all the
+/// same.
+fn tell_sessions(dir: &Path, before: Option<&Path>) {
+    if !holds_board(dir) {
+        let made = Storage::new(dir).and_then(|storage| {
+            let _lock = storage.acquire_lock()?;
+            if holds_board(dir) { Ok(()) } else { storage.set(&ItemMap::new()) }
+        });
+        if let Err(error) = made {
+            eprintln!("ekko: the new board's file was not made, so sessions running here hear it only after a /clear: {error}");
+            return;
+        }
+    }
+    let Some(before) = before.filter(|before| *before != crate::storage::storage_file(dir).as_path()) else { return };
+    let touched = fs::OpenOptions::new().write(true).open(before).and_then(|file| file.set_modified(SystemTime::now()));
+    if let Err(error) = touched.or_else(|error| if error.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(error) }) {
+        eprintln!("ekko: {} was not touched, so sessions running here hear the new board only after a /clear: {error}", before.display());
+    }
+}
+
+/// `init`, without telling the sessions running in the folder.
+fn init_folder(
+    home: &Path,
+    cwd: &Path,
+    folder: Option<&str>,
+    name: Option<&str>,
+    now_millis: i64,
+) -> Result<Initialized, DirectoryError> {
     let asked = match folder {
         Some(folder) => crate::paths::resolve_path(home, cwd, folder),
         None => cwd.to_path_buf(),

@@ -80,7 +80,9 @@ push is the user's.
    task N" -- then end your turn: ekko wakes you. It wakes you when a task
    is done or cancelled, or when its session waits -- because it stopped
    short of its task and wrote a handoff, or its turn ended on an API
-   error. Born sessions say nothing to the user: they have no ask, and
+   error -- or when its session ended with the task unfinished: then the
+   task is paused, with a note saying where its worktree stands, and
+   `ekko agents start N` takes it up again. Born sessions say nothing to the user: they have no ask, and
    their permission prompts are denied at once, so what only the user can
    settle comes to you. Read the handoff, ask the user with your own `ask`
    -- for a call the guard refused it, with `allow` set to the code the

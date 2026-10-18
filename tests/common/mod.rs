@@ -21,6 +21,9 @@ pub const SESSION_VARIABLES: &[&str] = &[
     "EKKO_AGENT_TASK",
     "EKKO_AGENT_WORKTREE",
     "EKKO_AGENT_BRANCH",
+    // How long a born session waits on the user before its watcher tells
+    // them (task 1832).
+    "EKKO_AGENTS_TELL_AFTER",
     // The session's own: ekko would act as it, and read its transcripts and
     // its task list.
     "CLAUDECODE",

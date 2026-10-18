@@ -259,29 +259,45 @@ fn hook_in(ekko: &Ekko, input: &str, config: &Path, list: Option<&str>) -> Resul
     let Some(session) = event["session_id"].as_str().filter(|id| !id.is_empty()) else {
         return Ok(String::new());
     };
+    let event_name = event["hook_event_name"].as_str().unwrap_or_default();
+    let paths = watched(ekko);
+    let changed = event["file_path"].as_str().map(Path::new);
     // A linked board's file, watched for the session's waits there (task
     // 1443), changes nothing in this board's list.
-    if event["file_path"].as_str().is_some_and(|changed| Path::new(changed) != ekko.storage.storage_path()) {
-        return Ok(String::new());
+    let linked = changed.is_some_and(|changed| changed != ekko.storage.storage_path() && paths.iter().any(|path| path == changed));
+    // The file of a board the folder no longer uses (task 1838): the one it
+    // used when the session started, before a board was made in it, which
+    // `ekko init` touches to say so.
+    let moved = event_name == "FileChanged" && changed.is_some_and(|changed| !paths.iter().any(|path| path == changed));
+    if !linked {
+        let dir = config.join("tasks").join(folder(list.unwrap_or(session)));
+        let since = began(&dir, ekko)?;
+        write(&dir, &tasks(ekko, since)?)?;
     }
-    let dir = config.join("tasks").join(folder(list.unwrap_or(session)));
-    let since = began(&dir, ekko)?;
-    write(&dir, &tasks(ekko, since)?)?;
     // Inside hookSpecificOutput, as every event's own fields are: at the top
     // level Claude Code reads the reply as valid and watches nothing. The
     // boards linked to this one are watched too, for the wake hook to tell
-    // the session of its waits there.
-    Ok(if event["hook_event_name"] == "SessionStart" {
-        let linked = ekko.linked().into_iter().map(|project| crate::storage::storage_file(&project.dir));
-        let watched: Vec<PathBuf> = std::iter::once(ekko.storage.storage_path().to_path_buf()).chain(linked).collect();
+    // the session of its waits there. FileChanged answers them too once the
+    // board has moved: Claude Code 2.1.302 reads watchPaths from that
+    // event's hookSpecificOutput, and they replace the list it watches --
+    // what other hooks gave included, so only then -- and the session hears
+    // this board from then on, rather than the one it started on.
+    Ok(if event_name == "SessionStart" || moved {
         serde_json::json!({"hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "watchPaths": watched,
+            "hookEventName": event_name,
+            "watchPaths": paths,
         }})
         .to_string()
     } else {
         String::new()
     })
+}
+
+/// The files a session on `ekko`'s board watches: the board's, and each
+/// linked board's.
+fn watched(ekko: &Ekko) -> Vec<PathBuf> {
+    let linked = ekko.linked().into_iter().map(|project| crate::storage::storage_file(&project.dir));
+    std::iter::once(ekko.storage.storage_path().to_path_buf()).chain(linked).collect()
 }
 
 /// The board revision the session began at, recorded beside its list the
@@ -579,6 +595,36 @@ mod tests {
         assert!(!drawn.exists(), "a linked board's file drew this board's list");
         hook_in(&site, &event("FileChanged", site.storage.storage_path()), &config, None).unwrap();
         assert!(drawn.exists(), "the board's own file draws its list");
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A change to the file of a board that is neither this one nor linked to
+    /// it -- the board the session started on, before `ekko init` made one in
+    /// its folder, which init touches (task 1838) -- answers with this board's
+    /// files to watch, as FileChanged's own reply, and draws this board's
+    /// list. A change to this board's file or a linked one's answers nothing:
+    /// the list a FileChanged reply gives replaces every path watched, other
+    /// hooks' too.
+    #[test]
+    fn a_change_to_a_board_the_folder_no_longer_uses_moves_the_watch_to_this_one() {
+        let (me, _, _) = crate::holder::test_sessions();
+        let home = fs::canonicalize(scratch("moved")).unwrap();
+        let boards = crate::project::test_projects(&home, &["site", "blog", "shop"], &[(0, 1)]);
+        let site = Ekko::at(&boards[0]).unwrap().acting_as(me);
+        let config = home.join("claude");
+        let event = |file: &Path| serde_json::json!({"session_id": "ab", "hook_event_name": "FileChanged", "file_path": file}).to_string();
+        let (blog, shop) = (crate::storage::storage_file(&boards[1].dir), crate::storage::storage_file(&boards[2].dir));
+        site.create_task(&words(&["the work"])).unwrap();
+
+        assert_eq!(hook_in(&site, &event(site.storage.storage_path()), &config, None).unwrap(), "", "its own file");
+        assert_eq!(hook_in(&site, &event(&blog), &config, None).unwrap(), "", "a linked board's file");
+        let drawn = config.join("tasks").join("ab").join("1.json");
+        fs::remove_file(&drawn).unwrap();
+        let moved: serde_json::Value = serde_json::from_str(&hook_in(&site, &event(&shop), &config, None).unwrap()).unwrap();
+        assert_eq!(moved["hookSpecificOutput"]["hookEventName"], "FileChanged", "{moved}");
+        assert_eq!(moved["hookSpecificOutput"]["watchPaths"], serde_json::json!([site.storage.storage_path(), blog]), "{moved}");
+        assert!(drawn.exists(), "the board it moved to drew its list");
 
         fs::remove_dir_all(&home).ok();
     }

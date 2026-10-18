@@ -947,9 +947,15 @@ impl Wait {
             let holder = item.held_by.as_ref().filter(|_| State::of(item) == Some(State::Progress))?;
             holder.waits().filter(|on| on.since > self.by.since).map(|_| How::Asked)
         };
+        // The session holding it in progress has ended (task 1827): no one
+        // works it now, so a wait until done is over too, and its waiter told.
+        let ended = || {
+            let holder = item.held_by.as_ref().filter(|_| State::of(item) == Some(State::Progress))?;
+            (!holder.alive()).then_some(How::Ended)
+        };
         match self.until {
             Until::Answered => item.question.as_ref().and_then(|question| question.answer.as_ref()).map(|_| How::Answered),
-            Until::Done => closed.or_else(asked),
+            Until::Done => closed.or_else(ended).or_else(asked),
             Until::Free if closed.is_some() => closed,
             Until::Free if State::of(item) != Some(State::Progress) => Some(How::Released),
             Until::Free => match &item.held_by {
@@ -966,7 +972,8 @@ impl Wait {
 /// What a wait waits for; see `Wait`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Until {
-    /// A task closing, done or cancelled.
+    /// A task closing, done or cancelled -- or the session holding it in
+    /// progress ending, after which no one works it (task 1827).
     Done,
     /// A task leaving the hands of whoever holds it in progress: out of
     /// progress, its holder's session ended, or taken up by the one waiting.
@@ -2102,8 +2109,12 @@ mod tests {
             assert_eq!(wait.over_on(Some(&held(&other, Some(recorded + 1), State::Progress))), Some(How::Asked), "{until:?}");
             assert_eq!(wait.over_on(Some(&held(&other, Some(recorded + 5), State::Done))), Some(How::Done), "{until:?}: done first");
         }
+        // Its session ended (task 1827): until done and until free alike.
         let marked_gone = held(&gone, Some(recorded + 5), State::Progress);
-        assert_eq!((wait(Until::Done).over_on(Some(&marked_gone)), wait(Until::Free).over_on(Some(&marked_gone))), (None, Some(How::Ended)), "its session ended");
+        assert_eq!((wait(Until::Done).over_on(Some(&marked_gone)), wait(Until::Free).over_on(Some(&marked_gone))), (Some(How::Ended), Some(How::Ended)), "its session ended");
+        assert_eq!(wait(Until::Done).over_on(Some(&held(&gone, None, State::Progress))), Some(How::Ended), "its session ended, unmarked");
+        assert_eq!(wait(Until::Done).over_on(Some(&held(&gone, None, State::Done))), Some(How::Done), "done first");
+        assert_eq!(wait(Until::Done).over_on(Some(&held(&crate::holder::Actor::person(), None, State::Progress))), None, "a person's claim lasts");
         assert_eq!(wait(Until::Free).over_on(Some(&held(&other, Some(recorded + 5), State::Paused))), Some(How::Released));
         assert_eq!(wait(Until::Done).over_on(Some(&held(&other, Some(recorded + 5), State::Paused))), None, "out of progress, not done");
     }

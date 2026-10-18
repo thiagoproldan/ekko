@@ -558,7 +558,7 @@ pub(crate) fn boot() -> Option<String> {
 }
 
 /// The profile Claude Code runs with, named after its config directory.
-fn profile() -> Option<String> {
+pub(crate) fn profile() -> Option<String> {
     let dir = std::env::var_os("CLAUDE_CONFIG_DIR");
     let name = dir.as_deref().and_then(|dir| Path::new(dir).file_name()).map(|name| name.to_string_lossy().into_owned());
     Some(match name.as_deref().map(|name| name.trim_start_matches('.')) {

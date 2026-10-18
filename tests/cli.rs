@@ -767,6 +767,53 @@ fn the_tasklist_hook_writes_the_sessions_list() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// A session started in a folder before `ekko init` made it a project
+/// watches the default board (task 1838). init makes the new board's file
+/// and touches the default board's, which fires that session's FileChanged
+/// hook; the task-list hook, run there, answers with the new board to watch.
+/// An init in a folder that is a project already touches nothing.
+#[test]
+fn ekko_init_moves_the_watch_of_the_sessions_running_in_the_folder() {
+    use std::io::Write as _;
+    let dir = temp_ekko_dir();
+    let app = dir.join("app");
+    fs::create_dir_all(&app).unwrap();
+    let ekko = |args: &[&str], stdin: &str| {
+        let mut child = common::ekko()
+            .args(args)
+            .current_dir(&app)
+            .env("HOME", &dir)
+            .env("CLAUDE_CONFIG_DIR", dir.join("claude"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to run ekko");
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    assert!(ekko(&["--task", "on the default board"], "").status.success());
+    let started: serde_json::Value = serde_json::from_slice(&ekko(&["--tasklist", "--hook"], r#"{"session_id":"s-1","hook_event_name":"SessionStart"}"#).stdout).unwrap();
+    let default = PathBuf::from(started["hookSpecificOutput"]["watchPaths"][0].as_str().unwrap());
+    assert!(default.starts_with(&dir) && !default.starts_with(&app), "{started}");
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let modified = |file: &std::path::Path| fs::metadata(file).unwrap().modified().unwrap();
+    fs::File::options().write(true).open(&default).unwrap().set_modified(long_ago).unwrap();
+
+    assert!(ekko(&["init"], "").status.success());
+    let board = fs::canonicalize(&app).unwrap().join(".ekko/storage/storage.json");
+    assert!(board.is_file(), "init made no board file to watch");
+    assert!(modified(&default) > long_ago + std::time::Duration::from_secs(3000), "the default board was not touched");
+    let changed = serde_json::json!({"session_id": "s-1", "hook_event_name": "FileChanged", "file_path": default}).to_string();
+    let moved: serde_json::Value = serde_json::from_slice(&ekko(&["--tasklist", "--hook"], &changed).stdout).unwrap();
+    assert_eq!(moved["hookSpecificOutput"]["watchPaths"], serde_json::json!([board]), "{moved}");
+
+    fs::File::options().write(true).open(&default).unwrap().set_modified(long_ago).unwrap();
+    assert!(ekko(&["init"], "").status.success());
+    assert_eq!(modified(&default), long_ago, "an init of a project touched the default board");
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// The memory hook as the plugin runs it at SessionStart (task 885): the
 /// page in the project's board folder for a session that starts, and nothing
 /// for one that resumes, nor on a board without a page -- plain text with no
@@ -2012,16 +2059,16 @@ impl Agents {
     /// its hooks, its tools and its MCP server, so the claims, waits and
     /// hooks of every step are this one process's.
     fn session(&self, tasks: &str) -> Stays {
-        self.stays(Some(tasks))
+        self.stays(Some(tasks), &[])
     }
 
     /// A session that stays, as `session` starts one, that ekko agents did
     /// not start: the orchestrator (task 1646).
     fn orchestrator(&self) -> Stays {
-        self.stays(None)
+        self.stays(None, &[])
     }
 
-    fn stays(&self, tasks: Option<&str>) -> Stays {
+    fn stays(&self, tasks: Option<&str>, env: &[(&str, String)]) -> Stays {
         let dir = self.home.join(format!("stays-{}", self.home.read_dir().unwrap().count()));
         fs::create_dir_all(&dir).unwrap();
         let claude = dir.join("claude");
@@ -2037,8 +2084,42 @@ impl Agents {
         if let Some(tasks) = tasks {
             command.env("EKKO_AGENT_TASK", tasks);
         }
+        command.envs(env.iter().map(|(name, value)| (*name, value.as_str())));
         let child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         Stays { child, dir, steps: std::cell::Cell::new(0) }
+    }
+
+    /// A born session for `tasks`, as `session` starts one, whose watcher
+    /// tells the user of a wait after `seconds`, through a stand-in busctl
+    /// that records each call it is made in `busctl.calls`.
+    fn session_telling_after(&self, tasks: &str, seconds: u32) -> Stays {
+        let bin = self.home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        write_executable(&bin.join("busctl"), &format!("#!/bin/sh\nprintf '%s\\037' \"$@\" >> '{}'\necho >> '{}'\n", self.busctl().display(), self.busctl().display()));
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        self.stays(Some(tasks), &[("EKKO_AGENTS_TELL_AFTER", seconds.to_string()), ("PATH", path)])
+    }
+
+    /// Where the stand-in busctl records its calls.
+    fn busctl(&self) -> PathBuf {
+        self.home.join("busctl.calls")
+    }
+
+    /// Each call the stand-in busctl was made, its arguments.
+    fn notified(&self) -> Vec<Vec<String>> {
+        let calls = fs::read_to_string(self.busctl()).unwrap_or_default();
+        calls.lines().map(|call| call.split('\u{1f}').filter(|arg| !arg.is_empty()).map(str::to_string).collect()).collect()
+    }
+
+    /// Whether `done` holds within 5 s, asked every 50 ms.
+    fn within(&self, mut done: impl FnMut() -> bool) -> bool {
+        (0..100).any(|_| {
+            let held = done();
+            if !held {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            held
+        })
     }
 
     /// The name the stand-in multiplexer gives the window of pane %7.
@@ -3437,6 +3518,181 @@ fn a_born_session_whose_turn_ends_on_an_api_error_waits_on_the_user_and_wakes_it
     assert!(agents.ekko(&["--check", "2"]).status.success());
     let (mut stand_in, _) = agents.born(Some(&uid), "s-2", "StopFailure", serde_json::json!({"error": "rate_limit", "last_assistant_message": "API Error: Rate limit reached"}));
     assert!(ended_by_sigterm(&mut stand_in), "a finished session's turn ended on an API error, and it stayed");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A born session whose process ends with its work unfinished -- its window
+/// closed, a crash, a kill -- is seen to by its watcher (tasks 1827 and
+/// 1729): the task it held in progress goes to paused, with a note saying
+/// where the work stands in its worktree and how to go on, and the waits on
+/// it end, which wakes the orchestrator; a task of its own it never took up
+/// gets the same note and its waits end, left pending. A task that is not
+/// the session's keeps its wait, as does one of its own the user holds,
+/// and a session whose tasks are finished leaves the board as it was.
+#[test]
+fn a_born_session_that_ends_mid_task_is_paused_with_where_it_stood_and_its_waiters_told() {
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs", "Write the tests", "Write the notes", "Write the index"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    fs::write(agents.app.join("hello.txt"), "hello\n").unwrap();
+    // Task 5, the session's too, is the user's to hold.
+    assert!(agents.ekko(&["--begin", "5"]).status.success());
+    let session = agents.session(&format!("{},{},{}", agents.uid(1), agents.uid(2), agents.uid(5)));
+    session.ekko(&["--begin", "1"], "");
+    assert_eq!(session.ran(), "", "a PostToolUse hook prints nothing");
+    let orchestrator = agents.orchestrator();
+    let waits: Vec<serde_json::Value> = orchestrator
+        .tools(&[1, 2, 3, 5].map(|id| ("wait", serde_json::json!({"item": id, "until": "done", "text": format!("review {id}")}))))
+        .iter()
+        .map(|reply| serde_json::from_str(reply).unwrap())
+        .collect();
+    assert!(waits.iter().all(|wait| wait["ok"] == true), "{waits:?}");
+    let changed = serde_json::json!({"hook_event_name": "FileChanged", "session_id": "o-1", "file_path": agents.home.join("app/.ekko/storage/storage.json")}).to_string();
+    orchestrator.ekko(&["--wake", "--hook"], &changed);
+    assert_eq!(orchestrator.said(), "", "nothing ended the waits yet");
+
+    drop(session);
+    let state = |id: u32| agents.json(&["--context", &id.to_string(), "--json"])["context"]["item"]["state"].as_str().map(str::to_string);
+    assert!(agents.within(|| state(1).as_deref() == Some("paused")), "task 1 is {:?}", state(1));
+    let context = agents.context("1");
+    assert!(context.contains("The session ekko agents started for task 1 ended at "), "{context}");
+    assert!(context.contains("gone with the task in progress: ekko paused it, which lets it go. The wait of note "), "{context}");
+    assert!(context.contains("Uncommitted, 1 file: ?? hello.txt. Last commit: "), "{context}");
+    assert!(context.contains("To go on: ekko agents start 1, in the project's folder"), "{context}");
+    assert_eq!(state(2).as_deref(), Some("pending"));
+    assert!(agents.context("2").contains("gone before it took the task up. The wait of note "), "{}", agents.context("2"));
+    assert!(!agents.context("3").contains("The session ekko agents started"), "{}", agents.context("3"));
+    assert!(!agents.context("5").contains("The session ekko agents started") && state(5).as_deref() == Some("in progress"), "the user's claim: {}", agents.context("5"));
+    assert!(agents.logged("ended with its work unfinished: task 1 paused, note "));
+
+    orchestrator.ekko(&["--wake", "--hook"], &changed);
+    let told = orchestrator.said();
+    assert!(told.contains("1 (Write hello) is free: the session holding it has ended, now paused (its notes say where it stood). This session waited on it (note "), "{told}");
+    assert!(told.contains("2 (Write the docs) is free: the session holding it has ended"), "{told}");
+    assert!(!told.contains("3 (Write the tests)"), "{told}");
+    assert!(!told.contains("5 (Write the index)"), "{told}");
+
+    // Its task done, a session that ends writes nothing.
+    let session = agents.session(&agents.uid(4));
+    session.ekko(&["--begin", "4"], "");
+    session.ekko(&["--check", "4"], "");
+    session.ran();
+    let board = fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap();
+    drop(session);
+    std::thread::sleep(std::time::Duration::from_millis(1_500));
+    assert_eq!(fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap(), board, "a finished session's end was written");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A born session that waits on the user before its model took its task up
+/// (task 1729) takes it up then, so the mark lands on it and the
+/// orchestrator's wait on it ends; one held by the user stays theirs.
+#[test]
+fn a_born_session_waiting_before_it_took_its_task_up_claims_it_so_its_orchestrator_hears() {
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    agents.name_window("1 \u{b7} haiku");
+    let session = agents.session(&agents.uid(1));
+    let orchestrator = agents.orchestrator();
+    let wait: serde_json::Value = serde_json::from_str(&orchestrator.tools(&[("wait", serde_json::json!({"item": 1, "until": "done", "text": "review hello"}))])[0]).unwrap();
+    assert_eq!(wait["ok"], true, "{wait}");
+
+    session.hook("Notification", serde_json::json!({"notification_type": "idle_prompt", "message": "Claude is waiting for your input"}));
+    assert!(agents.logged("waits on you (idle_prompt): Claude is waiting for your input; claimed task 1, which it had not taken up; marked on task 1;"));
+    let context = agents.context("1");
+    assert!(context.contains("task, in progress, held by ") && context.contains("waiting on you since"), "{context}");
+    let changed = serde_json::json!({"hook_event_name": "FileChanged", "session_id": "o-1", "file_path": agents.home.join("app/.ekko/storage/storage.json")}).to_string();
+    orchestrator.ekko(&["--wake", "--hook"], &changed);
+    assert!(orchestrator.said().starts_with("1 (Write hello) is held by a session that waits on the user, in the window named \"1 \u{b7} haiku\": Claude is waiting for your input."), "{}", orchestrator.said());
+
+    assert!(agents.ekko(&["--begin", "2"]).status.success());
+    let other = agents.session(&agents.uid(2));
+    // A session of its own, as Stays::hook names every one s-1.
+    other.ekko(&["--born", "--hook"], &serde_json::json!({"session_id": "s-2", "hook_event_name": "Notification", "notification_type": "idle_prompt", "message": "Claude is waiting for your input"}).to_string());
+    assert!(agents.logged(&format!("{} waits on you (idle_prompt): Claude is waiting for your input; no task of its own in progress to mark on the board", agents.uid(2))));
+    assert!(agents.context("2").contains("task, in progress, yours since"), "the user's claim was taken: {}", agents.context("2"));
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A born session that has waited on the user for long is told to them
+/// directly (task 1832): its watcher sends one desktop notification a wait,
+/// naming the task, what it waits for and the window, once the wait is as
+/// old as EKKO_AGENTS_TELL_AFTER says; none while it does not wait.
+#[test]
+fn a_born_session_that_waits_on_the_user_for_long_is_told_to_them() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    agents.name_window("1 \u{b7} haiku");
+    let session = agents.session_telling_after(&agents.uid(1), 1);
+    session.ekko(&["--begin", "1"], "");
+    session.ran();
+    std::thread::sleep(std::time::Duration::from_millis(2_000));
+    assert_eq!(agents.notified(), Vec::<Vec<String>>::new(), "told with nothing waited on");
+
+    session.asks();
+    assert!(agents.within(|| !agents.notified().is_empty()), "not told within 5 s");
+    let call = agents.notified().remove(0);
+    let at = call.iter().position(|arg| arg == "dialog-question").unwrap_or_else(|| panic!("{call:?}"));
+    assert!(call[..at].iter().any(|arg| arg == "org.freedesktop.Notifications"), "{call:?}");
+    assert!(call[at + 1].starts_with("ekko: task 1's session has waited on you for "), "{call:?}");
+    assert_eq!(call[at + 2], "Claude needs your permission -- Bash: date > stamp.txt. Window \"1 \u{b7} haiku\" of session ekko, project app.", "{call:?}");
+    assert!(agents.logged("told the user it has waited on them for "));
+    std::thread::sleep(std::time::Duration::from_millis(1_500));
+    assert_eq!(agents.notified().len(), 1, "told twice of one wait");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A born session's handoff on a task it holds (task 2028) ends its turn at
+/// once: PostToolUse answers `continue: false`, so no text follows, marks
+/// the task waiting on the user with the handoff, which ends the
+/// orchestrator's wait, and starts no closer -- the session stays for the
+/// answer. The turn's end that follows keeps the mark; the next tool the
+/// answer sets going clears it, and that handoff stops it no more. A plain
+/// note, a decision, or the user's handoff stop nothing.
+#[test]
+fn a_born_session_s_handoff_ends_its_turn_and_marks_it_waiting_at_once() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    agents.name_window("1 \u{b7} haiku");
+    let mut session = agents.session(&agents.uid(1));
+    session.ekko(&["--begin", "1"], "");
+    let orchestrator = agents.orchestrator();
+    let wait: serde_json::Value = serde_json::from_str(&orchestrator.tools(&[("wait", serde_json::json!({"item": 1, "until": "done", "text": "review hello"}))])[0]).unwrap();
+    assert_eq!(wait["ok"], true, "{wait}");
+    let created = |session: &Stays| session.hook("PostToolUse", serde_json::json!({"tool_name": "mcp__plugin_ekko_ekko__create", "tool_input": {}, "tool_response": {}}));
+
+    session.tools(&[("create", serde_json::json!({"text": "Tried the short name", "attached_to": 1})), ("create", serde_json::json!({"text": "Chose red", "kind": "decision", "attached_to": 1}))]);
+    orchestrator.tools(&[("create", serde_json::json!({"text": "Where 1 stood, as the orchestrator saw it", "kind": "handoff", "attached_to": 1}))]);
+    assert_eq!(created(&session), "", "stopped with no handoff of its own");
+    assert!(!agents.context("1").contains("waiting on you"));
+
+    session.tools(&[("create", serde_json::json!({"text": "Stopped: red or blue is the user's to choose", "kind": "handoff", "attached_to": 1}))]);
+    let said = created(&session);
+    let stop: serde_json::Value = serde_json::from_str(&said).unwrap_or_else(|e| panic!("{e}: {said}"));
+    assert_eq!(stop["continue"], false, "{said}");
+    assert_eq!(stop["stopReason"], "ekko: this session wrote its handoff on task 1 and waits; the answer comes as a note on the task", "{said}");
+    let read = agents.json(&["--context", "1", "--json"]);
+    let what = read["context"]["item"]["held"]["waitsOnUser"]["what"].as_str().unwrap_or_else(|| panic!("{read}")).to_string();
+    assert!(what.starts_with("its handoff, note ") && what.ends_with(", on task 1: Stopped: red or blue is the user's to choose"), "{what}");
+    assert_eq!(agents.window(), "1 \u{b7} haiku \u{b7} waiting on you");
+    assert!(agents.logged(&format!("waits on you (handoff): {what}; marked on task 1;")));
+    assert!(still_alive(&mut session.child), "a closer ended it");
+    let changed = serde_json::json!({"hook_event_name": "FileChanged", "session_id": "o-1", "file_path": agents.home.join("app/.ekko/storage/storage.json")}).to_string();
+    orchestrator.ekko(&["--wake", "--hook"], &changed);
+    assert!(orchestrator.said().starts_with(&format!("1 (Write hello) is held by a session that waits on the user, in the window named \"1 \u{b7} haiku\": {what}. Read its handoff")), "{}", orchestrator.said());
+
+    // Its turn's end keeps the mark; the answer's note reaches it, and the
+    // tool it runs then clears the mark.
+    session.hook("Stop", serde_json::json!({"background_tasks": [], "session_crons": []}));
+    assert!(agents.context("1").contains("waiting on you since"), "the turn's end cleared the mark");
+    assert_eq!(agents.window(), "1 \u{b7} haiku \u{b7} waiting on you");
+    orchestrator.tools(&[("create", serde_json::json!({"text": "Red", "attached_to": 1}))]);
+    session.ran();
+    assert!(!agents.context("1").contains("waiting on you"), "{}", agents.context("1"));
+    assert_eq!(created(&session), "", "the same handoff stopped it again");
     fs::remove_dir_all(&agents.home).ok();
 }
 
