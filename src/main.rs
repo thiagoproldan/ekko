@@ -1,6 +1,7 @@
 mod agent;
 mod alike;
 mod agents;
+mod agents_gate;
 mod agents_merge;
 mod agents_view;
 mod anchors;
@@ -53,8 +54,8 @@ const HELP: &str = r#"
     $ ekko serve [--idle <seconds>] [--stop]
     $ ekko agents start <task>... --model <model> [--effort <level>] [--group <task>,...] [--project <name>]
     $ ekko agents merge <task>... [--keep] [--project <name>]
-    $ ekko agents test [<command> | --none] [--project <name>]
-    $ ekko agents limit [<n>] [--project <name>]
+    $ ekko agents test [<command> | --none | --derive] [--project <name>]
+    $ ekko agents limit [<n>] [--default] [--project <name>]
     $ ekko agents view [--once] [--json] [--project <name>]
     $ ekko agents wall
     $ ekko agents unwall
@@ -584,11 +585,13 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
         cli::Agents::Start { ids, group, model, effort, project, json } => (ids, group, model, effort, project, json),
         // `ekko agents merge` (task 1714).
         cli::Agents::Merge { ids, keep, project, json } => return run_merge(&home_dir, &cwd, &ids, keep, project.as_deref(), json_first || json),
-        cli::Agents::Test { command, none, project, json } => {
-            return run_agents_test(&home_dir, &cwd, command.as_deref(), none, project.as_deref(), json_first || json);
+        cli::Agents::Test { command, none, derive, project, json } => {
+            return run_agents_test(&home_dir, &cwd, command.as_deref(), none, derive, project.as_deref(), json_first || json);
         }
-        // `ekko agents limit` (task 1727).
-        cli::Agents::Limit { limit, project, json } => return run_agents_limit(&home_dir, &cwd, limit, project.as_deref(), json_first || json),
+        // `ekko agents limit` (task 1727), and the machine's default (task 1902).
+        cli::Agents::Limit { limit, default, project, json } => {
+            return run_agents_limit(&home_dir, &cwd, limit, default, project.as_deref(), json_first || json);
+        }
         // `ekko agents view` (task 1676).
         cli::Agents::View { once, project, json } => {
             let project_env = std::env::var("EKKO_PROJECT").ok();
@@ -707,64 +710,163 @@ fn agents_board(home_dir: &Path, cwd: &Path, project: Option<&str>) -> Result<(d
 }
 
 /// `ekko agents test`: the command `ekko agents merge` tests a rebased
-/// branch with, shown, or set as the user says (task 1714).
-fn run_agents_test(home_dir: &Path, cwd: &Path, command: Option<&str>, none: bool, project: Option<&str>, json_mode: bool) -> ExitCode {
-    let settings = agents_board(home_dir, cwd, project).and_then(|(location, ekko)| {
-        if location.project.is_none() {
+/// branch with, shown, or set as the user says (task 1714), or as ekko
+/// derives it from what the repository declares (task 1902).
+fn run_agents_test(home_dir: &Path, cwd: &Path, command: Option<&str>, none: bool, derive: bool, project: Option<&str>, json_mode: bool) -> ExitCode {
+    let set = agents_board(home_dir, cwd, project).and_then(|(location, ekko)| {
+        let Some(project) = location.project.as_ref() else {
             return Err(EkkoError::InvalidInput("ekko agents works on a project's board, whose sessions work in worktrees of the project's repository; this is the default board".into()));
-        }
-        match (command, none) {
-            (Some(command), _) if command.trim().is_empty() => {
+        };
+        let derived = || match project.root.as_deref() {
+            Some(root) => match agents::git(root, &["rev-parse", "--show-toplevel"]) {
+                Ok(top) => agents_gate::derive(Path::new(&top), &std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())),
+                Err(_) => agents_gate::derive(root, root),
+            },
+            None => agents_gate::Derived::Nothing,
+        };
+        match (command, none, derive) {
+            (Some(command), _, _) if command.trim().is_empty() => {
                 Err(EkkoError::InvalidInput("An empty command tests nothing: ekko agents test --none says the project has no tests".into()))
             }
-            (Some(command), _) => ekko.set_agents_test(Some(command)),
-            (None, true) => ekko.set_agents_test(None),
-            (None, false) => ekko.storage.get_agents().map_err(EkkoError::from),
+            (Some(command), _, _) => Ok((ekko.set_agents_test(Some(command))?, None)),
+            (None, true, _) => Ok((ekko.set_agents_test(None)?, None)),
+            (None, false, true) => {
+                let settings = ekko.storage.get_agents()?;
+                let derived = derived();
+                let (command, from) = match &derived {
+                    agents_gate::Derived::Found { command, from } => (command.clone(), from.clone()),
+                    agents_gate::Derived::Disagree { from, commands } => {
+                        return Err(EkkoError::InvalidInput(format!(
+                            "ekko derives no test command for this project: {from} test in {} different ways ({}). Nothing was set: the user \
+                             chooses with ekko agents test 'COMMAND'",
+                            commands.len(),
+                            commands.iter().map(|command| format!("`{command}`")).collect::<Vec<_>>().join(", ")
+                        )))
+                    }
+                    agents_gate::Derived::Nothing => {
+                        return Err(EkkoError::InvalidInput(
+                            "ekko derives no test command for this project: no CI test step, flake checks, or test target of make, Cargo or npm. \
+                             Nothing was set: the user sets one with ekko agents test 'COMMAND', or says it has none with ekko agents test --none"
+                                .into(),
+                        ))
+                    }
+                };
+                match (&settings.test, settings.untested) {
+                    (Some(set), _) if *set != command => Err(EkkoError::InvalidInput(format!(
+                        "This project's test command is set already, to `{set}`, and --derive sets one only where none is: ekko agents test \
+                         '{command}' sets the derived one, from {from}, in its place"
+                    ))),
+                    (None, true) => Err(EkkoError::InvalidInput(format!(
+                        "The user said this project has no tests, and --derive sets a command only where nothing is set: ekko agents test \
+                         '{command}' sets the derived one, from {from}"
+                    ))),
+                    _ => Ok((ekko.set_agents_test(Some(&command))?, Some(derived))),
+                }
+            }
+            (None, false, false) => {
+                let settings = ekko.storage.get_agents()?;
+                let derivable = (settings.test.is_none() && !settings.untested).then(derived);
+                Ok((settings, derivable))
+            }
         }
     });
-    let settings = match settings {
-        Ok(settings) => settings,
+    let (settings, derived) = match set {
+        Ok(set) => set,
         Err(err) => return finish_with_error(&err, json_mode, home_dir),
     };
+    let found = match &derived {
+        Some(agents_gate::Derived::Found { command, from }) => Some((command.as_str(), from.as_str())),
+        _ => None,
+    };
     if json_mode {
-        println!("{}", serde_json::json!({"ok": true, "command": "agents test", "test": settings.test, "untested": settings.untested}));
+        let found = found.map(|(command, from)| serde_json::json!({"command": command, "from": from}));
+        let key = if derive { "derived" } else { "derivable" };
+        println!("{}", serde_json::json!({"ok": true, "command": "agents test", "test": settings.test, "untested": settings.untested, key: found}));
         return ExitCode::SUCCESS;
     }
     match (&settings.test, settings.untested) {
+        (Some(command), _) if derive => match found {
+            Some((_, from)) => println!(
+                "ekko agents merge tests each branch with `{command}`, in its worktree once rebased, and merges it only if that exits 0: derived from {from}; \
+                 ekko agents test 'COMMAND' changes it"
+            ),
+            None => println!("ekko agents merge tests each branch with `{command}`, in its worktree once rebased, and merges it only if that exits 0"),
+        },
         (Some(command), _) => println!("ekko agents merge tests each branch with `{command}`, in its worktree once rebased, and merges it only if that exits 0"),
         (None, true) => println!("This project has no tests, as the user said: ekko agents merge merges a rebased branch untested"),
-        (None, false) => println!(
-            "No test command is set: ekko agents merge refuses until the user sets one with ekko agents test 'COMMAND', or says the project has none with ekko agents test --none"
-        ),
+        (None, false) => {
+            println!(
+                "No test command is set: ekko agents merge refuses until the user sets one with ekko agents test 'COMMAND', or says the project has none with ekko agents test --none"
+            );
+            match found {
+                Some((command, from)) => println!("ekko agents test --derive sets `{command}`, from {from}"),
+                None => println!("ekko derives none from what the repository declares"),
+            }
+        }
     }
     ExitCode::SUCCESS
 }
 
-/// `ekko agents limit`: how many sessions `ekko agents start` runs at once
-/// for the project, shown, or set as the user says (task 1727).
-fn run_agents_limit(home_dir: &Path, cwd: &Path, limit: Option<u32>, project: Option<&str>, json_mode: bool) -> ExitCode {
+/// `ekko agents limit`: how many sessions ekko agents starts at once for
+/// the project, shown, or set as the user says (task 1727); with `default`,
+/// the machine's default, which a project without a limit of its own takes
+/// (task 1902).
+fn run_agents_limit(home_dir: &Path, cwd: &Path, limit: Option<u32>, default: bool, project: Option<&str>, json_mode: bool) -> ExitCode {
     let settings = agents_board(home_dir, cwd, project).and_then(|(location, ekko)| {
+        if default {
+            if let Some(limit) = limit {
+                ekko.set_agents_default_limit(home_dir, limit)?;
+            }
+            return Ok((ekko.storage.get_agents().unwrap_or_default(), location.project.is_some()));
+        }
         if location.project.is_none() {
-            return Err(EkkoError::InvalidInput("ekko agents works on a project's board, whose sessions work in worktrees of the project's repository; this is the default board".into()));
+            return Err(EkkoError::InvalidInput(
+                "ekko agents works on a project's board, whose sessions work in worktrees of the project's repository; this is the default board: \
+                 ekko agents limit --default sets the machine's default"
+                    .into(),
+            ));
         }
         match limit {
             Some(limit) => ekko.set_agents_limit(limit),
             None => ekko.storage.get_agents().map_err(EkkoError::from),
         }
+        .map(|settings| (settings, true))
     });
-    let settings = match settings {
+    let (settings, in_project) = match settings {
         Ok(settings) => settings,
         Err(err) => return finish_with_error(&err, json_mode, home_dir),
     };
+    let machine = agents::default_limit(home_dir);
+    let at_once = settings.at_once(machine);
+    let from = match (settings.limit, machine) {
+        (Some(_), _) => "project",
+        (None, Some(_)) => "default",
+        (None, None) => "ekko",
+    };
     if json_mode {
-        println!("{}", serde_json::json!({"ok": true, "command": "agents limit", "limit": settings.at_once(), "set": settings.limit.is_some()}));
+        let mut out = serde_json::json!({"ok": true, "command": "agents limit", "limit": at_once, "set": settings.limit.is_some(), "default": machine.unwrap_or(agents::LIMIT), "from": from});
+        if !in_project {
+            out["limit"] = serde_json::Value::Null;
+        }
+        println!("{out}");
         return ExitCode::SUCCESS;
     }
-    let at_once = settings.at_once();
-    let sessions = if at_once == 1 { "session" } else { "sessions" };
-    match settings.limit {
-        Some(_) => println!("ekko agents start runs at most {at_once} {sessions} at once for this project, as the user set"),
-        None => println!("ekko agents start runs at most {at_once} {sessions} at once for this project, until the user sets another limit with ekko agents limit N"),
+    let sessions = |n: u32| if n == 1 { "session" } else { "sessions" };
+    if default {
+        let n = machine.unwrap_or(agents::LIMIT);
+        match machine {
+            Some(_) => println!("A project without a limit of its own runs at most {n} {} at once on this machine, as the user set", sessions(n)),
+            None => println!("A project without a limit of its own runs at most {n} {} at once, until the user sets another default with ekko agents limit N --default", sessions(n)),
+        }
+        if !in_project {
+            return ExitCode::SUCCESS;
+        }
+    }
+    let sessions = sessions(at_once);
+    match from {
+        "project" => println!("ekko agents start runs at most {at_once} {sessions} at once for this project, as the user set"),
+        "default" => println!("ekko agents start runs at most {at_once} {sessions} at once for this project, the machine's default, until the user sets another limit with ekko agents limit N"),
+        _ => println!("ekko agents start runs at most {at_once} {sessions} at once for this project, until the user sets another limit with ekko agents limit N"),
     }
     ExitCode::SUCCESS
 }

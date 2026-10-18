@@ -23,11 +23,19 @@ push is the user's.
   the user's terminal.
 
 - `ekko agents test` shows the command each branch must pass before it goes
-  in. If none is set, `ekko agents merge` refuses: ask the user for it
-  (`ekko agents test 'COMMAND'`, or `--none` for a project without tests).
-  The gate is theirs to set, not yours.
+  in. If none is set, `ekko agents merge` refuses. Do not ask the user
+  (decision 1908): run `ekko agents test --derive`, which sets the command
+  the repository declares -- its CI's test step, a flake's checks, the test
+  target of make, Cargo or npm -- by ekko's fixed rule, and tell the user
+  the command and where it came from, then go on; `ekko agents test
+  'COMMAND'` is how they change it. Only when `--derive` sets nothing --
+  nothing declared, or two CI steps that test differently -- ask the user
+  for it (`ekko agents test 'COMMAND'`, or `--none` for a project without
+  tests). Never choose or write the command yourself.
 - `ekko agents limit` shows how many sessions run at once for the project:
-  2 unless the user set another. Do not raise it yourself.
+  its own limit, else the machine's default the user set once with
+  `ekko agents limit N --default`, else 2. Do not ask, and do not raise it
+  yourself.
 
 ## The loop
 

@@ -82,8 +82,9 @@ pub fn test_command(ekko: &Ekko) -> Result<Test, EkkoError> {
         Some(command) => Ok(Test::Command(command)),
         None if settings.untested => Ok(Test::None),
         None => Err(EkkoError::InvalidInput(
-            "No test command is set for this project, and ekko agents merge tests each branch, rebased, before it goes in: the user \
-             sets one with ekko agents test 'COMMAND', or says the project has none with ekko agents test --none. Nothing was merged"
+            "No test command is set for this project, and ekko agents merge tests each branch, rebased, before it goes in: ekko agents \
+             test --derive sets the one the repository declares, if it declares one; else the user sets one with ekko agents test \
+             'COMMAND', or says the project has none with ekko agents test --none. Nothing was merged"
                 .into(),
         )),
     }

@@ -122,11 +122,16 @@ pub enum Agents {
     Test {
         /// The command, quoted: run through `sh -c` in the branch's
         /// worktree, once rebased; the branch goes in if it exits 0.
-        #[arg(value_name = "COMMAND", conflicts_with = "none")]
+        #[arg(value_name = "COMMAND", conflicts_with_all = ["none", "derive"])]
         command: Option<String>,
         /// The project has no tests: a branch goes in untested.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "derive")]
         none: bool,
+        /// Set the command ekko derives, by a fixed rule, from what the
+        /// repository declares: its CI's test step, a flake's checks, the
+        /// test target of make, Cargo or npm.
+        #[arg(long)]
+        derive: bool,
         /// A project's board other than the one found from the folder.
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
@@ -140,6 +145,10 @@ pub enum Agents {
         /// The most sessions that run at once, one at least.
         #[arg(value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
         limit: Option<u32>,
+        /// The machine's default instead, which a project without a limit
+        /// of its own takes.
+        #[arg(long)]
+        default: bool,
         /// A project's board other than the one found from the folder.
         #[arg(long, value_name = "NAME")]
         project: Option<String>,

@@ -62,15 +62,22 @@ pub const WAITS_OPTION: &str = "@ekko_waits";
 pub const PROJECT_OPTION: &str = "@ekko_project";
 
 /// The most sessions `start` runs at once for a project where the user set
-/// no other with `ekko agents limit` (task 1727): two, to begin with, as
-/// the user decided (decision 1717).
+/// no other with `ekko agents limit` (task 1727), nor a default for the
+/// machine with `--default` (task 1902): two, as the user decided (decision
+/// 1717).
 pub const LIMIT: u32 = 2;
 
 impl crate::storage::AgentsSettings {
-    /// The most sessions that run at once for the project.
-    pub fn at_once(&self) -> u32 {
-        self.limit.unwrap_or(LIMIT)
+    /// The most sessions that run at once for the project: its own limit,
+    /// else the machine's `default`, else `LIMIT`.
+    pub fn at_once(&self, default: Option<u32>) -> u32 {
+        self.limit.or(default).unwrap_or(LIMIT)
     }
+}
+
+/// The machine's default limit, as `~/.ekko.json` under `home` holds it.
+pub fn default_limit(home: &Path) -> Option<u32> {
+    crate::config::get(home).ok().and_then(|config| config.agents_limit)
 }
 
 /// The states `STATE_OPTION` takes.
@@ -244,7 +251,7 @@ pub fn start(
     if let Some((id, pane)) = pane_of(&project.name, &ids, &born) {
         return Err(refused(format!("task {id} has a session already, in pane {} of window {} in session {SESSION}: step into it there", pane.pane, pane.window)));
     }
-    let limit = ekko.storage.get_agents()?.at_once();
+    let limit = ekko.storage.get_agents()?.at_once(default_limit(home));
     let running = running_for(&project.name, &windows, &born);
     if running.len() >= limit as usize {
         return Err(refused(format!(

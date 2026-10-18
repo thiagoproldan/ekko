@@ -2500,6 +2500,82 @@ fn agents_start_given_part_of_a_group_takes_up_the_groups_branch() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// The machine's default limit (task 1902): a project without a limit of
+/// its own takes it, in place of 2, and one with its own keeps that; it is
+/// set in ~/.ekko.json, from any folder, the default board's included.
+#[test]
+fn agents_limit_default_is_taken_by_a_project_without_its_own() {
+    let agents = Agents::new();
+    let shown = agents.json(&["agents", "limit", "--json"]);
+    assert_eq!((shown["limit"].as_u64(), shown["from"].as_str(), shown["default"].as_u64()), (Some(2), Some("ekko"), Some(2)), "{shown}");
+
+    let elsewhere = agents.home.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let set = agents.command(&["--json", "agents", "limit", "1", "--default"]).current_dir(&elsewhere).output().unwrap();
+    let set: serde_json::Value = serde_json::from_slice(&set.stdout).unwrap();
+    assert_eq!((set["ok"].as_bool(), set["default"].as_u64(), set["limit"].clone()), (Some(true), Some(1), serde_json::Value::Null), "{set}");
+    let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join(".ekko.json")).unwrap()).unwrap();
+    assert_eq!(config["agentsLimit"], 1, "{config}");
+    let shown = agents.json(&["agents", "limit", "--json"]);
+    assert_eq!((shown["limit"].as_u64(), shown["set"].as_bool(), shown["from"].as_str()), (Some(1), Some(false), Some("default")), "{shown}");
+    let said = String::from_utf8(agents.ekko(&["agents", "limit"]).stdout).unwrap();
+    assert!(said.contains("runs at most 1 session at once for this project, the machine's default"), "{said}");
+
+    // start keeps to it: one session runs, so a second is refused.
+    for text in ["One", "Two"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let state = agents.home.join("mux-state");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("session"), "").unwrap();
+    fs::write(state.join("born-panes"), "%1\t0\t@1\t1 \u{b7} haiku\t1\tTitle\thaiku\t\tworking\t1\t\tapp\n").unwrap();
+    fs::write(state.join("windows"), "1 \u{b7} haiku\n").unwrap();
+    let refused = agents.json(&["agents", "start", "2", "--model", "haiku", "--json"]);
+    assert!(refused["error"].as_str().unwrap().contains("as many as its limit lets run at once (1,"), "{refused}");
+
+    // The project's own limit wins over the default.
+    assert!(agents.ekko(&["agents", "limit", "2"]).status.success());
+    let shown = agents.json(&["agents", "limit", "--json"]);
+    assert_eq!((shown["limit"].as_u64(), shown["from"].as_str(), shown["default"].as_u64()), (Some(2), Some("project"), Some(1)), "{shown}");
+    let started = agents.json(&["agents", "start", "2", "--model", "haiku", "--json"]);
+    assert_eq!(started["ok"], true, "{started}");
+}
+
+/// `ekko agents test --derive` (task 1902): the gate the repository
+/// declares, by the fixed rule, set and said where it came from; nothing
+/// set where nothing is declared, nor over what is set already.
+#[test]
+fn agents_test_derive_sets_what_the_repository_declares() {
+    let agents = Agents::new();
+    let settings = agents.home.join("app/.ekko/storage/agents.json");
+    let shown = String::from_utf8(agents.ekko(&["agents", "test"]).stdout).unwrap();
+    assert!(shown.ends_with("ekko derives none from what the repository declares\n"), "{shown}");
+    let nothing = agents.json(&["--json", "agents", "test", "--derive"]);
+    assert!(nothing["error"].as_str().unwrap().starts_with("ekko derives no test command for this project: no CI test step"), "{nothing}");
+    assert!(!settings.exists());
+
+    let workflows = agents.app.join(".github/workflows");
+    fs::create_dir_all(&workflows).unwrap();
+    fs::write(workflows.join("ci.yml"), "jobs:\n  t:\n    steps:\n      - name: Unit\n        run: |\n          ./build.sh\n          make test\n").unwrap();
+    fs::write(agents.app.join("Cargo.toml"), "").unwrap();
+    let shown = agents.json(&["--json", "agents", "test"]);
+    assert_eq!(shown["derivable"], serde_json::json!({"command": "./build.sh\nmake test", "from": ".github/workflows/ci.yml, step Unit"}), "{shown}");
+    assert!(!settings.exists(), "shown, not set");
+
+    let derived = agents.json(&["--json", "agents", "test", "--derive"]);
+    assert_eq!((derived["test"].as_str(), derived["derived"]["from"].as_str()), (Some("./build.sh\nmake test"), Some(".github/workflows/ci.yml, step Unit")), "{derived}");
+    let said = String::from_utf8(agents.ekko(&["agents", "test", "--derive"]).stdout).unwrap();
+    assert!(said.ends_with("derived from .github/workflows/ci.yml, step Unit; ekko agents test 'COMMAND' changes it\n"), "{said}");
+
+    // Set by the user, it stays: --derive says how to take the derived one instead.
+    assert!(agents.ekko(&["agents", "test", "true"]).status.success());
+    let kept = agents.json(&["--json", "agents", "test", "--derive"]);
+    assert!(kept["error"].as_str().unwrap().starts_with("This project's test command is set already, to `true`"), "{kept}");
+    assert_eq!(agents.json(&["--json", "agents", "test"])["test"], "true");
+    assert!(agents.ekko(&["agents", "test", "--none"]).status.success());
+    assert!(agents.json(&["--json", "agents", "test", "--derive"])["error"].as_str().unwrap().starts_with("The user said this project has no tests"));
+}
+
 /// At most the project's limit of sessions run at once (task 1727): two
 /// until the user sets another with `ekko agents limit`. A start past it is
 /// refused, naming those that run, with nothing opened. A session counts
@@ -4095,6 +4171,13 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     let said = limit["error"].as_str().unwrap();
     assert!(said.starts_with("The project's limit on sessions at once is not this session's to set: ekko agents started it for task 1, and how many sessions run at once is the user's to set"), "{said}");
     assert!(born.ekko(&["--json", "agents", "limit"], "").contains("\"limit\":2"), "read");
+    assert!(!agents.home.join("app/.ekko/storage/agents.json").exists());
+    // The machine's default (task 1902), and the gate ekko derives: the user's too.
+    assert!(born.ekko(&["--json", "agents", "limit", "5", "--default"], "").contains("NOT_BORN_FOR"));
+    assert!(!fs::read_to_string(agents.home.join(".ekko.json")).unwrap().contains("agentsLimit"));
+    fs::write(agents.home.join("app/Cargo.toml"), "").unwrap();
+    assert!(born.ekko(&["--json", "agents", "test", "--derive"], "").contains("NOT_BORN_FOR"));
+    fs::remove_file(agents.home.join("app/Cargo.toml")).unwrap();
     assert!(!agents.home.join("app/.ekko/storage/agents.json").exists());
     assert!(born.ekko(&["--json", "agents", "test"], "").contains("\"ok\":true"), "read");
     let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };

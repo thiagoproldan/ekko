@@ -17,6 +17,11 @@ pub struct Config {
     pub ekko_directory: String,
     pub display_complete_tasks: bool,
     pub display_progress_overview: bool,
+    /// The most sessions ekko agents starts at once for a project that set
+    /// no limit of its own (task 1902): the user's default for this
+    /// machine, set with `ekko agents limit N --default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents_limit: Option<u32>,
 }
 
 impl Default for Config {
@@ -25,6 +30,7 @@ impl Default for Config {
             ekko_directory: "~".to_string(),
             display_complete_tasks: true,
             display_progress_overview: true,
+            agents_limit: None,
         }
     }
 }
@@ -76,6 +82,23 @@ pub fn get(home_dir: &Path) -> Result<Config, ConfigError> {
     config.ekko_directory = expand_tilde(home_dir, &config.ekko_directory).to_string_lossy().into_owned();
 
     Ok(config)
+}
+
+/// Sets the machine's default limit on ekko agents' sessions at once (task
+/// 1902), keeping every other key of the file as it is, those this version
+/// does not know among them; written whole, then renamed over the old.
+pub fn set_agents_limit(home_dir: &Path, limit: u32) -> Result<Config, ConfigError> {
+    let path = config_file_path(home_dir);
+    ensure_config_file(&path)?;
+    let mut file: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+    let Some(keys) = file.as_object_mut() else {
+        return Err(ConfigError::Io(io::Error::new(io::ErrorKind::InvalidData, format!("{} holds no JSON object", path.display()))));
+    };
+    keys.insert("agentsLimit".to_string(), serde_json::json!(limit));
+    let temp = path.with_file_name(format!(".ekko.json.{}.tmp", std::process::id()));
+    fs::write(&temp, json::to_pretty_string(&file)?)?;
+    fs::rename(&temp, &path)?;
+    get(home_dir)
 }
 
 fn ensure_config_file(path: &Path) -> Result<(), ConfigError> {
@@ -139,6 +162,23 @@ mod tests {
         assert!(!config.display_complete_tasks); // from the file
         assert!(config.display_progress_overview); // default, key was absent
         assert_eq!(config.ekko_directory, home.to_string_lossy()); // default "~", expanded
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn the_default_agents_limit_is_set_keeping_the_rest_of_the_file() {
+        let home = temp_home_dir();
+        assert_eq!(get(&home).unwrap().agents_limit, None);
+        fs::write(config_file_path(&home), r#"{"displayCompleteTasks":false,"later":{"kept":1}}"#).unwrap();
+
+        let config = set_agents_limit(&home, 5).unwrap();
+
+        assert_eq!((config.agents_limit, config.display_complete_tasks), (Some(5), false));
+        let file: serde_json::Value = serde_json::from_str(&fs::read_to_string(config_file_path(&home)).unwrap()).unwrap();
+        assert_eq!(file, serde_json::json!({"displayCompleteTasks": false, "later": {"kept": 1}, "agentsLimit": 5}));
+        // The defaults written for a new file leave it out.
+        assert!(!json::to_pretty_string(&Config::default()).unwrap().contains("agentsLimit"));
 
         fs::remove_dir_all(&home).ok();
     }

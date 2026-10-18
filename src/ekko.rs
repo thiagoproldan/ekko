@@ -1366,6 +1366,21 @@ impl Ekko {
         self.change_agents(AgentsSetting::Limit, |settings| settings.limit = Some(limit))
     }
 
+    /// Sets the machine's default limit on sessions at once, in
+    /// `~/.ekko.json` under `home` (task 1902), refused to a session ekko
+    /// agents started as its project's own limit is. What is set now.
+    pub fn set_agents_default_limit(&self, home: &Path, limit: u32) -> Result<Option<u32>, EkkoError> {
+        if crate::agents::default_limit(home) == Some(limit) {
+            return Ok(Some(limit));
+        }
+        if let Some(born) = &self.born_for {
+            if self.actor.as_ref().is_some_and(|actor| !actor.is_person()) {
+                return Err(EkkoError::AgentsNotBornFor { setting: AgentsSetting::Limit, born: born_ids(born, &*self.storage.get_shared()?) });
+            }
+        }
+        Ok(config::set_agents_limit(home, limit)?.agents_limit)
+    }
+
     /// Changes `setting` of the project's ekko agents as `change` says.
     /// Refused to a session ekko agents started, as `refuse_unborn_phases`
     /// refuses it the phases: the gate its own branch passes and what the
