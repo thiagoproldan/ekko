@@ -2,8 +2,8 @@
 //!
 //! A gotcha may carry a cue: a command, words what the call is given must
 //! hold, and a folder. Once the user turns it on, `ekko --guard --hook`, a
-//! PreToolUse hook on Bash, refuses each call that matches it, with the
-//! gotcha's text as the reason. The match is against the calls the command
+//! PreToolUse hook on Bash and Monitor, refuses each call that matches it,
+//! with the gotcha's text as the reason. The match is against the calls the command
 //! parses into (`crate::shell`), never its text, so a here-document or a
 //! memory file that names the call passes. A gotcha marked to recheck
 //! refuses all the same, since only the user turns a cue off, and its
@@ -314,6 +314,19 @@ struct Seen {
     path: Option<String>,
 }
 
+/// The tools whose `command` runs in a shell, which the guard reads alike
+/// (task 1809): Bash, and Monitor, whose command a born session's waiter
+/// ran as `until … ! pgrep -f …; do sleep 10; done` past every guard on
+/// Bash alone.
+const SHELL_TOOLS: &[&str] = &["Bash", "Monitor"];
+
+impl Seen {
+    /// Whether the call runs a shell command (`SHELL_TOOLS`).
+    fn shell(&self) -> bool {
+        SHELL_TOOLS.contains(&self.tool.as_str())
+    }
+}
+
 /// The tools that write a file, which the guard reads in a born session
 /// (task 1800): the file each writes is its input's `file_path`, or a
 /// notebook's `notebook_path`.
@@ -323,7 +336,7 @@ fn seen(event: &Value) -> Option<Seen> {
     let tool = event.get("tool_name")?.as_str()?.to_string();
     let input = event.get("tool_input")?;
     let call = match input.get("command").and_then(Value::as_str) {
-        Some(command) if tool == "Bash" => command.to_string(),
+        Some(command) if SHELL_TOOLS.contains(&tool.as_str()) => command.to_string(),
         _ => {
             // What a call says of itself is not what it does.
             let mut input = input.clone();
@@ -534,11 +547,11 @@ fn handed_on(code: &str) -> String {
 
 // --- the hooks -----------------------------------------------------------------
 
-/// `ekko --guard --hook`: Claude Code's PreToolUse on Bash, and on the tools
-/// that write a file (`FILE_TOOLS`), which only a born session's limits
-/// read. Refuses a call a cue that is on names, unless the user let it through; silent for
-/// everything else, and on any error, since a broken guard must not break
-/// the shell.
+/// `ekko --guard --hook`: Claude Code's PreToolUse on Bash and Monitor
+/// (`SHELL_TOOLS`), and on the tools that write a file (`FILE_TOOLS`),
+/// which only a born session's limits read. Refuses a call a cue that is
+/// on names, unless the user let it through; silent for everything else,
+/// and on any error, since a broken guard must not break the shell.
 pub fn hook(home: &Path, input: &str) -> ExitCode {
     let Ok(event) = serde_json::from_str::<Value>(input) else { return ExitCode::SUCCESS };
     let actor = Actor::of_this_command();
@@ -569,11 +582,11 @@ fn hook_reply(home: &Path, input: &str, actor: &Actor) -> Option<Value> {
 /// branch it creates claimed, a task its commit names that the session does
 /// not hold (task 1560).
 fn reply_to(home: &Path, event: &Value, actor: &Actor, env: &crate::claims::Env, now: i64) -> Option<Value> {
-    let seen = seen(event).filter(|seen| seen.tool == "Bash" || seen.path.is_some())?;
+    let seen = seen(event).filter(|seen| seen.shell() || seen.path.is_some())?;
     let limits = limit_reasons(&seen, env.born.is_some());
     // A file's write is only a born session's limits' to refuse, and most
     // are none's: no cue index read for them.
-    if seen.tool != "Bash" && limits.is_empty() {
+    if !seen.shell() && limits.is_empty() {
         return None;
     }
     let index = current(home, now);
@@ -600,29 +613,29 @@ fn reply_to(home: &Path, event: &Value, actor: &Actor, env: &crate::claims::Env,
         }
     }
     let cwd = Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd });
-    if seen.tool == "Bash" {
+    if seen.shell() {
         context.extend(crate::claims::told(home, &seen.call, cwd, actor, env));
     }
     (!context.is_empty()).then(|| json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context.join("\n")}}))
 }
 
-/// The reasons the limits of a session ekko agents started refuse the Bash
-/// call or the file's write `seen` with, when such a session makes it
+/// The reasons the limits of a session ekko agents started refuse the shell
+/// command or the file's write `seen` with, when such a session makes it
 /// (`born`): none from another session, nor for a call of another tool.
 fn limit_reasons(seen: &Seen, born: bool) -> Vec<String> {
     let cwd = Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd });
     match (&seen.path, seen.tool.as_str()) {
         _ if !born => Vec::new(),
-        (_, "Bash") => crate::agents::limits(&seen.call, cwd),
+        _ if seen.shell() => crate::agents::limits(&seen.call, cwd),
         (Some(path), _) => crate::agents::file_limits(path, cwd),
         _ => Vec::new(),
     }
 }
 
-/// The reasons of the cues that are on and name the Bash call `seen`.
+/// The reasons of the cues that are on and name the shell command `seen`.
 fn cue_reasons(home: &Path, index: &Index, seen: &Seen) -> Vec<String> {
     // Most calls name no cue's command at all, and need no parse.
-    if seen.tool != "Bash" || !index.cues.iter().any(|cue| seen.call.contains(cue.cue.command.as_str())) {
+    if !seen.shell() || !index.cues.iter().any(|cue| seen.call.contains(cue.cue.command.as_str())) {
         return Vec::new();
     }
     let found = hits(&index.cues, &seen.call, Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd }), Reading::GUARD);
@@ -795,6 +808,32 @@ mod tests {
     use crate::holder::test_sessions;
     use crate::item::{CueOn, State};
     use crate::ops::{Draft, Inquiry, Op, Ref};
+
+    /// The plugin runs the guard on every tool it reads -- each of
+    /// `SHELL_TOOLS` and `FILE_TOOLS` -- and on no other: a tool its
+    /// PreToolUse matchers leave out runs past it (task 1809, where a
+    /// Monitor's command did).
+    #[test]
+    fn the_plugin_runs_the_guard_on_every_tool_it_reads() {
+        let plugin = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/.claude-plugin/plugin.json")).unwrap();
+        let plugin: Value = serde_json::from_str(&plugin).unwrap();
+        let mut matched: Vec<&str> = plugin["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["hooks"].as_array().is_some_and(|hooks| hooks.iter().any(|hook| hook["command"] == "ekko --guard --hook")))
+            .flat_map(|entry| entry["matcher"].as_str().unwrap().split('|'))
+            .collect();
+        let mut read: Vec<&str> = [SHELL_TOOLS, FILE_TOOLS].concat();
+        matched.sort_unstable();
+        read.sort_unstable();
+        assert_eq!(matched, read);
+        let seen_as = |tool: &str| seen(&json!({"tool_name": tool, "tool_input": {"command": "git push", "description": "d"}})).unwrap();
+        for tool in SHELL_TOOLS {
+            assert!(seen_as(tool).shell() && seen_as(tool).call == "git push", "{tool}");
+        }
+        assert!(!seen_as("Task").shell() && seen_as("Task").call != "git push");
+    }
 
     fn home(tag: &str) -> PathBuf {
         let home = crate::paths::test_dir(&format!("ekko-guard-{tag}"));

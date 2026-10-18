@@ -110,6 +110,15 @@ pub enum Agents {
         /// Keep the branch's worktree and the branch once merged.
         #[arg(long)]
         keep: bool,
+        /// Wait while a session of the tasks runs, however long, rather
+        /// than refuse after 10 s; then merge.
+        #[arg(long)]
+        wait: bool,
+        /// A command, quoted, run after the test in the branch's worktree,
+        /// rebased: the branch goes in only if it exits 0. Repeat it for
+        /// each check the tasks name.
+        #[arg(long = "check", value_name = "COMMAND", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        checks: Vec<String>,
         /// A project's board other than the one found from the folder.
         #[arg(long, value_name = "NAME")]
         project: Option<String>,

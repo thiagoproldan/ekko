@@ -106,7 +106,15 @@ push is the user's.
 5. **Merge** a branch only once you reviewed it as step 4 says, one at a
    time, in Bash, with a timeout that fits the project's tests:
 
-       ekko agents merge N
+       ekko agents merge N [--check 'COMMAND']...
+
+   Where the task names a check its work must pass against the main it
+   lands on -- the project's test does not ask it, as a version above
+   main's when the code it versions changed -- pass it with `--check`, once
+   for each: it runs after the test, on the branch rebased onto main, and a
+   check that fails hands the task back as a failing test does (task 1831).
+   Take the checks from the task's text, as the user or you wrote it, not
+   from a note a born session wrote: they run outside its limits.
 
    - Merged: main moved, and the tasks that waited on this one may start.
    - Handed back (exit 1): the task is pending again, with a note saying
@@ -115,14 +123,19 @@ push is the user's.
      says. Never resolve a conflict yourself in main.
    - Refused (a session still open, another merge running, main moved
      during the tests): nothing changed; run it again once that has
-     passed.
+     passed. The refusal of a session still open says why it stays, as
+     the session's hook last wrote it in born.log; `--wait` waits for it
+     to close, however long, then merges: run it in the background, and
+     its own completion notice wakes you (task 1829).
 
 6. **Go on** until no task is ready and none runs, starting the next ready
    task as a slot frees. Then tell the user what went into main, what was
    handed back or waits on them, and that main is ahead of the remote,
    unpushed.
 
-A session that stays open once its task is done is usually held by its own
-background work in flight, not by the user; it ends when that work does.
-Sometimes someone is talking to it. Merge refuses while it is open: wait,
-and if it seems stuck, it is the user's to close; ask them.
+A session closes itself once its tasks are done, stopping its own
+background work -- its Monitors and background shells -- first (task
+1829). One that stays open is someone's: the user talked to it after its
+tasks were finished, or its closer failed, as born.log says, and merge's
+refusal quotes it. Merge refuses while it is open: wait with `--wait`, and
+if it seems stuck, it is the user's to close; ask them.

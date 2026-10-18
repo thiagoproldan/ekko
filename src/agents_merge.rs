@@ -27,6 +27,10 @@ const QUOTED_WIDTH: usize = 200;
 /// How often the born session's pane is looked for while it closes.
 const LOOK_EVERY: Duration = Duration::from_millis(200);
 
+/// How often `--wait` looks again once the session has run past
+/// `agents::GONE_WITHIN`.
+const WAIT_EVERY: Duration = Duration::from_secs(1);
+
 /// The file, in the git directory of the worktree being merged, that says a
 /// merge put it on a detached HEAD, and the branch's commit before: a merge
 /// cut short -- killed by a timeout -- leaves it, and the next one puts the
@@ -52,6 +56,9 @@ pub struct Merged {
     /// The branch's commits that `into` did not have.
     pub commits: usize,
     pub tested: Tested,
+    /// The checks the merge was asked to run after the test (task 1831),
+    /// each passed.
+    pub checks: Vec<Checked>,
     /// What became of the branch's worktree and the branch.
     pub left: Left,
     pub notes: Vec<u32>,
@@ -64,6 +71,28 @@ pub enum Tested {
     Untested,
     /// Not run: nothing was merged.
     Unneeded,
+}
+
+/// A check a merge was asked to run (task 1831), and how it passed.
+pub struct Checked {
+    pub command: String,
+    pub seconds: f64,
+    pub log: PathBuf,
+}
+
+/// What a merge was asked for beyond its tasks.
+#[derive(Default)]
+pub struct Asked {
+    /// Keep the branch's worktree and the branch once merged.
+    pub keep: bool,
+    /// Wait, with no bound, while a session of the tasks runs, rather than
+    /// refuse once `agents::GONE_WITHIN` has passed (task 1829).
+    pub wait: bool,
+    /// Commands run after the test, in the branch's worktree rebased onto
+    /// the branch it goes into, each to exit 0 for it to go in (task 1831):
+    /// what the tasks' work needs checked against what it lands on, as a
+    /// version above that branch's.
+    pub checks: Vec<String>,
 }
 
 /// The test a rebased branch passes before it goes in, as the user set it
@@ -129,11 +158,15 @@ enum Back {
 /// `task-12`, `task-12-13` for two started together -- into the branch the
 /// project's checkout is on, running `test` in the branch's worktree once it
 /// is rebased; leaves the worktree and the branch, once merged, only where
-/// `keep` asks. Refused, changing nothing, for tasks not all finished, or
-/// none done, for a branch that is not there, for a session of theirs that
-/// still runs, while another merge runs on the repository, and for a task
-/// whose done blocker's branch is not merged yet (task 1728).
-pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, raw_ids: &[String], test: &Test, keep: bool) -> Result<Outcome, EkkoError> {
+/// `asked.keep` asks, and running `asked.checks` after the test, each a
+/// gate as the test is (task 1831). Refused, changing nothing, for tasks
+/// not all finished, or none done, for a branch that is not there, for a
+/// session of theirs that still runs -- unless `asked.wait`, which waits
+/// until it has gone, then reads the board again (task 1829) --, while
+/// another merge runs on the repository, and for a task whose done
+/// blocker's branch is not merged yet (task 1728).
+pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, raw_ids: &[String], test: &Test, asked: &Asked) -> Result<Outcome, EkkoError> {
+    let keep = asked.keep;
     let refused = EkkoError::InvalidInput;
     let Some(project) = location.project.as_ref() else {
         return Err(refused("ekko agents merge works on a project's board, whose sessions work in worktrees of the project's repository; this is the default board".into()));
@@ -141,30 +174,20 @@ pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, ra
     let Some(root) = project.root.as_deref() else {
         return Err(refused(format!("project {} has no folder of its own, so no repository to merge in", project.name)));
     };
-    let all = ekko.storage.get_shared()?;
+    let mut all = ekko.storage.get_shared()?;
     let ids = ekko.validate_ids(raw_ids, &all)?;
-    for id in &ids {
-        match State::of(&all[id]) {
-            Some(State::Done | State::Cancelled) => {}
-            Some(state) => {
-                return Err(refused(format!("task {id} is {}: ekko agents merge takes the branch of tasks their session set done", state.word())));
-            }
-            None => return Err(refused(format!("{id} is a note, which no session is started for"))),
-        }
-    }
-    let done: Vec<u32> = ids.iter().copied().filter(|id| State::of(&all[id]) == Some(State::Done)).collect();
-    if done.is_empty() {
-        return Err(refused(match ids.as_slice() {
-            [id] => format!("task {id} is cancelled: no work of its goes in"),
-            _ => format!("tasks {} are cancelled, none done: no work of theirs goes in", agents::listed(&ids)),
-        }));
-    }
+    let mut done = settled(&all, &ids).map_err(refused)?;
     let top = PathBuf::from(agents::git(root, &["rev-parse", "--show-toplevel"]).map_err(|why| refused(format!("{} is in no git repository: {why}", root.display())))?);
     let branch = format!("task-{}", agents::joined(&ids, "-"));
     if agents::git(&top, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err() {
         return Err(refused(no_branch(&top, &branch, &ids)));
     }
-    gone(&project.name, &ids).map_err(refused)?;
+    let uids: Vec<String> = ids.iter().map(|id| all[id].uid.clone().unwrap_or_else(|| id.to_string())).collect();
+    if gone(home, &project.name, &ids, &uids, asked.wait).map_err(refused)? {
+        // Its session may have changed the tasks before it went.
+        all = ekko.storage.get_shared()?;
+        done = settled(&all, &ids).map_err(refused)?;
+    }
     let _lock = lock(&top).map_err(refused)?;
     let into = agents::git(&top, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .map_err(|_| refused(format!("the project's checkout, {}, is on no branch: ekko agents merge fast-forwards the branch it is on", top.display())))?;
@@ -201,7 +224,7 @@ pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, ra
             left_said(&left, &branch)
         );
         let notes = noted(ekko, &done, &text)?;
-        return Ok(Outcome::Merged(Merged { tasks: ids, branch, into, from: base.clone(), to: base, commits, tested: Tested::Unneeded, left, notes }));
+        return Ok(Outcome::Merged(Merged { tasks: ids, branch, into, from: base.clone(), to: base, commits, tested: Tested::Unneeded, checks: Vec::new(), left, notes }));
     }
 
     // Rebased on a detached HEAD, so the branch stays where its session left
@@ -257,6 +280,22 @@ pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, ra
         }
         Test::None => Tested::Untested,
     };
+    let mut checks = Vec::new();
+    for check in &asked.checks {
+        let ran = match run_test(home, &folder, &project.name, &branch, check) {
+            Ok(ran) => ran,
+            Err(why) => {
+                back_on_branch(true).map_err(refused)?;
+                return Err(refused(format!("{into} was not moved, and {branch} is as its session left it: {why}")));
+            }
+        };
+        if !ran.passed {
+            back_on_branch(true).map_err(refused)?;
+            let back = Back::Failed { command: check.clone(), code: ran.code, seconds: ran.seconds, tail: ran.tail, log: ran.log };
+            return hand_back(ekko, &ids, &done, &branch, &into, &worktree, test, back);
+        }
+        checks.push(Checked { command: check.clone(), seconds: ran.seconds, log: ran.log });
+    }
     let new = git(&["rev-parse", "HEAD"]).map_err(refused)?;
     if let Err(why) = fast_forward(&top, &into, &base, &new) {
         back_on_branch(true).map_err(refused)?;
@@ -269,6 +308,14 @@ pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, ra
         Tested::Passed { command, seconds: took, .. } => format!("passed `{command}` in {}", seconds(*took)),
         Tested::Untested | Tested::Unneeded => "untested, as the user said the project has no tests".to_string(),
     };
+    let passed = match checks.as_slice() {
+        [] => passed,
+        _ => format!(
+            "{passed}, and passed the check{} it was asked to run, {}",
+            if checks.len() == 1 { "" } else { "s" },
+            checks.iter().map(|check| format!("`{}` in {}", check.command, seconds(check.seconds))).collect::<Vec<_>>().join(", ")
+        ),
+    };
     let text = format!(
         "Merged into {into} by ekko agents merge: {commits} commit{} of {branch}, rebased onto {into} at {}, {passed}; {into} is at {} now.\n\n{}",
         if commits == 1 { "" } else { "s" },
@@ -277,7 +324,27 @@ pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, ra
         left_said(&left, &branch)
     );
     let notes = noted(ekko, &done, &text)?;
-    Ok(Outcome::Merged(Merged { tasks: ids, branch, into, from: base, to: new, commits, tested, left, notes }))
+    Ok(Outcome::Merged(Merged { tasks: ids, branch, into, from: base, to: new, commits, tested, checks, left, notes }))
+}
+
+/// The tasks of `ids` that are done, once each is done or cancelled; why
+/// not, where one is neither, or none is done.
+fn settled(all: &crate::storage::ItemMap, ids: &[u32]) -> Result<Vec<u32>, String> {
+    for id in ids {
+        match State::of(&all[id]) {
+            Some(State::Done | State::Cancelled) => {}
+            Some(state) => return Err(format!("task {id} is {}: ekko agents merge takes the branch of tasks their session set done", state.word())),
+            None => return Err(format!("{id} is a note, which no session is started for")),
+        }
+    }
+    let done: Vec<u32> = ids.iter().copied().filter(|id| State::of(&all[id]) == Some(State::Done)).collect();
+    if done.is_empty() {
+        return Err(match ids {
+            [id] => format!("task {id} is cancelled: no work of its goes in"),
+            _ => format!("tasks {} are cancelled, none done: no work of theirs goes in", agents::listed(ids)),
+        });
+    }
+    Ok(done)
 }
 
 /// Why there is no branch for the tasks: the branches of `ekko agents
@@ -303,28 +370,49 @@ fn no_branch(top: &Path, branch: &str, ids: &[u32]) -> String {
     }
 }
 
-/// Whether every born session of the tasks has gone, waiting the while one
-/// takes to close itself once they are done; why not, if one stays: it is
-/// someone's to talk to, and its worktree is not to move under it.
-fn gone(project: &str, ids: &[u32]) -> Result<(), String> {
+/// Whether every born session of the tasks -- `uids`, as born.log names
+/// them -- has gone, waiting the while one takes to close itself once they
+/// are done, or, with `wait`, as long as it runs (task 1829): whether one
+/// ran when it looked. Why not, if one stays: it is someone's to talk to,
+/// and its worktree is not to move under it; with why it stays, as the
+/// born hook last said in born.log (task 1809).
+fn gone(home: &Path, project: &str, ids: &[u32], uids: &[String], wait: bool) -> Result<bool, String> {
     let mux = Mux::here();
     let started = Instant::now();
+    let mut ran = false;
+    let mut said = String::new();
     loop {
         let panes = mux.born_panes().unwrap_or_default();
         let windows = mux.windows().unwrap_or_default();
         let running = match (agents::pane_of(project, ids, &panes), agents::window_of(project, ids, &windows, &panes)) {
             (Some((_, pane)), _) => format!("in pane {} of window {}", pane.pane, pane.window),
             (None, Some((_, window))) => format!("in window {window}"),
-            (None, None) => return Ok(()),
+            (None, None) => return Ok(ran),
         };
-        if started.elapsed() >= agents::GONE_WITHIN {
+        ran = true;
+        if started.elapsed() < agents::GONE_WITHIN {
+            std::thread::sleep(LOOK_EVERY);
+            continue;
+        }
+        let why = match agents::born_said(home, uids) {
+            Some(last) => format!("; born.log last said of it, at {last}"),
+            None => "; born.log says nothing of it".to_string(),
+        };
+        if !wait {
             return Err(format!(
-                "a session for these tasks still runs, {running} of session {}, {} s after this merge looked: a session closes itself once its tasks are done and no one talks to it, and one someone talks to is theirs; merge once it has gone",
+                "a session for these tasks still runs, {running} of session {}, {} s after this merge looked{why}. A session closes itself once its tasks \
+                 are done and no one talks to it, and one someone talks to is theirs; merge once it has gone, or with --wait, which waits for it",
                 agents::SESSION,
                 agents::GONE_WITHIN.as_secs()
             ));
         }
-        std::thread::sleep(LOOK_EVERY);
+        // Said once, and again as born.log says more.
+        let now = format!("ekko agents merge waits: a session for these tasks still runs, {running} of session {}{why}", agents::SESSION);
+        if now != said {
+            eprintln!("{now}");
+            said = now;
+        }
+        std::thread::sleep(WAIT_EVERY);
     }
 }
 
@@ -416,8 +504,13 @@ fn run_test(home: &Path, folder: &Path, project: &str, branch: &str, test: &str)
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '.') { c } else { '_' })
         .collect();
-    let log = dir.join(format!("{name}.log"));
-    let out = std::fs::File::create(&log).map_err(|error| format!("{} could not be written: {error}", log.display()))?;
+    // A check run in the same millisecond as the test before it gets a log
+    // of its own (task 1831).
+    let (log, out) = (1..)
+        .map(|n| dir.join(if n == 1 { format!("{name}.log") } else { format!("{name}-{n}.log") }))
+        .take(100)
+        .find_map(|log| std::fs::OpenOptions::new().write(true).create_new(true).open(&log).ok().map(|out| (log, out)))
+        .ok_or_else(|| format!("no log could be made in {}", dir.display()))?;
     let err = out.try_clone().map_err(|error| format!("{} could not be written: {error}", log.display()))?;
     // CI has no Claude Code session around its tests (task 1942): they run
     // without what a born session's window is started without (task 1803).

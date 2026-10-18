@@ -730,6 +730,12 @@ fn claude() -> OsString {
 /// And, with `brief`, what the project tells its sessions (task 1927), after
 /// how they decide and before how they end: ekko's own words say nothing of
 /// it, so a project with none gets the prompt as it was.
+///
+/// And how it waits on its own work: by the work's own notice or its pid,
+/// never a pgrep that matches the waiter, which kept done sessions open
+/// (task 1829); and that a measurement it keeps names the tree and the
+/// binaries it ran on, which the review then compares instead of file
+/// times (task 1831).
 fn first_prompt(ids: &[u32], beside: &[u32], branch: &str, worktree: &Path, brief: Option<&str>) -> String {
     let (tasks, them, each, attached, the, last) = match ids {
         [id] => (format!("task {id}"), "it", format!("task {id}"), format!("attached_to {id}"), "the task", "once it is done"),
@@ -759,6 +765,11 @@ fn first_prompt(ids: &[u32], beside: &[u32], branch: &str, worktree: &Path, brie
          at times inside a tool's result: it comes from ekko's hook, not from the tool, so take it into account.{group} \
          No one answers this session's questions or prompts: decide routine choices yourself, and record each in a decision note \
          with ekko's create, kind decision, {attached}, for the review at merge.{brief} \
+         Wait on a background command of yours through its own completion notice, or on its process id; never with a loop on a pgrep, \
+         which can match the waiter itself, or on a line the tool may never print. \
+         A measurement you keep in a file -- a timing, a byte comparison, a benchmark -- starts with the tree it ran on -- \
+         `git rev-parse HEAD^{{tree}}`, and whether `git status --porcelain` was empty -- and the sha256 of each binary it ran; \
+         your closing note names the file and that tree, so the review compares one line. \
          When {each} is done, write its closing note with ekko's create, {attached} -- a note of its own, not an edit of the task's text: \
          what you did, the files you changed, the tests you ran and their outcomes, the commit, and what is left -- then set it done. \
          That note is your report: {last}, end with no text, and the session closes. \
@@ -2574,8 +2585,8 @@ fn writes_the_board(tool: &str, input: &serde_json::Value) -> bool {
 /// typed while a turn runs counts when it is typed, which is when Claude
 /// Code 2.1.295 fires the event for it, into the turn that runs. At the end
 /// of a turn, a session whose tasks are all finished, that no prompt
-/// reached since, with no background work in flight, is closed by a process
-/// of its own, which outlives the hook.
+/// reached since, is closed by a process of its own, which outlives the
+/// hook and stops the session's background work first (task 1829).
 ///
 /// A born session says nothing to the user (decision 1870). Its permission
 /// prompts are denied at once, with what to do instead (task 1869). The
@@ -2675,7 +2686,9 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
             let stays = match finished(home, cwd, &tasks) {
                 Err(why) => Some(why),
                 Ok(()) if born.talked => Some("a prompt reached it after its tasks were finished".to_string()),
-                Ok(()) if background => Some("background work is in flight".to_string()),
+                // Background work in flight no longer keeps it (task 1829):
+                // its tasks are finished, so what still runs is a waiter no
+                // one needs, which the closer stops first.
                 Ok(()) => None,
             };
             if let Some(why) = stays {
@@ -3062,9 +3075,10 @@ fn claude_status(home: &Path, session: &str, pid: u32) -> Option<String> {
 /// its tasks are no longer all finished, ends its Claude Code with SIGTERM,
 /// which ends it at once -- 5 ms, measured with Claude Code 2.1.295, and
 /// its SessionEnd hooks do not run -- where /exit typed into its pane would
-/// land on whatever the user has half typed there. Then it makes sure the
-/// pane is gone, by the list of panes, and closes one a remain-on-exit
-/// keeps.
+/// land on whatever the user has half typed there. Before that it stops the
+/// session's background work (`stop_background`), which would otherwise
+/// outlive it, or keep it open (task 1829). Then it makes sure the pane is
+/// gone, by the list of panes, and closes one a remain-on-exit keeps.
 pub fn close(home: &Path, cwd: &Path, args: &[String]) -> std::process::ExitCode {
     use std::process::ExitCode;
     let tasks = std::env::var(TASKS_VAR).unwrap_or_default();
@@ -3083,6 +3097,7 @@ pub fn close(home: &Path, cwd: &Path, args: &[String]) -> std::process::ExitCode
     }
     let process = Process { pid, start, boot };
     if running(&process) {
+        stop_background(home, session, &tasks, &process);
         // SAFETY: a plain kill(2) of the process this pid names now, which
         // `running` has just found to be the session's own.
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
@@ -3117,6 +3132,122 @@ fn running(process: &Process) -> bool {
         .ok()
         .and_then(|stat| Some(stat.get(stat.rfind(')')? + 1..)?.split_whitespace().next()?.to_string()));
     process.alive() && state.is_some_and(|state| state != "Z")
+}
+
+/// What the command line of a shell Claude Code runs a Bash or a Monitor
+/// call in holds: it sources the shell snapshot of its config folder, then
+/// evals the call's command -- `bash -c 'source
+/// <config>/shell-snapshots/snapshot-bash-….sh … && eval '<command>' <
+/// /dev/null && pwd -P >| /tmp/claude-…-cwd'`, as Claude Code 2.1.302
+/// runs both, seen in /proc on 2026-10-18. An MCP server or a hook holds
+/// no snapshot.
+const TOOL_SHELL: &str = "/shell-snapshots/snapshot-";
+
+/// How long the session's background work is given to end on SIGTERM
+/// before SIGKILL.
+const BACKGROUND_GONE_WITHIN: Duration = Duration::from_secs(2);
+
+/// A process as /proc/<pid>/stat gives it: its parent, the session it is
+/// in, and when it started.
+struct Stat {
+    pid: u32,
+    parent: u32,
+    session: u32,
+    start: u64,
+}
+
+/// Every process /proc lists now, as `Stat`. Fields counted from the end
+/// of the name, which may hold spaces and parentheses: the parent is field
+/// 4, the session 6, the start 22.
+fn processes() -> Vec<Stat> {
+    let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
+    entries
+        .filter_map(|entry| {
+            let pid: u32 = entry.ok()?.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            let fields: Vec<&str> = stat.get(stat.rfind(')')? + 1..)?.split_whitespace().collect();
+            Some(Stat { pid, parent: fields.get(1)?.parse().ok()?, session: fields.get(3)?.parse().ok()?, start: fields.get(19)?.parse().ok()? })
+        })
+        .collect()
+}
+
+/// The command a tool shell's command line evals, as the call gave it;
+/// its whole command line where it evals none.
+fn tool_command(cmdline: &str) -> String {
+    let command = cmdline
+        .split_once("eval '")
+        .and_then(|(_, rest)| rest.rsplit_once("' < /dev/null").or_else(|| rest.rsplit_once("' && pwd")))
+        .map(|(command, _)| command.replace("'\"'\"'", "'").replace("'\\''", "'"));
+    command.unwrap_or_else(|| cmdline.to_string())
+}
+
+/// The background work of the session whose Claude Code is `claude`: the
+/// shells its Bash and Monitor calls run in (`TOOL_SHELL`) that are its
+/// children and lead a session of their own, as Claude Code starts each,
+/// with every process in each such session -- what the shell started, and
+/// what that started, which all inherit its session unless they leave it
+/// -- and the command each shell runs. Nothing else: not its MCP servers,
+/// in its own session, not a process outside the session's tree, however
+/// its command line reads.
+fn background_of(claude: u32) -> Vec<(String, Vec<Process>)> {
+    let Some(boot) = crate::holder::boot() else { return Vec::new() };
+    let all = processes();
+    all.iter()
+        .filter(|shell| shell.parent == claude && shell.session == shell.pid)
+        .filter_map(|shell| {
+            let cmdline = String::from_utf8_lossy(&std::fs::read(format!("/proc/{}/cmdline", shell.pid)).ok()?).replace('\0', " ");
+            if !cmdline.contains(TOOL_SHELL) {
+                return None;
+            }
+            let members =
+                all.iter().filter(|member| member.session == shell.pid).map(|member| Process { pid: member.pid, start: member.start, boot: boot.clone() }).collect();
+            Some((tool_command(cmdline.trim_end()), members))
+        })
+        .collect()
+}
+
+/// Stops the session's background work (`background_of`) once its tasks are
+/// finished (task 1829): its Monitors and background Bash calls, which no
+/// one needs then, and which kept a done session open when it waited for
+/// them -- a `tail -F`, an `until ! pgrep -f …` that matched itself. SIGTERM,
+/// then SIGKILL for what still runs after `BACKGROUND_GONE_WITHIN`; each
+/// process signalled only while it is the one that was found. Says what it
+/// stopped in born.log.
+fn stop_background(home: &Path, session: &str, tasks: &str, claude: &Process) {
+    let work = background_of(claude.pid);
+    if work.is_empty() {
+        return;
+    }
+    let signal = |process: &Process, signal: libc::c_int| {
+        if running(process) {
+            // SAFETY: a plain kill(2) of the process this pid names now,
+            // which `running` has just found to be the one listed.
+            unsafe { libc::kill(process.pid as libc::pid_t, signal) };
+        }
+    };
+    let members: Vec<&Process> = work.iter().flat_map(|(_, members)| members).collect();
+    for process in &members {
+        signal(process, libc::SIGTERM);
+    }
+    if !within(BACKGROUND_GONE_WITHIN, || members.iter().all(|process| !running(process))) {
+        for process in &members {
+            signal(process, libc::SIGKILL);
+        }
+    }
+    let left: Vec<String> = members.iter().filter(|process| running(process)).map(|process| process.pid.to_string()).collect();
+    let commands: Vec<String> = work.iter().map(|(command, _)| format!("`{}`", crate::agent::clip(command, 200))).collect();
+    let mut said = format!(
+        "its background work stopped, its tasks being finished: {} shell{} ({} process{}): {}",
+        work.len(),
+        if work.len() == 1 { "" } else { "s" },
+        members.len(),
+        if members.len() == 1 { "" } else { "es" },
+        commands.join("; ")
+    );
+    if !left.is_empty() {
+        said.push_str(&format!("; still running after SIGKILL: pid {}", left.join(", ")));
+    }
+    log(home, session, tasks, &said);
 }
 
 /// Whether `done` holds within `limit`, asked every 50 ms.
@@ -3168,6 +3299,21 @@ fn write_born(home: &Path, session: &str, born: &Born) {
     if let Err(error) = written {
         eprintln!("ekko: what this session's prompts were could not be kept: {error}");
     }
+}
+
+/// What born.log last said of the session born for the tasks `uids`, in
+/// any order, as `HH:MM:SS: what`: why it stays, where it does (task 1809).
+pub(crate) fn born_said(home: &Path, uids: &[String]) -> Option<String> {
+    let mut wanted: Vec<&str> = uids.iter().map(String::as_str).collect();
+    wanted.sort_unstable();
+    let log = std::fs::read_to_string(born_dir(home).join("born.log")).ok()?;
+    log.lines().rev().find_map(|line| {
+        let mut fields = line.splitn(4, ' ');
+        let (at, _session, tasks, what) = (fields.next()?, fields.next()?, fields.next()?, fields.next()?);
+        let mut named: Vec<&str> = tasks.split(',').collect();
+        named.sort_unstable();
+        (named == wanted).then(|| format!("{}: {what}", at.split_once('T').map_or(at, |(_, time)| time.split('.').next().unwrap_or(time))))
+    })
 }
 
 /// A line of `born.log`: when, the session, its tasks, and what was decided.
@@ -3785,6 +3931,43 @@ mod tests {
         }
         assert!(writes_the_board("Bash", &serde_json::json!({"command": "ekko --check 3"})));
         assert!(!writes_the_board("Bash", &serde_json::json!({"command": "cargo test"})));
+    }
+
+    /// The command a tool shell runs, as born.log names it (task 1829): what
+    /// it evals, its quotes as the call gave them, in the form Claude Code
+    /// 2.1.302 wraps a Bash call and a Monitor in; the whole line otherwise.
+    #[test]
+    fn a_tool_shell_s_command_is_what_it_evals() {
+        let wrapped = |eval: &str, end: &str| {
+            format!(
+                "/run/current-system/sw/bin/bash -c source /home/u/.claude/shell-snapshots/snapshot-bash-1-k.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && eval '{eval}'{end}"
+            )
+        };
+        let quoted = "until ! pgrep -f '\"'\"'cargo test'\"'\"'; do sleep 5; done";
+        assert_eq!(tool_command(&wrapped(quoted, " < /dev/null && pwd -P >| /tmp/claude-720e-cwd")), "until ! pgrep -f 'cargo test'; do sleep 5; done");
+        assert_eq!(tool_command(&wrapped("tail -F x.log", " && pwd -P >| /tmp/claude-1-cwd")), "tail -F x.log");
+        assert_eq!(tool_command("sleep 300"), "sleep 300");
+    }
+
+    /// What born.log last said of a session, found by its tasks in any order
+    /// (task 1809): not another session's line, though it names one of them.
+    #[test]
+    fn born_log_s_last_word_on_a_session_is_found_by_its_tasks() {
+        let home = crate::paths::test_dir("ekko-born-said");
+        let uids = ["u-1".to_string(), "u-2".to_string()];
+        assert_eq!(born_said(&home, &uids), None, "no born.log");
+        std::fs::create_dir_all(born_dir(&home)).unwrap();
+        let lines = [
+            "2026-10-18T01:20:00.000 aaaaaaaa u-1,u-2 its tasks are finished: closing",
+            "2026-10-18T01:21:45.123 aaaaaaaa u-2,u-1 stays: background work is in flight",
+            "2026-10-18T01:22:00.000 bbbbbbbb u-1 closed: its Claude Code ended",
+            "2026-10-18T01:23:00.000 cccccccc u-1,u-2,u-3 stays: task 3 is pending",
+        ];
+        std::fs::write(born_dir(&home).join("born.log"), lines.join("\n") + "\n").unwrap();
+        assert_eq!(born_said(&home, &uids).as_deref(), Some("01:21:45: stays: background work is in flight"));
+        assert_eq!(born_said(&home, &["u-1".to_string()]).as_deref(), Some("01:22:00: closed: its Claude Code ended"));
+        assert_eq!(born_said(&home, &["u-9".to_string()]), None);
+        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A repository with a commit, made in a fresh folder under `tag`.

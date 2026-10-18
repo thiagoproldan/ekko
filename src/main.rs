@@ -53,7 +53,7 @@ const HELP: &str = r#"
     $ ekko artifact <id> [--project <name>] [--no-open]
     $ ekko serve [--idle <seconds>] [--stop]
     $ ekko agents start <task>... --model <model> [--effort <level>] [--group <task>,...] [--project <name>]
-    $ ekko agents merge <task>... [--keep] [--project <name>]
+    $ ekko agents merge <task>... [--keep] [--wait] [--check <command>]... [--project <name>]
     $ ekko agents test [<command> | --none | --derive] [--project <name>]
     $ ekko agents limit [<n>] [--default] [--project <name>]
     $ ekko agents env [<NAME=VALUE>... | --remove <NAME>...] [--project <name>]
@@ -587,7 +587,10 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
     let (ids, group, model, effort, project, json) = match cli.command {
         cli::Agents::Start { ids, group, model, effort, project, json } => (ids, group, model, effort, project, json),
         // `ekko agents merge` (task 1714).
-        cli::Agents::Merge { ids, keep, project, json } => return run_merge(&home_dir, &cwd, &ids, keep, project.as_deref(), json_first || json),
+        cli::Agents::Merge { ids, keep, wait, checks, project, json } => {
+            let asked = agents_merge::Asked { keep, wait, checks };
+            return run_merge(&home_dir, &cwd, &ids, &asked, project.as_deref(), json_first || json);
+        }
         cli::Agents::Test { command, none, derive, project, json } => {
             return run_agents_test(&home_dir, &cwd, command.as_deref(), none, derive, project.as_deref(), json_first || json);
         }
@@ -992,10 +995,10 @@ fn run_agents_brief(home_dir: &Path, cwd: &Path, text: Option<&str>, none: bool,
 /// on, into the branch the project's checkout is on -- rebased, tested,
 /// fast-forwarded -- or handed back to the tasks (task 1714). Fails, exit
 /// 1, when it merged nothing.
-fn run_merge(home_dir: &Path, cwd: &Path, ids: &[String], keep: bool, project: Option<&str>, json_mode: bool) -> ExitCode {
+fn run_merge(home_dir: &Path, cwd: &Path, ids: &[String], asked: &agents_merge::Asked, project: Option<&str>, json_mode: bool) -> ExitCode {
     let merged = agents_board(home_dir, cwd, project).and_then(|(location, ekko)| {
         let test = agents_merge::test_command(&ekko)?;
-        agents_merge::merge(&ekko, &location, home_dir, ids, &test, keep)
+        agents_merge::merge(&ekko, &location, home_dir, ids, &test, asked)
     });
     let outcome = match merged {
         Ok(outcome) => outcome,
@@ -1025,6 +1028,7 @@ fn run_merge(home_dir: &Path, cwd: &Path, ids: &[String], keep: bool, project: O
                     "to": merged.to,
                     "commits": merged.commits,
                     "tested": tested,
+                    "checks": merged.checks.iter().map(|check| serde_json::json!({"command": check.command, "seconds": check.seconds, "log": check.log})).collect::<Vec<_>>(),
                     "worktree": left,
                     "notes": merged.notes,
                 });
@@ -1035,6 +1039,10 @@ fn run_merge(home_dir: &Path, cwd: &Path, ids: &[String], keep: bool, project: O
                 agents_merge::Tested::Passed { command, seconds, .. } => format!("tested with `{command}` ({seconds:.1} s)"),
                 agents_merge::Tested::Untested => "untested, as the project has no tests".to_string(),
                 agents_merge::Tested::Unneeded => String::new(),
+            };
+            let how = match merged.checks.as_slice() {
+                [] => how,
+                checks => format!("{how}, then checked with {}", checks.iter().map(|check| format!("`{}` ({:.1} s)", check.command, check.seconds)).collect::<Vec<_>>().join(", ")),
             };
             if merged.commits == 0 {
                 println!("Nothing to merge: {} has every commit of {} already", merged.into, merged.branch);

@@ -855,6 +855,17 @@ fn the_guard_answers_a_pre_tool_use_event_and_stays_silent_otherwise() {
         let passed = ekko(&["--guard", "--hook"], &silent);
         assert!(passed.status.success() && passed.stdout.is_empty(), "{silent}: {}", String::from_utf8_lossy(&passed.stdout));
     }
+    // A Monitor's command runs in a shell as a Bash call's does, and is read
+    // alike (task 1809).
+    let monitor = |command: &str| {
+        let input = serde_json::json!({"command": command, "description": "Watch the field", "timeout_ms": 60_000});
+        serde_json::json!({"tool_name": "Monitor", "tool_input": input, "cwd": home, "tool_use_id": "t3"}).to_string()
+    };
+    let refused = ekko(&["--guard", "--hook"], &monitor("until gh api graphql -f query='mutation { updateProjectV2Field }'; do sleep 5; done"));
+    let reply: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&refused.stdout)));
+    assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny", "{reply}");
+    let passed = ekko(&["--guard", "--hook"], &monitor("until gh issue list; do sleep 5; done"));
+    assert!(passed.status.success() && passed.stdout.is_empty(), "{}", String::from_utf8_lossy(&passed.stdout));
 
     let read = serde_json::json!({"tool_name": "Read", "tool_input": {"file_path": "/x"}, "cwd": home, "tool_use_id": "t2"}).to_string();
     let other = ekko(&["--guard", "--refuse", "ctx: it would bring secret material into the context"], &read);
@@ -2221,6 +2232,10 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert!(prompt.contains("No one answers this session's questions or prompts: decide routine choices yourself, and record each in a decision note with ekko's create, kind decision, attached_to 1"), "{prompt}");
     assert!(prompt.contains("That note is your report: once it is done, end with no text, and the session closes."), "{prompt}");
     assert!(prompt.contains(&format!("{}, on its branch task-1", worktree.display())), "{prompt}");
+    // How it waits on its own work (task 1829), and what a measurement it
+    // keeps names (task 1831).
+    assert!(prompt.contains("Wait on a background command of yours through its own completion notice, or on its process id"), "{prompt}");
+    assert!(prompt.contains("starts with the tree it ran on -- `git rev-parse HEAD^{tree}`"), "{prompt}");
     // How it was started, on the task (task 1647).
     let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
     let note = &board[reply["notes"][0].as_u64().unwrap().to_string()];
@@ -2757,7 +2772,7 @@ fn agents_brief_is_in_the_first_prompt_only_where_the_project_set_one() {
     assert_eq!(started["ok"], true, "{started}");
     let briefed = prompt_of(&agents, 1);
     assert_eq!(briefed.matches(brief).count(), 1, "{briefed}");
-    let after = format!("for the review at merge. The project's brief for its sessions: {brief} When task 2 is done, write its closing note");
+    let after = format!("for the review at merge. The project's brief for its sessions: {brief} Wait on a background command of yours");
     assert!(briefed.contains(&after), "{briefed}");
     assert!(briefed.ends_with("answers with a note on the task, which reaches you."), "{briefed}");
 
@@ -2927,8 +2942,8 @@ fn a_born_session_starts_with_the_environment_its_orchestrator_started_with() {
 /// of a turn whose task is not done, the session stays; once it is done and
 /// no prompt came after, the session's Claude Code is ended by SIGTERM a
 /// second later, and its pane, still listed, is closed and gone from the
-/// list. Background work in flight keeps it, and a session ekko agents did
-/// not start is left alone, whatever its board says.
+/// list. A session ekko agents did not start is left alone, whatever its
+/// board says.
 #[test]
 fn a_born_session_closes_once_its_task_is_done_and_not_before() {
     let agents = Agents::new();
@@ -2942,10 +2957,6 @@ fn a_born_session_closes_once_its_task_is_done_and_not_before() {
     assert!(still_runs(&mut stand_in), "closed with its task pending");
 
     assert!(agents.ekko(&["--check", "1"]).status.success());
-    let busy = serde_json::json!({"background_tasks": [{"id": "b-1", "type": "shell", "status": "running"}], "session_crons": []});
-    let (mut stand_in, _) = agents.born(Some(&uid), "s-1", "Stop", busy);
-    assert!(agents.logged("stays: background work is in flight"));
-    assert!(still_runs(&mut stand_in), "closed with background work in flight");
     let (mut stand_in, _) = agents.born(None, "s-1", "Stop", serde_json::json!({"background_tasks": [], "session_crons": []}));
     assert!(still_runs(&mut stand_in), "closed a session ekko agents did not start");
 
@@ -2960,6 +2971,80 @@ fn a_born_session_closes_once_its_task_is_done_and_not_before() {
     let closing: Vec<Vec<String>> = agents.calls().into_iter().filter(|call| call[..2] == ["-S", socket.to_str().unwrap()] && call[2] != "set-option").collect();
     assert_eq!(closing.iter().map(|call| call[2].as_str()).collect::<Vec<_>>(), ["list-panes", "kill-pane", "list-panes", "list-panes"], "{closing:?}");
     assert_eq!(closing[1][3..], ["-t", "%7"]);
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// Background work no longer keeps a born session whose tasks are finished
+/// (task 1829): the closer stops it, then ends the session. Its work is the
+/// shells Claude Code runs its Bash and Monitor calls in -- children of its
+/// process, each leading a session of its own, sourcing the shell snapshot
+/// -- with all they started; not another child of its, as an MCP server
+/// is, nor another session's tool shell, though its command line reads
+/// the same.
+#[test]
+fn a_born_session_whose_tasks_are_finished_stops_its_own_background_work_and_closes() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    let uid = agents.uid(1);
+    let home = agents.home.display().to_string();
+    let snapshot = format!("{home}/.claude/shell-snapshots/snapshot-bash-1.sh");
+    let tool_shell = |command: &str| format!("source {snapshot} 2>/dev/null || true && eval '{command}' < /dev/null && pwd -P >| {home}/cwd");
+    // A waiter that never ends on its own, in a tool shell of the session:
+    // it records its shell's pid and its child's.
+    let waiter = format!("echo $$ > {home}/shell; sleep 300 & echo $! > {home}/child; sleep 301");
+    agents.prompt(&uid, "s-1");
+    assert!(agents.ekko(&["--check", "1"]).status.success());
+    // Beside it, children of its that are no tool shell of its: one leading
+    // a session of its own, its command line no tool shell's; one whose
+    // command line reads as one, in the session's own session, as its MCP
+    // servers run.
+    let quiet = "</dev/null >/dev/null 2>&1";
+    write_executable(
+        &agents.home.join("claude"),
+        &format!(
+            "#!/bin/sh\nsetsid bash -c \"{}\" {quiet} &\nsetsid sleep 302 {quiet} & echo $! > {home}/server\n\
+             mkfifo {home}/fifo\nbash -c 'read -t 304 <> \"$1\"; : /shell-snapshots/snapshot-mcp' mcp {home}/fifo {quiet} & echo $! > {home}/mcp\n\"$@\"\nexec sleep 30 >/dev/null 2>&1\n",
+            tool_shell(&waiter).replace('$', "\\$")
+        ),
+    );
+    // Another session's tool shell, outside this one's tree.
+    let mut theirs = common::command("bash");
+    theirs.args(["-c", &tool_shell("sleep 303")]);
+    // SAFETY: only setsid, async-signal-safe, between fork and exec.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut theirs, || {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut theirs = theirs.spawn().unwrap();
+    let pid_in = |name: &str| -> u32 {
+        (0..100)
+            .find_map(|_| {
+                let pid = fs::read_to_string(agents.home.join(name)).ok().and_then(|pid| pid.trim().parse().ok());
+                if pid.is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                pid
+            })
+            .unwrap_or_else(|| panic!("no pid in {name}"))
+    };
+    let runs = |pid: u32| fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| stat.rsplit_once(") ").is_some_and(|(_, rest)| !rest.starts_with('Z')));
+    let busy = serde_json::json!({"background_tasks": [{"id": "b-1", "type": "shell", "status": "running", "command": waiter}], "session_crons": []});
+    let (mut stand_in, said) = agents.born(Some(&uid), "s-1", "Stop", busy);
+    let (shell, child, server, mcp) = (pid_in("shell"), pid_in("child"), pid_in("server"), pid_in("mcp"));
+    assert!(said.contains("closes now"), "{said}");
+    assert!(ended_by_sigterm(&mut stand_in), "background work in flight kept it");
+    let log = fs::read_to_string(agents.home.join(".local/state/ekko/born/born.log")).unwrap();
+    assert!(log.contains(&format!("its background work stopped, its tasks being finished: 1 shell (3 processes): `{waiter}`")), "{log}");
+    assert!(!runs(shell) && !runs(child), "its tool shell or what it started still runs");
+    assert!(runs(server) && runs(mcp), "a child of its that is no tool shell was stopped");
+    assert!(theirs.try_wait().unwrap().is_none(), "another session's tool shell was stopped");
+    for pid in [server, mcp] {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+    unsafe { libc::kill(-(theirs.id() as libc::pid_t), libc::SIGKILL) };
+    theirs.wait().ok();
     fs::remove_dir_all(&agents.home).ok();
 }
 
@@ -3082,10 +3167,10 @@ fn a_background_shell_s_notice_after_the_task_is_done_does_not_keep_a_born_sessi
     for (id, session) in [(1, "s-1"), (2, "s-2")] {
         let uid = agents.uid(id);
         agents.prompt(&uid, session);
-        assert!(agents.ekko(&["--check", &id.to_string()]).status.success());
         let (mut stand_in, _) = agents.born(Some(&uid), session, "Stop", shell.clone());
         stand_in.kill().ok();
         stand_in.wait().ok();
+        assert!(agents.ekko(&["--check", &id.to_string()]).status.success());
         if id == 1 {
             let (mut stand_in, _) = agents.born(Some(&uid), session, "UserPromptSubmit", notice.clone());
             stand_in.kill().ok();
@@ -3484,6 +3569,79 @@ fn ekko_agents_merge_takes_a_tested_branch_in_and_hands_a_failing_one_back() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// A check the tasks name runs after the test, on the branch rebased onto
+/// main (task 1831): two branches that each raise VERSION from 1 to 2 merge
+/// cleanly, and the project's test passes both, so without a check the
+/// second goes in at main's version; with `--check` that VERSION be above
+/// main's, it is handed back as a failing test is, and goes in once raised
+/// again.
+#[test]
+fn ekko_agents_merge_runs_the_checks_it_is_given_on_the_rebased_branch() {
+    let agents = Agents::new();
+    let app = fs::canonicalize(&agents.app).unwrap();
+    fs::write(app.join("VERSION"), "1\n").unwrap();
+    agents.git(&app, &["add", "VERSION"]);
+    agents.git(&app, &["commit", "-q", "-m", "Version 1"]);
+    for text in ["Change the extraction", "Change the extraction again"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let made = |n: u32| {
+        let branch = format!("task-{n}");
+        let worktree = agents.worktree(&branch);
+        agents.git(&app, &["worktree", "add", "-q", "-b", &branch, worktree.to_str().unwrap(), "HEAD"]);
+        fs::write(worktree.join(format!("extract-{n}.txt")), "changed\n").unwrap();
+        fs::write(worktree.join("VERSION"), "2\n").unwrap();
+        agents.git(&worktree, &["add", "."]);
+        agents.git(&worktree, &["commit", "-q", "-m", &format!("Task {n}, version 2")]);
+        worktree
+    };
+    let (_, two) = (made(1), made(2));
+    assert!(agents.ekko(&["--check", "1", "2"]).status.success());
+    assert!(agents.ekko(&["agents", "test", "true"]).status.success());
+    let json = |output: process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
+    };
+    let above = "test \"$(cat VERSION)\" -gt \"$(git show main:VERSION)\"";
+
+    // The first raises main's version: it goes in, checked.
+    let merged = json(agents.merging(&["--json", "agents", "merge", "1", "--check", above]));
+    assert_eq!((merged["ok"].as_bool(), merged["checks"][0]["command"].as_str()), (Some(true), Some(above)), "{merged}");
+    // The control: without the check, the second goes in as clean as the
+    // first, at the version main already has.
+    let main = agents.git(&app, &["rev-parse", "main"]);
+    let unchecked = json(agents.merging(&["--json", "agents", "merge", "2", "--keep"]));
+    assert_eq!((unchecked["ok"].as_bool(), unchecked["checks"].clone()), (Some(true), serde_json::json!([])), "{unchecked}");
+    assert_eq!(agents.git(&app, &["show", "main:VERSION"]), "2");
+    agents.git(&app, &["reset", "-q", "--hard", &main]);
+    agents.git(&two, &["reset", "-q", "--hard", "HEAD~1"]);
+    fs::write(two.join("extract-2.txt"), "changed\n").unwrap();
+    fs::write(two.join("VERSION"), "2\n").unwrap();
+    agents.git(&two, &["add", "."]);
+    agents.git(&two, &["commit", "-q", "-m", "Task 2, version 2"]);
+
+    // With it: handed back, naming the check.
+    let failed = agents.merging(&["--json", "agents", "merge", "2", "--check", "true", "--check", above]);
+    assert!(!failed.status.success());
+    let failed = json(failed);
+    assert_eq!(failed["reopened"], serde_json::json!([2]), "{failed}");
+    assert!(failed["why"].as_str().unwrap().starts_with(&format!("rebased onto main, task-2 failed `{above}` (exit code 1, after ")), "{failed}");
+    assert_eq!(agents.git(&app, &["rev-parse", "main"]), main, "main moved");
+    // Raised again: in.
+    fs::write(two.join("VERSION"), "3\n").unwrap();
+    agents.git(&two, &["commit", "-q", "-am", "Version 3"]);
+    assert!(agents.ekko(&["--check", "2"]).status.success());
+    let output = agents.merging(&["agents", "merge", "2", "--check", above]);
+    let said = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success() && said.contains(&format!(", then checked with `{above}` (")), "{said}");
+    assert_eq!(agents.git(&app, &["show", "main:VERSION"]), "3");
+    let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
+    let checked: Vec<&str> =
+        board.as_object().unwrap().values().filter_map(|item| item["description"].as_str()).filter(|note| note.contains("and passed the check")).collect();
+    assert_eq!(checked.len(), 2, "{checked:?}");
+    assert!(checked.iter().any(|note| note.contains("passed `true` in ") && note.contains(&format!(", and passed the check it was asked to run, `{above}` in "))), "{checked:?}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// A commit that holds conflict markers, with the next commit removing them,
 /// passes the test at the branch's tip, yet goes into main as a commit that
 /// does not build (task 2017): merge checks each commit, and hands the branch
@@ -3756,14 +3914,47 @@ fn ekko_agents_merge_waits_for_the_session_to_close_and_takes_up_a_merge_cut_sho
     agents.git(&app, &["checkout", "-q", "main"]);
     fs::remove_file(mux.join("born-panes")).unwrap();
     unmoved();
-    // A session of task 1 stays: refused once the wait is over.
+    // A session of task 1 stays: refused once the wait is over, with why it
+    // stays, as born.log last said of it (task 1809).
     fs::write(mux.join("windows"), "1 \u{b7} haiku\n").unwrap();
+    let born_log = agents.home.join(".local/state/ekko/born/born.log");
+    fs::create_dir_all(born_log.parent().unwrap()).unwrap();
+    let uid = agents.uid(1);
+    fs::write(
+        &born_log,
+        format!(
+            "2026-10-18T01:20:00.000 aaaaaaaa {uid} its tasks are finished: closing\n2026-10-18T01:21:45.123 aaaaaaaa {uid} stays: a prompt reached it after its tasks were finished\n2026-10-18T01:22:00.000 bbbbbbbb {uid},{} closed: its Claude Code ended\n",
+            agents.uid(2)
+        ),
+    )
+    .unwrap();
     let started = std::time::Instant::now();
     let stays = agents.merging(&["agents", "merge", "1"]);
     let said = String::from_utf8(stays.stdout).unwrap();
     assert!(!stays.status.success() && said.contains("a session for these tasks still runs, in window 1 \u{b7} haiku of session ekko, 10 s after"), "{said}");
+    assert!(said.contains("; born.log last said of it, at 01:21:45: stays: a prompt reached it after its tasks were finished. "), "{said}");
+    assert!(said.ends_with("merge once it has gone, or with --wait, which waits for it\n"), "{said}");
     assert!(started.elapsed() >= std::time::Duration::from_secs(10), "{:?}", started.elapsed());
     assert_eq!(main(), before);
+    // With --wait it waits past the 10 s, saying why, and merges once the
+    // session has gone (task 1829).
+    let closes = {
+        let windows = mux.join("windows");
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(12_000));
+            fs::write(windows, "").unwrap();
+        })
+    };
+    let started = std::time::Instant::now();
+    let waited = agents.merging(&["agents", "merge", "1", "--wait", "--keep"]);
+    closes.join().unwrap();
+    let told = String::from_utf8(waited.stderr).unwrap();
+    assert!(waited.status.success(), "{}{told}", String::from_utf8_lossy(&waited.stdout));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(12), "{:?}", started.elapsed());
+    assert_eq!(told.matches("ekko agents merge waits: a session for these tasks still runs, in window 1 \u{b7} haiku of session ekko; born.log last said of it, at 01:21:45: stays: ").count(), 1, "{told}");
+    // Main back where it was, the branch kept one commit ahead of it.
+    agents.git(&app, &["reset", "-q", "--hard", &before]);
+    fs::write(mux.join("windows"), "1 \u{b7} haiku\n").unwrap();
     // It closes while the merge waits: merged.
     let closes = {
         let windows = mux.join("windows");
@@ -3903,7 +4094,6 @@ fn a_born_session_s_pane_holds_its_state_for_the_views_as_it_changes() {
     assert_eq!(states(), [working.clone(), waiting.clone(), working.clone(), idle.clone()]);
     stop(serde_json::json!([]));
     assert_eq!(states().len(), 4, "idle again: no call");
-    assert!(agents.ekko(&["--check", "1"]).status.success());
     stop(serde_json::json!([{"id": "b-1", "type": "shell", "status": "running"}]));
     assert_eq!(states(), [working.clone(), waiting, working.clone(), idle, working]);
     fs::remove_dir_all(&agents.home).ok();
@@ -4569,8 +4759,9 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         assert!(agents.ekko(&["--task", text]).status.success());
     }
     let uid = agents.uid(1);
-    let event = |command: &str| serde_json::json!({"session_id": "s-1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command, "description": "Run it"}, "cwd": agents.app, "tool_use_id": "toolu_1"}).to_string();
-    let guard = |args: &[&str], command: &str, born: Option<&str>| -> String {
+    let event_of = |tool: &str, command: &str| serde_json::json!({"session_id": "s-1", "hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": {"command": command, "description": "Run it"}, "cwd": agents.app, "tool_use_id": "toolu_1"}).to_string();
+    let event = |command: &str| event_of("Bash", command);
+    let guard_on = |tool: &str, args: &[&str], command: &str, born: Option<&str>| -> String {
         let mut guard = agents.command(args);
         // The pane the session runs in, as the multiplexer sets it.
         guard.env("TMUX_PANE", "%7");
@@ -4578,10 +4769,11 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
             guard.env("EKKO_AGENT_TASK", born);
         }
         let mut child = guard.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
-        child.stdin.take().unwrap().write_all(event(command).as_bytes()).unwrap();
+        child.stdin.take().unwrap().write_all(event_of(tool, command).as_bytes()).unwrap();
         String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
     };
-    let hook = |command: &str, born: Option<&str>| guard(&["--guard", "--hook"], command, born);
+    let guard = |args: &[&str], command: &str, born: Option<&str>| guard_on("Bash", args, command, born);
+    let hook =|command: &str, born: Option<&str>| guard(&["--guard", "--hook"], command, born);
     for (command, kinds) in refused {
         let reply: serde_json::Value = serde_json::from_str(&hook(command, Some(&uid))).unwrap_or_else(|_| panic!("not refused: {command}"));
         let output = &reply["hookSpecificOutput"];
@@ -4598,6 +4790,13 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         assert_eq!(hook(command, Some(&uid)), "", "{command}");
         assert_eq!(hook(command, None), "", "the orchestrator's {command}");
     }
+    // A Monitor's command runs in a shell as a Bash call's does, and is
+    // read alike (task 1809).
+    let monitor = |command: &str, born: Option<&str>| guard_on("Monitor", &["--guard", "--hook"], command, born);
+    let reply = monitor("until git push; do sleep 5; done", Some(&uid));
+    assert!(reply.contains("\"permissionDecision\":\"deny\"") && reply.contains(PUSH), "{reply}");
+    assert_eq!(monitor("until git push; do sleep 5; done", None), "", "the orchestrator's Monitor");
+    assert_eq!(monitor("tail -F build.log", Some(&uid)), "");
     // Another guard refusing a call carries the limit's reason too: calls
     // of their own, since this test's two sessions are one to the guard.
     let other = |command: &str, born: Option<&str>| guard(&["--guard", "--refuse", "ctx: it would lose work"], command, born);
