@@ -451,6 +451,13 @@ jobs:
         let npm = ("package.json", r#"{"scripts": {"test": "vitest"}}"#);
         let ci = (".github/workflows/ci.yml", CI);
         assert_eq!(derived(&[ci, make, cargo, npm]), found("cargo test --locked", ".github/workflows/ci.yml, step Test"));
+        // A flake with checks and a dev shell does not outrank the CI step: CI is the gate the project merges on.
+        let both = "{ outputs = { self }: { checks.x86_64-linux.default = self; devShells.default = self; }; }";
+        assert_eq!(
+            derived(&[ci, ("flake.nix", both), cargo]),
+            found("nix develop --command cargo test --locked", ".github/workflows/ci.yml, step Test")
+        );
+        assert_eq!(derived(&[("flake.nix", both), cargo]), found("nix flake check", "flake.nix, which declares checks"));
         assert_eq!(derived(&[make, cargo, npm]), found("make test", "Makefile, target test"));
         assert_eq!(derived(&[cargo, npm, ("Cargo.lock", "")]), found("cargo test --locked", "Cargo.toml, beside its Cargo.lock"));
         assert_eq!(derived(&[npm]), found("npm test", "package.json, scripts.test"));
