@@ -1240,8 +1240,14 @@ pub enum Limit {
     Kill,
     /// What signals processes (task 1742): `kill`, `pkill`, `killall` and
     /// `skill`, whatever they are given, but to list the signals or ask for
-    /// their help or version (`signals`).
+    /// their help or version (`signals`), and a `kill` that signals none but
+    /// the session's own (task 1849, `own_signal`).
     Signal,
+    /// What a multiplexer reads as no tmux command (task 1746): kmux's own
+    /// verbs, which it runs before tmux's commands -- `revive`, `bcast`,
+    /// `prune`, `resurrect` and the rest `kmux verbs` lists as extensions --
+    /// and any other word in their place (`mux_verb`).
+    Verb,
     /// What has the multiplexer run a command it is given (task 1742): a
     /// command of `REACHES` given one, a hook or another option of
     /// `RUN_OPTIONS` set, a copy mode pipe, a format's `#()`, or its own
@@ -1253,15 +1259,18 @@ pub enum Limit {
     Keys,
     /// What writes what every checkout of its repository shares, or leaves
     /// its own branch (task 1800): a git command that writes a branch other
-    /// than the session's, a tag, the stash, notes, replacements, the
-    /// worktrees, the remotes or the repository's config, or that puts its
-    /// worktree on another branch or none (`git_touches`).
+    /// than the session's, a tag, notes, replacements, the worktrees, the
+    /// remotes or the repository's config, or that puts its worktree on
+    /// another branch or none (`git_touches`).
     Shared,
+    /// What writes the stash, which every checkout of its repository shares
+    /// (tasks 1800 and 1833): its refusal says how to set work aside instead.
+    Stash,
     /// What writes in another checkout of its repository than its own
     /// worktree -- the project's own, another session's worktree (task
     /// 1800): a git command that writes there, wherever `-C`, a `cd`,
     /// `--git-dir` or `--work-tree` puts it, and an Edit or Write of a file
-    /// there.
+    /// there, or a Bash call's (task 1925, `write_limit`).
     Checkout,
 }
 
@@ -1274,15 +1283,29 @@ impl Limit {
             Limit::Session => "does not start sessions: the orchestrator starts them, each with a context and a cost of its own",
             Limit::Stop => "does not stop, respawn or remove Claude Code's sessions, nor purge their state: they are the orchestrator's and the user's to end",
             Limit::Kill => "does not kill or respawn the multiplexer's panes, windows, sessions or server: the orchestrator, the user and the other born sessions run there",
-            Limit::Signal => "does not signal processes with kill, pkill or killall: the orchestrator's, the user's and the other born sessions' run on this machine too",
+            Limit::Signal => {
+                "does not signal processes with kill, pkill or killall: the orchestrator's, the user's and the other born sessions' run on this machine too. \
+                 A kill -0, which signals none, goes through, and so does a kill of its own: $!, $$, a job as %1, a variable holding one of those, \
+                 or a pid below its Claude Code process"
+            }
+            Limit::Verb => {
+                "does not run what the multiplexer reads as no tmux command -- kmux's own verbs, as revive, bcast, prune and resurrect, \
+                 which `kmux verbs` lists as extensions: several respawn, broadcast to or remove what the orchestrator, the user and the other \
+                 born sessions run, and the guard does not read them"
+            }
             Limit::Runs => {
                 "does not have the multiplexer run a command for it -- run-shell, if-shell, a key binding, a hook, a popup, a new window's command, a file of commands, \
                  a format's #(): the guard does not see what that command does"
             }
             Limit::Keys => "does not type into another pane than its own: the others are the orchestrator's, the user's and the other born sessions'",
             Limit::Shared => {
-                "does not leave its own branch, nor write what every checkout of its repository shares -- another branch, a tag, the stash, notes, \
+                "does not leave its own branch, nor write what every checkout of its repository shares -- another branch, a tag, notes, \
                  the worktrees, the remotes, the config: the orchestrator merges its branch into main, and the rest is the user's and the other sessions'"
+            }
+            Limit::Stash => {
+                "does not write the stash: it is one list every checkout of its repository shares, where another session may pop or drop its entry, \
+                 or it theirs. To set work aside, make it a WIP commit on its own branch -- git add -A && git commit -m wip -- and take it back \
+                 with git reset HEAD~1; git stash list, show and apply stay free"
             }
             Limit::Checkout => {
                 "does not write in another checkout of its repository -- the project's own, another session's worktree: it works in its own worktree, \
@@ -1541,6 +1564,12 @@ fn mux_limit(args: &[String], own: Option<&str>) -> Option<Limit> {
             }
         }
     }
+    if let Some(first) = args.get(at) {
+        let word = if first.ends_with("\\;") { first.as_str() } else { first.trim_end_matches(';') };
+        if !word.is_empty() && mux_verb(word) {
+            return Some(Limit::Verb);
+        }
+    }
     let mut command: Vec<&str> = Vec::new();
     for arg in args.iter().skip(at) {
         let ends = arg.ends_with(';') && !arg.ends_with("\\;");
@@ -1556,6 +1585,20 @@ fn mux_limit(args: &[String], own: Option<&str>) -> Option<Limit> {
         }
     }
     command_limit(&command, elsewhere, own)
+}
+
+/// kmux's own verbs that tmux reads as a command of its, as `kmux verbs`
+/// lists them (3.7.47): `info`, one of tmux's aliases, which kmux runs as
+/// its verb. Every other verb of kmux is no tmux command at all.
+const SHADOWING_VERBS: &[&str] = &["info"];
+
+/// Whether a multiplexer given `word` first after its options runs no tmux
+/// command (task 1746, the user's decision 1910): one of kmux's own verbs,
+/// which it runs on that word exactly before tmux reads its command line,
+/// or a word tmux reads as none -- which tmux refuses, and a kmux newer than
+/// this guard may run as a verb of its own.
+fn mux_verb(word: &str) -> bool {
+    SHADOWING_VERBS.contains(&word) || (!TMUX_ALIASES.iter().any(|(alias, _)| *alias == word) && tmux_command(word).is_none())
 }
 
 /// What one tmux command, `words` its name and arguments, would do that a
@@ -1613,13 +1656,100 @@ fn signals(name: &str, args: &[String]) -> bool {
     }
 }
 
-/// The limit the call `call`, run in `folder`, reaches, if any, in a session
-/// whose `EKKO_MUX` names the binary `mux`, in the multiplexer's pane `own`,
-/// working in the checkout `checkout` where `start` named one.
-pub fn limit_of(call: &crate::shell::Call, folder: &Path, mux: Option<&str>, own: Option<&str>, checkout: Option<&Own>) -> Option<Limit> {
+/// Whether a `kill` given `args`, where `place` says, signals no process but
+/// the session's own (task 1849): it sends signal 0, which signals none and
+/// asks whether a process is there, or every pid it is given is the
+/// session's -- `$!`, the last the command put in the background; `$$` or
+/// `$BASHPID`, its shell; a job, as `%1`; a variable that holds one of
+/// those; or a process below `claude`, the Claude Code process its tools
+/// run under. A negative pid, a process group, is no one's own, and nor is
+/// what pkill, killall and skill are given, a pattern or names.
+fn own_signal(name: &str, args: &[String], place: &crate::shell::Located, claude: Option<u32>) -> bool {
+    if name != "kill" {
+        return false;
+    }
+    // The signal its first argument names, and where its pids start.
+    let (signal, mut at) = match args.first().map(String::as_str) {
+        Some("-s" | "-n" | "--signal") => (args.get(1).map(String::as_str), 2),
+        Some(first) if first.starts_with("--signal=") => (first.strip_prefix("--signal="), 1),
+        Some("--") | None => (None, 0),
+        Some(first) if first.starts_with('-') && !first.starts_with("--") => (Some(&first[1..]), 1),
+        Some(first) if first.starts_with('-') => return false,
+        Some(_) => (None, 0),
+    };
+    if signal == Some("0") {
+        return true;
+    }
+    if args.get(at).is_some_and(|arg| arg == "--") {
+        at += 1;
+    }
+    let pids = &args[at.min(args.len())..];
+    !pids.is_empty() && pids.iter().all(|pid| own_pid(pid, &place.variables, claude, 0))
+}
+
+/// Whether `pid`, as a kill is given it, names a process of the session's
+/// own; see `own_signal`.
+fn own_pid(pid: &str, variables: &std::collections::HashMap<String, String>, claude: Option<u32>, depth: usize) -> bool {
+    if matches!(pid, "$!" | "${!}" | "$$" | "${$}" | "$BASHPID" | "${BASHPID}") || pid.starts_with('%') {
+        return true;
+    }
+    let name = pid.strip_prefix("${").and_then(|name| name.strip_suffix('}')).or_else(|| pid.strip_prefix('$'));
+    if let Some(name) = name.filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+        return depth < 4 && variables.get(name).is_some_and(|value| own_pid(value, variables, claude, depth + 1));
+    }
+    match (pid.parse::<u32>(), claude) {
+        (Ok(pid), Some(claude)) => below(pid, claude),
+        _ => false,
+    }
+}
+
+/// Whether the process `pid` runs below `ancestor`, by /proc: one of its
+/// children, theirs, and so on -- `ancestor` itself is not.
+fn below(mut pid: u32, ancestor: u32) -> bool {
+    for _ in 0..64 {
+        match crate::holder::stat(pid) {
+            Some((parent, _)) if parent == ancestor => return true,
+            Some((parent, _)) if parent > 1 => pid = parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Who makes the calls the limits judge: a session ekko agents started, as
+/// its environment says (`Caller::of_this_process`).
+#[derive(Debug, Clone, Default)]
+pub struct Caller {
+    /// The name of the binary `EKKO_MUX` names, as a call names it: `kmux`.
+    pub mux: Option<String>,
+    /// The multiplexer's pane it runs in, TMUX_PANE.
+    pub pane: Option<String>,
+    /// The worktree and branch `start` named, where it named them.
+    pub checkout: Option<Own>,
+    /// The Claude Code process it runs in: what runs below it is the
+    /// session's own to signal (task 1849).
+    pub claude: Option<u32>,
+}
+
+impl Caller {
+    /// The session this process -- the guard's hook -- runs in.
+    fn of_this_process() -> Caller {
+        Caller {
+            mux: mux_name(),
+            pane: set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned()),
+            checkout: Own::of_this_process(),
+            claude: crate::holder::claude_among(std::os::unix::process::parent_id()),
+        }
+    }
+}
+
+/// The limit the call `call` reaches, if any, run where `place` says, by
+/// the session `caller`.
+pub fn limit_of(call: &crate::shell::Call, place: &crate::shell::Located, caller: &Caller) -> Option<Limit> {
     let operands = |valued: &[&str]| crate::shell::operands(&call.args, valued);
-    match call.name.as_str() {
-        "git" => git_limit(&call.args, folder, checkout),
+    let (mux, own) = (caller.mux.as_deref(), caller.pane.as_deref());
+    let found = match call.name.as_str() {
+        "git" => git_limit(&call.args, place, caller, 0),
         "gh" => match operands(&["-R", "--repo"]).as_slice() {
             ["pr", "create" | "merge", ..] => Some(Limit::Push),
             ["release", "create" | "upload" | "edit" | "delete" | "delete-asset", ..] => Some(Limit::Release),
@@ -1655,10 +1785,80 @@ pub fn limit_of(call: &crate::shell::Call, folder: &Path, mux: Option<&str>, own
             script.filter(|script| script.starts_with("release")).map(|_| Limit::Release)
         }
         name if name.starts_with("release") => Some(Limit::Release),
-        name @ ("kill" | "pkill" | "killall" | "skill") => signals(name, &call.args).then_some(Limit::Signal),
+        name @ ("kill" | "pkill" | "killall" | "skill") => {
+            (signals(name, &call.args) && !own_signal(name, &call.args, place, caller.claude)).then_some(Limit::Signal)
+        }
         name if MUXES.contains(&name) || mux == Some(name) => mux_limit(&call.args, own),
         _ => None,
+    };
+    found.or_else(|| caller.checkout.as_ref().and_then(|checkout| write_limit(call, place, checkout)))
+}
+
+/// The programs that write files a Bash call names (task 1925), each with
+/// the options it takes a value after, as its `--help` lists them (GNU
+/// coreutils 9.7 and sed 4.9): those whose operands are each a file they
+/// write -- or, as `mv` does, take away -- and those that write the last,
+/// or the folder `-t` names; `sed` with `-i`, and `dd` its `of=`.
+const WRITERS: &[(&str, &[&str])] = &[
+    ("sed", &["-e", "--expression", "-f", "--file", "-l", "--line-length"]),
+    ("dd", &[]),
+    ("cp", &["-S", "--suffix", "-t", "--target-directory"]),
+    ("install", &["-m", "--mode", "-o", "--owner", "-g", "--group", "-S", "--suffix", "-t", "--target-directory", "--strip-program"]),
+    ("ln", &["-S", "--suffix", "-t", "--target-directory"]),
+    ("mv", &["-S", "--suffix", "-t", "--target-directory"]),
+    ("rm", &[]),
+    ("rmdir", &[]),
+    ("unlink", &[]),
+    ("shred", &["-n", "--iterations", "-s", "--size", "--random-source"]),
+    ("touch", &["-d", "--date", "-r", "--reference", "-t"]),
+    ("mkdir", &["-m", "--mode"]),
+    ("truncate", &["-s", "--size", "-r", "--reference"]),
+    ("tee", &[]),
+];
+
+/// The files the call `call` writes by what it is given, as written: see
+/// `WRITERS`.
+fn written_files(call: &crate::shell::Call) -> Vec<&str> {
+    let args = &call.args;
+    let Some((name, valued)) = WRITERS.iter().find(|(name, _)| *name == call.name) else { return Vec::new() };
+    let operands = || crate::shell::operands(args, valued);
+    let target = || crate::claims::given(args, &["-t", "--target-directory"]);
+    match *name {
+        "sed" => {
+            let in_place = args.iter().take_while(|arg| *arg != "--").any(|arg| {
+                arg.starts_with("--in-place")
+                    || arg.strip_prefix('-').filter(|short| !short.starts_with('-')).is_some_and(|short| short.split_once('i').is_some_and(|(before, _)| before.chars().all(|c| "nErsuz".contains(c))))
+            });
+            let scripted = flagged(args, &["-e", "--expression", "-f", "--file"]);
+            if in_place { operands().into_iter().skip(usize::from(!scripted)).collect() } else { Vec::new() }
+        }
+        "dd" => args.iter().filter_map(|arg| arg.strip_prefix("of=")).collect(),
+        "cp" | "install" | "ln" if target().is_some() => target().into_iter().collect(),
+        "install" if flagged(args, &["-d", "--directory"]) || clustered(args, &['d']) => operands(),
+        "cp" | "install" => operands().last().copied().into_iter().collect(),
+        // `ln -s target` makes its link here.
+        "ln" => match operands().as_slice() {
+            [_] => vec!["."],
+            operands => operands.last().copied().into_iter().collect(),
+        },
+        "mv" => operands().into_iter().chain(target()).collect(),
+        _ => operands(),
     }
+}
+
+/// The limit a born session working in `own` reaches with the files the
+/// call `call`, run where `place` says, writes (task 1925): by its
+/// redirections, or by what it is given (`written_files`), each judged as
+/// an Edit of it is (`file_limit`). A path no variable the command or the
+/// environment sets resolves goes unjudged, and a device is no file.
+fn write_limit(call: &crate::shell::Call, place: &crate::shell::Located, own: &Own) -> Option<Limit> {
+    let mut words: Vec<&str> = call.writes.iter().map(String::as_str).collect();
+    words.extend(written_files(call));
+    words
+        .into_iter()
+        .filter(|word| !word.starts_with("/dev/"))
+        .flat_map(|word| crate::shell::expand(word, &place.variables, &place.folder))
+        .find_map(|path| file_limit(path.to_str()?, &place.folder, own))
 }
 
 /// The worktree and branch `start` gave a born session (task 1800), and
@@ -1698,6 +1898,8 @@ enum Touches {
     /// What every checkout of the repository shares, or another branch
     /// than the session's, or which branch the checkout is on.
     Shared,
+    /// The stash, which every checkout shares too.
+    Stash,
 }
 
 /// Git's commands that write nothing of the repository they run in: they
@@ -1851,7 +2053,7 @@ fn git_touches(git: &str, rest: &[String], folder: &Path, own: &Own) -> Touches 
             Some(&("list" | "show")) => Nothing,
             Some(&("apply" | "create")) => Checkout,
             // refs/stash is every worktree's.
-            _ => Shared,
+            _ => Touches::Stash,
         },
         "notes" => match operands(&["--ref"]).first() {
             None | Some(&("list" | "show" | "get-ref")) => Nothing,
@@ -1961,20 +2163,61 @@ fn written(touches: Touches, folder: &Path, globals: &[String], own: &Own) -> Op
     }
     match touches {
         Touches::Shared => Some(Limit::Shared),
+        Touches::Stash => Some(Limit::Stash),
         _ => (!top.is_some_and(|top| same(&top, &own.worktree))).then_some(Limit::Checkout),
     }
 }
 
-/// The limit the git call `args`, run in `folder`, reaches: a push in any
-/// born session; in one `start` named its worktree and branch (`own`), a
-/// write of what every checkout shares, or in another checkout.
-fn git_limit(args: &[String], folder: &Path, own: Option<&Own>) -> Option<Limit> {
-    let (git, rest, folder) = crate::claims::git_command(args, folder)?;
+/// The limit the git call `args`, run where `place` says, reaches: a push
+/// in any born session; in one `start` named its worktree and branch
+/// (`caller.checkout`), a write of what every checkout shares, or in
+/// another checkout. An alias is read as the command it stands for (task
+/// 1925), `depth` the aliases expanded on the way.
+fn git_limit(args: &[String], place: &crate::shell::Located, caller: &Caller, depth: usize) -> Option<Limit> {
+    let (git, rest, folder) = crate::claims::git_command(args, &place.folder)?;
+    let before = &args[..args.len() - rest.len() - 1];
+    if let Some(alias) = git_alias(before, git, &folder).filter(|_| depth < 8) {
+        return match alias.strip_prefix('!') {
+            // A shell command, which git runs at the top of the checkout.
+            Some(shell) => {
+                let top = repository(&folder, &git_globals(args), &[]).and_then(|(_, top)| top).unwrap_or(folder);
+                reached(shell, &top, caller).into_iter().next()
+            }
+            None => {
+                let words = crate::shell::calls(&format!("git {alias}")).into_iter().next().map(|call| call.args).unwrap_or_default();
+                let expanded: Vec<String> = before.iter().chain(&words).chain(rest).cloned().collect();
+                git_limit(&expanded, place, caller, depth + 1)
+            }
+        };
+    }
     if git == "push" {
         return Some(Limit::Push);
     }
-    let own = own?;
+    let own = caller.checkout.as_ref()?;
     written(git_touches(git, rest, &folder, own), &folder, &git_globals(args), own)
+}
+
+/// Git's commands the guard reads by name, beside those of `GIT_READS`:
+/// each is git's own, whose name an alias cannot take.
+const GIT_OWN: &[&str] = &[
+    "push", "branch", "tag", "update-ref", "symbolic-ref", "checkout", "switch", "rebase", "fetch", "pull", "stash", "notes", "replace",
+    "worktree", "remote", "reflog", "config", "filter-branch", "commit", "add", "reset", "merge", "cherry-pick", "revert", "restore", "rm",
+    "mv", "am", "apply", "clean", "gc", "submodule", "bisect", "sparse-checkout", "maintenance",
+];
+
+/// What the alias `git` stands for, where it is one: as a `-c alias.NAME=`
+/// before the command gives it -- the last one --, or else the repository's
+/// or the user's config, which is asked only for a name git has no command
+/// of (`GIT_READS`, `GIT_OWN`).
+fn git_alias(before: &[String], git: &str, folder: &Path) -> Option<String> {
+    let key = format!("alias.{git}=");
+    let given = before.windows(2).filter(|pair| pair[0] == "-c").filter_map(|pair| pair[1].strip_prefix(&key).map(str::to_string)).next_back();
+    if given.is_some() || GIT_READS.contains(&git) || GIT_OWN.contains(&git) {
+        return given;
+    }
+    let output = Command::new("git").current_dir(folder).args(["config", "--get", &format!("alias.{git}")]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let alias = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (output.status.success() && !alias.is_empty()).then_some(alias)
 }
 
 /// Why the guard refuses a born session the Edit or Write of the file
@@ -2014,19 +2257,18 @@ fn mux_name() -> Option<String> {
 /// reaches none, or that only names one -- in an echo, a commit message, a
 /// here-document.
 pub fn limits(command: &str, cwd: &Path) -> Vec<String> {
-    let (mux, pane) = (mux_name(), set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned()));
-    reached(command, cwd, mux.as_deref(), pane.as_deref(), Own::of_this_process().as_ref()).into_iter().map(reason).collect()
+    reached(command, cwd, &Caller::of_this_process()).into_iter().map(reason).collect()
 }
 
-/// The limits the calls of `command`, run from `cwd`, reach, each once, in
-/// a session whose multiplexer `mux` names, in its pane `own`, working in
-/// `checkout` where `start` named one: see `limits`.
-fn reached(command: &str, cwd: &Path, mux: Option<&str>, own: Option<&str>, checkout: Option<&Own>) -> Vec<Limit> {
+/// The limits the calls of `command`, run from `cwd`, reach, each once, made
+/// by the session `caller`: see `limits`.
+fn reached(command: &str, cwd: &Path, caller: &Caller) -> Vec<Limit> {
     let (calls, placed) = crate::shell::located(command, cwd, crate::shell::Reading::GUARD);
     let mut found: Vec<Limit> = Vec::new();
     for place in &placed {
         // The GIT_DIR and GIT_WORK_TREE set before it, which move a git call.
-        let checkout = checkout.cloned().map(|mut checkout| {
+        let mut caller = caller.clone();
+        caller.checkout = caller.checkout.map(|mut checkout| {
             for call in &calls[..place.at] {
                 let set: Vec<(&str, &str)> = match call.name.as_str() {
                     "=" => call.args.split_first().map(|(name, value)| (name.as_str(), value.first().map_or("", String::as_str))).into_iter().collect(),
@@ -2039,7 +2281,7 @@ fn reached(command: &str, cwd: &Path, mux: Option<&str>, own: Option<&str>, chec
             }
             checkout
         });
-        if let Some(limit) = limit_of(&calls[place.at], &place.folder, mux, own, checkout.as_ref()).filter(|limit| !found.contains(limit)) {
+        if let Some(limit) = limit_of(&calls[place.at], place, &caller).filter(|limit| !found.contains(limit)) {
             found.push(limit);
         }
     }
@@ -2716,7 +2958,7 @@ mod tests {
     fn a_value_of_claude_s_options_is_never_taken_for_its_command() {
         let limit = |args: &[&str]| {
             let (calls, placed) = crate::shell::located(&format!("claude {}", args.join(" ")), Path::new("/"), crate::shell::Reading::GUARD);
-            limit_of(&calls[placed[0].at], Path::new("/"), None, None, None)
+            limit_of(&calls[placed[0].at], &placed[0], &Caller::default())
         };
         for option in CLAUDE_VALUED {
             assert_eq!(limit(&[option, "value", "mcp", "list"]), None, "{option}");
@@ -2768,7 +3010,7 @@ mod tests {
         };
         let limit = |command: &str, mux: Option<&str>| {
             let (calls, placed) = crate::shell::located(command, Path::new("/"), crate::shell::Reading::GUARD);
-            limit_of(&calls[placed[0].at], Path::new("/"), mux, None, None)
+            limit_of(&calls[placed[0].at], &placed[0], &Caller { mux: mux.map(str::to_string), ..Caller::default() })
         };
         let mut words: Vec<String> = table.iter().filter(|(_, alias)| !alias.is_empty()).map(|(_, alias)| alias.to_string()).collect();
         for (name, _) in &table {
@@ -2821,13 +3063,56 @@ mod tests {
             (&["display", "-p", r"a\;", "kill-pane"], None),
             (&["list-panes", "-a"], None),
             (&["-V"], None),
-            // kmux's own verbs, which it runs before tmux's commands, go
-            // unread (task 1746).
-            (&["revive"], None),
-            (&["bcast", "kill-server"], None),
+            // kmux's own verbs, which it runs before tmux's commands (task
+            // 1746): first after the options only.
+            (&["revive"], Some(Limit::Verb)),
+            (&["-L", "ekko", "bcast", "kill-server"], Some(Limit::Verb)),
+            (&["display", "-p", "x", ";", "revive"], None),
         ];
         for (args, limit) in read {
             assert_eq!(reached(args), *limit, "{args:?}");
+        }
+    }
+
+    /// Every verb of kmux's own, as `kmux verbs` lists its extensions
+    /// (3.7.47), is refused in a born session, whatever it is given and
+    /// past any option -- `info` too, which tmux reads as its alias -- and
+    /// so is a word tmux reads as no command, as a newer kmux's verb would
+    /// be, while none of tmux's commands or aliases is (task 1746, the
+    /// user's decision 1910).
+    #[test]
+    fn each_of_kmux_s_own_verbs_is_refused_as_kmux_verbs_lists_them() {
+        let listed = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/kmux-3.7.47-verbs.txt")).unwrap();
+        let section = |title: &str| -> Vec<String> {
+            let lines = listed.lines().skip_while(|line| !line.starts_with(title)).skip(1);
+            lines.take_while(|line| !line.trim().is_empty()).filter_map(|line| line.split_whitespace().next().map(str::to_string)).collect()
+        };
+        let (verbs, commands, aliases) = (section("EXTENSIONS"), section("COMMANDS"), section("ALIASES"));
+        assert_eq!((verbs.len(), commands.len(), aliases.len()), (114, 93, 78));
+        for word in ["revive", "bcast", "prune", "resurrect", "solo", "sync", "stash", "dead", "info"] {
+            assert!(verbs.contains(&word.to_string()), "{word}");
+        }
+        let limit = |command: &str, mux: Option<&str>| -> Vec<Limit> {
+            let (calls, placed) = crate::shell::located(command, Path::new("/"), crate::shell::Reading::GUARD);
+            let caller = Caller { mux: mux.map(str::to_string), pane: Some("%7".into()), ..Caller::default() };
+            placed.iter().filter_map(|place| limit_of(&calls[place.at], place, &caller)).collect()
+        };
+        for verb in &verbs {
+            for command in [format!("kmux {verb}"), format!("kmux -L ekko {verb} --json"), format!("timeout 5 kmux -uS /tmp/s {verb};")] {
+                assert_eq!(limit(&command, None), [Limit::Verb], "{command}");
+            }
+            assert_eq!(limit(&format!("/opt/mux/bin/mymux {verb}"), Some("mymux")), [Limit::Verb], "{verb}, by the binary EKKO_MUX names");
+        }
+        // The verbs tmux reads as one of its commands, which only the table names.
+        let tmux_reads = |word: &str| TMUX_ALIASES.iter().any(|(alias, _)| *alias == word) || tmux_command(word).is_some();
+        let shadowing: Vec<&str> = verbs.iter().map(String::as_str).filter(|verb| tmux_reads(verb)).collect();
+        assert_eq!(shadowing, SHADOWING_VERBS);
+        assert_eq!(limit("kmux zzverb", None), [Limit::Verb], "a word tmux reads as no command");
+        for word in commands.iter().chain(&aliases) {
+            assert!(limit(&format!("kmux {word} -t %7"), None).iter().all(|limit| *limit != Limit::Verb), "{word}, tmux's");
+        }
+        for command in ["kmux", "kmux -V", "kmux ls", "kmux list-panes -a", "tmux display -p '#{pane_id}'", "echo kmux revive", "kmux display -p revive"] {
+            assert_eq!(limit(command, None), [], "{command}");
         }
     }
 
@@ -2983,59 +3268,115 @@ mod tests {
     }
 
     /// kill(1), pkill, killall and skill, as the guard reads calls: refused
-    /// whatever they are given -- a pid, a job, a name, nothing, as `xargs`
-    /// gives them theirs -- under any wrapper or shell, but to list the
-    /// signals or ask for their help or version; named only, none.
+    /// whatever they are given -- a pid, a name, nothing, as `xargs` gives
+    /// them theirs -- under any wrapper or shell, but to list the signals or
+    /// ask for their help or version; named only, none. A kill of signal 0,
+    /// which signals none, and one whose every pid is the session's own --
+    /// `$!`, `$$`, a job, a variable holding one, a process below its Claude
+    /// Code process -- go through (task 1849), each form in the transcripts
+    /// of 2026-10-11 to 14 among them; a pkill pattern does not.
     #[test]
-    fn a_program_that_signals_processes_is_refused_but_to_list_the_signals() {
+    fn a_program_that_signals_processes_is_refused_but_to_list_the_signals_or_its_own() {
+        // This test's process stands for the session's Claude Code: a child
+        // of its is the session's, and so is that child's child.
+        let mut child = Command::new("sh").args(["-c", "sleep 30 & wait"]).spawn().unwrap();
+        let mut grandchild = String::new();
+        for _ in 0..250 {
+            let children = std::fs::read_to_string(format!("/proc/{0}/task/{0}/children", child.id())).unwrap_or_default();
+            if let Some(pid) = children.split_whitespace().next() {
+                grandchild = pid.to_string();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!grandchild.is_empty(), "sh started its sleep");
+        let caller = Caller { claude: Some(std::process::id()), ..Caller::default() };
         let reached = |command: &str| -> Vec<Limit> {
             let (calls, placed) = crate::shell::located(command, Path::new("/"), crate::shell::Reading::GUARD);
-            placed.iter().filter_map(|place| limit_of(&calls[place.at], &place.folder, None, None, None)).collect()
+            placed.iter().filter_map(|place| limit_of(&calls[place.at], place, &caller)).collect()
         };
+        let (own, parent) = (child.id(), std::os::unix::process::parent_id());
         for command in [
-            "kill 4242",
-            "kill -9 4242",
-            "kill -s HUP 4242",
-            "kill %1",
-            "kill",
-            "kill -9 4242 -l",
-            "/bin/kill -TERM 4242",
-            "builtin kill %1",
-            "command kill 4242",
-            "timeout 5 kill 4242",
-            "pgrep claude | xargs kill",
-            "pgrep claude | xargs -r kill -9",
-            "sh -c 'pkill -f claude'",
-            "pkill -f claude",
-            "pkill",
-            "/usr/bin/pkill -u roldant",
-            "killall claude",
-            "killall",
-            "skill -9 claude",
-            "echo \"`kill 1`\"",
-            "echo \"$(kill 1)\"",
+            "kill 4242".to_string(),
+            "kill -9 4242".into(),
+            "kill -s HUP 4242".into(),
+            "kill".into(),
+            "kill -9".into(),
+            "kill -9 4242 -l".into(),
+            "/bin/kill -TERM 4242".into(),
+            "command kill 4242".into(),
+            "timeout 5 kill 4242".into(),
+            "pgrep claude | xargs kill".into(),
+            "pgrep claude | xargs -r kill -9".into(),
+            "sh -c 'pkill -f claude'".into(),
+            "pkill -f claude".into(),
+            "pkill".into(),
+            "/usr/bin/pkill -u roldant".into(),
+            "killall claude".into(),
+            "killall".into(),
+            "skill -9 claude".into(),
+            "echo \"`kill 1`\"".into(),
+            "echo \"$(kill 1)\"".into(),
+            // Not the session's: its Claude Code itself, what runs above it,
+            // a process group, a pid a variable or a file holds, a pkill
+            // pattern however narrow.
+            format!("kill {}", std::process::id()),
+            format!("kill {parent}"),
+            "kill 1".into(),
+            format!("kill {own} 4242"),
+            format!("kill -9 -{own}"),
+            format!("kill -- -{own}"),
+            "kill $PID".into(),
+            "x=4242; kill $x".into(),
+            "kill $(cat /tmp/x.pid)".into(),
+            "kill -0 4242 && kill 4242".into(),
+            "kill --verbose 4242".into(),
+            "pkill -A -x -f /tmp/nixdk-415/bin/nixdk".into(),
+            "pkill -fA 'timeout 3600 Xvfb -displayfd 3'".into(),
         ] {
-            assert_eq!(reached(command), [Limit::Signal], "{command}");
+            assert_eq!(reached(&command), [Limit::Signal], "{command}");
         }
         for command in [
-            "kill -l",
-            "kill -l 9",
-            "kill -L",
-            "kill --help",
-            "killall -l",
-            "killall --version",
-            "pkill --help",
-            "pkill -V",
-            "pgrep -f claude",
-            "echo kill 4242",
-            "git commit -m 'kill 4242'",
+            "kill -l".to_string(),
+            "kill -l 9".into(),
+            "kill -L".into(),
+            "kill --help".into(),
+            "killall -l".into(),
+            "killall --version".into(),
+            "pkill --help".into(),
+            "pkill -V".into(),
+            "pgrep -f claude".into(),
+            "echo kill 4242".into(),
+            "git commit -m 'kill 4242'".into(),
             // Single-quoted, a substitution is text (task 1848).
-            "echo '`kill 1`'",
-            "echo '$(kill 1)'",
-            "sed -i '16s#upstream `kill(-1, 0)` asked#x#' docs/PORTING.md",
+            "echo '`kill 1`'".into(),
+            "echo '$(kill 1)'".into(),
+            "sed -i '16s#upstream `kill(-1, 0)` asked#x#' docs/PORTING.md".into(),
+            // Signal 0 asks whether a process is there (seek 102, 103, 107).
+            "kill -0 4242".into(),
+            "kill -0 \"$(cat /tmp/kwin.pid)\"".into(),
+            "kill -s 0 4242".into(),
+            "kill -n 0 4242".into(),
+            "kill --signal=0 4242".into(),
+            // What the command itself started (blackbox 4, 5, 14 and 423).
+            "nix develop -c bash -c 'Xvfb :99 & x=$!; sleep 1; kill $x'".into(),
+            "sleep 9 & kill $!".into(),
+            "sleep 9 & pid=$!; kill -TERM \"${pid}\"".into(),
+            "sh -c 'kill -ABRT $$'".into(),
+            "kill -9 $BASHPID".into(),
+            "sleep 9 & kill %1".into(),
+            "builtin kill %1".into(),
+            "kill -- $!".into(),
+            // A process below its Claude Code.
+            format!("kill {own}"),
+            format!("kill -9 {own} {grandchild}"),
+            format!("pid={own}; kill $pid"),
         ] {
-            assert_eq!(reached(command), [], "{command}");
+            assert_eq!(reached(&command), [], "{command}");
         }
+        assert_eq!(limit_of(&crate::shell::calls(&format!("kill {own}"))[0], &crate::shell::located("x", Path::new("/"), crate::shell::Reading::GUARD).1[0], &Caller::default()), Some(Limit::Signal), "with no Claude Code process known, a pid is no one's own");
+        child.kill().ok();
+        child.wait().ok();
     }
 
     /// A Claude Code process is a born session when its environment names
@@ -3177,7 +3518,7 @@ mod tests {
         assert!(Command::new("git").current_dir(&main).args(add).arg(&worktree).status().unwrap().success());
         let scratch = repository_at("scratch");
         let own = Own { worktree: worktree.clone(), branch: "task-1".into(), git_env: Vec::new() };
-        let reach = |command: &str, cwd: &Path, own: Option<&Own>| reached(command, cwd, None, None, own);
+        let reach = |command: &str, cwd: &Path, own: Option<&Own>| reached(command, cwd, &Caller { checkout: own.cloned(), ..Caller::default() });
         let (main_dir, main_git) = (main.display().to_string(), main.join(".git").display().to_string());
 
         let shared = [
@@ -3218,13 +3559,6 @@ mod tests {
             "git fetch origin main:main",
             "git fetch origin +refs/heads/*:refs/heads/*",
             "git pull origin main:main",
-            "git stash",
-            "git stash push -m x",
-            "git stash pop",
-            "git stash drop",
-            "git stash clear",
-            "git stash store x",
-            "git stash branch b",
             "git notes add -m x",
             "git notes --ref r remove HEAD",
             "git replace HEAD HEAD~1",
@@ -3247,6 +3581,18 @@ mod tests {
             assert_eq!(reach(command, &worktree, Some(&own)), [Limit::Shared], "{command}, in its worktree");
             assert_eq!(reach(command, &scratch, Some(&own)), [], "{command}, in another repository");
             assert_eq!(reach(command, &worktree, None), [], "the orchestrator's {command}");
+        }
+        // The stash, refused with what to do instead (task 1833).
+        for command in ["git stash", "git stash push -u -m x", "git stash pop", "git stash drop", "git stash clear", "git stash store x", "git stash branch b"] {
+            assert_eq!(reach(command, &worktree, Some(&own)), [Limit::Stash], "{command}, in its worktree");
+            assert_eq!(reach(command, &main, Some(&own)), [Limit::Stash], "{command}, in main");
+            assert_eq!(reach(command, &scratch, Some(&own)), [], "{command}, in another repository");
+            assert_eq!(reach(command, &worktree, None), [], "the orchestrator's {command}");
+        }
+        let instead = reason(Limit::Stash);
+        assert!(instead.contains("make it a WIP commit on its own branch -- git add -A && git commit -m wip --"), "{instead}");
+        for set_aside in ["git add -A && git commit -m wip", "git reset HEAD~1"] {
+            assert_eq!(reach(set_aside, &worktree, Some(&own)), [], "{set_aside}, which the refusal names");
         }
 
         let checkout = [
@@ -3338,5 +3684,87 @@ mod tests {
         assert_eq!(file_limit("../../../readme.md", &worktree, &own), Some(Limit::Checkout), "a path relative to its worktree");
         let _ = std::fs::remove_dir_all(&main);
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A born session's Bash call that writes a file without git (task
+    /// 1925): each program of `WRITERS` and each redirection, writing into
+    /// the project's own checkout from its worktree -- by a path, a `cd`, a
+    /// variable, a `bash -c` -- is refused as an Edit there is, and let
+    /// through into its worktree, into a folder no repository holds, and for
+    /// the orchestrator. A git alias is read as the command it stands for,
+    /// given with `-c` or in the repository's config.
+    #[test]
+    fn a_born_session_s_shell_writes_into_another_checkout_are_refused_as_its_edits_are() {
+        let main = repository_at("shell-main");
+        let worktree = main.join(".claude/worktrees/task-1");
+        let add = ["worktree", "add", "-q", "-b", "task-1"];
+        assert!(Command::new("git").current_dir(&main).args(add).arg(&worktree).status().unwrap().success());
+        let loose = crate::paths::test_dir("ekko-agents-loose");
+        std::fs::create_dir_all(loose.join("d")).unwrap();
+        for dir in [&main, &worktree, &loose] {
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+        }
+        let own = Own { worktree: worktree.clone(), branch: "task-1".into(), git_env: Vec::new() };
+        let reach = |command: &str, own: Option<&Own>| reached(command, &worktree, &Caller { checkout: own.cloned(), ..Caller::default() });
+        // Each program, and the forms it writes by.
+        let by_program: &[(&str, &[&str])] = &[
+            ("sed", &["sed -i s/a/b/ {}/src/x.rs", "sed -Ei.bak 's/a/b/' {}/x", "sed --in-place -e s/a/b/ -e s/c/d/ {}/x", "cd {} && sed -i s/a/b/ src/x.rs"]),
+            ("dd", &["dd if=/dev/zero of={}/x bs=1 count=1"]),
+            ("cp", &["cp x {}/", "cp -r src {}/src", "cp -t {} x", "cp --target-directory={} x y"]),
+            ("install", &["install -m 644 x {}/x", "install -d {}/d"]),
+            ("ln", &["ln -sf x {}/l", "cd {} && ln -s /x"]),
+            ("mv", &["mv x {}/x", "mv {}/readme.md x", "mv -t {} x"]),
+            ("rm", &["rm {}/readme.md", "rm -f {}/readme.md", "rm -rf {}/src", "rm -d {}/d"]),
+            ("rmdir", &["rmdir {}/d"]),
+            ("unlink", &["unlink {}/x"]),
+            ("shred", &["shred -u -n 3 {}/x"]),
+            ("touch", &["touch {}/x", "touch -d yesterday {}/x"]),
+            ("mkdir", &["mkdir -p {}/d/e", "mkdir -m 700 {}/d"]),
+            ("truncate", &["truncate -s 0 {}/x"]),
+            ("tee", &["echo y | tee {}/readme.md", "tee -a {}/a < x"]),
+        ];
+        let names: Vec<&str> = by_program.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, WRITERS.iter().map(|(name, _)| *name).collect::<Vec<_>>(), "a case for each program");
+        let redirected = [
+            "echo y > {}/readme.md",
+            "echo y >> {}/readme.md",
+            "cargo test 2> {}/log",
+            "cargo test &> {}/log",
+            "git diff > {}/x.patch",
+            "cat > {}/x <<'EOF'\nbody\nEOF",
+            "cd {} && echo y > readme.md",
+            "M={}; echo y > $M/readme.md",
+            "bash -c 'echo y > {}/x'",
+            "nix develop -c sh -c 'touch {}/x'",
+        ];
+        let commands = by_program.iter().flat_map(|(_, forms)| forms.iter()).chain(&redirected);
+        for template in commands {
+            let at = |dir: &Path| template.replace("{}", &dir.display().to_string());
+            assert_eq!(reach(&at(&main), Some(&own)), [Limit::Checkout], "{}", at(&main));
+            assert_eq!(reach(&at(&main), None), [], "the orchestrator's {}", at(&main));
+            assert_eq!(reach(&at(&worktree), Some(&own)), [], "{}", at(&worktree));
+            assert_eq!(reach(&at(&loose), Some(&own)), [], "{}", at(&loose));
+        }
+        for command in ["sed s/a/b/ {}/x", "sed -n p {}/x", "cat {}/readme.md", "cp {}/readme.md x", "echo y 2>&1 >/dev/null", "grep -r x {} > /dev/null", "ls {} >&2"] {
+            let command = command.replace("{}", &main.display().to_string());
+            assert_eq!(reach(&command, Some(&own)), [], "{command}, which writes nothing there");
+        }
+
+        // A git alias, read as what it stands for.
+        assert!(Command::new("git").current_dir(&main).args(["config", "alias.pp", "push"]).status().unwrap().success());
+        for (command, limit) in [
+            ("git -c alias.p=push p origin task-1", vec![Limit::Push]),
+            ("git -c alias.p='!git push origin task-1' p", vec![Limit::Push]),
+            ("git -c alias.b='branch -f main HEAD' b", vec![Limit::Shared]),
+            ("git -c alias.s='stash push' s", vec![Limit::Stash]),
+            ("git -c alias.c=commit -C ../../.. c -am x", vec![Limit::Checkout]),
+            ("git pp origin task-1", vec![Limit::Push]),
+            ("git -c alias.st=status st", vec![]),
+            ("git -c alias.c=commit c -am x", vec![]),
+        ] {
+            assert_eq!(reach(command, Some(&own)), limit, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&main);
+        let _ = std::fs::remove_dir_all(&loose);
     }
 }

@@ -115,6 +115,10 @@ impl Sink {
 pub struct Call {
     pub name: String,
     pub args: Vec<String>,
+    /// The files its redirections write, as written: the target of each
+    /// `>`, `>>`, `>|`, `&>`, `&>>`, `<>` and `>&` a file follows, whatever
+    /// its descriptor (task 1925).
+    pub writes: Vec<String>,
     /// Where its own output goes; see `output` for where it ends up.
     pub sink: Sink,
     /// The call its output feeds, by index in the same list.
@@ -136,6 +140,7 @@ impl Call {
         Call {
             name: name.to_string(),
             args: Vec::new(),
+            writes: Vec::new(),
             sink: Sink::Shown,
             piped_to: None,
             parent: None,
@@ -146,6 +151,11 @@ impl Call {
     }
 
     fn redirect(&mut self, operator: &str, fd: Option<&str>, target: &str) {
+        // `>&2` duplicates a descriptor and `>&-` closes one: no file.
+        let duplicates = operator.ends_with('&') && (target == "-" || (!target.is_empty() && target.chars().all(py_isdigit)));
+        if operator.contains('>') && !duplicates && !target.is_empty() {
+            self.writes.push(target.to_string());
+        }
         if operator == "<" && matches!(fd, None | Some("0")) {
             self.stdin = Some(target.to_string());
         } else if operator.starts_with("&>") {
@@ -1385,13 +1395,15 @@ fn fnmatch(name: &[char], pattern: &[char]) -> bool {
 }
 
 /// A call other than `cd`, `pushd` and the assignments, with the folder it
-/// runs in, as far as the command's own text says. The Python yields the
-/// variables set before it too, which ekko's guard has no use for.
+/// runs in, as far as the command's own text says, and the variables set
+/// before it, as the Python yields them: the guard follows a path or a pid
+/// a variable holds (tasks 1849 and 1925).
 #[derive(Debug, Clone)]
 pub struct Located {
     /// Its index in the calls.
     pub at: usize,
     pub folder: PathBuf,
+    pub variables: HashMap<String, String>,
 }
 
 /// The calls of `command`, read as `reading` says, and each one but `cd`,
@@ -1428,7 +1440,7 @@ pub fn located(command: &str, cwd: &Path, reading: Reading) -> (Vec<Call>, Vec<L
                     }
                 }
             }
-            _ => placed.push(Located { at, folder: folder.clone() }),
+            _ => placed.push(Located { at, folder: folder.clone(), variables: variables.clone() }),
         }
     }
     (found, placed)
@@ -1510,6 +1522,19 @@ mod tests {
         assert_eq!(found[0].args, vec!["-n", "5"]);
         assert_eq!((found[0].sink, found[0].stdin.as_deref()), (Sink::File, Some("in.txt")));
         assert_eq!(calls("cat x >&2")[0].sink, Sink::Shown);
+        // The files they write, whatever the descriptor (task 1925); none
+        // where a descriptor is duplicated or closed, or one is read.
+        for (command, writes) in [
+            ("echo y > a", &["a"][..]),
+            ("echo y >> a 2> b", &["a", "b"]),
+            ("echo y >| a &> b &>> c", &["a", "b", "c"]),
+            ("echo y >& a", &["a"]),
+            ("cat 3<> a", &["a"]),
+            ("echo y >&2 2>&1 >&- < in <<< here", &[]),
+            ("cat <<'EOF' > out\nbody\nEOF", &["out"]),
+        ] {
+            assert_eq!(calls(command)[0].writes, writes, "{command}");
+        }
     }
 
     #[test]

@@ -1,0 +1,311 @@
+COMMANDS (93)
+  attach-session        attach or switch to a session
+  bind-key              bind a key to a command
+  break-pane            break a pane from an existing into a new window
+  capture-pane          capture the contents of a pane to a buffer
+  choose-buffer         put a pane into buffer choice mode
+  choose-client         put a window into client choice mode
+  choose-tree           put a window into tree choice mode
+  clear-history         remove and clear history for a pane
+  clear-prompt-history  [-T prompt-type]
+  clock-mode            enter clock mode
+  command-prompt        open the tmux command prompt in a client
+  confirm-before        run a command but ask for confirmation before
+  copy-mode             enter copy mode
+  customize-mode        enter customize mode
+  delete-buffer         delete a paste buffer
+  detach-client         detach a client from the server
+  display-menu          display a menu
+  display-message       display a message in the status line
+  display-panes         display an indicator for each visible pane
+  display-popup         display a popup box over a pane
+  find-window           search for a pattern in windows
+  has-session           check and report if a session exists on the server
+  if-shell              execute a tmux command if a shell-command succeeded
+  join-pane             split a pane and move an existing one into the new space
+  kill-pane             destroy a given pane
+  kill-server           kill clients, sessions and server
+  kill-session          destroy a given session
+  kill-window           destroy a given window
+  last-pane             select the previously selected pane
+  last-window           select the previously selected window
+  link-window           link a window to another
+  list-buffers          list paste buffers of a session
+  list-clients          list clients attached to server
+  list-commands         list supported sub-commands
+  list-keys             list all key-bindings
+  list-panes            list panes of a window
+  list-sessions         list sessions managed by server
+  list-windows          list windows of a session
+  load-buffer           load a file into a paste buffer
+  lock-client           lock a client
+  lock-server           lock all clients attached to the server
+  lock-session          lock all clients attached to a session
+  move-pane             move a pane, or reposition a floating one
+  move-window           move a window to another
+  new-pane              create a new floating pane
+  new-session           create a new session
+  new-window            create a new window
+  next-layout           move a window to the next layout
+  next-window           move to the next window in a session
+  paste-buffer          insert a paste buffer into the window
+  pipe-pane             pipe output from a pane to a shell command
+  previous-layout       move a window to the previous layout
+  previous-window       move to the previous window in a session
+  refresh-client        refresh a client
+  rename-session        rename a session
+  rename-window         rename a window
+  resize-pane           resize a pane
+  resize-window         resize a window
+  respawn-pane          reuse a pane in which a command has exited
+  respawn-window        reuse a window in which a command has exited
+  rotate-window         rotate positions of panes in a window
+  run-shell             execute a command without creating a new window
+  save-buffer           save a paste buffer to a file
+  select-layout         choose a layout for a pane
+  select-pane           make a pane the active one in the window
+  select-window         select a window
+  send-keys             send key(s) to a window
+  send-prefix           send the prefix key to a window
+  server-access         [-adglrw] [-t target-pane] [user|group]
+  set-buffer            set contents of a paster buffer
+  set-environment       (un)set an environment variable
+  set-hook              set a hook to a command
+  set-option            set a session option
+  set-window-option     set a window option
+  show-buffer           display the contents of a paste buffer
+  show-environment      display the environment
+  show-hooks            show the global list of hooks
+  show-messages         show client's message log
+  show-options          show session options
+  show-prompt-history   [-T prompt-type]
+  show-window-options   show window options
+  source-file           execute tmux commands from a file
+  split-window          splits a pane into two
+  start-server          start a tmux server
+  suspend-client        suspend a client
+  swap-pane             swap two panes
+  swap-window           swap two windows
+  switch-client         switch the client to another session
+  switch-mode           put a pane into switch (session/window picker) mode
+  unbind-key            unbind a key
+  unlink-window         unlink a window
+  wait-for              wait for an event or trigger it
+  znative               install and load tmux plugins, native (Rust cdylib) or TPM script (ztmux extension)
+
+ALIASES (78)
+  attach                alias for attach-session
+  bind                  alias for bind-key
+  breakp                alias for break-pane
+  capturep              alias for capture-pane
+  clearhist             alias for clear-history
+  clearphist            alias for clear-prompt-history
+  confirm               alias for confirm-before
+  deleteb               alias for delete-buffer
+  detach                alias for detach-client
+  display               alias for display-message
+  displayp              alias for display-panes
+  findw                 alias for find-window
+  has                   alias for has-session
+  if                    alias for if-shell
+  joinp                 alias for join-pane
+  killp                 alias for kill-pane
+  killw                 alias for kill-window
+  last                  alias for last-window
+  lastp                 alias for last-pane
+  linkw                 alias for link-window
+  loadb                 alias for load-buffer
+  lock                  alias for lock-server
+  lockc                 alias for lock-client
+  locks                 alias for lock-session
+  ls                    alias for list-sessions
+  lsb                   alias for list-buffers
+  lsc                   alias for list-clients
+  lscm                  alias for list-commands
+  lsk                   alias for list-keys
+  lsp                   alias for list-panes
+  lsw                   alias for list-windows
+  menu                  alias for display-menu
+  movep                 alias for move-pane
+  movew                 alias for move-window
+  new                   alias for new-session
+  newp                  alias for new-pane
+  neww                  alias for new-window
+  next                  alias for next-window
+  nextl                 alias for next-layout
+  pasteb                alias for paste-buffer
+  pipep                 alias for pipe-pane
+  popup                 alias for display-popup
+  prev                  alias for previous-window
+  prevl                 alias for previous-layout
+  refresh               alias for refresh-client
+  rename                alias for rename-session
+  renamew               alias for rename-window
+  resizep               alias for resize-pane
+  resizew               alias for resize-window
+  respawnp              alias for respawn-pane
+  respawnw              alias for respawn-window
+  rotatew               alias for rotate-window
+  run                   alias for run-shell
+  saveb                 alias for save-buffer
+  selectl               alias for select-layout
+  selectp               alias for select-pane
+  selectw               alias for select-window
+  send                  alias for send-keys
+  set                   alias for set-option
+  setb                  alias for set-buffer
+  setenv                alias for set-environment
+  setw                  alias for set-window-option
+  show                  alias for show-options
+  showb                 alias for show-buffer
+  showenv               alias for show-environment
+  showmsgs              alias for show-messages
+  showphist             alias for show-prompt-history
+  showw                 alias for show-window-options
+  source                alias for source-file
+  splitw                alias for split-window
+  start                 alias for start-server
+  suspendc              alias for suspend-client
+  swapp                 alias for swap-pane
+  swapw                 alias for swap-window
+  switchc               alias for switch-client
+  unbind                alias for unbind-key
+  unlinkw               alias for unlink-window
+  wait                  alias for wait-for
+
+EXTENSIONS (114)
+  active                focused window/pane of every session (ztmux extension)
+  age                   sessions ranked by creation age, oldest first (ztmux extension)
+  ahead                 how far each repo is ahead of/behind upstream (ztmux extension)
+  alerts                windows with a pending bell/activity/silence alert (ztmux extension)
+  autolock              sessions set to lock themselves after idle time (ztmux extension)
+  autoname              windows with a pinned name (automatic-rename off) (ztmux extension)
+  banner                the ztmux banner: logo, verb totals and live server counts (ztmux extension)
+  bcast                 broadcast a command to many panes at once (ztmux extension)
+  borders               windows that draw a status line on their pane borders (ztmux extension)
+  buffers               the server's paste buffers, largest first (ztmux extension)
+  busy                  panes running a program, not idle at a prompt (ztmux extension)
+  changes               uncommitted file count per pane's repo, dirtiest first (ztmux extension)
+  clearall              free the scrollback of every pane (ztmux extension)
+  cmd                   histogram of commands running across panes (ztmux extension)
+  commit                the last commit in every pane's repo (ztmux extension)
+  conflicts             repos with unresolved merge conflicts (ztmux extension)
+  connected             attached clients ranked by connection age (ztmux extension)
+  constrain             attached clients ranked by screen size, smallest first (ztmux extension)
+  control               clients attached in control mode (-CC) (ztmux extension)
+  cwd                   working directories in use, busiest first (ztmux extension)
+  dashboard             live ratatui server dashboard (ztmux extension)
+  dead                  dead panes still held open in a window (ztmux extension)
+  dedup                 find redundant panes (same cwd + command) (ztmux extension)
+  density               windows ranked by pane count, most first (ztmux extension)
+  destroy               sessions that self-destruct when the last client detaches (ztmux extension)
+  detached              sessions with no client attached, freshest first (ztmux extension)
+  disk                  filesystem usage behind each pane's cwd (ztmux extension)
+  doctor                environment / server health check (ztmux extension)
+  elapsed               how long each pane's process has been running (ztmux extension)
+  env                   per-session environment overrides (ztmux extension)
+  equalize              re-balance every multi-pane window's layout (ztmux extension)
+  events                stream server lifecycle events as JSONL (ztmux extension)
+  fanout                sessions ranked by total pane count (ztmux extension)
+  finder                search panes by command/path/title/window (ztmux extension)
+  focus                 the active pane of every window (ztmux extension)
+  git                   git branch + dirty state of every pane's repo (ztmux extension)
+  gone                  panes whose working directory no longer exists (ztmux extension)
+  graph                 render the server tree as DOT/Mermaid/HTML (ztmux extension)
+  grep                  search the live contents of every pane (ztmux extension)
+  groups                cluster sessions by session group (ztmux extension)
+  history               rank panes by scrollback buffer size (ztmux extension)
+  hooks                 the command hooks configured on each session (ztmux extension)
+  idle                  attached clients ranked by time since last activity (ztmux extension)
+  info                  deep inspector for a single pane (ztmux extension)
+  input                 panes that are ignoring keyboard input (ztmux extension)
+  keys                  how many key bindings live in each key table (ztmux extension)
+  keytable              clients parked on a non-root key table (ztmux extension)
+  layout                apply a named layout preset to a window (ztmux extension)
+  layouts               the current layout string of every window (ztmux extension)
+  limit                 each session's scrollback capacity, largest first (ztmux extension)
+  linked                windows linked into more than one session (ztmux extension)
+  marks                 the marked pane(s) (ztmux extension)
+  mem                   panes ranked by process resident memory (ztmux extension)
+  modal                 zellij-style modal keybindings: pane/tab/resize/session/lock modes (ztmux extension)
+  mode                  panes currently frozen in a mode (ztmux extension)
+  monitor               windows armed to alert on activity or silence (ztmux extension)
+  mouse                 which sessions have mouse mode enabled (ztmux extension)
+  named                 windows with a deliberate name, not the running command (ztmux extension)
+  nested                panes running a nested terminal multiplexer (ztmux extension)
+  net                   established outbound connections per pane (ztmux extension)
+  open                  pick a URL or file path out of the current pane and open it (ztmux extension)
+  peek                  dump the visible contents of every pane (ztmux extension)
+  pick                  batch sync/unmark/clear over the multi-pane mark set (ztmux extension)
+  piped                 panes with an active pipe-pane capture (ztmux extension)
+  ports                 listening TCP ports mapped to panes (ztmux extension)
+  project               project kind and root behind every pane (ztmux extension)
+  prune                 remove dead/empty/idle server objects (ztmux extension)
+  ps                    one-shot pipeable per-pane process table (ztmux extension)
+  pstree                process tree running under every pane (ztmux extension)
+  readonly              clients attached in read-only mode (ztmux extension)
+  recent                list sessions ranked by last activity (ztmux extension)
+  remain                windows that keep panes open after they exit (ztmux extension)
+  remote                the git remote each pane's repo points at (ztmux extension)
+  repl                  interactive console over every ztmux verb (ztmux extension)
+  resurrect             save/restore all sessions across restarts (ztmux extension)
+  retitle               label every pane with its running command (ztmux extension)
+  revive                revive every dead pane in place (ztmux extension)
+  sessions              zellij-style session manager: switch/rename/kill/new (ztmux extension)
+  shadow                install the ~/.ztmux shadow: tmux shim, man pages, completion (ztmux extension)
+  shells                panes sitting at a bare shell prompt (ztmux extension)
+  size                  report pane geometry, smallest first (ztmux extension)
+  snapshot              dump the whole server as one nested JSON document (ztmux extension)
+  solo                  windows holding a single, unsplit pane (ztmux extension)
+  ssh                   which panes hold an SSH connection, and where (ztmux extension)
+  stack                 zellij-style pane stacks: toggle, unstack, refocus (ztmux extension)
+  startcmd              the command line each pane was launched with (ztmux extension)
+  stash                 repositories with stashed work behind a pane (ztmux extension)
+  state                 panes whose process is in an abnormal state (ztmux extension)
+  stats                 one-shot server summary report (ztmux extension)
+  status                sessions with the status line turned off (ztmux extension)
+  submodules            repos with submodules and how many are out of sync (ztmux extension)
+  switcher              interactive session/window/pane picker (ztmux extension)
+  sync                  windows with synchronize-panes turned on (ztmux extension)
+  tabs                  zellij-style top tab bar of windows (ztmux extension)
+  tag                   the git describe/tag context of every pane's repo (ztmux extension)
+  term                  histogram of attached client terminal types (ztmux extension)
+  titlebar              sessions that push a title to the outer terminal (ztmux extension)
+  titles                every pane's advertised title (ztmux extension)
+  tree                  print the session/window/pane tree (ztmux extension)
+  triggers              run a ztmux command when a regex matches pane output (ztmux extension)
+  tty                   map every pane to its terminal device (ztmux extension)
+  usage                 per-session CPU/MEM/RSS resource rollup (ztmux extension)
+  user                  the owner of every pane's process (ztmux extension)
+  utf8                  the UTF-8 state of every attached client (ztmux extension)
+  vcs                   which version-control system each pane is under (ztmux extension)
+  verbs                 list every verb ztmux answers to, with descriptions (ztmux extension)
+  viewers               how many clients are attached to each session (ztmux extension)
+  visual                sessions that show alerts visually instead of just beeping (ztmux extension)
+  watch                 top-like live per-pane process monitor (ztmux extension)
+  who                   clients attached to the server, by session (ztmux extension)
+  winsize               windows whose sizing mode differs from the default (ztmux extension)
+  worktree              panes sitting in a linked git worktree (ztmux extension)
+  writable              panes whose working directory is read-only (ztmux extension)
+  zoom                  windows with a zoomed pane (ztmux extension)
+
+CONSOLE (18)
+  cat                   print files to stdout (console builtin)
+  cd                    change the console's working directory (console builtin)
+  clear                 clear the screen (console builtin)
+  cp                    copy files, or directories with -r (console builtin)
+  dir                   list a directory, -a all -l long -t by time -r reversed (console builtin)
+  echo                  print the arguments, -n without a newline (console builtin)
+  exit                  leave the console (console builtin)
+  export                set an environment variable for later lines (console builtin)
+  help                  show the console keys and builtins (console builtin)
+  ln                    create a hard link, or a symlink with -s (console builtin)
+  mkdir                 create directories, -p with parents (console builtin)
+  mv                    move or rename files (console builtin)
+  printenv              print the environment, or one variable (console builtin)
+  pwd                   print the console's working directory (console builtin)
+  quit                  leave the console (console builtin)
+  rm                    remove files, -r directories -f ignore missing (console builtin)
+  touch                 create files, or bump their mtime (console builtin)
+  unset                 remove environment variables (console builtin)
+

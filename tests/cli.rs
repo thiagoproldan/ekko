@@ -3870,6 +3870,7 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     const SIGNAL: &str = "does not signal processes with kill, pkill or killall";
     const RUNS: &str = "does not have the multiplexer run a command for it";
     const KEYS: &str = "does not type into another pane than its own";
+    const VERB: &str = "does not run what the multiplexer reads as no tmux command";
     let agents = Agents::new();
     // The stand-in multiplexer, which the guard's EKKO_MUX names, as the
     // session's names the one `start` used.
@@ -3932,7 +3933,8 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         ("claude purge", &[STOP]),
         ("claude purge --all -y", &[STOP]),
         ("kill 4242", &[SIGNAL]),
-        ("kill -9 %1", &[SIGNAL]),
+        ("kill -9 -1", &[SIGNAL]),
+        ("kill -0 4242; kill 4242", &[SIGNAL]),
         ("/bin/kill -TERM 4242", &[SIGNAL]),
         ("pkill -f claude", &[SIGNAL]),
         ("killall claude", &[SIGNAL]),
@@ -3961,6 +3963,9 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         ("tmux paste-buffer -t %3", &[KEYS]),
         ("tmux send-prefix -t %3", &[KEYS]),
         ("tmux -L other send-keys x", &[KEYS]),
+        ("kmux revive", &[VERB]),
+        ("kmux -L ekko bcast 'echo hi'", &[VERB]),
+        ("tmux info", &[VERB]),
         ("kill 4242; tmux send-keys -t %3 C-c && tmux run-shell true", &[SIGNAL, RUNS, KEYS]),
     ];
     let let_through = [
@@ -3994,6 +3999,9 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         "grep -rn kill-pane src",
         "claude purge --dry-run",
         "kill -l",
+        "kill -0 4242",
+        "sleep 1 & kill $!",
+        "sh -c 'kill -ABRT $$'",
         "kill -l 9",
         "pkill --help",
         "pgrep -f claude",
@@ -4029,7 +4037,7 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         let reason = output["permissionDecisionReason"].as_str().unwrap();
         assert_eq!(output["permissionDecision"], "deny", "{command}");
         assert!(reason.starts_with("ekko agents: this session, started for its tasks, "), "{command}: {reason}");
-        for kind in [PUSH, RELEASE, SESSION, STOP, KILL, SIGNAL, RUNS, KEYS] {
+        for kind in [PUSH, RELEASE, SESSION, STOP, KILL, SIGNAL, RUNS, KEYS, VERB] {
             assert_eq!(reason.matches(kind).count(), usize::from(kinds.contains(&kind)), "{command}: {reason}");
         }
         assert!(reason.contains("ask them through ekko's ask with allow set to \""), "{command}: {reason}");
@@ -4180,12 +4188,15 @@ fn the_wall_and_unwall_move_only_this_projects_panes() {
 /// orchestrator's to make. Its commit in its worktree and a read of the
 /// project's checkout go through, and an Edit or Write of a file there is
 /// refused, while one in its worktree or outside the repository is not.
+/// So is a Bash call that writes a file there without git (task 1925),
+/// and the stash, with what to do instead (task 1833).
 #[test]
 fn a_born_session_is_refused_a_write_outside_its_worktree_and_branch_and_its_orchestrator_none() {
     use std::io::Write as _;
     const SHARED: &str = "does not leave its own branch, nor write what every checkout of its repository shares";
     const CHECKOUT: &str = "does not write in another checkout of its repository";
     const PUSH: &str = "does not push or open a pull request";
+    const STASH: &str = "does not write the stash";
     let agents = Agents::new();
     assert!(agents.ekko(&["--task", "Write hello"]).status.success());
     let uid = agents.uid(1);
@@ -4211,18 +4222,22 @@ fn a_born_session_is_refused_a_write_outside_its_worktree_and_branch_and_its_orc
         ("git branch -f main HEAD".to_string(), SHARED),
         ("git update-ref refs/heads/main HEAD".to_string(), SHARED),
         ("git checkout -b other".to_string(), SHARED),
+        ("git stash push -u -m x".to_string(), STASH),
+        (format!("echo y > {}/readme.md", app.display()), CHECKOUT),
+        (format!("sed -i s/a/b/ {}/readme.md", app.display()), CHECKOUT),
+        (format!("cd {} && rm -f readme.md", app.display()), CHECKOUT),
     ];
     for (command, kind) in &refused {
         let reply: serde_json::Value = serde_json::from_str(&bash(command, true)).unwrap_or_else(|_| panic!("not refused: {command}"));
         let output = &reply["hookSpecificOutput"];
         let reason = output["permissionDecisionReason"].as_str().unwrap();
         assert_eq!(output["permissionDecision"], "deny", "{command}");
-        for other in [SHARED, CHECKOUT, PUSH] {
+        for other in [SHARED, CHECKOUT, PUSH, STASH] {
             assert_eq!(reason.matches(other).count(), usize::from(other == *kind), "{command}: {reason}");
         }
         assert_eq!(bash(command, false), "", "the orchestrator's {command}");
     }
-    for command in ["git commit -am x".to_string(), format!("cd {} && git log --oneline", app.display()), "git status".to_string()] {
+    for command in ["git commit -am x".to_string(), format!("cd {} && git log --oneline", app.display()), "git status".to_string(), "echo y > readme.md".to_string(), format!("echo y > {}", agents.home.join("scratch.md").display())] {
         assert_eq!(bash(&command, true), "", "{command}");
     }
     let scratch = agents.home.join("scratch.md");
