@@ -1097,7 +1097,7 @@ fn a_question_left_unanswered_stays_open_on_the_board() {
     assert!(text(reply(6)).contains("\nWaiting on you (3)\n"), "{}", text(reply(6)));
 
     let without = session(&home, &[request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})), call(2, "ask", json!({"questions": [{"quick": true, "text": "No forms?"}]}))]);
-    assert!(text(&without["2"]).contains("\"unanswered\":\"ekko's menu has nowhere to open here: no tmux, and no display; the questions"), "{}", without["2"]);
+    assert!(text(&without["2"]).contains("\"unanswered\":\"ekko's menu has nowhere to open here: no tmux with a client attached, and no display; the questions"), "{}", without["2"]);
 
     fs::remove_dir_all(&home).ok();
 }
@@ -2390,4 +2390,59 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
     assert!(done.get("10").is_none(), "moved to the blog: {}", done);
     assert!(phases().contains("test"), "{}", phases());
     fs::remove_dir_all(&home).ok();
+}
+
+/// ask in a multiplexer session (task 1867): a popup needs a client attached
+/// to the session, and a born session's usually has none. Stand-ins for tmux
+/// and for a terminal record which of them was asked to open the menu; both
+/// then fail, so the reply comes back at once.
+fn asked_in_tmux(clients: &str, display: bool) -> (String, String) {
+    let home = temp_home();
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let log = home.join("opened.log");
+    write_executable(
+        &bin.join("tmux"),
+        &format!("#!/bin/sh\ncase \"$1\" in\n  list-clients) printf '%s' '{clients}' ;;\n  display-popup) echo popup >> \"{log}\"; exit 1 ;;\nesac\n", log = log.display()),
+    );
+    write_executable(&bin.join("xterm"), &format!("#!/bin/sh\necho window >> \"{}\"\nexit 1\n", log.display()));
+    let mut command = common::ekko();
+    command.env("EKKO_DIR", &home).current_dir(&home).env("HOME", &home).env("XDG_RUNTIME_DIR", &home).env("PATH", &bin);
+    command.env("TMUX", "/nonexistent/socket,1,0").env("TMUX_PANE", "%1");
+    if display {
+        command.env("DISPLAY", ":99");
+    }
+    let mut child = command.arg("--mcp").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().expect("failed to spawn ekko --mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "{}", request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}}))).unwrap();
+    writeln!(stdin, "{}", call(2, "ask", json!({"questions": [{"quick": true, "text": "Which?"}]}))).unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let reply = loop {
+        let message: Value = serde_json::from_str(&lines.next().expect("no reply to ask").unwrap()).unwrap();
+        if message["id"] == 2 {
+            break text(&message).to_string();
+        }
+    };
+    drop(stdin);
+    child.wait().unwrap();
+    let opened = fs::read_to_string(&log).unwrap_or_default();
+    fs::remove_dir_all(&home).ok();
+    (reply, opened)
+}
+
+#[test]
+fn a_detached_multiplexer_session_opens_a_window_not_a_popup() {
+    // No client and a display: the terminal's window.
+    let (reply, opened) = asked_in_tmux("", true);
+    assert_eq!(opened, "window\n", "{reply}");
+    assert!(reply.contains("could not open"), "{reply}");
+    // No client and no display: nowhere to open, said at once.
+    let (reply, opened) = asked_in_tmux("", false);
+    assert_eq!(opened, "", "{reply}");
+    assert!(reply.contains("nowhere to open here: no tmux with a client attached, and no display"), "{reply}");
+    // A client attached: the popup, display or not.
+    for display in [false, true] {
+        let (reply, opened) = asked_in_tmux("/dev/pts/3\n", display);
+        assert_eq!(opened, "popup\n", "{reply}");
+    }
 }

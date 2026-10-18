@@ -639,7 +639,7 @@ impl Server {
                 }
                 Err(error) => format!("ekko's menu could not open: {error}"),
             },
-            None => "ekko's menu has nowhere to open here: no tmux, and no display".to_string(),
+            None => "ekko's menu has nowhere to open here: no tmux with a client attached, and no display".to_string(),
         };
         // The client's dialog, the last resort: one question, one choice. Not
         // for a cue or a refused call, whose answer through it would be this

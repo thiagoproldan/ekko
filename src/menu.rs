@@ -111,9 +111,21 @@ pub enum Place {
     Window(Vec<String>),
 }
 
+/// Whether the multiplexer has a client attached to the pane's session: a
+/// popup needs one, and a detached session, as a born session's usually is,
+/// has none (task 1867).
+fn attached() -> bool {
+    let mut command = Command::new("tmux");
+    command.args(["list-clients", "-F", "#{client_name}"]);
+    if let Ok(pane) = std::env::var("TMUX_PANE") {
+        command.args(["-t", &pane]);
+    }
+    command.stdin(Stdio::null()).stderr(Stdio::null()).output().is_ok_and(|out| out.status.success() && !out.stdout.iter().all(u8::is_ascii_whitespace))
+}
+
 /// Where a menu can open, if anywhere: `EKKO_TERMINAL`, or else a tmux popup
-/// inside tmux, or else a window of a known terminal on PATH, `$TERMINAL`
-/// first, when there is a display.
+/// inside tmux with a client attached, or else a window of a known terminal
+/// on PATH, `$TERMINAL` first, when there is a display.
 pub fn place() -> Option<Place> {
     if let Ok(chosen) = std::env::var(TERMINAL) {
         let words: Vec<String> = chosen.split_whitespace().map(str::to_string).collect();
@@ -121,7 +133,7 @@ pub fn place() -> Option<Place> {
     }
     let path = std::env::var_os("PATH")?;
     let found = |name: &str| std::env::split_paths(&path).any(|dir| dir.join(name).is_file());
-    if std::env::var_os("TMUX").is_some() && found("tmux") {
+    if std::env::var_os("TMUX").is_some() && found("tmux") && attached() {
         return Some(Place::Tmux);
     }
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
