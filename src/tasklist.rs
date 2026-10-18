@@ -108,7 +108,12 @@ pub fn tasks(ekko: &Ekko, since: u64) -> Result<Vec<Task>, Box<dyn Error>> {
         .partition(|entry| entry.state == Some(State::Progress));
     let (doing, abandoned): (Vec<_>, Vec<_>) = progress
         .into_iter()
-        .partition(|entry| started.contains_key(&entry.id) || entry.held.as_ref().is_some_and(|held| held.yours));
+        .partition(|entry| {
+            let held = entry.held.as_ref();
+            // A started session that has not claimed its task yet is working it;
+            // one whose process ended (task 1965) left it abandoned.
+            held.is_some_and(|held| held.yours) || (started.contains_key(&entry.id) && !held.is_some_and(|held| held.gone))
+        });
 
     // A step of a sequence says which, done ones too: "(2/3) ". The steps
     // still to come after one in progress follow it, blocked as they are,
@@ -136,7 +141,7 @@ pub fn tasks(ekko: &Ekko, since: u64) -> Result<Vec<Task>, Box<dyn Error>> {
     }
     let ready: Vec<_> = ready.iter().filter(|entry| !rows.iter().any(|row| row.0 == entry.id)).take(NEXT_SHOWN).collect();
     rows.extend(ready.iter().map(|entry| (entry.id, step(entry.id), entry.description.as_str(), "pending")));
-    rows.extend(abandoned.iter().map(|entry| (entry.id, "(abandoned) ".to_string(), entry.description.as_str(), "pending")));
+    rows.extend(abandoned.iter().map(|entry| (entry.id, format!("(abandoned) {}", step(entry.id)), entry.description.as_str(), "pending")));
     Ok(rows.into_iter().enumerate().map(|(at, (id, mark, text, status))| task(at + 1, id, &mark, text, status)).collect())
 }
 
@@ -416,6 +421,32 @@ mod tests {
         // The born session's own list is its own work, not the orchestrator's.
         let own = drawn(&tasks(&as_(&born), since).unwrap());
         assert!(own.iter().all(|(_, subject)| !subject.contains("opus")), "{own:?}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session this one started that ended leaves its task in progress, held
+    /// by no running process: the list shows it abandoned, window mark kept,
+    /// not in progress (task 1965). One still running stays in progress.
+    #[test]
+    fn a_started_session_that_ended_leaves_its_task_abandoned() {
+        let (me, born, gone) = crate::holder::test_sessions();
+        let dir = scratch("ended");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir.join("board")).unwrap()).acting_as(actor.clone());
+        for name in ["ended", "running"] {
+            as_(&me).create_task(&words(&[name])).unwrap();
+        }
+        for (task, window) in [("1", "1 \u{b7} opus"), ("2", "2 \u{b7} opus")] {
+            as_(&me).create_note(&words(&[format!("Started by ekko agents start: a session on opus, in window \"{window}\" of session ekko, on branch b.").as_str()])).unwrap();
+            let note = as_(&me).storage.get().unwrap().keys().max().copied().unwrap();
+            as_(&me).set_attached_to(&words(&[format!("@{note}").as_str(), task])).unwrap();
+        }
+        as_(&gone).set_state(&words(&["@1", "progress"]), false).unwrap();
+        as_(&born).set_state(&words(&["@2", "progress"]), false).unwrap();
+
+        let list = tasks(&as_(&me), 0).unwrap();
+        let expected = [("in_progress", "2. (2 \u{b7} opus) running"), ("pending", "1. (abandoned) (1 \u{b7} opus) ended")];
+        assert_eq!(drawn(&list), expected.map(|(s, t)| (s.to_string(), t.to_string())));
 
         fs::remove_dir_all(&dir).ok();
     }
