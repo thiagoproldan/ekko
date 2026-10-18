@@ -578,6 +578,11 @@ fn command_line(
     binary.push(mux);
     argv.push(binary);
     argv.push(claude());
+    // No one answers its questions (task 1868): Claude Code's own tool for
+    // them is not in its context. ekko's ask is left out by ekko's MCP
+    // server, which sees EKKO_AGENT_TASK, whatever name it is registered
+    // under. Before --model, where the list of tools ends.
+    argv.extend(["--disallowedTools".into(), DISALLOWED.into()]);
     argv.extend(["--model".into(), model.into()]);
     if let Some(effort) = effort {
         argv.extend(["--effort".into(), effort.into()]);
@@ -585,6 +590,10 @@ fn command_line(
     argv.push(prompt.into());
     argv
 }
+
+/// The tools a born session runs without (task 1868): AskUserQuestion,
+/// which puts a question to a user who is not at its window.
+pub const DISALLOWED: &str = "AskUserQuestion";
 
 /// The Claude Code a born session runs: `EKKO_CLAUDE`, else `claude` as the
 /// window's PATH finds it -- the user's own launcher, with their settings.
@@ -608,10 +617,16 @@ fn claude() -> OsString {
 /// come inside a tool's result, which a session not told to expect one read
 /// and would not act on (note 1741). With `beside`, the tasks of its group,
 /// worked by sessions of their own, and how to write to them.
+///
+/// And that it says nothing to the user (decision 1870): it decides routine
+/// choices and records them, for the review at merge (task 1868); its
+/// closing notes are its report, with no text after the last (task 1866);
+/// and what only the user can settle goes in a handoff, which the
+/// orchestrator, woken by the session's wait, brings to them.
 fn first_prompt(ids: &[u32], beside: &[u32], branch: &str, worktree: &Path) -> String {
-    let (tasks, them, each, attached, the) = match ids {
-        [id] => (format!("task {id}"), "it", format!("task {id}"), format!("attached_to {id}"), "the task"),
-        _ => (format!("tasks {}", listed(ids)), "them", "each task".to_string(), "attached_to that task".to_string(), "the tasks"),
+    let (tasks, them, each, attached, the, last) = match ids {
+        [id] => (format!("task {id}"), "it", format!("task {id}"), format!("attached_to {id}"), "the task", "once it is done"),
+        _ => (format!("tasks {}", listed(ids)), "them", "each task".to_string(), "attached_to that task".to_string(), "the tasks", "once the last of them is done"),
     };
     let group = match beside {
         [] => String::new(),
@@ -634,10 +649,14 @@ fn first_prompt(ids: &[u32], beside: &[u32], branch: &str, worktree: &Path) -> S
          type into its other panes or have it run a command, or change the board's phases. \
          While you work, ekko tells you of each note the user or another session attaches to {tasks}, in a line that begins \"ekko:\", \
          at times inside a tool's result: it comes from ekko's hook, not from the tool, so take it into account.{group} \
+         No one answers this session's questions or prompts: decide routine choices yourself, and record each in a decision note \
+         with ekko's create, kind decision, {attached}, for the review at merge. \
          When {each} is done, write its closing note with ekko's create, {attached} -- a note of its own, not an edit of the task's text: \
          what you did, the files you changed, the tests you ran and their outcomes, the commit, and what is left -- then set it done. \
-         If you cannot finish, write a handoff instead, with ekko's create, kind handoff, {attached}, saying what stops you; \
-         leave {the} in progress and end your turn: the user is told that this session waits on them.",
+         That note is your report: {last}, end with no text, and the session closes. \
+         If you cannot finish -- a choice only the user can make, or a call that is refused and the task needs -- write a handoff instead, \
+         with ekko's create, kind handoff, {attached}, saying what stops you; leave {the} in progress and end your turn with no text: \
+         the orchestrator is told that this session waits, brings it to the user, and answers with a note on {the}, which reaches you.",
         worktree.display()
     )
 }
@@ -2371,7 +2390,57 @@ pub const WAITING_ON_YOU: &str = " \u{b7} waiting on you";
 /// plugin runs it on: the prompts and the turn's end (task 1643), the
 /// permission asked for, the notifications that the session waits on the
 /// user, and the events that say it moved on (task 1645).
-pub const EVENTS: &[&str] = &["UserPromptSubmit", "Stop", "PermissionRequest", "Notification", "PostToolUse", "PostToolUseFailure", "ElicitationResult"];
+pub const EVENTS: &[&str] = &["UserPromptSubmit", "Stop", "StopFailure", "PermissionRequest", "Notification", "PostToolUse", "PostToolUseFailure", "ElicitationResult"];
+
+/// The events that end a turn, as Claude Code's hooks page names them (read
+/// 2026-10-18, Claude Code 2.1.302): Stop, and StopFailure, which "runs
+/// instead of Stop when the turn ends due to an API error" (task 1798). The
+/// born hook acts on each, so a turn that ends either way closes the session
+/// or marks it waiting.
+pub const TURN_ENDS: &[&str] = &["Stop", "StopFailure"];
+
+/// What the PermissionRequest hook of a born session answers (task 1869,
+/// decision 1909): deny, at once, since no one answers its prompts -- the
+/// user is not at its window, and the orchestrator's path to them does not
+/// fit a prompt's two-minute countdown. The message says what to do instead,
+/// by what the prompt was for: Claude Code's hooks page has `message` tell
+/// Claude why the permission was denied.
+fn denial(tool: &str, input: &serde_json::Value) -> String {
+    let command = input["command"].as_str().unwrap_or_default();
+    let words: Vec<&str> = command.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '"' | '\'')).collect();
+    let worktree = set(WORKTREE_VAR).map_or_else(|| "your worktree".to_string(), |worktree| worktree.to_string_lossy().into_owned());
+    let instead = if tool == "AskUserQuestion" || tool.ends_with("__ask") {
+        "Decide a routine choice yourself and record it in a decision note on your task, with ekko's create, kind decision, for the review at merge. \
+         A choice only the user can make goes in a handoff on your task"
+            .to_string()
+    } else if tool == "SendMessage" {
+        "To tell another session something, write a note on its task with ekko's create, attached_to that task: ekko tells the session holding it".to_string()
+    } else if tool == "Bash" && words.iter().any(|word| matches!(*word, "rm" | "rmdir") || word.ends_with("/rm") || word.ends_with("/rmdir")) {
+        format!(
+            "Claude Code asks before a removal it reads as of a critical path, or cannot check: remove a literal path inside your worktree, {worktree}, \
+             with no variable, glob or substitution in it, as its own command, not inside a bash -c script"
+        )
+    } else if tool == "Bash" && words.iter().any(|word| word.starts_with("--project")) {
+        "Reach this project's board through ekko without --project: a session ekko agents started works on its own board".to_string()
+    } else {
+        format!("Do it another way that needs no prompt, inside your worktree, {worktree}")
+    };
+    format!(
+        "No one answers this session's prompts: ekko agents started it, and its prompts are denied at once. {instead}. \
+         If the task needs this exact call, write it in a handoff on your task, with ekko's create, kind handoff, and end your turn with no text: \
+         the orchestrator brings it to the user, and their answer comes back as a note on your task."
+    )
+}
+
+/// The tools a born session finishes its work with on the board: ekko's
+/// writes, through its MCP server -- `mcp__<server>__<tool>`, whatever the
+/// server is named where it is registered -- or its command line, in Bash.
+fn writes_the_board(tool: &str, input: &serde_json::Value) -> bool {
+    match tool.strip_prefix("mcp__").and_then(|rest| rest.rsplit_once("__")) {
+        Some((server, name)) => server.contains("ekko") && matches!(name, "create" | "set_state" | "force_state" | "batch" | "edit" | "update"),
+        None => tool == "Bash" && input["command"].as_str().is_some_and(|command| command.contains("ekko")),
+    }
+}
 
 /// The hook of a born session (tasks 1643 and 1645), on each event of
 /// `EVENTS`; nothing in a session `start` did not open, which has no
@@ -2395,6 +2464,15 @@ pub const EVENTS: &[&str] = &["UserPromptSubmit", "Stop", "PermissionRequest", "
 /// of a turn, a session whose tasks are all finished, that no prompt
 /// reached since, with no background work in flight, is closed by a process
 /// of its own, which outlives the hook.
+///
+/// A born session says nothing to the user (decision 1870). Its permission
+/// prompts are denied at once, with what to do instead (task 1869). The
+/// write that finishes the last of its tasks, each with a closing note from
+/// it, ends its processing there -- `continue: false`, so no closing text
+/// follows in the pane -- and starts the closer, whether or not Claude Code
+/// fires Stop after such a stop (task 1866). A turn an API error ends,
+/// StopFailure, closes it as Stop would, or else marks it waiting on the
+/// user with the error (task 1798).
 pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
     let Some(tasks) = std::env::var(TASKS_VAR).ok().filter(|tasks| !tasks.trim().is_empty()) else {
         return std::process::ExitCode::SUCCESS;
@@ -2410,9 +2488,19 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
     match event {
         // Kept for the notification that may follow, whose message names
         // no tool: "Claude needs your permission", in Claude Code 2.1.295.
+        // Denied at once (task 1869): no one answers it. Kept all the same,
+        // for a version that would show the prompt anyway.
         "PermissionRequest" => {
-            born.asked = Some(asked_for(&input["tool_name"], &input["tool_input"]));
+            let asked = asked_for(&input["tool_name"], &input["tool_input"]);
+            born.asked = Some(asked.clone());
             write_born(home, session, &born);
+            let tool = input["tool_name"].as_str().unwrap_or_default();
+            let message = denial(tool, &input["tool_input"]);
+            log(home, session, &tasks, &format!("its permission prompt denied at once: {asked}"));
+            println!(
+                "{}",
+                serde_json::json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": message}}})
+            );
             return std::process::ExitCode::SUCCESS;
         }
         "Notification" => {
@@ -2469,7 +2557,7 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
             show_state(home, session, &tasks, &mut born, WORKING, None);
             write_born(home, session, &born);
         }
-        "Stop" => {
+        _ if TURN_ENDS.contains(&event) => {
             let busy = |key: &str| input[key].as_array().is_some_and(|work| !work.is_empty());
             let background = busy("background_tasks") || busy("session_crons");
             let stays = match finished(home, cwd, &tasks) {
@@ -2480,6 +2568,22 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
             };
             if let Some(why) = stays {
                 log(home, session, &tasks, &format!("stays: {why}"));
+                // A turn an API error ended (task 1798) waits on the user:
+                // nothing else starts it again, and no idle_prompt came in
+                // 101 s for 1564's session. Claude Code ignores this event's
+                // output, so the mark is what tells anyone.
+                if event == "StopFailure" {
+                    let error = input["error"].as_str().filter(|error| !error.is_empty()).unwrap_or("unknown");
+                    let said = input["last_assistant_message"].as_str().map(str::trim).filter(|said| !said.is_empty()).unwrap_or("API Error");
+                    let what = crate::agent::clip(&format!("its turn ended on an error -- {said} ({error})"), 200);
+                    born.waiting = wait_on_user(home, cwd, &tasks, session, "api_error", &what);
+                    if born.waiting.is_some() {
+                        show_state(home, session, &tasks, &mut born, WAITING, Some(&what));
+                    }
+                    born.background = background;
+                    write_born(home, session, &born);
+                    return std::process::ExitCode::SUCCESS;
+                }
                 let shown = show_state(home, session, &tasks, &mut born, if background { WORKING } else { IDLE }, None);
                 if shown || born.background != background {
                     born.background = background;
@@ -2487,18 +2591,25 @@ pub fn hook(home: &Path, cwd: &Path, input: &str) -> std::process::ExitCode {
                 }
                 return std::process::ExitCode::SUCCESS;
             }
-            let process = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of);
-            let closing = process.ok_or_else(|| "no Claude Code process is among its ancestors".to_string()).and_then(|process| spawn_closer(session, born.prompts, &process));
-            match closing {
-                Ok(()) => {
-                    log(home, session, &tasks, "its tasks are finished: closing");
-                    println!("{}", serde_json::json!({"systemMessage": "ekko: this session's tasks are finished, so it closes now"}));
-                }
-                Err(why) => log(home, session, &tasks, &format!("not closed: {why}")),
+            if closing(home, session, &tasks, born.prompts) {
+                println!("{}", serde_json::json!({"systemMessage": "ekko: this session's tasks are finished, so it closes now"}));
             }
         }
-        // A tool ran, or a dialog was answered: the turn goes on.
+        // A tool ran, or a dialog was answered: the turn goes on -- unless
+        // the tool was the write that finished the last of the session's
+        // tasks, each with its closing note (task 1866).
         _ => {
+            if event == "PostToolUse" && !born.talked && writes_the_board(input["tool_name"].as_str().unwrap_or_default(), &input["tool_input"]) {
+                let process = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of);
+                let noted = process.is_some_and(|process| finished(home, cwd, &tasks).is_ok() && closed(home, cwd, &tasks, &process).is_ok());
+                if noted && closing(home, session, &tasks, born.prompts) {
+                    log(home, session, &tasks, "its last task is finished, each with its closing note: stopped after the write that finished it");
+                    println!(
+                        "{}",
+                        serde_json::json!({"continue": false, "stopReason": "ekko: this session's tasks are finished, each with its closing note, so it closes now"})
+                    );
+                }
+            }
             if show_state(home, session, &tasks, &mut born, WORKING, None) {
                 write_born(home, session, &born);
             }
@@ -2695,6 +2806,54 @@ fn finished(home: &Path, cwd: &Path, named: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Whether each of the tasks `named` has a closing note from `process`,
+/// the session's Claude Code (task 1866): a note of its own attached to the
+/// task -- not a handoff, a decision, gotcha or procedure, a question or a
+/// wait -- that this process wrote.
+/// Why not, if not: a task set done before its note is written would lose
+/// the note if the session stopped there.
+fn closed(home: &Path, cwd: &Path, named: &str, process: &Process) -> Result<(), String> {
+    let all = board(home, cwd)?.storage.get_shared().map_err(|error| EkkoError::from(error).to_string())?;
+    let index = crate::ekko::uid_index(&all);
+    for name in named.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        let Some(task) = index.get(name).copied().or_else(|| name.parse::<u32>().ok()).and_then(|id| all.get(&id)) else {
+            return Err(format!("task {name} is not on its board"));
+        };
+        let keys = [task.uid.clone(), Some(task.id.to_string())];
+        let noted = all.values().any(|note| {
+            !note.is_task
+                && !note.handoff
+                && note.knowledge.is_none()
+                && note.question.is_none()
+                && note.wait.is_none()
+                && note.trashed.is_none()
+                && note.stashed.is_none()
+                && note.attached_to.as_ref().is_some_and(|on| keys.iter().flatten().any(|key| key == on))
+                && note.created_by.as_ref().and_then(crate::holder::Holder::process).as_ref() == Some(process)
+        });
+        if !noted {
+            return Err(format!("task {} has no closing note from this session", task.id));
+        }
+    }
+    Ok(())
+}
+
+/// Starts the closer for the end of the session's work, and says so in
+/// born.log; whether it started.
+fn closing(home: &Path, session: &str, tasks: &str, prompts: u64) -> bool {
+    let process = crate::holder::claude_among(std::os::unix::process::parent_id()).and_then(Process::of);
+    match process.ok_or_else(|| "no Claude Code process is among its ancestors".to_string()).and_then(|process| spawn_closer(session, prompts, &process)) {
+        Ok(()) => {
+            log(home, session, tasks, "its tasks are finished: closing");
+            true
+        }
+        Err(why) => {
+            log(home, session, tasks, &format!("not closed: {why}"));
+            false
+        }
+    }
 }
 
 /// Starts the closer: ekko again, in a session of its own with none of the
@@ -3494,6 +3653,26 @@ mod tests {
         events.sort_unstable();
         expected.sort_unstable();
         assert_eq!(events, expected, "the events the plugin runs the born hook on");
+        // Every event that ends a turn, an API error's included (task 1798).
+        for end in TURN_ENDS {
+            assert!(events.contains(end), "a turn that ends on {end} is one the born hook never hears of");
+        }
+    }
+
+    /// The tools that finish a born session's work on the board are ekko's
+    /// writes, under whatever name its MCP server is registered, and its
+    /// command line in Bash; its reads and other tools are not.
+    #[test]
+    fn the_write_that_may_finish_a_born_session_s_work_is_ekko_s() {
+        let none = serde_json::Value::Null;
+        for tool in ["mcp__plugin_ekko_ekko__set_state", "mcp__ekko__set_state", "mcp__plugin_ekko_ekko__create", "mcp__ekko__batch", "mcp__plugin_ekko_ekko__force_state"] {
+            assert!(writes_the_board(tool, &none), "{tool}");
+        }
+        for tool in ["mcp__plugin_ekko_ekko__context", "mcp__plugin_graff_graff__def", "mcp__other__set_state", "Read", "Edit"] {
+            assert!(!writes_the_board(tool, &none), "{tool}");
+        }
+        assert!(writes_the_board("Bash", &serde_json::json!({"command": "ekko --check 3"})));
+        assert!(!writes_the_board("Bash", &serde_json::json!({"command": "cargo test"})));
     }
 
     /// A repository with a commit, made in a fresh folder under `tag`.

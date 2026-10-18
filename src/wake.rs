@@ -366,7 +366,7 @@ fn asked(named: &str, target: Option<&Item>, waited: &str) -> String {
         Some(on) => {
             let window = on.window.as_deref().map(|window| format!(", in the window named \"{window}\"")).unwrap_or_default();
             format!(
-                "{named} is held by a session that waits on the user{window}: {}. Tell the user, then wait on it again. {waited}",
+                "{named} is held by a session that waits on the user{window}: {}. Read its handoff on the task, if it wrote one, and bring it to the user -- with your ask, for what only they can settle -- then answer the session with a note on the task, which reaches it, and wait on it again. {waited}",
                 agent::clip(&on.what, QUOTED)
             )
         }
@@ -613,7 +613,7 @@ mod tests {
             told,
             vec![format!(
                 "1 (Write the docs (+10 chars)) is held by a session that waits on the user, in the window named \"1 \u{b7} haiku\": \
-                 Claude needs your permission -- Bash: date > stamp.txt. Tell the user, then wait on it again. \
+                 Claude needs your permission -- Bash: date > stamp.txt. Read its handoff on the task, if it wrote one, and bring it to the user -- with your ask, for what only they can settle -- then answer the session with a note on the task, which reaches it, and wait on it again. \
                  This session waited on it (note {first}) to: review the docs"
             )]
         );

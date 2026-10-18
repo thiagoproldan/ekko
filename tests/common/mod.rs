@@ -16,8 +16,11 @@ pub const SESSION_VARIABLES: &[&str] = &[
     // Another board.
     "EKKO_DIR",
     "EKKO_PROJECT",
-    // A born session's tasks: every other task refused.
+    // A born session's tasks: every other task refused; and its worktree
+    // and branch, which it keeps to (task 1800).
     "EKKO_AGENT_TASK",
+    "EKKO_AGENT_WORKTREE",
+    "EKKO_AGENT_BRANCH",
     // The session's own: ekko would act as it, and read its transcripts and
     // its task list.
     "CLAUDECODE",

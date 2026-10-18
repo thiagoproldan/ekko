@@ -1,6 +1,6 @@
 {
   "name": "ekko",
-  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes; the board's resume view added to context when a session starts, with the project's memory page when the board's folder holds one; the board drawn in the session's task list under the spinner; a session woken when what it waits on is over, and told, while it works, of each note another writes on a task it holds; the Bash calls a gotcha's cue names refused, once the user turns the cue on; and a session ekko agents started kept from pushing, merging, releasing, starting or stopping sessions, and writing outside its worktree and branch, marked, on the board and in its window, while it waits on the user, and closed once its tasks are finished; and a skill, /ekko:agents, that runs the board's ready tasks in such sessions, at most the project's limit at once, and merges each one's branch into main in turn.",
+  "description": "The ekko task board for agents: an MCP server with the resume view, the work order, one item in context and structured writes; the board's resume view added to context when a session starts, with the project's memory page when the board's folder holds one; the board drawn in the session's task list under the spinner; a session woken when what it waits on is over, and told, while it works, of each note another writes on a task it holds; the Bash calls a gotcha's cue names refused, once the user turns the cue on; and a session ekko agents started kept from pushing, merging, releasing, starting or stopping sessions, and writing outside its worktree and branch, its permission prompts denied at once, marked, on the board and in its window, while it waits on the user, and closed once its tasks are finished, with no closing text; and a skill, /ekko:agents, that runs the board's ready tasks in such sessions, at most the project's limit at once, and merges each one's branch into main in turn.",
   "homepage": "https://github.com/thiagoproldan/ekko",
   "license": "MIT",
   "mcpServers": {
@@ -119,6 +119,16 @@
       }
     ],
     "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ekko --born --hook"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
       {
         "hooks": [
           {

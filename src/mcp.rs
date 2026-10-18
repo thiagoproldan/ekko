@@ -93,6 +93,16 @@ Each session starts with the board's prime in context. Call prime again after a 
 - Ask the user through ask; it records the answer.
 - Refusals come back as CODE: message. Branch on the code; nothing was written.";
 
+/// The line of `INSTRUCTIONS` that sends questions to the user, which a
+/// session ekko agents started reads as `BORN_ASKS` instead (task 1868).
+const ASK_LINE: &str = "- Ask the user through ask; it records the answer.";
+
+/// How a session ekko agents started settles what it would ask: no one
+/// answers its questions, so ask is not among its tools.
+const BORN_ASKS: &str = "No one answers this session's questions: ekko agents started it. Decide a routine choice yourself and record it \
+     in a decision note on your task, for the review at merge; a choice only the user can make goes in a handoff on your task, \
+     and then end your turn with no text: the orchestrator brings it to the user and answers with a note on the task.";
+
 /// Where calls find their board: the folder the server was started in, and
 /// its environment -- the same way `ekko` typed in that folder would.
 pub struct Server {
@@ -567,7 +577,7 @@ impl Server {
     /// Whether a call is ask's, to be put to the user and answered once they
     /// have: its reply waits, under either revision.
     fn puts_to_user(&self, params: &Value) -> bool {
-        self.mode == Mode::Board && params.get("name").and_then(Value::as_str) == Some("ask")
+        self.mode == Mode::Board && self.born.is_none() && params.get("name").and_then(Value::as_str) == Some("ask")
     }
 
     /// ask: records the questions, then puts them to the user -- in ekko's
@@ -945,7 +955,11 @@ impl Server {
         match self.mode {
             Mode::Board => {
                 offer.insert("capabilities".into(), json!({"tools": {"listChanged": true}, "prompts": {}}));
-                offer.insert("instructions".into(), json!(INSTRUCTIONS));
+                let instructions = match self.born {
+                    None => INSTRUCTIONS.to_string(),
+                    Some(_) => INSTRUCTIONS.replace(ASK_LINE, &format!("- {BORN_ASKS}")),
+                };
+                offer.insert("instructions".into(), json!(instructions));
             }
             Mode::Resources => {
                 offer.insert("capabilities".into(), json!({"resources": {"listChanged": true}}));
@@ -1017,6 +1031,9 @@ impl Server {
         if !TOOLS.contains(&name) {
             return Err(RpcError::new(-32602, format!("Unknown tool: {name}")));
         }
+        if name == "ask" && self.born.is_some() {
+            return Ok(self.tool_result(format!("BORN_DOES_NOT_ASK: {BORN_ASKS}"), true));
+        }
         let mut args = match params.get("arguments") {
             None | Some(Value::Null) => Map::new(),
             Some(Value::Object(map)) => map.clone(),
@@ -1044,7 +1061,7 @@ impl Server {
     fn let_through(&self, name: &str, mut given: Map<String, Value>, refused: ToolError, claude_code: Option<String>) -> Result<String, ToolError> {
         let input = Value::Object(given.clone());
         let call = format!("mcp:{}", crate::item::new_uid());
-        if let Some(ending) = crate::guard::gate(&self.home, name, &input, &self.cwd, &call, &refused.message, &self.actor) {
+        if let Some(ending) = crate::guard::gate(&self.home, name, &input, &self.cwd, &call, &refused.message, &self.actor, self.born.is_some()) {
             return Err(ToolError { code: refused.code, message: format!("{}. {ending}", refused.message) });
         }
         LET_THROUGH.set(true);
@@ -1117,7 +1134,7 @@ impl Server {
         );
         let input = json!({"project": project, "destination": destination, "items": items});
         let call = format!("mcp:{}", crate::item::new_uid());
-        match crate::guard::gate(&self.home, "move_to", &input, &self.cwd, &call, &reason, &self.actor) {
+        match crate::guard::gate(&self.home, "move_to", &input, &self.cwd, &call, &reason, &self.actor, self.born.is_some()) {
             None => Ok(()),
             Some(ending) => Err(ToolError { code: "NOT_LINKED", message: format!("{reason} {ending}") }),
         }
@@ -1131,9 +1148,17 @@ impl Server {
 
     /// The tool list, remembered with the linked boards it names for
     /// `tools_changed` to compare against.
+    /// The tool list; in a session ekko agents started, without ask (task
+    /// 1868): no one answers its questions, and what only the user can
+    /// settle goes in a handoff the orchestrator brings to them.
     fn tools(&self) -> Value {
         let linked = self.linked_names();
-        let tools = tool_definitions(&linked);
+        let mut tools = tool_definitions(&linked);
+        if self.born.is_some() {
+            if let Some(list) = tools.as_array_mut() {
+                list.retain(|tool| tool["name"] != "ask");
+            }
+        }
         *self.tools_listed.lock().unwrap_or_else(PoisonError::into_inner) = Some(linked);
         tools
     }
@@ -1589,7 +1614,7 @@ fn asked_already(data: &crate::storage::ItemMap, note: u32) -> Option<String> {
     let on = held.waits()?;
     let window = on.window.as_deref().map(|window| format!(", in the window named \"{window}\"")).unwrap_or_default();
     Some(format!(
-        "{} is held by a session that waits on the user already, since {}{window}: {}. Tell the user. This wait ends as until says, or the next time that session waits on the user.",
+        "{} is held by a session that waits on the user already, since {}{window}: {}. Read its handoff on the task, if it wrote one, and bring it to the user; answer the session with a note on the task. This wait ends as until says, or the next time that session waits on the user.",
         target.id,
         crate::holder::when(on.since),
         agent::clip(&on.what, 300)

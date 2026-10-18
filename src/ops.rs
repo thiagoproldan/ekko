@@ -1711,8 +1711,8 @@ impl<'a> Draft<'a> {
             (None, Some(code)) => {
                 let session = self.ekko.actor.as_ref().and_then(|actor| actor.process.as_ref());
                 let now = chrono::Local::now().timestamp_millis();
-                let refused = crate::guard::refusal(home, code.trim(), session, now).map_err(invalid)?;
-                let (block, allowance) = crate::guard::allow_block(&refused);
+                let refused = crate::guard::refusal(home, code.trim(), session, self.ekko.born_for.is_some(), now).map_err(invalid)?;
+                let (block, allowance) = crate::guard::allow_block(&refused, session);
                 (block, None, Some(allowance))
             }
         };

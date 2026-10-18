@@ -2279,7 +2279,8 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
         ("artifact", json!({"artifact": 11, "steps": [{"key": "one", "text": "The first step"}]})),
     ];
     // And those that cannot: what they write is new, a note, or no item.
-    let cannot = ["create", "ask", "answer", "wait"];
+    // ask is none of its tools (task 1868).
+    let cannot = ["create", "answer", "wait"];
 
     let answer = format!("echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" {APPLY}; done");
     let mut born = Held::start_born(&home, Some(site), &answer, &own);
@@ -2296,6 +2297,18 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
     let mut classed: Vec<&str> = reaching.iter().map(|(tool, _)| *tool).chain(cannot).chain(["phases"]).collect();
     classed.sort_unstable();
     assert_eq!(writes, classed, "every write tool, each where it belongs");
+    // No one answers its questions (task 1868): ask is not listed, a call
+    // to it is refused, and its instructions say what to do instead.
+    assert!(!listed["result"]["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "ask"), "{listed}");
+    born.send(&call(3, "ask", json!({"questions": [{"quick": true, "text": "Which?"}]})));
+    let asked = born.reply(3);
+    assert_eq!(asked["result"]["isError"], true, "{asked}");
+    assert!(text(&asked).starts_with("BORN_DOES_NOT_ASK: No one answers this session's questions"), "{asked}");
+    let mut quiet = Held::spawn_born(&home, Some(site), "exit 1", Some(&own));
+    quiet.send(&request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})));
+    let instructions = quiet.reply(1)["result"]["instructions"].as_str().unwrap().to_string();
+    assert!(instructions.contains("\n- No one answers this session's questions") && !instructions.contains("Ask the user through ask"), "{instructions}");
+    quiet.stop();
 
     let (before, blog_before) = (board(), blog());
     let mut refused = HashMap::new();
@@ -2306,7 +2319,7 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
         let target = 2 + at;
         let expected = format!("{target} is not this session's to change: ekko agents started it for 1, and the rest of the board");
         assert!(said.starts_with("NOT_BORN_FOR: ") && said.contains(&expected), "{tool}: {said}");
-        assert!(said.contains("a note is any session's to write. If the user wants this exact call made anyway") && said.contains("allow set to \""), "{tool}: {said}");
+        assert!(said.contains("a note is any session's to write. No one answers this session's questions") && said.contains("allow set to \""), "{tool}: {said}");
         refused.insert(*tool, said);
     }
     let after = board();
@@ -2346,11 +2359,16 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
     assert!(mine["12"]["description"].as_str().unwrap().ends_with("Read."), "{}", mine["12"]);
     assert_eq!((mine["1"]["phase"].as_str(), mine["15"]["phase"].as_str()), (Some("build"), Some("build")), "{mine}");
 
-    // The user lets the edit of 4 through: once.
+    // The user lets the edit of 4 through, asked by a session ekko agents
+    // did not start -- here the born one's own process, as every server of
+    // this test has the test for its client: once.
+    let mut asker = Held::spawn_born(&home, Some(site), &answer, None);
+    asker.send(&request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})));
+    asker.reply(1);
     let edit = &reaching[2].1;
     let code = refused["edit"].rsplit("allow set to \"").next().unwrap().split('"').next().unwrap().to_string();
-    born.send(&call(40, "ask", json!({"questions": [proposing(json!({"text": "Deixo a sessão mudar a 4?", "allow": code}))]})));
-    let answered: Value = serde_json::from_str(text(&born.reply(40))).unwrap();
+    asker.send(&call(40, "ask", json!({"questions": [proposing(json!({"text": "Deixo a sessão mudar a 4?", "allow": code}))]})));
+    let answered: Value = serde_json::from_str(text(&asker.reply(40))).unwrap();
     assert_eq!(answered["answers"][0]["answer"], APPLY, "{answered}");
     born.send(&call(41, "edit", edit.clone()));
     let through = born.reply(41);
@@ -2361,8 +2379,8 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
     assert!(again.starts_with("NOT_BORN_FOR: 4 is not") && again.contains(&format!("allow set to \"{code}\"")), "once: {again}");
     // And the change of the phases: once.
     let code = said.rsplit("allow set to \"").next().unwrap().split('"').next().unwrap().to_string();
-    born.send(&call(43, "ask", json!({"questions": [proposing(json!({"text": "Deixo a sessão mudar as fases?", "allow": code}))]})));
-    let answered: Value = serde_json::from_str(text(&born.reply(43))).unwrap();
+    asker.send(&call(43, "ask", json!({"questions": [proposing(json!({"text": "Deixo a sessão mudar as fases?", "allow": code}))]})));
+    let answered: Value = serde_json::from_str(text(&asker.reply(43))).unwrap();
     assert_eq!(answered["answers"][0]["answer"], APPLY, "{answered}");
     born.send(&call(44, "phases", change.clone()));
     let through = born.reply(44);
@@ -2374,6 +2392,7 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
     let again = text(&born.reply(46)).to_string();
     assert!(again.starts_with("NOT_BORN_FOR: The board's phases") && again.contains("allow set to \""), "once: {again}");
     born.stop();
+    asker.stop();
 
     // The orchestrator makes each.
     let lines: Vec<String> = std::iter::once(request(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}})))

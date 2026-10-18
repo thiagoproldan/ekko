@@ -218,7 +218,7 @@ fn build(boards: &[Board], stamps: Vec<(PathBuf, Stamp)>, now: i64) -> Index {
                     id: item.id,
                     uid: uid.clone(),
                     code: allow.code.clone(),
-                    session: question.asked_by.as_ref().and_then(|by| by.process()).as_ref().map(key),
+                    session: allow.for_session.clone().or_else(|| question.asked_by.as_ref().and_then(|by| by.process()).as_ref().map(key)),
                     answered: answer.at,
                     used: allow.used.as_ref().map(|used| used.tool_use_id.clone()),
                 });
@@ -437,8 +437,12 @@ fn record(home: &Path, seen: &Seen, session: Option<&Process>, code: &str, reaso
 }
 
 /// The refusal `code` names, when a guard made it in the last day for
-/// `session`: what a question asking about it quotes.
-pub fn refusal(home: &Path, code: &str, session: Option<&Process>, now: i64) -> Result<Refused, String> {
+/// `session`: what a question asking about it quotes. Or, for a session
+/// that ekko agents did not start (`!born`), one made for a session it did
+/// start, still running (task 1868): that session has no ask, and its
+/// orchestrator asks the user for it. Only the user's answer in ekko's menu
+/// lets the call through, as for any other.
+pub fn refusal(home: &Path, code: &str, session: Option<&Process>, born: bool, now: i64) -> Result<Refused, String> {
     let plain = !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric());
     let found = plain
         .then(|| std::fs::read(refused_dir(home).join(format!("{code}.json"))).ok())
@@ -447,10 +451,20 @@ pub fn refusal(home: &Path, code: &str, session: Option<&Process>, now: i64) -> 
     let Some(refused) = found.filter(|refused| now - refused.at < DAY) else {
         return Err(format!("allow {code:?} names no call a guard refused in the last day: ask with the code the refusal gave"));
     };
-    if refused.session != session.map(key) {
+    if refused.session != session.map(key) && (born || !refused.session.as_ref().is_some_and(asks_through_another)) {
         return Err(format!("allow {code:?} names a call another session made: only the session whose call was refused asks for it"));
     }
     Ok(refused)
+}
+
+/// Whether the session `key` names runs still, started by ekko agents:
+/// such a session has no ask (task 1868), and its call is asked for by
+/// another.
+fn asks_through_another(key: &(u32, u64, String)) -> bool {
+    let (pid, start, boot) = key.clone();
+    let named = format!("{}=", crate::agents::TASKS_VAR);
+    Process { pid, start, boot }.alive()
+        && std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default().split(|byte| *byte == 0).any(|entry| entry.starts_with(named.as_bytes()))
 }
 
 /// What a guard's refusal of a call comes to.
@@ -502,6 +516,19 @@ fn how_to_ask(code: &str) -> String {
          question, with explain and two options in their language, the first letting the call through. Only their answer \
          in ekko's menu lets it through: once, from this folder and this session, within 24 hours. An answer a session \
          records does not count."
+    )
+}
+
+/// What a refusal ends with in a session ekko agents started, which has no
+/// ask and whose questions no one answers (task 1868): the call goes in a
+/// handoff, which the orchestrator, woken by the session's wait, brings to
+/// the user, asking with the code as this session would have.
+fn handed_on(code: &str) -> String {
+    format!(
+        "No one answers this session's questions: if the task needs this exact call, write it in a handoff on your task, with ekko's \
+         create, kind handoff, naming the call and the code \"{code}\", leave the task in progress and end your turn with no text. \
+         The orchestrator asks the user through ekko's ask with allow set to \"{code}\": their answer in ekko's menu lets this session \
+         make the call once, within 24 hours, and the orchestrator tells you so in a note on your task."
     )
 }
 
@@ -567,7 +594,7 @@ fn reply_to(home: &Path, event: &Value, actor: &Actor, env: &crate::claims::Env,
                 return Some(json!({"hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
-                    "permissionDecisionReason": clipped(&format!("{}{}", reasons.join("\n\n"), ending(&code, &all, &reasons)), 9_000),
+                    "permissionDecisionReason": clipped(&format!("{}{}", reasons.join("\n\n"), ending(&code, &all, &reasons, env.born.is_some())), 9_000),
                 }}));
             }
         }
@@ -643,9 +670,9 @@ fn stale(cue: &Indexed, folder: Option<&Path>) -> String {
 /// once and shows the model only the reason of the last to finish refusing
 /// (2.1.283, read off its bundle), so each guard's carries every reason
 /// recorded by then (task 839).
-fn ending(code: &str, all: &[String], reasons: &[String]) -> String {
+fn ending(code: &str, all: &[String], reasons: &[String], born: bool) -> String {
     let others: String = all.iter().filter(|reason| !reasons.contains(reason)).map(|other| format!("\n\n{other}")).collect();
-    format!("{others}\n\n{}", how_to_ask(code))
+    format!("{others}\n\n{}", if born { handed_on(code) } else { how_to_ask(code) })
 }
 
 /// `ekko --guard --refuse REASON`, for another guard about to refuse the
@@ -656,7 +683,7 @@ fn ending(code: &str, all: &[String], reasons: &[String]) -> String {
 /// that refused the call, then how to ask -- and exits 1. Anything it
 /// cannot read exits 2, and the other guard refuses as it would have.
 pub fn refuse(home: &Path, input: &str, reason: &str) -> ExitCode {
-    match refuse_reply(home, input, reason, &Actor::of_this_command(), crate::agents::born_tasks().is_some()) {
+    match refuse_reply(home, input, reason, &Actor::of_this_command(), crate::agents::born_tasks().is_some(), crate::agents::born_tasks().is_some()) {
         None => ExitCode::from(2),
         Some(None) => ExitCode::SUCCESS,
         Some(Some(sentence)) => {
@@ -667,17 +694,17 @@ pub fn refuse(home: &Path, input: &str, reason: &str) -> ExitCode {
 }
 
 /// `refuse`'s answer for the session `actor`, which ekko agents started
-/// when `born`: `None` for input it cannot read, else what a refusal
+/// when `born`, read under that session's limits when `limits`: `None` for input it cannot read, else what a refusal
 /// ends with, or `None` inside for a call the user let through.
-fn refuse_reply(home: &Path, input: &str, reason: &str, actor: &Actor, born: bool) -> Option<Option<String>> {
+fn refuse_reply(home: &Path, input: &str, reason: &str, actor: &Actor, born: bool, limits: bool) -> Option<Option<String>> {
     let seen = seen(&serde_json::from_str::<Value>(input).ok()?)?;
     let now = chrono::Local::now().timestamp_millis();
     let index = current(home, now);
     let given = vec![reason.trim().to_string()];
-    let reasons = [given.clone(), limit_reasons(&seen, born), cue_reasons(home, &index, &seen)].concat();
+    let reasons = [given.clone(), limit_reasons(&seen, limits), cue_reasons(home, &index, &seen)].concat();
     Some(match decide(home, &index, &seen, &reasons, actor, now) {
         Verdict::Through(_) => None,
-        Verdict::Refused(code, all) => Some(ending(&code, &all, &given).trim_start().to_string()),
+        Verdict::Refused(code, all) => Some(ending(&code, &all, &given, born).trim_start().to_string()),
     })
 }
 
@@ -686,9 +713,10 @@ fn refuse_reply(home: &Path, input: &str, reason: &str, actor: &Actor, born: boo
 /// naming this call alone, as a tool use id does. `None` when the user's
 /// answer lets it through, once; else it is recorded as a guard's refusal
 /// is, with `reason`, and this is what the refusal ends with.
-pub fn gate(home: &Path, tool: &str, input: &Value, cwd: &Path, call: &str, reason: &str, actor: &Actor) -> Option<String> {
+#[allow(clippy::too_many_arguments)] // born joins actor: what a refusal ends with turns on it (task 1868)
+pub fn gate(home: &Path, tool: &str, input: &Value, cwd: &Path, call: &str, reason: &str, actor: &Actor, born: bool) -> Option<String> {
     let event = serde_json::json!({"tool_name": tool, "tool_input": input, "cwd": cwd.display().to_string(), "tool_use_id": call});
-    refuse_reply(home, &event.to_string(), reason, actor, false).unwrap_or_else(|| Some(String::new()))
+    refuse_reply(home, &event.to_string(), reason, actor, born, false).unwrap_or_else(|| Some(String::new()))
 }
 
 fn clipped(text: &str, most: usize) -> String {
@@ -704,7 +732,9 @@ fn clipped(text: &str, most: usize) -> String {
 
 /// The block under a question asking about a refused call, and the answers
 /// offered: the call as the guard recorded it, not as the session put it.
-pub fn allow_block(refused: &Refused) -> (String, Allowance) {
+/// Asked by a session other than the one refused, `asker`, it lets that
+/// one's call through (task 1868), and says whose it is.
+pub fn allow_block(refused: &Refused, asker: Option<&Process>) -> (String, Allowance) {
     let length = refused.call.chars().count();
     let call = if length <= QUOTED {
         refused.call.clone()
@@ -714,7 +744,12 @@ pub fn allow_block(refused: &Refused) -> (String, Allowance) {
         format!("{head}\n[… {} characters not shown …]\n{tail}", length - QUOTED)
     };
     let why: String = refused.reasons.iter().map(|reason| format!("\n- {}", clipped(reason, 1_500))).collect();
-    let text = format!("\n\nThe call refused ({}), from {}:\n{call}\nWhy:{why}", refused.tool, refused.cwd);
+    let for_session = refused.session.clone().filter(|refused| Some(refused) != asker.map(key).as_ref());
+    let whose = match &for_session {
+        Some((pid, _, _)) => format!(", by the session ekko agents started that runs as pid {pid}"),
+        None => String::new(),
+    };
+    let text = format!("\n\nThe call refused ({}), from {}{whose}:\n{call}\nWhy:{why}", refused.tool, refused.cwd);
     let allowance = Allowance {
         code: refused.code.clone(),
         tool: refused.tool.clone(),
@@ -722,6 +757,7 @@ pub fn allow_block(refused: &Refused) -> (String, Allowance) {
         cwd: refused.cwd.clone(),
         reasons: refused.reasons.clone(),
         used: None,
+        for_session,
         unknown: BTreeMap::new(),
     };
     (text, allowance)
@@ -764,6 +800,23 @@ mod tests {
         let home = crate::paths::test_dir(&format!("ekko-guard-{tag}"));
         std::fs::create_dir_all(home.join(".ekko")).unwrap();
         home
+    }
+
+    /// A session of its own, running until it is killed: born, as ekko
+    /// agents starts one, with the tasks in its environment, or not.
+    fn started(born: bool) -> (std::process::Child, Actor) {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30").env_remove(crate::agents::TASKS_VAR);
+        if born {
+            command.env(crate::agents::TASKS_VAR, "18dd061239a28cb8-a8dad");
+        }
+        let child = command.spawn().unwrap();
+        let actor = Actor { process: Process::of(child.id()), profile: Some("default".into()), tty: Some("pts/9".into()), registry: None };
+        (child, actor)
+    }
+
+    fn started_plain() -> (std::process::Child, Actor) {
+        started(false)
     }
 
     fn ekko_at(dir: &Path, actor: Option<&Actor>) -> Ekko {
@@ -1097,7 +1150,7 @@ mod tests {
         let through = call("/r", "t4", &session).unwrap();
         let context = through["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(context.contains(&format!("question {asked}")) && through["hookSpecificOutput"].get("permissionDecision").is_none(), "{through}");
-        assert_eq!(refuse_reply(&home, &event(command, Path::new("/r"), "t4"), "ctx: it would lose work", &session, false), Some(None), "another guard on the same call");
+        assert_eq!(refuse_reply(&home, &event(command, Path::new("/r"), "t4"), "ctx: it would lose work", &session, false, false), Some(None), "another guard on the same call");
         assert!(refused(&call("/r", "t5", &session)).is_some(), "once: the next call is refused again");
         let allow = ekko_at(&dir, None).storage.get().unwrap()[&asked].question.clone().unwrap().allow.unwrap();
         assert_eq!(allow.used.unwrap().tool_use_id, "t4");
@@ -1130,6 +1183,52 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// A born session has no ask (task 1868): its refusal says to hand the
+    /// call on in a handoff, with its code, and its orchestrator -- a session
+    /// ekko agents did not start -- asks the user with that code; their answer
+    /// lets the born session's call through, once. Neither another born
+    /// session nor any session for one ekko agents did not start may ask for
+    /// a call another session made.
+    #[test]
+    fn the_orchestrator_asks_the_user_for_a_born_session_s_refused_call() {
+        let home = home("orchestrated");
+        let dir = home.join(".ekko");
+        let (orchestrator, _, _) = test_sessions();
+        let (mut born_child, born_session) = started(true);
+        let (mut plain_child, plain_session) = started(false);
+        let limited = crate::claims::Env { born: Some(vec!["18dd061239a28cb8-a8dad".into()]), ..Default::default() };
+        let call = |tool_use_id: &str, actor: &Actor| {
+            let event: Value = serde_json::from_str(&event("git push origin task-7", Path::new("/r"), tool_use_id)).unwrap();
+            reply_to(&home, &event, actor, &limited, chrono::Local::now().timestamp_millis())
+        };
+        let reason = refused(&call("t1", &born_session)).expect("refused");
+        assert!(reason.contains("No one answers this session's questions: if the task needs this exact call, write it in a handoff"), "{reason}");
+        assert!(!reason.contains("If the user wants this exact call made anyway"), "{reason}");
+        let code = code_in(&reason);
+        // Another born session may not ask for it, nor may anyone ask for a
+        // call of a session ekko agents did not start.
+        let another_born = ekko_at(&dir, Some(&orchestrator)).born_for(Some(vec!["18dd061239a28cb8-ffff".into()]));
+        let refused_ask = ask(&another_born, &home, json!({"text": "Deixo?", "allow": code})).unwrap_err().to_string();
+        assert!(refused_ask.contains("names a call another session made"), "{refused_ask}");
+        let plain_code = code_in(&refused(&call("t1", &plain_session)).expect("refused"));
+        let refused_ask = ask(&ekko_at(&dir, Some(&orchestrator)), &home, json!({"text": "Deixo?", "allow": plain_code})).unwrap_err().to_string();
+        assert!(refused_ask.contains("names a call another session made"), "{refused_ask}");
+        // The orchestrator asks; the user's answer lets the born session's
+        // call through, once.
+        let (asked, inquiry) = ask(&ekko_at(&dir, Some(&orchestrator)), &home, json!({"text": "Deixo a sessão fazer o push?", "allow": code})).unwrap();
+        assert!(format!("{inquiry:?}").contains("by the session ekko agents started that runs as pid"), "{inquiry:?}");
+        assert!(refused(&call("t2", &born_session)).is_some(), "let through before the user answered");
+        answer(&dir, &Actor::person(), asked, APPLY).unwrap();
+        let through = call("t3", &born_session).expect("let through");
+        assert!(through["hookSpecificOutput"]["additionalContext"].as_str().is_some_and(|context| context.contains(&format!("question {asked} let this call through"))), "{through}");
+        assert!(refused(&call("t4", &born_session)).is_some(), "once: the next call is refused again");
+        for child in [&mut born_child, &mut plain_child] {
+            child.kill().ok();
+            child.wait().ok();
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     /// When ekko's cue and another guard refuse one call, the model reads
     /// only the reason of the last to finish refusing (task 839), and each
     /// guard's text is made as it records. ctx's carries ekko's cues'
@@ -1147,7 +1246,7 @@ mod tests {
             cued(&home.join(".ekko"), lesson, cue("gh", &["updateProjectV2Field"], None));
             let input = event(command, Path::new("/r"), "t1");
             // As ctx refuses: its reason, then what ekko told it to end with.
-            let from_ctx = || format!("{ctx}\n\n{}", refuse_reply(&home, &input, ctx, &session, false).unwrap().unwrap());
+            let from_ctx = || format!("{ctx}\n\n{}", refuse_reply(&home, &input, ctx, &session, false, false).unwrap().unwrap());
             let from_ekko = || refused(&hook_reply(&home, &input, &session)).unwrap();
             let (ekko_text, ctx_text) = if ekko_first {
                 let ekko_text = from_ekko();
@@ -1175,16 +1274,16 @@ mod tests {
         let read = |tool_use_id: &str| {
             json!({"tool_name": "Read", "tool_input": {"file_path": "/persist/secrets/key"}, "cwd": "/r", "tool_use_id": tool_use_id}).to_string()
         };
-        let sentence = refuse_reply(&home, &read("t1"), "ctx: it would bring secret material into the context", &session, false).unwrap().unwrap();
+        let sentence = refuse_reply(&home, &read("t1"), "ctx: it would bring secret material into the context", &session, false, false).unwrap().unwrap();
         let code = code_in(&sentence);
-        assert!(refuse_reply(&home, &read("t2"), "ctx: it would bring secret material into the context", &session, false).unwrap().is_some());
+        assert!(refuse_reply(&home, &read("t2"), "ctx: it would bring secret material into the context", &session, false, false).unwrap().is_some());
         let (asked, put) = ask(&ekko_at(&dir, Some(&session)), &home, json!({"text": "Leio a chave?", "allow": code})).unwrap();
         let explain = put.explain.unwrap_or_default();
         assert!(explain.contains("The call refused (Read), from /r:\n{\"file_path\":\"/persist/secrets/key\"}"), "{explain}");
         assert!(explain.contains("- ctx: it would bring secret material into the context"), "{explain}");
         answer(&dir, &Actor::person(), asked, APPLY).unwrap();
-        assert_eq!(refuse_reply(&home, &read("t3"), "ctx: again", &session, false), Some(None));
-        assert_eq!(refuse_reply(&home, "not json", "ctx", &session, false), None, "unreadable input: the other guard refuses as it would have");
+        assert_eq!(refuse_reply(&home, &read("t3"), "ctx: again", &session, false, false), Some(None));
+        assert_eq!(refuse_reply(&home, "not json", "ctx", &session, false, false), None, "unreadable input: the other guard refuses as it would have");
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -1196,7 +1295,7 @@ mod tests {
         let dir = home.join(".ekko");
         let (session, _, _) = test_sessions();
         let read = json!({"tool_name": "Read", "tool_input": {"file_path": "/k"}, "cwd": "/r", "tool_use_id": "t1"}).to_string();
-        let code = code_in(&refuse_reply(&home, &read, "ctx: a secret", &session, false).unwrap().unwrap());
+        let code = code_in(&refuse_reply(&home, &read, "ctx: a secret", &session, false, false).unwrap().unwrap());
         let (asked, _) = ask(&ekko_at(&dir, Some(&session)), &home, json!({"text": "Leio?", "allow": code})).unwrap();
         answer(&dir, &Actor::person(), asked, APPLY).unwrap();
         let grant = current(&home, chrono::Local::now().timestamp_millis()).granted.into_iter().find(|grant| grant.id == asked).unwrap();
@@ -1239,7 +1338,7 @@ mod tests {
             _ => {
                 reads.set(reads.get() + 1);
                 let read = json!({"tool_name": "Read", "tool_input": {"file_path": format!("/k{}", reads.get())}, "cwd": "/r", "tool_use_id": "t"});
-                let code = code_in(&refuse_reply(&home, &read.to_string(), "ctx: a secret", &session, false).unwrap().unwrap());
+                let code = code_in(&refuse_reply(&home, &read.to_string(), "ctx: a secret", &session, false, false).unwrap().unwrap());
                 json!({"text": "Leio?", "allow": code})
             }
         };
@@ -1387,7 +1486,10 @@ mod tests {
     fn a_question_about_a_cue_or_a_refused_call_is_checked_before_it_is_asked() {
         let home = home("checked");
         let dir = home.join(".ekko");
-        let (session, other, _) = test_sessions();
+        let (_, other, _) = test_sessions();
+        // A session of its own, which ekko agents did not start, whatever runs
+        // the tests: one it did start has its call asked for by another.
+        let (mut plain, session) = started_plain();
         let as_session = ekko_at(&dir, Some(&session));
         let gotcha = cued(&dir, "a lesson", cue("gh", &["x"], None));
         let note = apply(&as_session, json!({"op": "create", "kind": "note", "text": "not a gotcha"})).unwrap()[0];
@@ -1414,6 +1516,14 @@ mod tests {
         fails(json!({"text": "?", "cue": {"gotcha": gotcha, "off": true, "command": "gh"}}), "takes no command");
         let error = ask(&ekko_at(&dir, Some(&other)), &home, json!({"text": "?", "allow": code})).unwrap_err().to_string();
         assert!(error.contains("another session made"), "{error}");
+        // Nor for this session's call, once it is a session ekko agents
+        // started -- as the test's own process is when a born session runs
+        // the tests -- by another that is one (task 1868).
+        let born_other = ekko_at(&dir, Some(&other)).born_for(Some(vec!["18dd061239a28cb8-a8dad".into()]));
+        let error = ask(&born_other, &home, json!({"text": "?", "allow": code})).unwrap_err().to_string();
+        assert!(error.contains("another session made"), "{error}");
+        plain.kill().ok();
+        plain.wait().ok();
         std::fs::remove_dir_all(&home).ok();
     }
 

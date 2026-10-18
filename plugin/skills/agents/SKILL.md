@@ -69,13 +69,18 @@ push is the user's.
 3. **Wait.** Call ekko's `wait` on each started task -- `item` the task,
    `text` what you will do once the wait is over, such as "review and merge
    task N" -- then end your turn: ekko wakes you. It wakes you when a task
-   is done or cancelled, or when its session waits on the user -- at a
-   permission prompt, a question, or because it stopped short of its task
-   and wrote a handoff. Then tell the user which window waits and what
-   for, read the handoff if there is one, and wait on the task again. Do
-   not do the tasks' work yourself while their sessions run. To tell a
-   session at work something -- the user's word, a change of plan --
-   attach a note to its task: ekko tells it between its tool calls.
+   is done or cancelled, or when its session waits -- because it stopped
+   short of its task and wrote a handoff, or its turn ended on an API
+   error. Born sessions say nothing to the user: they have no ask, and
+   their permission prompts are denied at once, so what only the user can
+   settle comes to you. Read the handoff, ask the user with your own `ask`
+   -- for a call the guard refused it, with `allow` set to the code the
+   handoff names, which lets that session's call through once the user
+   answers -- then answer the session with a note on its task, which
+   reaches it, and wait on the task again. Do not do the tasks' work
+   yourself while their sessions run. To tell a session at work something
+   -- the user's word, a change of plan -- attach a note to its task: ekko
+   tells it between its tool calls.
 
 4. **Review.** Woken by a task done, read it with ekko's `context`, detail
    full -- its whole text, not its title alone, and its closing note --

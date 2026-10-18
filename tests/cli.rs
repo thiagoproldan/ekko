@@ -105,7 +105,7 @@ fn every_variable_ekko_reads_is_one_the_tests_keep_set_or_let_through() {
                     _ if call == "env::home_dir(" => {
                         read.insert("HOME".to_string());
                     }
-                    _ if call == " set(" => {}
+                    _ if call == " set(" => read.extend(named(argument)),
                     _ => match named(argument) {
                         Some(name) => {
                             read.insert(name);
@@ -2054,9 +2054,12 @@ impl Stays {
 
     /// A permission prompt left unanswered, as Claude Code 2.1.295 tells
     /// it: the request, then the notification, six seconds on, whose
-    /// message names no tool. What the notification's hook printed.
+    /// message names no tool. What the notification's hook printed. The
+    /// request's hook denies it (task 1869); a version that showed the
+    /// prompt anyway would still notify.
     fn asks(&self) -> String {
-        assert_eq!(self.hook("PermissionRequest", serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "date > stamp.txt", "description": "Write the date"}})), "", "a PermissionRequest hook prints nothing");
+        let denied = self.hook("PermissionRequest", serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "date > stamp.txt", "description": "Write the date"}}));
+        assert!(denied.contains("\"behavior\":\"deny\""), "{denied}");
         self.hook("Notification", serde_json::json!({"notification_type": "permission_prompt", "message": "Claude needs your permission", "title": "Permission needed"}))
     }
 
@@ -2167,15 +2170,25 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert_eq!(assigned(&command, "EKKO_AGENT_BRANCH"), Some("task-1"), "{command:?}");
     assert_eq!(assigned(&command, "EKKO_MUX"), agents.mux.to_str(), "the hook that closes it speaks to the same one: {command:?}");
     let claude = command.iter().position(|arg| arg == "/stand-in/claude").unwrap();
-    assert_eq!(command[claude + 1..command.len() - 1], ["--model", "haiku", "--effort", "low"]);
+    assert_eq!(command[claude + 1..command.len() - 1], ["--disallowedTools", "AskUserQuestion", "--model", "haiku", "--effort", "low"], "no question of its own reaches a user who is not there (task 1868)");
     let prompt = command.last().unwrap();
     assert!(prompt.starts_with("ekko agents started this session to do task 1 on"), "{prompt}");
     assert!(prompt.contains("Before you change anything, set task 1 in progress"), "{prompt}");
     assert!(prompt.contains("write its closing note with ekko's create, attached_to 1 -- a note of its own"), "{prompt}");
     assert!(prompt.contains("write a handoff instead, with ekko's create, kind handoff, attached_to 1"), "{prompt}");
-    // Stopped short, it keeps its task and waits on the user, whose mark
-    // wakes the orchestrator (task 1647).
-    assert!(prompt.ends_with("saying what stops you; leave the task in progress and end your turn: the user is told that this session waits on them."), "{prompt}");
+    // Stopped short, it keeps its task and waits, whose mark wakes the
+    // orchestrator (task 1647), which brings it to the user (task 1868).
+    assert!(
+        prompt.ends_with(
+            "saying what stops you; leave the task in progress and end your turn with no text: \
+             the orchestrator is told that this session waits, brings it to the user, and answers with a note on the task, which reaches you."
+        ),
+        "{prompt}"
+    );
+    // It says nothing to the user (decision 1870): it decides and records
+    // routine choices, and its closing note is its report (task 1866).
+    assert!(prompt.contains("No one answers this session's questions or prompts: decide routine choices yourself, and record each in a decision note with ekko's create, kind decision, attached_to 1"), "{prompt}");
+    assert!(prompt.contains("That note is your report: once it is done, end with no text, and the session closes."), "{prompt}");
     assert!(prompt.contains(&format!("{}, on its branch task-1", worktree.display())), "{prompt}");
     // How it was started, on the task (task 1647).
     let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
@@ -2199,6 +2212,7 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert!(command.last().unwrap().contains("to do tasks 2 and 3 on"), "{command:?}");
     assert!(command.last().unwrap().contains("When each task is done, write its closing note with ekko's create, attached_to that task"), "{command:?}");
     assert!(command.last().unwrap().contains("leave the tasks in progress and end your turn"), "{command:?}");
+    assert!(command.last().unwrap().contains("once the last of them is done, end with no text"), "{command:?}");
     // A note on each, the effort its default.
     let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
     let notes: Vec<(&str, &str)> = reply["notes"]
@@ -2352,7 +2366,7 @@ fn agents_start_names_the_group_whose_sessions_talk_through_notes() {
     let group = "Tasks 2 and 3 are worked beside yours by sessions of their own, as a group: to tell the session working one of them what it needs to know -- \
                  a change it builds on, an answer, a question -- write a note with ekko's create, attached_to that task, and ekko tells that session at once; \
                  it answers you with a note on yours.";
-    assert!(prompt.contains(&format!("{told} {group} When task 1 is done")), "{prompt}");
+    assert!(prompt.contains(&format!("{told} {group} No one answers this session's questions")), "{prompt}");
     assert!(noted(&reply).ends_with("(made for it). In a group with tasks 2 and 3, each worked by a session of its own: a note on a task reaches the session holding it."), "{}", noted(&reply));
 
     let reply = agents.json(&["agents", "start", "2", "--model", "haiku", "--group", "1", "--json"]);
@@ -2757,6 +2771,65 @@ fn a_born_session_for_two_tasks_closes_only_once_both_are_finished() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// A born session ends silently (task 1866, decision 1870): the write that
+/// finishes the last of its tasks, each with a closing note it wrote, stops
+/// its processing there -- PostToolUse answers `continue: false`, so no
+/// text follows in its pane -- and its closer ends it, Stop or no Stop. A
+/// task done with no closing note yet, or with only the user's note, a
+/// decision or a handoff of the session's own, does not stop it: the note
+/// would be lost. Nor does a tool that is no write of ekko's.
+#[test]
+fn a_born_session_stops_at_the_write_that_finishes_its_last_task_with_its_closing_note() {
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs", "Write the tests"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let mut session = agents.session(&format!("{},{},{}", agents.uid(1), agents.uid(2), agents.uid(3)));
+    session.ekko(&["--begin", "1", "2", "3"], "");
+    let wrote = |session: &Stays, tool: &str| session.hook("PostToolUse", serde_json::json!({"tool_name": tool, "tool_input": {}, "tool_response": {}}));
+    let note = |text: &str, kind: &str| serde_json::json!({"text": text, "kind": kind, "attached_to": 1});
+
+    // Task 1 done, with its closing note; the others still in progress.
+    session.tools(&[("create", note("Closing note for 1", "note")), ("set_state", serde_json::json!({"items": [1], "state": "done"}))]);
+    assert_eq!(wrote(&session, "mcp__plugin_ekko_ekko__set_state"), "", "stopped with tasks 2 and 3 in progress");
+    // Task 3's closing note, before it is done; task 2 done with none of the
+    // session's: the user's note, a decision and a handoff of its own are none.
+    session.tools(&[("create", serde_json::json!({"text": "Closing note for 3", "attached_to": 3}))]);
+    assert!(agents.ekko(&["--note", "The user's word on 2"]).status.success());
+    assert!(agents.ekko(&["--attached-to", "@6", "2"]).status.success());
+    session.tools(&[
+        ("create", serde_json::json!({"text": "Chose the short name", "kind": "decision", "attached_to": 2})),
+        ("create", serde_json::json!({"text": "Where 2 stopped", "kind": "handoff", "attached_to": 2})),
+        ("set_state", serde_json::json!({"items": [2, 3], "state": "done"})),
+    ]);
+    for tool in ["mcp__plugin_ekko_ekko__set_state", "mcp__ekko__set_state"] {
+        assert_eq!(wrote(&session, tool), "", "stopped with task 2 done before its closing note");
+    }
+    assert!(still_alive(&mut session.child), "closed with task 2 done before its closing note");
+
+    // Each with its closing note, task 3 back in progress: the note does not
+    // stop it, nor does a read.
+    session.tools(&[("set_state", serde_json::json!({"items": [3], "state": "progress"})), ("create", serde_json::json!({"text": "Closing note for 2", "attached_to": 2}))]);
+    assert_eq!(wrote(&session, "mcp__plugin_ekko_ekko__create"), "", "stopped with task 3 in progress");
+    assert_eq!(wrote(&session, "mcp__plugin_ekko_ekko__context"), "", "a read stopped it");
+    // Task 3 done: that write stops it.
+    session.tools(&[("set_state", serde_json::json!({"items": [3], "state": "done"}))]);
+    let said = wrote(&session, "mcp__plugin_ekko_ekko__set_state");
+    let stop: serde_json::Value = serde_json::from_str(&said).unwrap_or_else(|e| panic!("{e}: {said}"));
+    assert_eq!(stop["continue"], false, "{said}");
+    assert!(stop["stopReason"].as_str().is_some_and(|reason| reason.contains("each with its closing note")), "{said}");
+    assert!(agents.logged("its last task is finished, each with its closing note: stopped after the write that finished it"));
+    assert!(ended_by_sigterm(&mut session.child), "its closer did not end it after the stop");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// Whether the stand-in session still runs 2.5 s on, past the second the
+/// closer waits; it is left running.
+fn still_alive(stand_in: &mut process::Child) -> bool {
+    std::thread::sleep(std::time::Duration::from_millis(2_500));
+    stand_in.try_wait().unwrap().is_none()
+}
+
 /// Note 1638's case C: the user finishes the task, then talks to the
 /// session; a prompt that reaches it once its task is done makes it the
 /// user's, and it stays at the end of that turn and every one after.
@@ -2919,6 +2992,55 @@ fn a_born_session_waiting_on_the_user_says_so_on_its_task_and_window_until_it_mo
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// A born session's permission prompt is denied at once (task 1869, decision
+/// 1909): no one answers it. Each kind of prompt Claude Code's permission
+/// modes page lists as still asked under bypassPermissions ("Actions no mode
+/// auto-approves", read 2026-10-18, Claude Code 2.1.302), and a prompt of
+/// another mode, gets a deny within a second, whose message says what to do
+/// instead; a session ekko agents did not start gets no answer from ekko.
+#[test]
+fn a_born_session_s_permission_prompt_is_denied_at_once_with_what_to_do_instead() {
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    let session = agents.session(&agents.uid(1));
+    session.ekko(&["--begin", "1"], "");
+    let bash = |command: &str| serde_json::json!({"command": command});
+    // Each kind, an example of it, and what its message says to do instead.
+    let kinds: [(&str, &str, serde_json::Value, &str); 10] = [
+        ("an explicit ask rule (decision 720's)", "Bash", bash("ekko --json --projects"), "without --project"),
+        ("a connector tool the organization set to ask", "mcp__claude_ai_Gmail__send", serde_json::json!({"to": "x"}), "another way that needs no prompt"),
+        ("AskUserQuestion, which requires user interaction", "AskUserQuestion", serde_json::json!({"questions": []}), "record it in a decision note"),
+        ("an MCP tool marked requiresUserInteraction", "mcp__plugin_ekko_ekko__ask", serde_json::json!({"questions": []}), "record it in a decision note"),
+        ("rm of a critical path", "Bash", bash("rm -rf \"$TMP\"/*"), "remove a literal path inside your worktree"),
+        ("rmdir of a critical path", "Bash", bash("rmdir ~"), "remove a literal path inside your worktree"),
+        ("an rm in a bash -c script it cannot check (note 1903)", "Bash", bash("for c in a b; do bash -c \"$c\"; rm -f $d/ran; done"), "not inside a bash -c script"),
+        ("the cross-session messaging safeguards", "SendMessage", serde_json::json!({"to": "o", "message": "m"}), "write a note on its task"),
+        ("a read outside the working directories", "Bash", bash("cat /etc/hosts"), "another way that needs no prompt"),
+        ("any prompt of a mode that asks", "Write", serde_json::json!({"file_path": "/tmp/x", "content": "x"}), "another way that needs no prompt"),
+    ];
+    for (kind, tool, input, instead) in kinds {
+        let asked = std::time::Instant::now();
+        let said = session.hook("PermissionRequest", serde_json::json!({"tool_name": tool, "tool_input": input}));
+        let took = asked.elapsed();
+        assert!(took < std::time::Duration::from_secs(1), "{kind}: answered in {took:?}");
+        let answer: serde_json::Value = serde_json::from_str(&said).unwrap_or_else(|e| panic!("{kind}: {e}: {said}"));
+        let decision = &answer["hookSpecificOutput"]["decision"];
+        assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PermissionRequest", "{kind}: {said}");
+        assert_eq!(decision["behavior"], "deny", "{kind}: {said}");
+        let message = decision["message"].as_str().unwrap_or_default();
+        assert!(message.starts_with("No one answers this session's prompts"), "{kind}: {message}");
+        assert!(message.contains(instead), "{kind}: {message}");
+        assert!(message.contains("write it in a handoff on your task"), "{kind}: {message}");
+    }
+    assert!(agents.logged("its permission prompt denied at once: Bash: ekko --json --projects"));
+    // The orchestrator, and any session ekko agents did not start: Claude
+    // Code asks its user, as it would without ekko.
+    let orchestrator = agents.orchestrator();
+    let said = orchestrator.hook("PermissionRequest", serde_json::json!({"tool_name": "Bash", "tool_input": bash("rm -rf \"$TMP\"/*")}));
+    assert_eq!(said, "", "a session ekko agents did not start");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// The orchestrator's wait on a born session's task ends when that session
 /// starts to wait on the user (task 1715, answer 1709): its wake hook says
 /// in which window and for what, as the born hook marked the task. Waited
@@ -2945,14 +3067,14 @@ fn an_orchestrator_waiting_on_a_born_session_s_task_is_woken_when_it_waits_on_th
     assert!(
         told.starts_with(
             "1 (Write hello) is held by a session that waits on the user, in the window named \"1 \u{b7} haiku\": \
-             Claude needs your permission -- Bash: date > stamp.txt. Tell the user, then wait on it again. This session waited on it (note "
+             Claude needs your permission -- Bash: date > stamp.txt. Read its handoff on the task, if it wrote one, and bring it to the user -- with your ask, for what only they can settle -- then answer the session with a note on the task, which reaches it, and wait on it again. This session waited on it (note "
         ),
         "{told}"
     );
     let again: serde_json::Value = serde_json::from_str(&orchestrator.tools(&[wait])[0]).unwrap();
     let asked = again["asked"].as_str().unwrap_or_else(|| panic!("{again}"));
     assert!(asked.starts_with("1 is held by a session that waits on the user already, since "), "{asked}");
-    assert!(asked.contains(", in the window named \"1 \u{b7} haiku\": Claude needs your permission -- Bash: date > stamp.txt. Tell the user."), "{asked}");
+    assert!(asked.contains(", in the window named \"1 \u{b7} haiku\": Claude needs your permission -- Bash: date > stamp.txt. Read its handoff on the task, if it wrote one, and bring it to the user; answer the session with a note on the task."), "{asked}");
     orchestrator.ekko(&["--wake", "--hook"], &changed);
     assert_eq!(orchestrator.said(), "", "the wait made again ended on the mark it was told of");
 
@@ -2967,6 +3089,53 @@ fn an_orchestrator_waiting_on_a_born_session_s_task_is_woken_when_it_waits_on_th
     orchestrator.ekko(&["--wake", "--hook"], &changed);
     let told = orchestrator.said();
     assert!(told.starts_with("1 (Write hello) is held by a session that waits on the user, in the window named \"1 \u{b7} haiku\": "), "{told}");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A born session whose turn ends on an API error (task 1798): Claude Code
+/// fires StopFailure instead of Stop, with the error and its text. Its task
+/// is marked waiting on the user with them, its window says so, and the
+/// orchestrator's wait on the task ends, naming the error; the user's prompt
+/// that sets it going again clears the mark. Its task done, the same event
+/// closes it as Stop does.
+#[test]
+fn a_born_session_whose_turn_ends_on_an_api_error_waits_on_the_user_and_wakes_its_orchestrator() {
+    let agents = Agents::new();
+    for text in ["Write hello", "Write the docs"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    agents.name_window("1 \u{b7} opus");
+    let session = agents.session(&agents.uid(1));
+    session.ekko(&["--begin", "1"], "");
+    let orchestrator = agents.orchestrator();
+    let wait = ("wait", serde_json::json!({"item": 1, "until": "done", "text": "review hello"}));
+    let first: serde_json::Value = serde_json::from_str(&orchestrator.tools(std::slice::from_ref(&wait))[0]).unwrap();
+    assert!(first["ok"] == true, "{first}");
+    let changed = serde_json::json!({"hook_event_name": "FileChanged", "session_id": "o-1", "file_path": agents.home.join("app/.ekko/storage/storage.json")}).to_string();
+
+    let failed = serde_json::json!({"error": "server_error", "error_details": "Connection lost", "last_assistant_message": "API Error: Connection lost mid-response"});
+    assert_eq!(session.hook("StopFailure", failed), "", "Claude Code ignores this event's output");
+    let what = "its turn ended on an error -- API Error: Connection lost mid-response (server_error)";
+    let read = agents.json(&["--context", "1", "--json"]);
+    assert_eq!(read["context"]["item"]["held"]["waitsOnUser"]["what"], what, "{read}");
+    assert_eq!(agents.window(), "1 \u{b7} opus \u{b7} waiting on you");
+    assert!(agents.logged(&format!("waits on you (api_error): {what}; marked on task 1;")));
+    orchestrator.ekko(&["--wake", "--hook"], &changed);
+    let told = orchestrator.said();
+    assert!(told.starts_with(&format!("1 (Write hello) is held by a session that waits on the user, in the window named \"1 \u{b7} opus\": {what}. ")), "{told}");
+
+    // The user types "go on" into its window.
+    session.hook("UserPromptSubmit", serde_json::json!({"prompt": "go on"}));
+    let read = agents.json(&["--context", "1", "--json"]);
+    assert!(read["context"]["item"]["held"].get("waitsOnUser").is_none(), "{read}");
+    assert_eq!(agents.window(), "1 \u{b7} opus");
+
+    // Its task done, an API error at the end of its turn closes it.
+    let uid = agents.uid(2);
+    agents.prompt(&uid, "s-2");
+    assert!(agents.ekko(&["--check", "2"]).status.success());
+    let (mut stand_in, _) = agents.born(Some(&uid), "s-2", "StopFailure", serde_json::json!({"error": "rate_limit", "last_assistant_message": "API Error: Rate limit reached"}));
+    assert!(ended_by_sigterm(&mut stand_in), "a finished session's turn ended on an API error, and it stayed");
     fs::remove_dir_all(&agents.home).ok();
 }
 
@@ -4116,7 +4285,7 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
         for kind in [PUSH, RELEASE, SESSION, STOP, KILL, SIGNAL, RUNS, KEYS, VERB] {
             assert_eq!(reason.matches(kind).count(), usize::from(kinds.contains(&kind)), "{command}: {reason}");
         }
-        assert!(reason.contains("ask them through ekko's ask with allow set to \""), "{command}: {reason}");
+        assert!(reason.contains("The orchestrator asks the user through ekko's ask with allow set to \""), "{command}: {reason}");
         assert_eq!(hook(command, None), "", "the orchestrator's {command}");
     }
     for command in let_through {

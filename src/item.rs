@@ -854,6 +854,12 @@ pub struct Allowance {
     /// through too, and any other stays refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used: Option<Used>,
+    /// The session whose call it lets through -- pid, start, boot -- when
+    /// another asked for it: a session ekko agents started, which has no
+    /// ask, refused, and a session that is not one, its orchestrator, asked
+    /// the user (task 1868). Absent: the session that asked.
+    #[serde(rename = "forSession", default, skip_serializing_if = "Option::is_none")]
+    pub for_session: Option<(u32, u64, String)>,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
