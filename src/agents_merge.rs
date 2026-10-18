@@ -118,6 +118,10 @@ pub struct HandedBack {
 enum Back {
     Uncommitted(String),
     Conflict(Vec<String>),
+    /// Conflict markers a commit of the rebased branch holds, as `commit
+    /// subject: file:line` lines: a later commit may have removed them, so
+    /// the tested tip does not show them.
+    Markers(Vec<String>),
     Failed { command: String, code: String, seconds: f64, tail: String, log: PathBuf },
 }
 
@@ -223,6 +227,17 @@ pub fn merge(ekko: &Ekko, location: &crate::directory::Location, home: &Path, ra
             return Err(refused(format!("{branch} could not be rebased onto {into}, for a reason other than a conflict, so {into} and {branch} are as they were: {why}")));
         }
         return hand_back(ekko, &ids, &done, &branch, &into, &worktree, test, Back::Conflict(conflicts));
+    }
+    match markers(&worktree, &base) {
+        Ok(found) if found.is_empty() => {}
+        Ok(found) => {
+            back_on_branch(true).map_err(refused)?;
+            return hand_back(ekko, &ids, &done, &branch, &into, &worktree, test, Back::Markers(found));
+        }
+        Err(why) => {
+            back_on_branch(true).map_err(refused)?;
+            return Err(refused(format!("{into} was not moved, and {branch} is as its session left it: {why}")));
+        }
     }
     let tested = match test {
         Test::Command(command) => {
@@ -509,6 +524,15 @@ fn hand_back(ekko: &Ekko, ids: &[u32], done: &[u32], branch: &str, into: &str, w
             },
             None,
         ),
+        Back::Markers(found) => (
+            format!("rebased onto {into}, {branch} holds leftover conflict markers in {}", if found.len() == 1 { "a commit".to_string() } else { format!("{} places", found.len()) }),
+            format!(
+                "`git log --check` over the commits of {branch} that {into} lacks found, as commit and file:line:\n```\n{}\n```\nThe rebase was undone: {branch} is where its session left it. A later commit that removes them does not help: each commit goes into {into} as it is.",
+                found.join("\n")
+            ),
+            format!("in {at}, remove the markers from the commits that hold them (git rebase -i {into}, or fixup commits), and set the task done again"),
+            None,
+        ),
         Back::Failed { command, code, seconds: took, tail, log } => (
             format!("rebased onto {into}, {branch} failed `{command}` ({code}, after {})", seconds(took)),
             format!("The end of its output:\n```\n{tail}\n```\nThe whole of it: {}. The rebase was undone: {branch} is where its session left it.", log.display()),
@@ -531,6 +555,35 @@ fn hand_back(ekko: &Ekko, ids: &[u32], done: &[u32], branch: &str, into: &str, w
         }
     };
     Ok(Outcome::HandedBack(HandedBack { tasks: ids.to_vec(), branch: branch.to_string(), into: into.to_string(), why, notes, reopened, not_reopened, log }))
+}
+
+/// The leftover conflict markers in the commits of the rebased branch,
+/// checked out in `worktree`, that `base` does not have, as `abc1234
+/// subject: file:12`. Whitespace errors, which `git log --check` also
+/// prints, are not counted: they build.
+fn markers(worktree: &Path, base: &str) -> Result<Vec<String>, String> {
+    let range = format!("{base}..HEAD");
+    // Exits 2 for any problem it finds, so not through `agents::git`.
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["log", "--check", "--format=commit %h %s", &range])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| format!("git could not be run: {error}"))?;
+    if !output.status.success() && output.status.code() != Some(2) {
+        return Err(format!("git log --check {range} failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let mut found = Vec::new();
+    let mut commit = String::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(header) = line.strip_prefix("commit ") {
+            commit = header.to_string();
+        } else if let Some(place) = line.strip_suffix(": leftover conflict marker") {
+            found.push(format!("{commit}: {place}"));
+        }
+    }
+    Ok(found)
 }
 
 /// A commit, as git abbreviates one in a line.

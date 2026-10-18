@@ -3268,6 +3268,63 @@ fn ekko_agents_merge_takes_a_tested_branch_in_and_hands_a_failing_one_back() {
     fs::remove_dir_all(&agents.home).ok();
 }
 
+/// A commit that holds conflict markers, with the next commit removing them,
+/// passes the test at the branch's tip, yet goes into main as a commit that
+/// does not build (task 2017): merge checks each commit, and hands the branch
+/// back naming it. Whitespace errors alone, and a clean branch, go in.
+#[test]
+fn ekko_agents_merge_hands_back_a_commit_that_holds_conflict_markers() {
+    let agents = Agents::new();
+    let app = fs::canonicalize(&agents.app).unwrap();
+    for text in ["Marked, then cleaned", "Clean", "Whitespace only"] {
+        assert!(agents.ekko(&["--task", text]).status.success());
+    }
+    let made = |n: u32| {
+        let branch = format!("task-{n}");
+        let worktree = agents.worktree(&branch);
+        agents.git(&app, &["worktree", "add", "-q", "-b", &branch, worktree.to_str().unwrap(), "HEAD"]);
+        worktree
+    };
+    let commit = |worktree: &std::path::Path, file: &str, text: &str, message: &str| {
+        fs::write(worktree.join(file), text).unwrap();
+        agents.git(worktree, &["add", file]);
+        agents.git(worktree, &["commit", "-q", "-m", message]);
+    };
+    let worktrees = [made(1), made(2), made(3)];
+    commit(&worktrees[0], "m.txt", "a\n<<<<<<< ours\nb\n=======\nc\n>>>>>>> theirs\n", "Marked");
+    commit(&worktrees[0], "m.txt", "a\n", "Cleaned");
+    commit(&worktrees[1], "n.txt", "n\n", "Clean");
+    commit(&worktrees[2], "w.txt", "trailing \n", "Whitespace");
+    assert!(agents.ekko(&["agents", "test", "--none"]).status.success());
+    assert!(agents.ekko(&["--check", "1", "2", "3"]).status.success());
+    let main = || agents.git(&app, &["rev-parse", "main"]);
+    let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
+    let json = |output: process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
+    };
+
+    // Handed back, naming the commit and the lines; nothing moved.
+    let (before, one) = (main(), agents.git(&app, &["rev-parse", "task-1"]));
+    let marked = json(agents.merging(&["--json", "agents", "merge", "1"]));
+    assert_eq!((marked["ok"].as_bool(), marked["code"].as_str(), marked["reopened"].clone()), (Some(false), Some("NOT_MERGED"), serde_json::json!([1])), "{marked}");
+    assert_eq!(marked["why"], "rebased onto main, task-1 holds leftover conflict markers in 3 places", "{marked}");
+    assert_eq!((main(), agents.git(&app, &["rev-parse", "task-1"])), (before.clone(), one));
+    assert_eq!(agents.git(&worktrees[0], &["symbolic-ref", "--short", "HEAD"]), "task-1");
+    let said = board()[marked["notes"][0].as_u64().unwrap().to_string()]["description"].as_str().unwrap().to_string();
+    for line in ["m.txt:2", "m.txt:4", "m.txt:6"] {
+        assert!(said.contains(&format!(" Marked: {line}")), "{said}");
+    }
+    assert!(!said.contains("Cleaned"), "{said}");
+
+    // Whitespace errors alone and a clean branch go in.
+    let clean = json(agents.merging(&["--json", "agents", "merge", "2"]));
+    assert_eq!(clean["ok"].as_bool(), Some(true), "{clean}");
+    let spaced = json(agents.merging(&["--json", "agents", "merge", "3"]));
+    assert_eq!(spaced["ok"].as_bool(), Some(true), "{spaced}");
+    assert_eq!(agents.git(&app, &["show", "main:w.txt"]), "trailing");
+    fs::remove_dir_all(&agents.home).ok();
+}
+
 /// A task's session starts, and its branch goes in, only once the branches
 /// of its done blockers are in main (task 1728): the session starts from
 /// main, and main takes a blocker's work first. Each refusal changes
