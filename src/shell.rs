@@ -955,13 +955,80 @@ fn delimiter_at(chars: &[char], mut at: usize) -> Option<(Vec<char>, bool, usize
 
 /// Where the `(...)` whose inside starts at `from` ends, just past its `)`,
 /// read as bash reads a command: a paren in quotes, `$'...'`, backticks, a
-/// comment or after a backslash is text, and a `$(...)` in double quotes
-/// nests (task 1953). The text's end when it never closes, as before;
+/// comment or after a backslash is text, a `$(...)` in double quotes nests
+/// (task 1953), and a `case` pattern's `)` closes the pattern, not the
+/// paren (task 1982). The text's end when it never closes, as before;
 /// `None` when a quote is left open, so `blanked` reads it as ctx does.
 fn closing_paren(chars: &[char], from: usize) -> Option<usize> {
-    let (mut depth, mut i) = (0usize, from);
+    // What encloses `i`: parens -- a pattern's own, as in `@(a|b)`, holds
+    // no commands -- and the `case` commands open in them.
+    let mut stack: Vec<Enclosing> = Vec::new();
+    // Whether a word at `i` is a command's first, where bash reads
+    // reserved words such as `case` and `esac`.
+    let (mut first, mut i) = (true, from);
     while i < chars.len() {
-        match chars[i] {
+        let c = chars[i];
+        let top = stack.last().copied();
+        let commands = matches!(top, None | Some(Enclosing::Paren { commands: true } | Enclosing::Case(Case::Body)));
+        if c == ' ' || c == '\t' || c == '\n' {
+            if top == Some(Enclosing::Case(Case::SubjectWord)) {
+                *stack.last_mut()? = Enclosing::Case(Case::In);
+            }
+            first |= c == '\n' && commands;
+            i += 1;
+            continue;
+        }
+        let reserved_spot = first && commands || matches!(top, Some(Enclosing::Case(Case::In | Case::Pattern)));
+        if reserved_spot && (c.is_ascii_alphabetic() || c == '{' || c == '}' || c == '!') {
+            let end = chars[i..].iter().position(|c| " \t\n;&|()<>'\"`$\\".contains(*c)).map_or(chars.len(), |at| i + at);
+            let delimited = chars.get(end).is_none_or(|c| " \t\n;&|()<>".contains(*c));
+            let word: String = chars[i..end].iter().collect();
+            let word = if delimited { word.as_str() } else { "" };
+            match top {
+                Some(Enclosing::Case(Case::In)) => {
+                    if word == "in" {
+                        *stack.last_mut()? = Enclosing::Case(Case::Pattern);
+                    }
+                }
+                Some(Enclosing::Case(Case::Pattern)) if word == "esac" => {
+                    stack.pop();
+                    first = false;
+                }
+                Some(Enclosing::Case(Case::Pattern)) => {
+                    // A pattern's first word: read it as the pattern.
+                    *stack.last_mut()? = Enclosing::Case(Case::InPattern);
+                    continue;
+                }
+                _ => {
+                    first = matches!(word, "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "{" | "!" | "time");
+                    if word == "case" {
+                        stack.push(Enclosing::Case(Case::Subject));
+                    } else if word == "esac" && top == Some(Enclosing::Case(Case::Body)) {
+                        stack.pop();
+                    }
+                }
+            }
+            i = end;
+            continue;
+        }
+        match top {
+            Some(Enclosing::Case(Case::Subject)) => *stack.last_mut()? = Enclosing::Case(Case::SubjectWord),
+            Some(Enclosing::Case(Case::Pattern)) => {
+                *stack.last_mut()? = Enclosing::Case(Case::InPattern);
+                // A pattern may open with a `(` of its own.
+                if c == '(' {
+                    i += 1;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        match c {
+            // A line continuation leaves a command's first word to come.
+            '\\' if chars.get(i + 1) == Some(&'\n') => {
+                i += 2;
+                continue;
+            }
             '\\' => i += 1,
             '\'' => i = find(chars, '\'', i + 1)?,
             '$' if chars.get(i + 1) == Some(&'\'') => i = escaped_end(chars, '\'', i + 2)?,
@@ -980,15 +1047,81 @@ fn closing_paren(chars: &[char], from: usize) -> Option<usize> {
             }
             '#' if i == from || " \t\n;&|(".contains(chars[i - 1]) => {
                 i = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |at| i + at);
+                continue;
             }
-            '(' => depth += 1,
-            ')' if depth == 0 => return Some(i + 1),
-            ')' => depth -= 1,
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                stack.push(Enclosing::Paren { commands: true });
+                first = true;
+                i += 2;
+                continue;
+            }
+            '(' => {
+                let commands = top != Some(Enclosing::Case(Case::InPattern)) && top != Some(Enclosing::Paren { commands: false });
+                stack.push(Enclosing::Paren { commands });
+                first = true;
+                i += 1;
+                continue;
+            }
+            ')' => match top {
+                None => return Some(i + 1),
+                Some(Enclosing::Paren { .. }) => {
+                    stack.pop();
+                }
+                Some(Enclosing::Case(Case::InPattern)) => {
+                    *stack.last_mut()? = Enclosing::Case(Case::Body);
+                    first = true;
+                    i += 1;
+                    continue;
+                }
+                // A `)` a `case` leaves open: the case ends, unfinished, and
+                // the `)` closes what holds it.
+                Some(Enclosing::Case(_)) => {
+                    stack.pop();
+                    continue;
+                }
+            },
+            ';' if top == Some(Enclosing::Case(Case::Body)) && matches!(chars.get(i + 1), Some(';' | '&')) => {
+                // `;;`, `;&` or `;;&`: the next pattern, or `esac`.
+                *stack.last_mut()? = Enclosing::Case(Case::Pattern);
+                i += if chars.get(i + 1..i + 3) == Some(&[';', '&']) { 3 } else { 2 };
+                continue;
+            }
+            ';' | '&' | '|' => {
+                first = top != Some(Enclosing::Case(Case::InPattern));
+                i += 1;
+                continue;
+            }
             _ => {}
         }
+        first = false;
         i += 1;
     }
     Some(chars.len())
+}
+
+/// What a `(...)` that `closing_paren` reads holds open at a point.
+#[derive(Clone, Copy, PartialEq)]
+enum Enclosing {
+    /// A paren; a pattern's, as in `@(a|b)`, holds no commands.
+    Paren { commands: bool },
+    Case(Case),
+}
+
+/// Where in a `case` command `closing_paren` reads.
+#[derive(Clone, Copy, PartialEq)]
+enum Case {
+    /// Before the word it matches.
+    Subject,
+    /// In that word.
+    SubjectWord,
+    /// Before `in`.
+    In,
+    /// Before a pattern, or `esac`.
+    Pattern,
+    /// In a pattern, before its `)`.
+    InPattern,
+    /// In the commands after a pattern's `)`.
+    Body,
 }
 
 /// The `closing` character that ends the quote whose inside starts at `i`,
@@ -1719,6 +1852,36 @@ mod tests {
         // The `)` that ends it ends it: what follows is the outer text again.
         assert!(!runs("echo \"$(echo ')') ; kill 1\""));
         assert!(!runs("cat <<EOF > f\n$(echo ')') ; kill 1\nEOF"));
+    }
+
+    /// A `case` pattern's `)` inside a `$(...)` closes the pattern, not the
+    /// substitution: what follows the `esac` still runs -- in a
+    /// here-document's body, in double quotes and bare. The answers are
+    /// bash 5.3's, measured with a recording `zap` on PATH: every one ran
+    /// (task 1982).
+    #[test]
+    fn a_case_pattern_does_not_end_a_substitution() {
+        let runs = |command: &str| calls_read(command, Reading::GUARD).iter().any(|call| call.name == "kill");
+        let hidden = [
+            "$(case w in a) echo;; esac ; kill 1)",
+            "$(case w in (a) echo;; esac ; kill 1)",
+            "$(case w in a|b) echo;; esac ; kill 1)",
+            "$(case w in a) case v in b) echo;; esac;; esac ; kill 1)",
+            "$(case w in a) echo esac;; b) echo;; esac ; kill 1)",
+            "$(case w in a) echo;& b) echo;;& esac ; kill 1)",
+            "$(case w in\n a) echo\n esac\n case v in b) echo;; esac ; kill 1)",
+        ];
+        for substitution in hidden {
+            for command in [format!("cat <<EOF > f\n{substitution}\nEOF"), format!("echo \"{substitution}\""), format!("echo {substitution}")] {
+                assert!(runs(&command), "{command}");
+            }
+            assert!(!runs(&format!("cat <<'EOF' > f\n{substitution}\nEOF")), "{substitution}");
+            // A `)` after the case ends it: what follows is the outer text.
+            let closed = substitution.replace(" ; kill 1)", ") ; kill 1");
+            for command in [format!("cat <<EOF > f\n{closed}\nEOF"), format!("echo \"{closed}\"")] {
+                assert!(!runs(&command), "{command}");
+            }
+        }
     }
 
     #[test]
