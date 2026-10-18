@@ -159,10 +159,10 @@ pub enum Agents {
         #[arg(long, short = 'j')]
         json: bool,
     },
-    /// Put every session it opened side by side in one window, the wall.
+    /// Put every session it opened for this project side by side in one window, the wall.
     #[command(disable_help_flag = true, disable_version_flag = true)]
     Wall,
-    /// Put each session on the wall back in a window of its own.
+    /// Put each of this project's sessions on the wall back in a window of its own.
     #[command(disable_help_flag = true, disable_version_flag = true)]
     Unwall,
 }

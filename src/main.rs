@@ -608,7 +608,13 @@ fn run_agents(args: &[String], json_first: bool) -> ExitCode {
         // The wall, and back (task 1677).
         command @ (cli::Agents::Wall | cli::Agents::Unwall) => {
             let walling = matches!(command, cli::Agents::Wall);
-            let moved = if walling { agents::wall() } else { agents::unwall() };
+            let project_env = std::env::var("EKKO_PROJECT").ok();
+            let ekko_dir_env = std::env::var("EKKO_DIR").ok();
+            let project = match directory::locate(&home_dir, &cwd, None, ekko_dir_env.as_deref(), project_env.as_deref()) {
+                Ok(location) => location.project.map(|project| project.name),
+                Err(err) => return finish_with_error(&EkkoError::from(err), json_first, &home_dir),
+            };
+            let moved = if walling { agents::wall(project.as_deref()) } else { agents::unwall(project.as_deref()) };
             return match moved {
                 Ok(moved) => {
                     let sessions: Vec<String> = moved.panes.iter().map(|(pane, tasks)| format!("{} ({pane})", tasks.iter().map(u32::to_string).collect::<Vec<_>>().join(","))).collect();

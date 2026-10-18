@@ -3990,3 +3990,55 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     drop(orchestrator);
     fs::remove_dir_all(&agents.home).ok();
 }
+
+/// One session `ekko` holds every project's windows, and the wall moves only
+/// this project's panes: `wall` joins those of this project, and those that
+/// name none, and leaves another's where they are, and `unwall` breaks out
+/// only the same ones (task 1806).
+#[test]
+fn the_wall_and_unwall_move_only_this_projects_panes() {
+    let agents = Agents::new();
+    for task in ["Write hello", "Write the docs", "Write the tests"] {
+        assert!(agents.ekko(&["--task", task]).status.success());
+    }
+    let mux = agents.home.join("mux-state");
+    fs::create_dir_all(&mux).unwrap();
+    fs::write(mux.join("session"), "").unwrap();
+    let lay = |window: &str| {
+        let lines = [
+            format!("%1\t0\t{window}\t1 \u{b7} haiku\t1\tWrite hello\thaiku\t\tworking\t1\t\tapp"),
+            format!("%2\t0\t{window}\t1 \u{b7} haiku\t1\tOther's task\thaiku\t\tworking\t1\t\tother"),
+            format!("%3\t0\t{window}\t3 \u{b7} haiku\t3\tWrite the tests\thaiku\t\tidle\t1\t\t"),
+        ];
+        fs::write(mux.join("born-panes"), lines.join("\n") + "\n").unwrap();
+    };
+    let commands = |from: usize| -> Vec<Vec<String>> {
+        agents.calls().into_iter().skip(from).flat_map(|call| call.split(|arg| arg == ";").map(<[String]>::to_vec).collect::<Vec<_>>()).collect()
+    };
+    let moved = |commands: &[Vec<String>], verb: &str| -> Vec<String> {
+        commands.iter().filter(|command| command[0] == verb).map(|command| command[3].clone()).collect()
+    };
+
+    lay("@1");
+    let said = String::from_utf8(agents.ekko(&["agents", "wall"]).stdout).unwrap();
+    assert_eq!(said.trim(), "On the wall, window @9 of session ekko: 1 (%1), 3 (%3)");
+    assert_eq!(moved(&commands(0), "join-pane"), ["%1", "%3"]);
+
+    // Only another project's panes: this project has none to move.
+    fs::write(mux.join("born-panes"), "%2\t0\t@2\t1 \u{b7} haiku\t1\tOther's task\thaiku\t\tworking\t1\t\tother\n").unwrap();
+    let before = agents.calls().len();
+    let output = agents.ekko(&["agents", "wall"]);
+    let why = String::from_utf8_lossy(&output.stderr).to_string() + &String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success() && why.contains("for the project app"), "{why}");
+    assert!(moved(&commands(before), "join-pane").is_empty());
+
+    // On the wall: only this project's come back out.
+    fs::write(mux.join("wall"), "").unwrap();
+    lay("@9");
+    let before = agents.calls().len();
+    let said = String::from_utf8(agents.ekko(&["agents", "unwall"]).stdout).unwrap();
+    assert_eq!(said.trim(), "Back in windows of their own: 1 (%1), 3 (%3)");
+    let broken = moved(&commands(before), "break-pane");
+    assert_eq!(broken, ["%1", "%3"]);
+    fs::remove_dir_all(&agents.home).ok();
+}

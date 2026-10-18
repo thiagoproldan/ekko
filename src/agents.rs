@@ -886,16 +886,27 @@ pub struct Moved {
     pub wall: Option<String>,
 }
 
-/// `ekko agents wall` (task 1677): every born session that runs, side by
-/// side in one window of the session ekko, tiled, each pane titled on its
-/// border; the wall window is the one WALL_OPTION marks, made now if there
-/// is none. Each session goes on running in its pane, and typing there
-/// still talks to it.
-pub fn wall() -> Result<Moved, String> {
+/// Whether a pane is `project`'s to move: one that names another project is
+/// not, one that names none stays any project's (task 1806).
+fn is_of(pane: &BornPane, project: Option<&str>) -> bool {
+    pane.project.is_none() || pane.project.as_deref() == project
+}
+
+/// `ekko agents wall` (task 1677): every born session of `project` that runs,
+/// side by side in one window of the session ekko, tiled, each pane titled on
+/// its border; the wall window is the one WALL_OPTION marks, made now if
+/// there is none. Each session goes on running in its pane, and typing there
+/// still talks to it. One session holds every project's windows, and another
+/// project's panes stay where they are (task 1806).
+pub fn wall(project: Option<&str>) -> Result<Moved, String> {
     let mux = Mux::here();
-    let panes: Vec<BornPane> = mux.born_panes()?.into_iter().filter(|pane| !pane.dead).collect();
+    let every: Vec<BornPane> = mux.born_panes()?.into_iter().filter(|pane| !pane.dead).collect();
+    let panes: Vec<&BornPane> = every.iter().filter(|pane| is_of(pane, project)).collect();
     if panes.is_empty() {
-        return Err(format!("no session ekko agents started runs in the session {SESSION}"));
+        return Err(match project {
+            Some(project) => format!("no session ekko agents started for the project {project} runs in the session {SESSION}"),
+            None => format!("no session ekko agents started runs in the session {SESSION}"),
+        });
     }
     let (wall, placeholder) = match mux.wall_window()? {
         Some(wall) => (wall, None),
@@ -911,7 +922,7 @@ pub fn wall() -> Result<Moved, String> {
     // Each joins after the last pane on the wall, where join-pane puts it
     // in the window's list of panes, which the tiled layout follows: the
     // wall keeps the sessions in the order of their windows.
-    let mut last = placeholder.clone().or_else(|| panes.iter().rfind(|pane| pane.window_id == wall).map(|pane| pane.pane.clone())).unwrap_or_else(|| wall.clone());
+    let mut last = placeholder.clone().or_else(|| every.iter().rfind(|pane| pane.window_id == wall).map(|pane| pane.pane.clone())).unwrap_or_else(|| wall.clone());
     let mut moved = Vec::new();
     for pane in panes.iter().filter(|pane| pane.window_id != wall) {
         // Tiled after each, so that the next has room to split.
@@ -941,16 +952,17 @@ pub fn wall() -> Result<Moved, String> {
     Ok(Moved { panes: moved, wall: Some(wall) })
 }
 
-/// `ekko agents unwall`: each born session on the wall back in a window of
-/// its own, named as `start` named it, its status line drawn as `start`
-/// draws it. A pane on the wall that no session `start` opened stays there.
-pub fn unwall() -> Result<Moved, String> {
+/// `ekko agents unwall`: each born session of `project` on the wall back in a
+/// window of its own, named as `start` named it, its status line drawn as
+/// `start` draws it. A pane on the wall that no session `start` opened, or
+/// that is another project's, stays there (task 1806).
+pub fn unwall(project: Option<&str>) -> Result<Moved, String> {
     let mux = Mux::here();
     let Some(wall) = mux.wall_window()? else {
         return Err(format!("there is no wall in the session {SESSION}"));
     };
     let mut moved = Vec::new();
-    for pane in mux.born_panes()?.into_iter().filter(|pane| pane.window_id == wall) {
+    for pane in mux.born_panes()?.into_iter().filter(|pane| pane.window_id == wall && is_of(pane, project)) {
         let name = format!("{} \u{b7} {}", joined(&pane.tasks, ","), pane.model);
         let mut commands = vec![["break-pane", "-d", "-s", &pane.pane, "-n", &name].map(str::to_string).to_vec()];
         // break-pane gives the last pane on the wall the wall's own window,
