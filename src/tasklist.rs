@@ -18,7 +18,7 @@
 //! at the next write. The user ruled the native tools out; the board is the
 //! one list.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,8 +27,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent;
 use crate::ekko::Ekko;
+use crate::holder::Actor;
 use crate::item::State;
-use crate::storage::lock_path;
+use crate::storage::{lock_path, ItemMap};
 
 /// Ready tasks the list shows after the work in progress, best first.
 const NEXT_SHOWN: usize = 5;
@@ -38,6 +39,9 @@ const DONE_SHOWN: usize = 10;
 /// spinner line does.
 const SUBJECT_CLIP: usize = 80;
 const ACTIVE_CLIP: usize = 60;
+/// How the note `ekko agents start` writes on each task it hands to a session
+/// begins; its author is the session that ran the command.
+const START_NOTE: &str = "Started by ekko agents start";
 /// What ekko keeps beside the list: the board revision the session began at.
 /// Claude Code reads no file in the list whose name starts with a dot.
 const SESSION_FILE: &str = ".ekko.json";
@@ -76,37 +80,47 @@ pub fn tasks(ekko: &Ekko, since: u64) -> Result<Vec<Task>, Box<dyn Error>> {
     // Done since the session began, and its own work: what another session
     // finished meanwhile is that session's to check off.
     let me = ekko.actor.as_ref();
+    // The sessions this one started, by their task (task 1928): their work is
+    // this session's to follow, as a subagent's is in the agent panel.
+    let started = started(&all, me);
     let mut done: Vec<_> = all
         .values()
         .filter(|item| item.stashed.is_none() && item.trashed.is_none())
         .filter(|item| State::of(item) == Some(State::Done) && item.rev.unwrap_or(0) > since)
-        .filter(|item| item.done_by.as_ref().is_some_and(|holder| me.is_some_and(|me| me.is(holder))))
+        .filter(|item| {
+            started.contains_key(&item.id) || item.done_by.as_ref().is_some_and(|holder| me.is_some_and(|me| me.is(holder)))
+        })
         .collect();
     done.sort_by_key(|item| (item.updated_at.unwrap_or(item.timestamp), item.id));
     let done = done.split_off(done.len().saturating_sub(DONE_SHOWN));
 
-    // Work another running session holds is that session's, not this one's;
-    // and only this session's own is in progress on its list, as its
-    // spinner's line. Work in progress that no running session holds -- its
+    // Work another running session holds is that session's, not this one's,
+    // unless this one started that session; and only this session's own and
+    // its started sessions' is in progress on its list, as its spinner's
+    // line. Work in progress that no running session holds -- its
     // session ended, or none ever claimed it -- comes last, marked
     // abandoned: free to take up, and nobody's spinner. Seen on 2026-09-22,
     // when one session's spinner showed a task another had held before a
     // restart.
     let (progress, ready): (Vec<_>, Vec<_>) = agent::next(ekko, None)?
         .into_iter()
-        .filter(|entry| !entry.held.as_ref().is_some_and(agent::Held::elsewhere))
+        .filter(|entry| started.contains_key(&entry.id) || !entry.held.as_ref().is_some_and(agent::Held::elsewhere))
         .partition(|entry| entry.state == Some(State::Progress));
-    let (doing, abandoned): (Vec<_>, Vec<_>) =
-        progress.into_iter().partition(|entry| entry.held.as_ref().is_some_and(|held| held.yours));
+    let (doing, abandoned): (Vec<_>, Vec<_>) = progress
+        .into_iter()
+        .partition(|entry| started.contains_key(&entry.id) || entry.held.as_ref().is_some_and(|held| held.yours));
 
     // A step of a sequence says which, done ones too: "(2/3) ". The steps
     // still to come after one in progress follow it, blocked as they are,
     // so the list shows the way ahead and not only what is ready.
     let sequences = agent::sequences(ekko)?;
+    // A session this one started is marked with its window: "(1800 · opus) ".
     let step = |id: u32| {
         let sequence = sequences.get(&id);
         let at = sequence.and_then(|sequence| sequence.iter().position(|step| *step == id));
-        sequence.zip(at).map(|(sequence, at)| format!("({}/{}) ", at + 1, sequence.len())).unwrap_or_default()
+        let step = sequence.zip(at).map(|(sequence, at)| format!("({}/{}) ", at + 1, sequence.len())).unwrap_or_default();
+        let window = started.get(&id).and_then(Option::as_deref).map(|window| format!("({window}) ")).unwrap_or_default();
+        format!("{step}{window}")
     };
     let mut rows: Vec<(u32, String, &str, &str)> =
         done.iter().map(|item| (item.id, step(item.id), item.description.as_str(), "completed")).collect();
@@ -124,6 +138,29 @@ pub fn tasks(ekko: &Ekko, since: u64) -> Result<Vec<Task>, Box<dyn Error>> {
     rows.extend(ready.iter().map(|entry| (entry.id, step(entry.id), entry.description.as_str(), "pending")));
     rows.extend(abandoned.iter().map(|entry| (entry.id, "(abandoned) ".to_string(), entry.description.as_str(), "pending")));
     Ok(rows.into_iter().enumerate().map(|(at, (id, mark, text, status))| task(at + 1, id, &mark, text, status)).collect())
+}
+
+/// The tasks of the sessions `me` started with `ekko agents start`, each with
+/// the window of the latest such session, if its note names one. Who started
+/// a session is the author of the start note on its task (task 1928).
+fn started(all: &ItemMap, me: Option<&Actor>) -> HashMap<u32, Option<String>> {
+    let Some(me) = me.filter(|me| !me.is_person()) else { return HashMap::new() };
+    let ids: HashMap<&str, u32> = all.values().filter_map(|item| Some((item.uid.as_deref()?, item.id))).collect();
+    let mut notes: Vec<_> = all
+        .values()
+        .filter(|item| !item.is_task && item.stashed.is_none() && item.trashed.is_none())
+        .filter(|item| item.description.starts_with(START_NOTE))
+        .filter(|item| item.created_by.as_ref().is_some_and(|author| me.is(author)))
+        .collect();
+    notes.sort_by_key(|item| item.id);
+    let mut started = HashMap::new();
+    for note in notes {
+        if let Some(&task) = note.attached_to.as_deref().and_then(|uid| ids.get(uid)) {
+            let window = note.description.split_once("in window \"").and_then(|(_, rest)| rest.split_once('"')).map(|(window, _)| window.to_string());
+            started.insert(task, window);
+        }
+    }
+    started
 }
 
 fn task(number: usize, id: u32, mark: &str, text: &str, status: &str) -> Task {
@@ -334,6 +371,51 @@ mod tests {
         let list = tasks(&as_(&me), 0).unwrap();
         let expected = [("in_progress", "3. mine"), ("pending", "2. (abandoned) left behind")];
         assert_eq!(drawn(&list), expected.map(|(s, t)| (s.to_string(), t.to_string())));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An orchestrator's list follows the sessions it started (task 1928):
+    /// their tasks are in progress on it, marked with the window, and
+    /// checked off once done by them; a session someone else started, or a
+    /// start note someone else wrote, adds nothing. Seen on 2026-10-18,
+    /// when born sessions held three tasks and the orchestrator's list
+    /// showed none in progress.
+    #[test]
+    fn the_sessions_it_started_are_on_its_list() {
+        let (me, born, gone) = crate::holder::test_sessions();
+        let dir = scratch("started");
+        let as_ = |actor: &crate::holder::Actor| Ekko::new(Storage::new(&dir.join("board")).unwrap()).acting_as(actor.clone());
+        for name in ["born, working", "born, merged", "not started by me", "claimed note"] {
+            as_(&me).create_task(&words(&[name])).unwrap();
+        }
+        let start = |by: &crate::holder::Actor, task: &str, window: &str| {
+            as_(by).create_note(&words(&[format!("Started by ekko agents start: a session on opus, in window \"{window}\" of session ekko, on branch b.").as_str()])).unwrap();
+            let note = as_(by).storage.get().unwrap().keys().max().copied().unwrap();
+            as_(by).set_attached_to(&words(&[format!("@{note}").as_str(), task])).unwrap();
+        };
+        start(&me, "1", "1 \u{b7} opus");
+        start(&me, "2", "2 \u{b7} opus");
+        start(&gone, "3", "3 \u{b7} opus");
+        start(&gone, "4", "4 \u{b7} opus");
+        let since = as_(&me).storage.get_counters().unwrap().revision;
+        as_(&born).set_state(&words(&["@1", "progress"]), false).unwrap();
+        as_(&born).set_state(&words(&["@2", "progress"]), false).unwrap();
+        as_(&born).set_state(&words(&["@2", "done"]), false).unwrap();
+        as_(&born).set_state(&words(&["@3", "progress"]), false).unwrap();
+
+        let list = tasks(&as_(&me), since).unwrap();
+        let expected = [
+            ("completed", "2. (2 \u{b7} opus) born, merged"),
+            ("in_progress", "1. (1 \u{b7} opus) born, working"),
+            ("pending", "4. claimed note"),
+        ];
+        assert_eq!(drawn(&list), expected.map(|(s, t)| (s.to_string(), t.to_string())));
+        assert_eq!(list[1].active_form, "1. (1 \u{b7} opus) born, working");
+
+        // The born session's own list is its own work, not the orchestrator's.
+        let own = drawn(&tasks(&as_(&born), since).unwrap());
+        assert!(own.iter().all(|(_, subject)| !subject.contains("opus")), "{own:?}");
 
         fs::remove_dir_all(&dir).ok();
     }
