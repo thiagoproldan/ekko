@@ -36,7 +36,7 @@ impl Env {
 }
 
 /// Git's options before its command that take a value of their own.
-const GIT_VALUED: &[&str] = &["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"];
+pub(crate) const GIT_VALUED: &[&str] = &["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"];
 
 /// The options of `git branch` that list, delete, move, copy or describe
 /// branches: with any of them, `git branch <name>` creates none.
@@ -115,32 +115,36 @@ pub(crate) fn git_command<'a>(args: &'a [String], folder: &Path) -> Option<(&'a 
     None
 }
 
+/// The value `rest` gives the first of `flags` it holds before a `--`: the
+/// next argument, or the one attached -- `-bname`, `--create=name`.
+pub(crate) fn given<'a>(rest: &'a [String], flags: &[&str]) -> Option<&'a str> {
+    for (at, arg) in rest.iter().enumerate() {
+        if arg == "--" {
+            break;
+        }
+        for flag in flags {
+            if arg == flag {
+                return rest.get(at + 1).map(String::as_str);
+            }
+            let attached = match flag.strip_prefix("--") {
+                Some(_) => arg.strip_prefix(flag).and_then(|value| value.strip_prefix('=')),
+                None => arg.strip_prefix(flag).filter(|value| !value.is_empty() && !arg.starts_with("--")),
+            };
+            if attached.is_some() {
+                return attached;
+            }
+        }
+    }
+    None
+}
+
 /// The branch the git command `git`, given `rest`, creates: `worktree add`
 /// with `-b` or `-B`, the only one of its commands that takes them,
 /// `checkout` with `-b` or `-B`, `switch` with `-c`, `-C`,
 /// `--create` or `--force-create`, and `branch <name>` with no option that
 /// lists, deletes, moves or copies branches.
-fn created_branch<'a>(git: &str, rest: &'a [String]) -> Option<&'a str> {
-    let given = |flags: &[&str]| -> Option<&'a str> {
-        for (at, arg) in rest.iter().enumerate() {
-            if arg == "--" {
-                break;
-            }
-            for flag in flags {
-                if arg == flag {
-                    return rest.get(at + 1).map(String::as_str);
-                }
-                let attached = match flag.strip_prefix("--") {
-                    Some(_) => arg.strip_prefix(flag).and_then(|value| value.strip_prefix('=')),
-                    None => arg.strip_prefix(flag).filter(|value| !value.is_empty() && !arg.starts_with("--")),
-                };
-                if attached.is_some() {
-                    return attached;
-                }
-            }
-        }
-        None
-    };
+pub(crate) fn created_branch<'a>(git: &str, rest: &'a [String]) -> Option<&'a str> {
+    let given = |flags: &[&str]| given(rest, flags);
     match git {
         "worktree" => given(&["-b", "-B"]),
         "checkout" => given(&["-b", "-B"]),

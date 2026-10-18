@@ -2152,6 +2152,8 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert!(unsets(&command, "CLAUDECODE"), "{command:?}");
     assert_eq!(assigned(&command, "EKKO_AGENT_TASK"), Some(agents.uid(1).as_str()), "{command:?}");
     assert_eq!(assigned(&command, "EKKO_PROJECT"), Some("app"), "{command:?}");
+    assert_eq!(assigned(&command, "EKKO_AGENT_WORKTREE"), worktree.to_str(), "the guard keeps it there: {command:?}");
+    assert_eq!(assigned(&command, "EKKO_AGENT_BRANCH"), Some("task-1"), "{command:?}");
     assert_eq!(assigned(&command, "EKKO_MUX"), agents.mux.to_str(), "the hook that closes it speaks to the same one: {command:?}");
     let claude = command.iter().position(|arg| arg == "/stand-in/claude").unwrap();
     assert_eq!(command[claude + 1..command.len() - 1], ["--model", "haiku", "--effort", "low"]);
@@ -4041,4 +4043,70 @@ fn the_wall_and_unwall_move_only_this_projects_panes() {
     let broken = moved(&commands(before), "break-pane");
     assert_eq!(broken, ["%1", "%3"]);
     fs::remove_dir_all(&agents.home).ok();
+}
+
+/// A born session keeps to its worktree and branch (task 1800), the cases
+/// measured with ekko 0.42.0: from its worktree, a commit in the project's
+/// own checkout, by `-C` or a `cd`, a branch moved by `branch -f` or
+/// `update-ref`, and a branch made, are refused as a push is; each is the
+/// orchestrator's to make. Its commit in its worktree and a read of the
+/// project's checkout go through, and an Edit or Write of a file there is
+/// refused, while one in its worktree or outside the repository is not.
+#[test]
+fn a_born_session_is_refused_a_write_outside_its_worktree_and_branch_and_its_orchestrator_none() {
+    use std::io::Write as _;
+    const SHARED: &str = "does not leave its own branch, nor write what every checkout of its repository shares";
+    const CHECKOUT: &str = "does not write in another checkout of its repository";
+    const PUSH: &str = "does not push or open a pull request";
+    let agents = Agents::new();
+    assert!(agents.ekko(&["--task", "Write hello"]).status.success());
+    let uid = agents.uid(1);
+    let worktree = agents.worktree("task-1");
+    agents.git(&agents.app, &["worktree", "add", "-q", "-b", "task-1", worktree.to_str().unwrap()]);
+    let app = fs::canonicalize(&agents.app).unwrap();
+    let hook = |tool: &str, input: serde_json::Value, born: bool| -> String {
+        let event = serde_json::json!({"session_id": "s-1", "hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": input, "cwd": worktree, "tool_use_id": "toolu_1"});
+        let mut guard = agents.command(&["--guard", "--hook"]);
+        guard.current_dir(&worktree).env("TMUX_PANE", "%7");
+        if born {
+            guard.env("EKKO_AGENT_TASK", &uid).env("EKKO_AGENT_WORKTREE", &worktree).env("EKKO_AGENT_BRANCH", "task-1");
+        }
+        let mut child = guard.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(event.to_string().as_bytes()).unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+    };
+    let bash = |command: &str, born: bool| hook("Bash", serde_json::json!({"command": command, "description": "Run it"}), born);
+    let refused = [
+        ("git push origin task-1".to_string(), PUSH),
+        (format!("git -C {} commit -am x", app.display()), CHECKOUT),
+        (format!("cd {} && git merge task-1", app.display()), CHECKOUT),
+        ("git branch -f main HEAD".to_string(), SHARED),
+        ("git update-ref refs/heads/main HEAD".to_string(), SHARED),
+        ("git checkout -b other".to_string(), SHARED),
+    ];
+    for (command, kind) in &refused {
+        let reply: serde_json::Value = serde_json::from_str(&bash(command, true)).unwrap_or_else(|_| panic!("not refused: {command}"));
+        let output = &reply["hookSpecificOutput"];
+        let reason = output["permissionDecisionReason"].as_str().unwrap();
+        assert_eq!(output["permissionDecision"], "deny", "{command}");
+        for other in [SHARED, CHECKOUT, PUSH] {
+            assert_eq!(reason.matches(other).count(), usize::from(other == *kind), "{command}: {reason}");
+        }
+        assert_eq!(bash(command, false), "", "the orchestrator's {command}");
+    }
+    for command in ["git commit -am x".to_string(), format!("cd {} && git log --oneline", app.display()), "git status".to_string()] {
+        assert_eq!(bash(&command, true), "", "{command}");
+    }
+    let scratch = agents.home.join("scratch.md");
+    for tool in ["Edit", "Write"] {
+        let input = |path: &std::path::Path| serde_json::json!({"file_path": path, "content": "x", "old_string": "a", "new_string": "b"});
+        let reply: serde_json::Value = serde_json::from_str(&hook(tool, input(&app.join("readme.md")), true)).unwrap_or_else(|_| panic!("{tool} not refused"));
+        assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny", "{reply}");
+        assert!(reply["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains(CHECKOUT), "{reply}");
+        assert_eq!(hook(tool, input(&app.join("readme.md")), false), "", "the orchestrator's {tool}");
+        assert_eq!(hook(tool, input(&worktree.join("readme.md")), true), "", "{tool} in its worktree");
+        assert_eq!(hook(tool, input(&scratch), true), "", "{tool} outside the repository");
+    }
+    let notebook = serde_json::json!({"notebook_path": app.join("a.ipynb"), "new_source": "x"});
+    assert!(hook("NotebookEdit", notebook, true).contains("\"deny\""), "NotebookEdit in the project's checkout");
 }

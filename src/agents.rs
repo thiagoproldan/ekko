@@ -30,6 +30,11 @@ pub const SESSION: &str = "ekko";
 /// for, for the hooks that run in it.
 pub const TASKS_VAR: &str = "EKKO_AGENT_TASK";
 
+/// Name the worktree a born session works in and its branch, for the guard
+/// that keeps its writes there (task 1800).
+pub const WORKTREE_VAR: &str = "EKKO_AGENT_WORKTREE";
+pub const BRANCH_VAR: &str = "EKKO_AGENT_BRANCH";
+
 /// The levels Claude Code's `--effort` takes (its CLI reference, read
 /// 2026-10-09); which of them a model allows is Claude Code's to say.
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultracode"];
@@ -263,7 +268,14 @@ pub fn start(
     };
     let window = format!("{} \u{b7} {model}", joined(&ids, ","));
     let uids: Vec<String> = ids.iter().map(|id| all[id].uid.clone().unwrap_or_else(|| id.to_string())).collect();
-    let argv = command_line(&environment, &mux.binary, &uids.join(","), &project.name, model, effort, &first_prompt(&ids, &beside, &branch, &worktree.path));
+    let uids = uids.join(",");
+    let born: [(&str, &OsStr); 4] = [
+        (TASKS_VAR, uids.as_ref()),
+        ("EKKO_PROJECT", project.name.as_ref()),
+        (WORKTREE_VAR, worktree.path.as_os_str()),
+        (BRANCH_VAR, branch.as_ref()),
+    ];
+    let argv = command_line(&environment, &mux.binary, &born, model, effort, &first_prompt(&ids, &beside, &branch, &worktree.path));
     let pane = mux.open(&window, &cwd, &argv).map_err(refused)?;
     let title = match ids.as_slice() {
         [] => String::new(),
@@ -455,16 +467,16 @@ fn starting_environment() -> Result<Vec<(OsString, OsString)>, String> {
 /// unsets CLAUDECODE and every other variable this command has and
 /// `environment` has not -- a multiplexer's server started by a session's
 /// command holds them all -- sets the Claude Code profile `environment`
-/// names, CLAUDE_CONFIG_DIR, or unsets it for the default one, and names the
-/// tasks, the project and the multiplexer's binary, for the hook that closes
-/// the window. The rest is the multiplexer's, as in any window the user
-/// opens there: no value but these goes on a command line, which any
-/// process on the machine may read.
+/// names, CLAUDE_CONFIG_DIR, or unsets it for the default one, and sets
+/// `born` -- the tasks, the project, the worktree and its branch -- and the
+/// multiplexer's binary, for the hooks that guard the session and close its
+/// window. The rest is the multiplexer's, as in any window the user opens
+/// there: no value but these goes on a command line, which any process on
+/// the machine may read.
 fn command_line(
     environment: &[(OsString, OsString)],
     mux: &OsStr,
-    uids: &str,
-    project: &str,
+    born: &[(&str, &OsStr)],
     model: &str,
     effort: Option<&str>,
     prompt: &str,
@@ -489,8 +501,11 @@ fn command_line(
         set.push(dir);
         argv.push(set);
     }
-    argv.push(format!("{TASKS_VAR}={uids}").into());
-    argv.push(format!("EKKO_PROJECT={project}").into());
+    for (name, value) in born {
+        let mut set = OsString::from(format!("{name}="));
+        set.push(value);
+        argv.push(set);
+    }
     let mut binary = OsString::from("EKKO_MUX=");
     binary.push(mux);
     argv.push(binary);
@@ -1175,6 +1190,18 @@ pub enum Limit {
     /// `send-keys`, `paste-buffer` and `send-prefix` with a `-t` that names
     /// another, or on a server another `-L` or `-S` names.
     Keys,
+    /// What writes what every checkout of its repository shares, or leaves
+    /// its own branch (task 1800): a git command that writes a branch other
+    /// than the session's, a tag, the stash, notes, replacements, the
+    /// worktrees, the remotes or the repository's config, or that puts its
+    /// worktree on another branch or none (`git_touches`).
+    Shared,
+    /// What writes in another checkout of its repository than its own
+    /// worktree -- the project's own, another session's worktree (task
+    /// 1800): a git command that writes there, wherever `-C`, a `cd`,
+    /// `--git-dir` or `--work-tree` puts it, and an Edit or Write of a file
+    /// there.
+    Checkout,
 }
 
 impl Limit {
@@ -1192,6 +1219,14 @@ impl Limit {
                  a format's #(): the guard does not see what that command does"
             }
             Limit::Keys => "does not type into another pane than its own: the others are the orchestrator's, the user's and the other born sessions'",
+            Limit::Shared => {
+                "does not leave its own branch, nor write what every checkout of its repository shares -- another branch, a tag, the stash, notes, \
+                 the worktrees, the remotes, the config: the orchestrator merges its branch into main, and the rest is the user's and the other sessions'"
+            }
+            Limit::Checkout => {
+                "does not write in another checkout of its repository -- the project's own, another session's worktree: it works in its own worktree, \
+                 on its own branch, and reads anywhere"
+            }
         }
     }
 }
@@ -1518,11 +1553,12 @@ fn signals(name: &str, args: &[String]) -> bool {
 }
 
 /// The limit the call `call`, run in `folder`, reaches, if any, in a session
-/// whose `EKKO_MUX` names the binary `mux`, in the multiplexer's pane `own`.
-pub fn limit_of(call: &crate::shell::Call, folder: &Path, mux: Option<&str>, own: Option<&str>) -> Option<Limit> {
+/// whose `EKKO_MUX` names the binary `mux`, in the multiplexer's pane `own`,
+/// working in the checkout `checkout` where `start` named one.
+pub fn limit_of(call: &crate::shell::Call, folder: &Path, mux: Option<&str>, own: Option<&str>, checkout: Option<&Own>) -> Option<Limit> {
     let operands = |valued: &[&str]| crate::shell::operands(&call.args, valued);
     match call.name.as_str() {
-        "git" => crate::claims::git_command(&call.args, folder).filter(|(git, _, _)| *git == "push").map(|_| Limit::Push),
+        "git" => git_limit(&call.args, folder, checkout),
         "gh" => match operands(&["-R", "--repo"]).as_slice() {
             ["pr", "create" | "merge", ..] => Some(Limit::Push),
             ["release", "create" | "upload" | "edit" | "delete" | "delete-asset", ..] => Some(Limit::Release),
@@ -1564,6 +1600,347 @@ pub fn limit_of(call: &crate::shell::Call, folder: &Path, mux: Option<&str>, own
     }
 }
 
+/// The worktree and branch `start` gave a born session (task 1800), and
+/// the GIT_DIR and GIT_WORK_TREE a command sets before a git call of its,
+/// which move where that call writes.
+#[derive(Debug, Clone, Default)]
+pub struct Own {
+    pub worktree: PathBuf,
+    pub branch: String,
+    pub git_env: Vec<(String, String)>,
+}
+
+impl Own {
+    /// What WORKTREE_VAR and BRANCH_VAR name, both set: none in the
+    /// orchestrator, nor in a session an ekko that set neither started, which
+    /// the limits on its checkout then leave free.
+    pub fn of_this_process() -> Option<Own> {
+        let worktree = PathBuf::from(set(WORKTREE_VAR)?);
+        let branch = set(BRANCH_VAR)?.to_string_lossy().into_owned();
+        Some(Own { worktree, branch, git_env: Vec::new() })
+    }
+
+    /// Whether the ref `name` is this session's branch, as a command names it.
+    fn owns(&self, name: &str) -> bool {
+        name == self.branch || name.strip_prefix("refs/heads/") == Some(self.branch.as_str())
+    }
+}
+
+/// What a git command writes, as `git_touches` reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Touches {
+    /// Nothing of the repository: it reads, or makes another one.
+    Nothing,
+    /// The checkout it runs in -- its files, index, HEAD and the branch
+    /// checked out there -- and what is only that worktree's.
+    Checkout,
+    /// What every checkout of the repository shares, or another branch
+    /// than the session's, or which branch the checkout is on.
+    Shared,
+}
+
+/// Git's commands that write nothing of the repository they run in: they
+/// read it, or make another (`clone`, `init`).
+const GIT_READS: &[&str] = &[
+    "status", "log", "show", "diff", "rev-parse", "rev-list", "ls-files", "ls-tree", "ls-remote", "blame", "annotate", "grep",
+    "describe", "merge-base", "for-each-ref", "show-ref", "show-branch", "cat-file", "shortlog", "whatchanged", "diff-tree",
+    "diff-index", "diff-files", "name-rev", "range-diff", "cherry", "var", "help", "version", "count-objects", "fsck",
+    "verify-commit", "verify-tag", "check-ignore", "check-attr", "check-ref-format", "archive", "format-patch", "bugreport",
+    "clone", "init",
+];
+
+/// The ref names only one worktree has: pseudorefs as ORIG_HEAD, and
+/// those under refs/bisect, refs/worktree and refs/rewritten (gitglossary,
+/// "per-worktree ref").
+fn per_worktree(name: &str) -> bool {
+    let pseudo = !name.contains('/') && name.ends_with("HEAD") && name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
+    pseudo || ["refs/bisect/", "refs/worktree/", "refs/rewritten/"].iter().any(|prefix| name.starts_with(prefix))
+}
+
+/// Whether `rest` holds one of `flags` before a `--`, alone or, for a long
+/// one, with `=value`.
+fn flagged(rest: &[String], flags: &[&str]) -> bool {
+    rest.iter().take_while(|arg| *arg != "--").any(|arg| {
+        flags.iter().any(|flag| arg == flag || (flag.starts_with("--") && arg.strip_prefix(flag).is_some_and(|value| value.starts_with('='))))
+    })
+}
+
+/// Whether `rest` holds, before a `--`, a cluster of short options -- `-df`
+/// -- with one of `letters`.
+fn clustered(rest: &[String], letters: &[char]) -> bool {
+    rest.iter().take_while(|arg| *arg != "--").any(|arg| {
+        arg.strip_prefix('-').filter(|short| !short.starts_with('-')).is_some_and(|short| short.chars().all(|c| c.is_ascii_alphabetic()) && short.contains(letters))
+    })
+}
+
+/// What the git command `git`, given `rest` and run in `folder`, writes, in
+/// a session whose branch `own` names (task 1800). A command it does not
+/// know writes the checkout: in the session's own worktree, it is free.
+fn git_touches(git: &str, rest: &[String], folder: &Path, own: &Own) -> Touches {
+    use Touches::{Checkout, Nothing, Shared};
+    let operands = |valued: &[&str]| crate::shell::operands(rest, valued);
+    let shared_unless = |name: Option<&str>| if name.is_some_and(|name| own.owns(name)) { Checkout } else { Shared };
+    if GIT_READS.contains(&git) {
+        return Nothing;
+    }
+    match git {
+        "branch" => {
+            if flagged(rest, &["-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy"]) || clustered(rest, &['d', 'D', 'm', 'M', 'c', 'C']) {
+                Shared
+            } else if let Some(name) = crate::claims::created_branch("branch", rest) {
+                shared_unless(Some(name))
+            } else if flagged(rest, &["-u", "--set-upstream-to", "--unset-upstream", "--edit-description"]) {
+                Checkout
+            } else {
+                Nothing
+            }
+        }
+        "tag" => {
+            let lists = ["-l", "--list", "-v", "--verify", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"];
+            if flagged(rest, &["-d", "--delete"]) || clustered(rest, &['d']) {
+                Shared
+            } else if flagged(rest, &lists)
+                || rest.iter().any(|arg| arg.starts_with("-n"))
+                || operands(&["-m", "-F", "-u", "--local-user", "--cleanup", "--sort", "--format", "--color", "--trailer"]).is_empty()
+            {
+                Nothing
+            } else {
+                Shared
+            }
+        }
+        "update-ref" => {
+            if flagged(rest, &["--stdin"]) {
+                return Shared;
+            }
+            match operands(&["-m"]).first() {
+                None => Nothing,
+                Some(&"HEAD") if flagged(rest, &["--no-deref"]) => Shared,
+                Some(&"HEAD") => Checkout,
+                Some(name) if own.owns(name) || per_worktree(name) => Checkout,
+                Some(_) => Shared,
+            }
+        }
+        "symbolic-ref" => {
+            if flagged(rest, &["-d", "--delete"]) {
+                return Shared;
+            }
+            match operands(&["-m"]).as_slice() {
+                [] | [_] => Nothing,
+                ["HEAD", target] if own.owns(target) => Checkout,
+                _ => Shared,
+            }
+        }
+        "checkout" => {
+            if let Some(name) = crate::claims::given(rest, &["-b", "-B", "--orphan"]) {
+                return shared_unless(Some(name));
+            }
+            if flagged(rest, &["--detach"]) {
+                return Shared;
+            }
+            if flagged(rest, &["-p", "--patch", "--pathspec-from-file"]) || rest.iter().any(|arg| arg == "--") {
+                return Checkout;
+            }
+            match operands(&[]).first() {
+                None => Checkout,
+                Some(first) if own.owns(first) || *first == "HEAD" => Checkout,
+                // A path, whose files it restores.
+                Some(first) if *first != "-" && folder.join(first).exists() => Checkout,
+                Some(_) => Shared,
+            }
+        }
+        "switch" => {
+            if let Some(name) = crate::claims::given(rest, &["-c", "-C", "--create", "--force-create"]) {
+                return shared_unless(Some(name));
+            }
+            if flagged(rest, &["-d", "--detach", "--orphan"]) {
+                return Shared;
+            }
+            match operands(&[]).first() {
+                None => Checkout,
+                first => shared_unless(first.copied()),
+            }
+        }
+        "rebase" => {
+            if flagged(rest, &["--update-refs"]) {
+                return Shared;
+            }
+            let given = operands(&["--onto", "-s", "--strategy", "-X", "--strategy-option", "-x", "--exec", "-C", "--whitespace"]);
+            let branch = if flagged(rest, &["--root"]) { given.first() } else { given.get(1) };
+            match branch {
+                Some(branch) if *branch != "HEAD" => shared_unless(Some(branch)),
+                _ => Checkout,
+            }
+        }
+        "fetch" | "pull" => {
+            let valued = [
+                "--depth", "--deepen", "--shallow-since", "--shallow-exclude", "-j", "--jobs", "--negotiation-tip", "--refmap", "-o",
+                "--server-option", "--upload-pack", "-s", "--strategy", "-X", "--strategy-option",
+            ];
+            let given = operands(&valued);
+            let writes = given.iter().skip(1).filter_map(|spec| spec.trim_start_matches('+').split_once(':').map(|(_, to)| to));
+            if writes.into_iter().any(|to| !to.is_empty() && !to.starts_with("refs/remotes/") && !own.owns(to)) {
+                Shared
+            } else if git == "pull" {
+                Checkout
+            } else {
+                Nothing
+            }
+        }
+        "stash" => match operands(&[]).first() {
+            Some(&("list" | "show")) => Nothing,
+            Some(&("apply" | "create")) => Checkout,
+            // refs/stash is every worktree's.
+            _ => Shared,
+        },
+        "notes" => match operands(&["--ref"]).first() {
+            None | Some(&("list" | "show" | "get-ref")) => Nothing,
+            Some(_) => Shared,
+        },
+        "replace" => {
+            if flagged(rest, &["-l", "--list"]) || operands(&["--format"]).is_empty() {
+                Nothing
+            } else {
+                Shared
+            }
+        }
+        "worktree" => match operands(&[]).first() {
+            Some(&"list") => Nothing,
+            _ => Shared,
+        },
+        "remote" => match operands(&[]).first() {
+            None | Some(&("show" | "get-url" | "update")) => Nothing,
+            Some(_) => Shared,
+        },
+        "reflog" => match operands(&[]).first() {
+            Some(&("expire" | "delete" | "drop")) => Shared,
+            _ => Nothing,
+        },
+        "config" => {
+            if flagged(rest, &["--global", "--system", "--file", "-f", "--blob"]) {
+                return Nothing;
+            }
+            if flagged(rest, &["--worktree"]) {
+                return Checkout;
+            }
+            let given = operands(&["--type", "--default", "--comment", "--value", "--file", "-f", "--blob"]);
+            match given.first() {
+                Some(&("get" | "list")) => return Nothing,
+                Some(&("set" | "unset" | "rename-section" | "remove-section" | "edit")) => return Shared,
+                _ => {}
+            }
+            let writes = ["--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section", "-e", "--edit"];
+            if flagged(rest, &writes) {
+                Shared
+            } else if flagged(rest, &["--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list", "--get-color", "--get-colorbool"]) || given.len() <= 1 {
+                Nothing
+            } else {
+                Shared
+            }
+        }
+        "filter-branch" | "filter-repo" => Shared,
+        _ => Checkout,
+    }
+}
+
+/// The `--git-dir` and `--work-tree` the git call `args` gives before its
+/// command, each as one argument, which `repository` hands on.
+fn git_globals(args: &[String]) -> Vec<String> {
+    let mut globals = Vec::new();
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        if matches!(arg.as_str(), "--git-dir" | "--work-tree") {
+            if let Some(value) = args.get(at + 1) {
+                globals.push(format!("{arg}={value}"));
+            }
+            at += 2;
+        } else if arg.starts_with("--git-dir=") || arg.starts_with("--work-tree=") {
+            globals.push(arg.clone());
+            at += 1;
+        } else if crate::claims::GIT_VALUED.contains(&arg.as_str()) {
+            at += 2;
+        } else if arg.starts_with('-') {
+            at += 1;
+        } else {
+            break;
+        }
+    }
+    globals
+}
+
+/// Where git, run in `folder` with `globals` and `env`, writes: the
+/// repository's common directory, which all its worktrees share, and the
+/// top of the checkout, which there is none of inside a `.git`. `None`
+/// outside a repository, and where `folder` is none.
+fn repository(folder: &Path, globals: &[String], env: &[(String, String)]) -> Option<(PathBuf, Option<PathBuf>)> {
+    let ask = |what: &str| -> Option<PathBuf> {
+        let mut git = Command::new("git");
+        git.current_dir(folder).args(globals).args(["rev-parse", "--path-format=absolute", what]);
+        git.envs(env.iter().map(|(name, value)| (name, folder.join(value)))).stdin(Stdio::null()).stderr(Stdio::null());
+        let output = git.output().ok().filter(|output| output.status.success())?;
+        let path = String::from_utf8(output.stdout).ok()?.trim_end_matches('\n').to_string();
+        (!path.is_empty()).then(|| PathBuf::from(path))
+    };
+    let common = ask("--git-common-dir")?;
+    Some((common, ask("--show-toplevel")))
+}
+
+/// The limit a write in `folder` reaches, by what `touches` says of it and
+/// where git writes from there (`repository`): none in another repository
+/// than the session's own -- a scratch one in /tmp, a test's --, the shared
+/// one for what every checkout shares, the checkout one for a write in
+/// another checkout than its worktree, or inside a `.git`.
+fn written(touches: Touches, folder: &Path, globals: &[String], own: &Own) -> Option<Limit> {
+    if touches == Touches::Nothing {
+        return None;
+    }
+    let (common, top) = repository(folder, globals, &own.git_env)?;
+    let (own_common, _) = repository(&own.worktree, &[], &[])?;
+    if !same(&common, &own_common) {
+        return None;
+    }
+    match touches {
+        Touches::Shared => Some(Limit::Shared),
+        _ => (!top.is_some_and(|top| same(&top, &own.worktree))).then_some(Limit::Checkout),
+    }
+}
+
+/// The limit the git call `args`, run in `folder`, reaches: a push in any
+/// born session; in one `start` named its worktree and branch (`own`), a
+/// write of what every checkout shares, or in another checkout.
+fn git_limit(args: &[String], folder: &Path, own: Option<&Own>) -> Option<Limit> {
+    let (git, rest, folder) = crate::claims::git_command(args, folder)?;
+    if git == "push" {
+        return Some(Limit::Push);
+    }
+    let own = own?;
+    written(git_touches(git, rest, &folder, own), &folder, &git_globals(args), own)
+}
+
+/// Why the guard refuses a born session the Edit or Write of the file
+/// `path`, from `cwd` (task 1800): a file in another checkout of its
+/// repository than its own worktree. Nothing for a file anywhere else --
+/// another repository, a folder that is none, as /tmp is.
+pub fn file_limits(path: &str, cwd: &Path) -> Vec<String> {
+    Own::of_this_process().and_then(|own| file_limit(path, cwd, &own)).map(reason).into_iter().collect()
+}
+
+/// The limit a born session working in `own` reaches when it writes the
+/// file `path`, from `cwd`: judged from the nearest folder there is on its
+/// way, as the file may not be yet.
+fn file_limit(path: &str, cwd: &Path, own: &Own) -> Option<Limit> {
+    let path = cwd.join(path);
+    let mut folder = path.as_path();
+    while !folder.is_dir() {
+        folder = folder.parent()?;
+    }
+    written(Touches::Checkout, folder, &[], own)
+}
+
+/// The reason the guard gives for `limit`.
+fn reason(limit: Limit) -> String {
+    format!("{LIMIT_REASON}: this session, started for its tasks, {}.", limit.why())
+}
+
 /// The name of the binary `EKKO_MUX` names, which `start` hands every born
 /// session: `kmux` for `/usr/local/bin/kmux`, as a call names it.
 fn mux_name() -> Option<String> {
@@ -1576,15 +1953,36 @@ fn mux_name() -> Option<String> {
 /// reaches none, or that only names one -- in an echo, a commit message, a
 /// here-document.
 pub fn limits(command: &str, cwd: &Path) -> Vec<String> {
+    let (mux, pane) = (mux_name(), set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned()));
+    reached(command, cwd, mux.as_deref(), pane.as_deref(), Own::of_this_process().as_ref()).into_iter().map(reason).collect()
+}
+
+/// The limits the calls of `command`, run from `cwd`, reach, each once, in
+/// a session whose multiplexer `mux` names, in its pane `own`, working in
+/// `checkout` where `start` named one: see `limits`.
+fn reached(command: &str, cwd: &Path, mux: Option<&str>, own: Option<&str>, checkout: Option<&Own>) -> Vec<Limit> {
     let (calls, placed) = crate::shell::located(command, cwd, crate::shell::Reading::GUARD);
-    let (mux, own) = (mux_name(), set("TMUX_PANE").map(|pane| pane.to_string_lossy().into_owned()));
     let mut found: Vec<Limit> = Vec::new();
     for place in &placed {
-        if let Some(limit) = limit_of(&calls[place.at], &place.folder, mux.as_deref(), own.as_deref()).filter(|limit| !found.contains(limit)) {
+        // The GIT_DIR and GIT_WORK_TREE set before it, which move a git call.
+        let checkout = checkout.cloned().map(|mut checkout| {
+            for call in &calls[..place.at] {
+                let set: Vec<(&str, &str)> = match call.name.as_str() {
+                    "=" => call.args.split_first().map(|(name, value)| (name.as_str(), value.first().map_or("", String::as_str))).into_iter().collect(),
+                    "export" => call.args.iter().filter_map(|arg| arg.split_once('=')).collect(),
+                    _ => Vec::new(),
+                };
+                for (name, value) in set.into_iter().filter(|(name, _)| matches!(*name, "GIT_DIR" | "GIT_WORK_TREE")) {
+                    checkout.git_env.push((name.to_string(), value.to_string()));
+                }
+            }
+            checkout
+        });
+        if let Some(limit) = limit_of(&calls[place.at], &place.folder, mux, own, checkout.as_ref()).filter(|limit| !found.contains(limit)) {
             found.push(limit);
         }
     }
-    found.iter().map(|limit| format!("{LIMIT_REASON}: this session, started for its tasks, {}.", limit.why())).collect()
+    found
 }
 
 /// How the reason a born session's limit refuses with opens.
@@ -2257,7 +2655,7 @@ mod tests {
     fn a_value_of_claude_s_options_is_never_taken_for_its_command() {
         let limit = |args: &[&str]| {
             let (calls, placed) = crate::shell::located(&format!("claude {}", args.join(" ")), Path::new("/"), crate::shell::Reading::GUARD);
-            limit_of(&calls[placed[0].at], Path::new("/"), None, None)
+            limit_of(&calls[placed[0].at], Path::new("/"), None, None, None)
         };
         for option in CLAUDE_VALUED {
             assert_eq!(limit(&[option, "value", "mcp", "list"]), None, "{option}");
@@ -2309,7 +2707,7 @@ mod tests {
         };
         let limit = |command: &str, mux: Option<&str>| {
             let (calls, placed) = crate::shell::located(command, Path::new("/"), crate::shell::Reading::GUARD);
-            limit_of(&calls[placed[0].at], Path::new("/"), mux, None)
+            limit_of(&calls[placed[0].at], Path::new("/"), mux, None, None)
         };
         let mut words: Vec<String> = table.iter().filter(|(_, alias)| !alias.is_empty()).map(|(_, alias)| alias.to_string()).collect();
         for (name, _) in &table {
@@ -2531,7 +2929,7 @@ mod tests {
     fn a_program_that_signals_processes_is_refused_but_to_list_the_signals() {
         let reached = |command: &str| -> Vec<Limit> {
             let (calls, placed) = crate::shell::located(command, Path::new("/"), crate::shell::Reading::GUARD);
-            placed.iter().filter_map(|place| limit_of(&calls[place.at], &place.folder, None, None)).collect()
+            placed.iter().filter_map(|place| limit_of(&calls[place.at], &place.folder, None, None, None)).collect()
         };
         for command in [
             "kill 4242",
@@ -2687,5 +3085,197 @@ mod tests {
         events.sort_unstable();
         expected.sort_unstable();
         assert_eq!(events, expected, "the events the plugin runs the born hook on");
+    }
+
+    /// A repository with a commit, made in a fresh folder under `tag`.
+    fn repository_at(tag: &str) -> PathBuf {
+        let dir = crate::paths::test_dir(&format!("ekko-agents-{tag}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        for args in [&["init", "-q", "-b", "main"][..], &["-c", "user.name=e", "-c", "user.email=e@x", "commit", "-q", "--allow-empty", "-m", "first"]] {
+            assert!(Command::new("git").current_dir(&dir).args(args).status().unwrap().success(), "{args:?}");
+        }
+        dir
+    }
+
+    /// A born session's checkout (task 1800): its worktree on `task-1`,
+    /// beside the project's own checkout, `main`, and a scratch repository
+    /// elsewhere. Each git command that writes a ref the checkouts share --
+    /// another branch, a tag, the stash, notes, replacements, worktrees,
+    /// remotes, reflogs, config -- or puts the worktree on another branch,
+    /// is refused there and free in the scratch one; each that writes the
+    /// checkout only is free in its worktree and refused in `main`, however
+    /// `-C`, `cd`, `--git-dir`, `--work-tree` or GIT_DIR take it there; what
+    /// reads is free anywhere; and the orchestrator is refused none, a push
+    /// aside. So is a file's write: refused in `main`, its `.git` included.
+    #[test]
+    fn a_born_session_writes_only_its_own_worktree_and_branch() {
+        let main = repository_at("main");
+        let worktree = main.join(".claude/worktrees/task-1");
+        let add = ["worktree", "add", "-q", "-b", "task-1"];
+        assert!(Command::new("git").current_dir(&main).args(add).arg(&worktree).status().unwrap().success());
+        let scratch = repository_at("scratch");
+        let own = Own { worktree: worktree.clone(), branch: "task-1".into(), git_env: Vec::new() };
+        let reach = |command: &str, cwd: &Path, own: Option<&Own>| reached(command, cwd, None, None, own);
+        let (main_dir, main_git) = (main.display().to_string(), main.join(".git").display().to_string());
+
+        let shared = [
+            "git branch other",
+            "git branch -f main HEAD",
+            "git branch -d main",
+            "git branch -D other",
+            "git branch -m main old",
+            "git branch -M x",
+            "git branch --copy main c",
+            "git branch -df x",
+            "git checkout -b other",
+            "git checkout -B main",
+            "git checkout --orphan o",
+            "git checkout main",
+            "git checkout --detach",
+            "git checkout -",
+            "git switch main",
+            "git switch -c other",
+            "git switch --create=other",
+            "git switch -d HEAD~1",
+            "git switch --orphan o",
+            "git update-ref refs/heads/main HEAD",
+            "git update-ref -d refs/heads/main",
+            "git update-ref --stdin",
+            "git update-ref --no-deref HEAD HEAD",
+            "git update-ref refs/tags/v1 HEAD",
+            "git symbolic-ref HEAD refs/heads/main",
+            "git symbolic-ref -d HEAD",
+            "git tag v1",
+            "git tag -a v1 -m 'a tag'",
+            "git tag -d v1",
+            "git tag -f v1 HEAD",
+            "git rebase main other",
+            "git rebase --update-refs main",
+            "git rebase --root other",
+            "git rebase --onto main x other",
+            "git fetch origin main:main",
+            "git fetch origin +refs/heads/*:refs/heads/*",
+            "git pull origin main:main",
+            "git stash",
+            "git stash push -m x",
+            "git stash pop",
+            "git stash drop",
+            "git stash clear",
+            "git stash store x",
+            "git stash branch b",
+            "git notes add -m x",
+            "git notes --ref r remove HEAD",
+            "git replace HEAD HEAD~1",
+            "git replace -d HEAD",
+            "git worktree add ../x",
+            "git worktree remove ../x",
+            "git worktree prune",
+            "git remote add up /x",
+            "git remote set-url origin /x",
+            "git remote remove origin",
+            "git reflog expire --all",
+            "git reflog delete HEAD@{1}",
+            "git config user.name x",
+            "git config --unset core.x",
+            "git config set core.x y",
+            "git config --add a.b c",
+            "git filter-branch --all",
+        ];
+        for command in shared {
+            assert_eq!(reach(command, &worktree, Some(&own)), [Limit::Shared], "{command}, in its worktree");
+            assert_eq!(reach(command, &scratch, Some(&own)), [], "{command}, in another repository");
+            assert_eq!(reach(command, &worktree, None), [], "the orchestrator's {command}");
+        }
+
+        let checkout = [
+            "git commit -am x",
+            "git merge task-2",
+            "git reset --hard",
+            "git add .",
+            "git cherry-pick HEAD",
+            "git checkout -- file",
+            "git checkout task-1",
+            "git checkout .",
+            "git switch task-1",
+            "git branch -u origin/main",
+            "git update-ref HEAD HEAD",
+            "git update-ref refs/heads/task-1 HEAD",
+            "git update-ref ORIG_HEAD HEAD",
+            "git symbolic-ref HEAD refs/heads/task-1",
+            "git rebase main",
+            "git rebase main task-1",
+            "git pull",
+            "git stash apply",
+            "git config --worktree a.b c",
+        ];
+        for command in checkout {
+            assert_eq!(reach(command, &worktree, Some(&own)), [], "{command}, in its worktree");
+            let elsewhere = command.replacen("git ", &format!("git -C {main_dir} "), 1);
+            assert_eq!(reach(&elsewhere, &worktree, Some(&own)), [Limit::Checkout], "{elsewhere}");
+            assert_eq!(reach(&format!("cd {main_dir} && {command}"), &worktree, Some(&own)), [Limit::Checkout], "cd, then {command}");
+            assert_eq!(reach(command, &main, Some(&own)), [Limit::Checkout], "{command}, in main");
+            assert_eq!(reach(command, &scratch, Some(&own)), [], "{command}, in another repository");
+            assert_eq!(reach(&elsewhere, &worktree, None), [], "the orchestrator's {elsewhere}");
+        }
+        let moved = [
+            format!("git --git-dir={main_git} --work-tree={main_dir} commit -am x"),
+            format!("git --git-dir {main_git} --work-tree {main_dir} commit -am x"),
+            format!("GIT_DIR={main_git} GIT_WORK_TREE={main_dir} git commit -am x"),
+            format!("export GIT_DIR={main_git} GIT_WORK_TREE={main_dir}; git commit -am x"),
+            format!("git -C {main_dir}/.git commit -am x"),
+        ];
+        for command in &moved {
+            assert_eq!(reach(command, &worktree, Some(&own)), [Limit::Checkout], "{command}");
+            assert_eq!(reach(command, &worktree, None), [], "the orchestrator's {command}");
+        }
+
+        let reads = [
+            "git status",
+            "git log --oneline",
+            "git diff main...task-1",
+            "git branch",
+            "git branch --list",
+            "git branch --show-current",
+            "git tag",
+            "git tag -l",
+            "git tag --contains HEAD",
+            "git stash list",
+            "git config user.name",
+            "git config --get user.name",
+            "git config get user.name",
+            "git config --global a.b c",
+            "git remote -v",
+            "git worktree list",
+            "git notes",
+            "git fetch",
+            "git fetch origin main",
+            "git symbolic-ref HEAD",
+            "git reflog",
+            "git replace -l",
+            "git clone /x y",
+            "git init y",
+        ];
+        for command in reads {
+            assert_eq!(reach(&format!("cd {main_dir} && {command}"), &worktree, Some(&own)), [], "{command}, in main");
+        }
+        for (born, orchestrator) in [(Some(&own), "its"), (None, "the orchestrator's")] {
+            assert_eq!(reach("git push origin task-1", &worktree, born), [Limit::Push], "{orchestrator} push");
+        }
+
+        for (path, refused) in [
+            (worktree.join("src/new.rs"), None),
+            (worktree.join("readme.md"), None),
+            (main.join("src/agents.rs"), Some(Limit::Checkout)),
+            (main.join("readme.md"), Some(Limit::Checkout)),
+            (main.join(".git/refs/heads/main"), Some(Limit::Checkout)),
+            (scratch.join("readme.md"), None),
+            (PathBuf::from("/nowhere/at/all"), None),
+        ] {
+            assert_eq!(file_limit(path.to_str().unwrap(), &worktree, &own), refused, "{}", path.display());
+        }
+        assert_eq!(file_limit("../../../readme.md", &worktree, &own), Some(Limit::Checkout), "a path relative to its worktree");
+        let _ = std::fs::remove_dir_all(&main);
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }

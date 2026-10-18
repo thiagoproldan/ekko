@@ -310,7 +310,14 @@ struct Seen {
     call: String,
     cwd: String,
     tool_use_id: String,
+    /// The file a tool of `FILE_TOOLS` writes.
+    path: Option<String>,
 }
+
+/// The tools that write a file, which the guard reads in a born session
+/// (task 1800): the file each writes is its input's `file_path`, or a
+/// notebook's `notebook_path`.
+const FILE_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 fn seen(event: &Value) -> Option<Seen> {
     let tool = event.get("tool_name")?.as_str()?.to_string();
@@ -326,7 +333,9 @@ fn seen(event: &Value) -> Option<Seen> {
             canonical(&input).to_string()
         }
     };
+    let path = ["file_path", "notebook_path"].iter().find_map(|key| input.get(key).and_then(Value::as_str)).filter(|_| FILE_TOOLS.contains(&tool.as_str()));
     Some(Seen {
+        path: path.map(str::to_string),
         tool,
         call,
         cwd: event.get("cwd").and_then(Value::as_str).unwrap_or_default().to_string(),
@@ -498,8 +507,9 @@ fn how_to_ask(code: &str) -> String {
 
 // --- the hooks -----------------------------------------------------------------
 
-/// `ekko --guard --hook`: Claude Code's PreToolUse on Bash. Refuses a call
-/// a cue that is on names, unless the user let it through; silent for
+/// `ekko --guard --hook`: Claude Code's PreToolUse on Bash, and on the tools
+/// that write a file (`FILE_TOOLS`), which only a born session's limits
+/// read. Refuses a call a cue that is on names, unless the user let it through; silent for
 /// everything else, and on any error, since a broken guard must not break
 /// the shell.
 pub fn hook(home: &Path, input: &str) -> ExitCode {
@@ -532,9 +542,14 @@ fn hook_reply(home: &Path, input: &str, actor: &Actor) -> Option<Value> {
 /// branch it creates claimed, a task its commit names that the session does
 /// not hold (task 1560).
 fn reply_to(home: &Path, event: &Value, actor: &Actor, env: &crate::claims::Env, now: i64) -> Option<Value> {
-    let seen = seen(event).filter(|seen| seen.tool == "Bash")?;
-    let index = current(home, now);
+    let seen = seen(event).filter(|seen| seen.tool == "Bash" || seen.path.is_some())?;
     let limits = limit_reasons(&seen, env.born.is_some());
+    // A file's write is only a born session's limits' to refuse, and most
+    // are none's: no cue index read for them.
+    if seen.tool != "Bash" && limits.is_empty() {
+        return None;
+    }
+    let index = current(home, now);
     let cues = cue_reasons(home, &index, &seen);
     let past = match (limits.is_empty(), cues.is_empty()) {
         (true, _) => "the cue that refuses it",
@@ -558,18 +573,23 @@ fn reply_to(home: &Path, event: &Value, actor: &Actor, env: &crate::claims::Env,
         }
     }
     let cwd = Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd });
-    context.extend(crate::claims::told(home, &seen.call, cwd, actor, env));
+    if seen.tool == "Bash" {
+        context.extend(crate::claims::told(home, &seen.call, cwd, actor, env));
+    }
     (!context.is_empty()).then(|| json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": context.join("\n")}}))
 }
 
 /// The reasons the limits of a session ekko agents started refuse the Bash
-/// call `seen` with, when such a session makes it (`born`): none from
-/// another session, nor for a call of another tool.
+/// call or the file's write `seen` with, when such a session makes it
+/// (`born`): none from another session, nor for a call of another tool.
 fn limit_reasons(seen: &Seen, born: bool) -> Vec<String> {
-    if !born || seen.tool != "Bash" {
-        return Vec::new();
+    let cwd = Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd });
+    match (&seen.path, seen.tool.as_str()) {
+        _ if !born => Vec::new(),
+        (_, "Bash") => crate::agents::limits(&seen.call, cwd),
+        (Some(path), _) => crate::agents::file_limits(path, cwd),
+        _ => Vec::new(),
     }
-    crate::agents::limits(&seen.call, Path::new(if seen.cwd.is_empty() { "/" } else { &seen.cwd }))
 }
 
 /// The reasons of the cues that are on and name the Bash call `seen`.
@@ -838,7 +858,7 @@ mod tests {
     #[test]
     fn a_code_is_the_same_for_the_same_call_and_differs_for_any_other() {
         let session = Process { pid: 7, start: 11, boot: "b".to_string() };
-        let at = |cwd: &str, call: &str| Seen { tool: "Bash".into(), call: call.into(), cwd: cwd.into(), tool_use_id: "x".into() };
+        let at = |cwd: &str, call: &str| Seen { tool: "Bash".into(), call: call.into(), cwd: cwd.into(), tool_use_id: "x".into(), path: None };
         let one = code(Some(&session), &at("/r", "git reset --hard"));
         assert_eq!(one.len(), 6);
         assert_eq!(one, code(Some(&session), &Seen { tool_use_id: "another".into(), ..at("/r", "git reset --hard") }));
@@ -1270,7 +1290,7 @@ mod tests {
             std::fs::write(dir.join(name), b"{}").unwrap();
             std::fs::File::options().write(true).open(dir.join(name)).unwrap().set_modified(two_days_ago).unwrap();
         }
-        let seen = Seen { tool: "Bash".into(), call: "ls".into(), cwd: "/".into(), tool_use_id: "t".into() };
+        let seen = Seen { tool: "Bash".into(), call: "ls".into(), cwd: "/".into(), tool_use_id: "t".into(), path: None };
         record(&home, &seen, None, "abcdef", &["why".to_string()], chrono::Local::now().timestamp_millis()).unwrap();
         let mut left: Vec<String> =
             std::fs::read_dir(&dir).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
