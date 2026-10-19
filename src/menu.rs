@@ -66,6 +66,19 @@ const SETTLE: Duration = Duration::from_secs(1);
 /// runs on, still meant for another window, is dropped as a whole.
 const QUIET: Duration = Duration::from_millis(400);
 
+/// What the menu writes before its first draw. Mode 1049: the alternate
+/// screen, where each draw's clear drops what it clears. On the main screen,
+/// Black Box's terminal (alacritty_terminal's `clear_viewport`) scrolls the
+/// cleared lines into the history, so every key left a copy of the menu
+/// there and the scrollbar grew (task 2165). Mode 1004: the terminal reports
+/// taking the focus, and keys wait SETTLE after it as after the first draw.
+const SCREEN_IN: &str = "\x1b[?1049h\x1b[?1004h";
+
+/// What the menu writes once it is done: the modes back, the screen cleared
+/// for a terminal without the alternate screen, and the main screen back as
+/// it was before the menu.
+const SCREEN_OUT: &str = "\x1b[?1004l\x1b[?25h\x1b[H\x1b[2J\x1b[?1049l";
+
 /// Terminals looked for on PATH when `EKKO_TERMINAL` is unset, each with
 /// what runs a command in it. Black Box first, the author's own terminal (task
 /// 2156), where it takes `--standalone` ([`takes_standalone`]). Each in a
@@ -681,7 +694,8 @@ impl Menu {
                     None => "     \x1b[2m→ no answer yet\x1b[0m\r\n".to_string(),
                 });
             }
-            out.push_str("\r\n\x1b[?25l\x1b[2mEnter to record them · ← or a number to change one · Esc to leave them open\x1b[0m");
+            let keys = hint(&["Enter to record them", "← or a number to change one", "Esc to leave them open"], width);
+            out.push_str(&format!("\r\n\x1b[?25l\x1b[2m{keys}\x1b[0m"));
             return out;
         }
         let page = &self.pages[self.current];
@@ -702,20 +716,31 @@ impl Menu {
         if let Some(note) = &page.note {
             out.push_str(&format!("\r\n\x1b[2mNote: {note}\x1b[0m\r\n"));
         }
-        let several = if self.pages.len() > 1 { " · ←/→ between questions" } else { "" };
+        let several = (self.pages.len() > 1).then_some("←/→ between questions");
         match &self.editing {
             Some(Editing::Other(text)) => {
-                let back = if page.posed.options.is_empty() { "Esc to leave it open" } else { "Esc to go back to the options" };
-                let note = if page.posed.options.is_empty() { " · Tab for a note" } else { "" };
-                let hint = format!("Enter to record it{note}{} · {back}", if page.posed.options.is_empty() { several } else { "" });
-                out.push_str(&format!("\r\nYour answer: {text}\x1b7\r\n\r\n\x1b[2m{hint}\x1b[0m\x1b8\x1b[?25h"));
+                let open = page.posed.options.is_empty();
+                let mut parts = vec!["Enter to record it"];
+                if open {
+                    parts.push("Tab for a note");
+                    parts.extend(several);
+                }
+                parts.push(if open { "Esc to leave it open" } else { "Esc to go back to the options" });
+                let keys = hint(&parts, width);
+                out.push_str(&format!("\r\nYour answer: {text}\x1b7\r\n\r\n\x1b[2m{keys}\x1b[0m\x1b8\x1b[?25h"));
             }
             Some(Editing::Note(text)) => {
-                out.push_str(&format!("\r\nNote: {text}\x1b7\r\n\r\n\x1b[2mEnter to keep it · Esc to drop the change\x1b[0m\x1b8\x1b[?25h"));
+                let keys = hint(&["Enter to keep it", "Esc to drop the change"], width);
+                out.push_str(&format!("\r\nNote: {text}\x1b7\r\n\r\n\x1b[2m{keys}\x1b[0m\x1b8\x1b[?25h"));
             }
             None => {
-                let pick = if page.posed.multiple { "Space to mark · Enter to confirm" } else { "Enter or a number to choose" };
-                out.push_str(&format!("\r\n\x1b[?25l\x1b[2m↑/↓ to move · {pick} · Tab for a note{several} · Esc to leave it open\x1b[0m"));
+                let mut parts = vec!["↑/↓ to move"];
+                parts.extend_from_slice(if page.posed.multiple { &["Space to mark", "Enter to confirm"][..] } else { &["Enter or a number to choose"][..] });
+                parts.push("Tab for a note");
+                parts.extend(several);
+                parts.push("Esc to leave it open");
+                let keys = hint(&parts, width);
+                out.push_str(&format!("\r\n\x1b[?25l\x1b[2m{keys}\x1b[0m"));
             }
         }
         out
@@ -803,6 +828,28 @@ fn aids(option: &Choice, inner: usize) -> Vec<String> {
         parts.push(preview.lines().map(|line| fit(line, inner)).collect());
     }
     parts.join(&String::new())
+}
+
+/// The keys a screen takes, joined with " · ", a line broken between two of
+/// them where the next would run past `width`. A terminal wrapping the line
+/// cuts a word in two instead: at 72 columns, where a question with no aids
+/// opens, every hint ran past the edge (task 2165).
+fn hint(parts: &[&str], width: usize) -> String {
+    let mut out = String::new();
+    let mut line = 0;
+    for part in parts {
+        let length = part.chars().count();
+        if line > 0 && line + 3 + length > width {
+            out.push_str("\r\n");
+            line = 0;
+        } else if line > 0 {
+            out.push_str(" · ");
+            line += 3;
+        }
+        out.push_str(part);
+        line += length;
+    }
+    out
 }
 
 /// How wide a question's explanation runs, in a terminal `width` wide.
@@ -954,9 +1001,7 @@ fn run(ekko: &Ekko, questions: Vec<Posed>) -> Result<Vec<Outcome>, EkkoError> {
     let done = {
         let _raw = Raw::enter()?;
         let mut out = io::stdout();
-        // Mode 1004: the terminal reports taking the focus, and keys wait
-        // SETTLE after it as after the first draw.
-        let _ = write!(out, "\x1b[?1004h");
+        let _ = write!(out, "{SCREEN_IN}");
         let mut settle = Settle::new(Instant::now());
         loop {
             let _ = write!(out, "{}", menu.draw(columns()));
@@ -971,7 +1016,7 @@ fn run(ekko: &Ekko, questions: Vec<Posed>) -> Result<Vec<Outcome>, EkkoError> {
         }
     };
     let mut out = io::stdout();
-    let _ = write!(out, "\x1b[?1004l\x1b[?25h\x1b[H\x1b[2J");
+    let _ = write!(out, "{SCREEN_OUT}");
     let _ = out.flush();
     if !done {
         let ids: Vec<String> = menu.pages.iter().map(|page| page.posed.id.to_string()).collect();
@@ -1206,6 +1251,105 @@ mod tests {
         assert_eq!((text.as_str(), explain, options.len(), multiple), ("Just a question?", None, 0, false));
         let (text, explain, _, _) = parse(&dialog::noted("Why?", Some("In a line."), &[], false));
         assert_eq!((text.as_str(), explain.as_deref()), ("Why?", Some("In a line.")));
+    }
+
+    /// The clears in `written` that fall on the main screen, by byte offset,
+    /// and whether it ends there, read as a terminal reads modes 1049, 1047
+    /// and 47.
+    fn main_screen_clears(written: &str) -> (Vec<usize>, bool) {
+        let (mut alternate, mut clears) = (false, Vec::new());
+        for (at, _) in written.match_indices('\x1b') {
+            let rest = &written[at..];
+            if ["\x1b[?1049h", "\x1b[?1047h", "\x1b[?47h"].iter().any(|set| rest.starts_with(set)) {
+                alternate = true;
+            } else if ["\x1b[?1049l", "\x1b[?1047l", "\x1b[?47l"].iter().any(|reset| rest.starts_with(reset)) {
+                alternate = false;
+            } else if (rest.starts_with("\x1b[2J") || rest.starts_with("\x1b[3J")) && !alternate {
+                clears.push(at);
+            }
+        }
+        (clears, !alternate)
+    }
+
+    #[test]
+    fn every_clear_of_the_menu_falls_on_the_alternate_screen() {
+        // A session as run writes it: the opening, a draw after each key --
+        // the arrows, a note being written, a second question and the
+        // review -- then the closing.
+        let mut menu = Menu::new(vec![posed(1, "First?", yes_no(), false), posed(2, "Which?", yes_no(), true)]);
+        let mut written = String::from(SCREEN_IN);
+        written.push_str(&menu.draw(72));
+        for key in [Key::Down, Key::Down, Key::Up, Key::Tab, Key::Char('n'), Key::Enter, Key::Enter, Key::Char(' '), Key::Enter] {
+            menu.press(key);
+            written.push_str(&menu.draw(72));
+        }
+        assert!(menu.reviewing(), "the keys reached the review");
+        written.push_str(SCREEN_OUT);
+        let (clears, ends_on_main) = main_screen_clears(&written);
+        assert_eq!(clears, Vec::<usize>::new(), "every draw clears the screen, and on the main one Black Box keeps what it cleared");
+        assert!(ends_on_main, "the closing gives the main screen back");
+        assert!(written.matches("\x1b[2J").count() >= 11, "the check saw the draws' clears");
+        // The checker says no: 0.44.0's opening and closing, without 1049.
+        let old = written.replacen(SCREEN_IN, "\x1b[?1004h", 1).replace(SCREEN_OUT, "\x1b[?1004l\x1b[?25h\x1b[H\x1b[2J");
+        assert_eq!(main_screen_clears(&old).0.len(), 11, "each of 0.44.0's draws, and its closing, cleared the main screen");
+    }
+
+    /// The lines of a drawn screen as the terminal shows them: escape
+    /// sequences, the title among them, taken out.
+    fn shown(screen: &str) -> Vec<String> {
+        let mut plain = String::new();
+        let mut chars = screen.chars().peekable();
+        while let Some(c) = chars.next() {
+            match (c, chars.peek()) {
+                ('\x1b', Some('[')) => {
+                    chars.next();
+                    while chars.next().is_some_and(|c| !c.is_ascii_alphabetic()) {}
+                }
+                ('\x1b', Some(']')) => while chars.next().is_some_and(|c| c != '\x07') {},
+                ('\x1b', _) => {
+                    chars.next();
+                }
+                _ => plain.push(c),
+            }
+        }
+        plain.split("\r\n").map(str::to_string).collect()
+    }
+
+    #[test]
+    fn no_hint_runs_past_the_window_ekko_opens_for_a_question_without_aids() {
+        let longest = |screen: &str| shown(screen).iter().map(|line| line.chars().count()).max().unwrap_or(0);
+        let one = Menu::new(vec![posed(1, "Q?", yes_no(), false)]);
+        let mut several = Menu::new(vec![posed(1, "First?", yes_no(), false), posed(2, "Which?", yes_no(), true)]);
+        let mut open = Menu::new(vec![posed(1, "Why?", Vec::new(), false), posed(2, "Q?", yes_no(), false)]);
+        open.press(Key::Char('x'));
+        let mut noting = Menu::new(vec![posed(1, "Q?", yes_no(), false)]);
+        noting.press(Key::Tab);
+        let screens = [
+            ("one question", one.draw(72)),
+            ("the first of two", several.draw(72)),
+            ("an answer being written", open.draw(72)),
+            ("a note being written", noting.draw(72)),
+            ("several marked", {
+                several.press(Key::Enter);
+                several.draw(72)
+            }),
+            ("the review", {
+                several.press(Key::Char(' '));
+                several.press(Key::Enter);
+                assert!(several.reviewing());
+                several.draw(72)
+            }),
+        ];
+        for (what, screen) in &screens {
+            assert!(longest(screen) <= 72, "{what}: a line of {} columns in 72:\n{}", longest(screen), shown(screen).join("\n"));
+        }
+        // Broken between keys, the hint keeps every word.
+        let lines = shown(&screens[1].1);
+        let keys = lines.iter().skip_while(|line| !line.starts_with("↑/↓")).cloned().collect::<Vec<_>>().join(" · ");
+        assert_eq!(keys, "↑/↓ to move · Enter or a number to choose · Tab for a note · ←/→ between questions · Esc to leave it open");
+        assert_eq!(hint(&["a", "b"], 80), "a · b");
+        assert_eq!(hint(&["abc", "def"], 8), "abc\r\ndef", "the second would end at column 9");
+        assert_eq!(hint(&["abc", "de"], 8), "abc · de", "it ends at column 8");
     }
 
     #[test]
