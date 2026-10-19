@@ -1102,6 +1102,13 @@ fn a_question_left_unanswered_stays_open_on_the_board() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// What a script standing in for a terminal reads from the menu's command
+/// line, its arguments: they end in `<ekko> --menu <file>`, and the script
+/// finds both, and the pid file beside the questions, as $exe, $spec and
+/// $pid. The variables that pick the board it takes as the command line sets
+/// them.
+const MENU_ARGUMENTS: &str = "spec=; exe=; prev=\nfor a in \"$@\"; do\n  [ \"$prev\" = --menu ] && spec=$a\n  [ \"$a\" = --menu ] && exe=$prev\n  case \"$a\" in EKKO_DIR=*|EKKO_PROJECT=*) export \"$a\";; esac\n  prev=$a\ndone\npid=\"${spec%.json}.pid\"\n";
+
 /// A server kept running while a test talks to it, as a client does while a
 /// window of ekko's menu is up: the answer comes back from a thread of the
 /// server, after stdin has gone quiet.
@@ -1147,12 +1154,8 @@ impl Held {
 
     fn spawn_born(home: &PathBuf, folder: Option<&Path>, terminal: &str, born: Option<&str>) -> Held {
         let script = home.join("terminal.sh");
-        // The arguments end in `<ekko> --menu <file>`: the script finds both,
-        // and the pid file beside the questions, as $exe, $spec and $pid. The
-        // variables that pick the board it takes as the command line sets them.
-        let prelude = "spec=; exe=; prev=\nfor a in \"$@\"; do\n  [ \"$prev\" = --menu ] && spec=$a\n  [ \"$a\" = --menu ] && exe=$prev\n  case \"$a\" in EKKO_DIR=*|EKKO_PROJECT=*) export \"$a\";; esac\n  prev=$a\ndone\npid=\"${spec%.json}.pid\"\n";
         let log = home.join("terminal.log");
-        write_executable(&script, &format!("#!/bin/sh\necho \"$@\" >> \"{}\"\n{prelude}{terminal}\n", log.display()));
+        write_executable(&script, &format!("#!/bin/sh\necho \"$@\" >> \"{}\"\n{MENU_ARGUMENTS}{terminal}\n", log.display()));
         let mut command = common::ekko();
         match folder {
             Some(folder) => command.current_dir(folder),
@@ -1161,10 +1164,16 @@ impl Held {
         if let Some(born) = born {
             command.env("EKKO_AGENT_TASK", born);
         }
+        command.env("EKKO_TERMINAL", &script);
+        Held::serve(home, command)
+    }
+
+    /// `ekko --mcp` on the board in `home`, run by `command`, which says
+    /// where its menu opens.
+    fn serve(home: &Path, mut command: process::Command) -> Held {
         let mut child = command
             .arg("--mcp")
             .env("HOME", home)
-            .env("EKKO_TERMINAL", &script)
             .env("XDG_RUNTIME_DIR", home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1251,6 +1260,110 @@ fn questions_go_to_ekkos_menu_and_the_answers_come_back() {
     assert_eq!(spec["questions"][1]["multiple"], true);
     let left = fs::read_dir(&home).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("ekko-menu-")).count();
     assert_eq!(left, 0, "the menu's files are cleaned up");
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// A PATH for a server whose menu opens in stand-ins of terminals: `sh`,
+/// `grep` and `cut`, and `menu.sh`, which answers Yes to every question in
+/// the menu's file, as the user would, from the menu's words in its
+/// arguments. What the stand-ins run is each test's.
+fn terminal_stand_ins(home: &Path) -> PathBuf {
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for tool in ["sh", "grep", "cut"] {
+        let found = std::env::split_paths(&std::env::var_os("PATH").unwrap()).map(|dir| dir.join(tool)).find(|path| path.is_file());
+        std::os::unix::fs::symlink(found.unwrap_or_else(|| panic!("no {tool} on PATH")), bin.join(tool)).unwrap();
+    }
+    write_executable(
+        &home.join("menu.sh"),
+        &format!("#!/bin/sh\n{MENU_ARGUMENTS}echo $$ > \"$pid\"\nfor uid in $(grep -o '\"uid\":\"[^\"]*\"' \"$spec\" | cut -d'\"' -f4); do \"$exe\" --answer \"$uid\" Yes; done\n"),
+    );
+    bin
+}
+
+/// `ekko --mcp` on the board in `home`, with only `bin` on PATH and a display
+/// that is no one's, asked `count` questions in turn: what each ask replied.
+fn ask_through(home: &Path, bin: &Path, count: u64) -> Vec<Value> {
+    let mut command = common::ekko();
+    command.env("EKKO_DIR", home).current_dir(home).env("PATH", bin).env("DISPLAY", "ekko-test-display");
+    let mut live = Held::serve(home, command);
+    live.send(&request(1, "initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}})));
+    live.reply(1);
+    let options = json!([{"label": "Yes", "recommended": true, "why": "It is done.", "example": "1 done"}, {"label": "No", "why": "It waits.", "example": "1 open"}]);
+    let replies = (2..2 + count)
+        .map(|id| {
+            live.send(&call(id, "ask", json!({"questions": [{"text": format!("Done {id}?"), "explain": "The task passed its checks.", "options": options}]})));
+            serde_json::from_str(text(&live.reply(id))).unwrap()
+        })
+        .collect();
+    live.stop();
+    replies
+}
+
+/// Where Black Box is on PATH and takes `--standalone`, as the author's port
+/// does, the menu opens in it before Konsole (task 2156): in a process of
+/// its own, sized to the menu, and with the command line as one word for its
+/// `$SHELL -c`, which a shell reads back into the menu's words. Whether it
+/// takes `--standalone` is asked once per server. Stand-ins for both
+/// terminals, on a PATH of their own, so no real terminal can run.
+#[test]
+fn the_menu_opens_in_black_box_before_konsole() {
+    let home = temp_home();
+    let bin = terminal_stand_ins(&home);
+    let log = home.join("terminal.log");
+    let probes = home.join("probes.log");
+    write_executable(&bin.join("konsole"), &format!("#!/bin/sh\necho konsole >> \"{}\"\nexit 1\n", log.display()));
+    // As the port answers the probe, then what it does with -c: the line
+    // goes to a shell.
+    write_executable(
+        &bin.join("blackbox-terminal"),
+        &format!(
+            "#!/bin/sh\nif [ \"$*\" = '--standalone --version' ]; then echo probed >> \"{}\"; echo 'Black Box version 0.16.0'; exit 0; fi\nprintf '%s\\n' \"$#\" \"$@\" >> \"{}\"\nline=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -c) line=$2; shift 2 ;;\n    *) shift ;;\n  esac\ndone\neval \"set -- $line\"\nexec \"{}\" \"$@\"\n",
+            probes.display(),
+            log.display(),
+            home.join("menu.sh").display()
+        ),
+    );
+    let replies = ask_through(&home, &bin, 2);
+    for answered in &replies {
+        assert_eq!(answered["answers"].as_array().map(Vec::len), Some(1), "{answered}");
+        assert_eq!(answered["answers"][0]["answer"], "Yes", "{answered}");
+    }
+    let log = fs::read_to_string(&log).unwrap();
+    let words: Vec<&str> = log.lines().collect();
+    assert_eq!(words.len(), 10, "two windows, of five lines each: {log}");
+    for words in words.chunks(5) {
+        assert_eq!(words[0], "4", "four arguments: {log}");
+        assert!(words[1].starts_with("--geometry=") && words[1][11..].split_once('x').is_some_and(|(c, r)| c.parse::<u16>().is_ok() && r.parse::<u16>().is_ok()), "{log}");
+        assert_eq!(&words[2..4], ["--standalone", "-c"], "{log}");
+        assert!(words[4].starts_with("'env' '-u' 'CLAUDECODE' ") && words[4].contains(" '--menu' '"), "{log}");
+    }
+    assert!(!log.contains("konsole"), "{log}");
+    assert_eq!(fs::read_to_string(&probes).unwrap(), "probed\n", "asked once for two windows");
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// A Black Box that refuses `--standalone`, as upstream's 0.14 does, which
+/// Debian and Ubuntu ship as `blackbox-terminal` too, is passed over for the
+/// next terminal on PATH, Konsole here: its window would never open (task
+/// 2156).
+#[test]
+fn a_black_box_that_refuses_standalone_is_passed_over() {
+    let home = temp_home();
+    let bin = terminal_stand_ins(&home);
+    let log = home.join("terminal.log");
+    // As upstream's 0.14 answers an option it lacks.
+    write_executable(
+        &bin.join("blackbox-terminal"),
+        &format!("#!/bin/sh\necho \"blackbox-terminal $*\" >> \"{}\"\necho 'Unknown option --standalone' >&2\nexit 255\n", log.display()),
+    );
+    write_executable(&bin.join("konsole"), &format!("#!/bin/sh\necho konsole >> \"{}\"\nexec \"{}\" \"$@\"\n", log.display(), home.join("menu.sh").display()));
+    let replies = ask_through(&home, &bin, 1);
+    assert_eq!(replies[0]["answers"], json!([{"id": 1, "answer": "Yes"}]), "{}", replies[0]);
+    let log = fs::read_to_string(&log).unwrap();
+    assert_eq!(log, "blackbox-terminal --standalone --version\nkonsole\n", "asked, then passed over");
 
     fs::remove_dir_all(&home).ok();
 }

@@ -67,9 +67,15 @@ const SETTLE: Duration = Duration::from_secs(1);
 const QUIET: Duration = Duration::from_millis(400);
 
 /// Terminals looked for on PATH when `EKKO_TERMINAL` is unset, each with
-/// what runs a command in it. Konsole in a process of its own, so that the
-/// environment and folder are this server's, and without its bars.
+/// what runs a command in it. Black Box first, the author's own terminal (task
+/// 2156), where it takes `--standalone` ([`takes_standalone`]). Each in a
+/// process of its own, so that the environment and folder are this server's:
+/// without `--standalone`, Black Box hands the command to the instance
+/// already running, which runs it with its own environment and folder, and
+/// where none runs, the terminal this server starts becomes the instance the
+/// user's later windows open in. Konsole without its bars.
 const KNOWN: &[(&str, &[&str])] = &[
+    ("blackbox-terminal", &["--standalone", "-c"]),
     ("konsole", &["--separate", "--hide-menubar", "--hide-tabbar", "--hide-toolbars", "-e"]),
     ("gnome-terminal", &["--"]),
     ("kitty", &[]),
@@ -144,9 +150,49 @@ pub fn place() -> Option<Place> {
         .iter()
         .filter(|(name, _)| preferred.as_deref() == Some(*name))
         .chain(KNOWN.iter())
-        .find(|(name, _)| found(name))
+        .find(|(name, run)| found(name) && (!run.contains(&"--standalone") || takes_standalone(name)))
         .map(|(name, run)| Place::Window(std::iter::once(*name).chain(run.iter().copied()).map(str::to_string).collect()))
 }
+
+/// Whether the Black Box at `program` takes `--standalone`, and with it
+/// `--geometry`: both came to the author's port together (task 2156).
+/// Upstream's 0.14, which Debian and Ubuntu ship as `blackbox-terminal` too,
+/// refuses an option it lacks, "Unknown option --standalone" and exit 255,
+/// and opens no window. Asked once per server and program, with
+/// `--standalone --version`, which prints and exits: 240 ms for either on a
+/// private Xvfb here.
+fn takes_standalone(program: &str) -> bool {
+    static TAKES: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+    let mut takes = TAKES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, known)) = takes.iter().find(|(asked, _)| asked == program) {
+        return *known;
+    }
+    let known = Command::new(program)
+        .args(["--standalone", "--version"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok_and(|mut child| {
+            let asked = Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return status.success(),
+                    Ok(None) if asked.elapsed() < PROBING => std::thread::sleep(Duration::from_millis(20)),
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return false;
+                    }
+                }
+            }
+        });
+    takes.push((program.to_string(), known));
+    known
+}
+
+/// How long a terminal has to say what it takes before it counts as not.
+const PROBING: Duration = Duration::from_secs(5);
 
 /// A menu put up for one call of ask.
 pub struct Window {
@@ -169,7 +215,7 @@ impl Window {
         let mut command = match place {
             Place::Window(terminal) => {
                 let mut command = Command::new(&terminal[0]);
-                command.args(sized(terminal, spec)).args(&line);
+                command.args(arguments(terminal, spec, &line));
                 command
             }
             Place::Tmux => {
@@ -289,8 +335,29 @@ fn shell_line(line: &[String]) -> String {
     line.iter().map(|word| format!("'{}'", word.replace('\'', "'\\''"))).collect::<Vec<_>>().join(" ")
 }
 
+/// Whether `program` is Black Box, by its name.
+fn black_box(program: &str) -> bool {
+    Path::new(program).file_name().is_some_and(|name| name == "blackbox-terminal")
+}
+
+/// What follows the terminal's program to run `line` in it. Black Box joins
+/// the words after `--` with spaces and has `$SHELL -c` run them, as it runs
+/// what `-c` gives it, so a word holding a space or a quote would come apart:
+/// it gets the line as one word, each word in it quoted, whichever of the two
+/// its command names.
+fn arguments(terminal: &[String], spec: &Spec, line: &[String]) -> Vec<String> {
+    let mut words = sized(terminal, spec);
+    if black_box(&terminal[0]) {
+        words.push(shell_line(line));
+    } else {
+        words.extend_from_slice(line);
+    }
+    words
+}
+
 /// The terminal's command, sized to the menu where the terminal takes a size:
-/// Konsole opens at its profile's size, most of it empty around a question.
+/// Konsole opens at its profile's size, most of it empty around a question,
+/// and Black Box at the size it remembers, which a long question outgrows.
 fn sized(terminal: &[String], spec: &Spec) -> Vec<String> {
     let mut words = terminal[1..].to_vec();
     let konsole = Path::new(&terminal[0]).file_name().is_some_and(|name| name == "konsole");
@@ -298,6 +365,13 @@ fn sized(terminal: &[String], spec: &Spec) -> Vec<String> {
         let (columns, rows) = size(spec);
         let props = ["-p".to_string(), format!("TerminalColumns={columns}"), "-p".to_string(), format!("TerminalRows={rows}")];
         words.splice(at..at, props);
+    }
+    // A Black Box run `--standalone` takes `--geometry` too, and one run
+    // without may be upstream's, which refuses it. First, before whatever
+    // ends its options.
+    if black_box(&terminal[0]) && words.iter().any(|word| word == "--standalone") {
+        let (columns, rows) = size(spec);
+        words.insert(0, format!("--geometry={columns}x{rows}"));
     }
     words
 }
@@ -1321,5 +1395,36 @@ mod tests {
         assert!(words[1] == "-p" && words[2].starts_with("TerminalColumns=") && words[4].starts_with("TerminalRows="), "{words:?}");
         assert_eq!(words.last().unwrap(), "-e");
         assert_eq!(sized(&["xterm".to_string(), "-e".to_string()], &spec), ["-e"]);
+    }
+
+    /// Black Box has `$SHELL -c` run one line (task 2156): the menu's command
+    /// goes to it as one word, which a shell reads back into the same words,
+    /// a space, quotes, a dollar, a backslash and a star in them included;
+    /// and its window, run `--standalone`, is sized to the menu, as Konsole's
+    /// is. Other terminals get the words as they are.
+    #[test]
+    fn black_box_gets_the_menus_command_as_one_line_a_shell_reads_back() {
+        let spec = Spec { questions: vec![posed(1, "Q?", yes_no(), false)] };
+        let (columns, rows) = size(&spec);
+        let line: Vec<String> = ["env", "-u", "CLAUDECODE", "sh", "-c", "cd \"$0\" && exec \"$@\"", "/home/it's a \"b\" $HOME \\ *", "/nix/store/x/bin/ekko", "--menu", "/run/m.json"]
+            .map(str::to_string)
+            .to_vec();
+        let (program, run) = KNOWN[0];
+        assert_eq!((program, run), ("blackbox-terminal", &["--standalone", "-c"][..]), "Black Box is looked for first");
+        for program in [program, "/etc/profiles/per-user/u/bin/blackbox-terminal"] {
+            let terminal: Vec<String> = std::iter::once(program).chain(run.iter().copied()).map(str::to_string).collect();
+            let words = arguments(&terminal, &spec, &line);
+            assert_eq!(words[..3], [format!("--geometry={columns}x{rows}"), "--standalone".to_string(), "-c".to_string()], "{words:?}");
+            assert_eq!(words.len(), 4, "{words:?}");
+            let read = Command::new("sh").arg("-c").arg(format!("printf '%s\\n' {}", words[3])).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&read.stdout).lines().collect::<Vec<_>>(), line, "{}", words[3]);
+        }
+        // Run without --standalone, as EKKO_TERMINAL may name upstream's,
+        // which refuses --geometry: no size, the line still one word.
+        let words = arguments(&["blackbox-terminal".to_string(), "-c".to_string()], &spec, &line);
+        assert_eq!(words, ["-c".to_string(), shell_line(&line)]);
+        let words = arguments(&["xterm".to_string(), "-e".to_string()], &spec, &line);
+        assert_eq!(words[0], "-e");
+        assert_eq!(&words[1..], line);
     }
 }

@@ -547,8 +547,9 @@ pub(crate) fn starting_environment() -> Result<Vec<(OsString, OsString)>, String
 /// The variables of a terminal's tab or window that name where the user is
 /// typing (task 1803): ctx types `/clear` into "the session's Konsole tab"
 /// through KONSOLE_DBUS_*, and the others are the same kind of address in
-/// the terminals ekko knows. A born session lives in a multiplexer pane, not
-/// in the user's tab, and a test the gate runs has no tab at all.
+/// the terminals ekko knows; Black Box, which the menu opens in first, sets
+/// none (task 2156). A born session lives in a multiplexer pane, not in the
+/// user's tab, and a test the gate runs has no tab at all.
 pub(crate) const TERMINAL_ADDRESSES: &[&str] = &[
     "KONSOLE_DBUS_SERVICE",
     "KONSOLE_DBUS_SESSION",
