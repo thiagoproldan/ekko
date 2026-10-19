@@ -1381,10 +1381,17 @@ mod tests {
         // the arguments' first, so a read between the two finds arguments
         // and no environment: 215 of 30000 reads polled with no pause did,
         // and none of 30000 that waited for PATH too, which the child
-        // inherits (task 1680).
+        // inherits (task 1680). Earlier still, exec_mmap wakes the parent
+        // out of the spawn's vfork before it gives the child its new memory,
+        // so /proc shows the parent's own arguments and environment, PATH
+        // included: CI failed on that (task 2180), and 7 of 30000 reads with
+        // no pause saw the parent's arguments here. So the read waits for
+        // the child's own arguments, and its environment.
+        let the_childs = |read: &Proc| read.args == ["cat"] && read.path_var.is_some();
+        assert!(!the_childs(&me), "a read showing the parent passes for the child's: {:?}", me.args);
         let read = (0..200)
             .find_map(|_| {
-                let read = Proc::read(child.id()).filter(|read| !read.args.is_empty() && read.path_var.is_some());
+                let read = Proc::read(child.id()).filter(the_childs);
                 if read.is_none() {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
