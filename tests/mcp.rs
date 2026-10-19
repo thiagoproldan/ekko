@@ -1301,12 +1301,13 @@ fn ask_through(home: &Path, bin: &Path, count: u64) -> Vec<Value> {
     replies
 }
 
-/// Where Black Box is on PATH and takes `--standalone`, as the author's port
-/// does, the menu opens in it before Konsole (task 2156): in a process of
-/// its own, sized to the menu, and with the command line as one word for its
-/// `$SHELL -c`, which a shell reads back into the menu's words. Whether it
-/// takes `--standalone` is asked once per server. Stand-ins for both
-/// terminals, on a PATH of their own, so no real terminal can run.
+/// Where Black Box is on PATH and takes `--standalone` and `--hide-headerbar`,
+/// as the author's port does, the menu opens in it before Konsole (task
+/// 2156): in a process of its own, without its header bar (task 2166), sized
+/// to the menu, and with the command line as one word for its `$SHELL -c`,
+/// which a shell reads back into the menu's words. Whether it takes them is
+/// asked once per server. Stand-ins for both terminals, on a PATH of their
+/// own, so no real terminal can run.
 #[test]
 fn the_menu_opens_in_black_box_before_konsole() {
     let home = temp_home();
@@ -1319,7 +1320,7 @@ fn the_menu_opens_in_black_box_before_konsole() {
     write_executable(
         &bin.join("blackbox-terminal"),
         &format!(
-            "#!/bin/sh\nif [ \"$*\" = '--standalone --version' ]; then echo probed >> \"{}\"; echo 'Black Box version 0.16.0'; exit 0; fi\nprintf '%s\\n' \"$#\" \"$@\" >> \"{}\"\nline=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -c) line=$2; shift 2 ;;\n    *) shift ;;\n  esac\ndone\neval \"set -- $line\"\nexec \"{}\" \"$@\"\n",
+            "#!/bin/sh\nif [ \"$*\" = '--standalone --hide-headerbar --version' ]; then echo probed >> \"{}\"; echo 'Black Box version 0.16.0'; exit 0; fi\nprintf '%s\\n' \"$#\" \"$@\" >> \"{}\"\nline=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -c) line=$2; shift 2 ;;\n    *) shift ;;\n  esac\ndone\neval \"set -- $line\"\nexec \"{}\" \"$@\"\n",
             probes.display(),
             log.display(),
             home.join("menu.sh").display()
@@ -1332,12 +1333,12 @@ fn the_menu_opens_in_black_box_before_konsole() {
     }
     let log = fs::read_to_string(&log).unwrap();
     let words: Vec<&str> = log.lines().collect();
-    assert_eq!(words.len(), 10, "two windows, of five lines each: {log}");
-    for words in words.chunks(5) {
-        assert_eq!(words[0], "4", "four arguments: {log}");
+    assert_eq!(words.len(), 12, "two windows, of six lines each: {log}");
+    for words in words.chunks(6) {
+        assert_eq!(words[0], "5", "five arguments: {log}");
         assert!(words[1].starts_with("--geometry=") && words[1][11..].split_once('x').is_some_and(|(c, r)| c.parse::<u16>().is_ok() && r.parse::<u16>().is_ok()), "{log}");
-        assert_eq!(&words[2..4], ["--standalone", "-c"], "{log}");
-        assert!(words[4].starts_with("'env' '-u' 'CLAUDECODE' ") && words[4].contains(" '--menu' '"), "{log}");
+        assert_eq!(&words[2..5], ["--standalone", "--hide-headerbar", "-c"], "{log}");
+        assert!(words[5].starts_with("'env' '-u' 'CLAUDECODE' ") && words[5].contains(" '--menu' '"), "{log}");
     }
     assert!(!log.contains("konsole"), "{log}");
     assert_eq!(fs::read_to_string(&probes).unwrap(), "probed\n", "asked once for two windows");
@@ -1345,27 +1346,33 @@ fn the_menu_opens_in_black_box_before_konsole() {
     fs::remove_dir_all(&home).ok();
 }
 
-/// A Black Box that refuses `--standalone`, as upstream's 0.14 does, which
-/// Debian and Ubuntu ship as `blackbox-terminal` too, is passed over for the
-/// next terminal on PATH, Konsole here: its window would never open (task
-/// 2156).
+/// A Black Box that refuses what the menu's window needs is passed over for
+/// the next terminal on PATH, Konsole here: its window would never open.
+/// Upstream's 0.14, which Debian and Ubuntu ship as `blackbox-terminal` too,
+/// refuses `--standalone` (task 2156); the port before task 2166 takes it
+/// and refuses `--hide-headerbar`. Each answers as it did on a private Xvfb.
 #[test]
 fn a_black_box_that_refuses_standalone_is_passed_over() {
-    let home = temp_home();
-    let bin = terminal_stand_ins(&home);
-    let log = home.join("terminal.log");
-    // As upstream's 0.14 answers an option it lacks.
-    write_executable(
-        &bin.join("blackbox-terminal"),
-        &format!("#!/bin/sh\necho \"blackbox-terminal $*\" >> \"{}\"\necho 'Unknown option --standalone' >&2\nexit 255\n", log.display()),
-    );
-    write_executable(&bin.join("konsole"), &format!("#!/bin/sh\necho konsole >> \"{}\"\nexec \"{}\" \"$@\"\n", log.display(), home.join("menu.sh").display()));
-    let replies = ask_through(&home, &bin, 1);
-    assert_eq!(replies[0]["answers"], json!([{"id": 1, "answer": "Yes"}]), "{}", replies[0]);
-    let log = fs::read_to_string(&log).unwrap();
-    assert_eq!(log, "blackbox-terminal --standalone --version\nkonsole\n", "asked, then passed over");
+    let refusals = [
+        ("upstream's 0.14", "case \"$*\" in *) echo 'Unknown option --standalone' >&2; exit 255 ;; esac"),
+        (
+            "the port before --hide-headerbar",
+            "case \"$*\" in '--standalone --version') echo 'Black Box version 0.16.0'; exit 0 ;; *--hide-headerbar*) echo 'Unknown option --hide-headerbar' >&2; exit 255 ;; esac",
+        ),
+    ];
+    for (which, answers) in refusals {
+        let home = temp_home();
+        let bin = terminal_stand_ins(&home);
+        let log = home.join("terminal.log");
+        write_executable(&bin.join("blackbox-terminal"), &format!("#!/bin/sh\necho \"blackbox-terminal $*\" >> \"{}\"\n{answers}\nexit 1\n", log.display()));
+        write_executable(&bin.join("konsole"), &format!("#!/bin/sh\necho konsole >> \"{}\"\nexec \"{}\" \"$@\"\n", log.display(), home.join("menu.sh").display()));
+        let replies = ask_through(&home, &bin, 1);
+        assert_eq!(replies[0]["answers"], json!([{"id": 1, "answer": "Yes"}]), "{which}: {}", replies[0]);
+        let log = fs::read_to_string(&log).unwrap();
+        assert_eq!(log, "blackbox-terminal --standalone --hide-headerbar --version\nkonsole\n", "{which}: asked, then passed over");
 
-    fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&home).ok();
+    }
 }
 
 /// What leaves questions in ekko's menu open: a menu closed without the
