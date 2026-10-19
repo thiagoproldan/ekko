@@ -31,7 +31,7 @@ Run each from the repository's root inside the dev shell:
 | `ab_report.py` | Each arm against the control, paired by scenario; `--blind` and `--blind-more N` write the answers under random labels for grading. |
 | `model.py` | The expected cost of a start under each arm, at the shares of stale starts part A measured; sign test, power, head to head. |
 | `anatomy.py` | Where a resume's orientation went, call by call, and what the runs wrote on the board. |
-| `bin/no-elsewhere` | The runs' PreToolUse guard: refuses a tool call that names the real folders. |
+| `bin/no-elsewhere` | The runs' PreToolUse guard: refuses a tool call that names the real folders; of a board write's text, only the `Rests on:` lines, which make ekko read a file. Its refusal says whether the run replays a past start or works on a copy as it is now. |
 
 ## What stays on this machine
 

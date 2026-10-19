@@ -3,19 +3,35 @@
 # must not reach the real folders -- for a replay of a past start they hold
 # its future, and for any run they hold what the study wrote about it. Any
 # tool call naming them is refused. ab.py passes the pattern, an extended regex from
-# study.json's "guard", as NO_ELSEWHERE, and the run's own transcript folder
-# (its persisted tool results), which stays open, as NO_ELSEWHERE_OWN.
+# study.json's "guard", as NO_ELSEWHERE; the run's own transcript folder
+# (its persisted tool results), which stays open, as NO_ELSEWHERE_OWN; and
+# what the run is, for the refusal to say, as NO_ELSEWHERE_WHY.
+#
+# A board write's free text only mentions a folder. Of it, the lines that
+# start with "Rests on:" are the ones that make ekko read a file (its
+# anchors, an absolute path read as given), so of an ekko tool's free-text
+# fields only those lines are matched (task 2221).
 if [ -z "${NO_ELSEWHERE:-}" ]; then
   echo "no-elsewhere: NO_ELSEWHERE is not set, so every call is refused" >&2
   exit 2
 fi
 input=$(cat)
-text=$(printf '%s' "$input" | jq -r '.tool_input | tostring' 2>/dev/null)
+if ! text=$(printf '%s' "$input" | jq -r '
+  def anchors: [splits("\n") | select(test("^\\s*rests on:"; "i"))] | join("\n");
+  def prose: IN("text", "append", "old", "new", "explain", "why", "example", "preview", "description", "label");
+  if (.tool_name // "") | test("^mcp__.*ekko.*__")
+  then .tool_input | walk(if type == "object"
+         then with_entries(if (.key | prose) and (.value | type) == "string" then .value |= anchors else . end)
+         else . end) | tostring
+  else .tool_input | tostring end' 2>/dev/null); then
+  echo "no-elsewhere: the call's input could not be read, so it is refused" >&2
+  exit 2
+fi
 if [ -n "${NO_ELSEWHERE_OWN:-}" ]; then
   text=${text//"$NO_ELSEWHERE_OWN"/OWN-RUN}
 fi
 if printf '%s' "$text" | grep -Eq -- "$NO_ELSEWHERE"; then
-  echo "This session replays a past moment in a copy of the repository; folders outside it are not available here." >&2
+  echo "${NO_ELSEWHERE_WHY:-This session works in a copy of the repository}; folders outside it are not available here." >&2
   exit 2
 fi
 exit 0

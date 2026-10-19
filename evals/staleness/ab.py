@@ -89,6 +89,12 @@ DENY = STUDY["deny"]
 PEEK = re.compile(STUDY["peek"])
 GIT_LOOK = re.compile(r"\bgit\b[^|;&]*?\b(log|status|diff|show|rev-list|describe|reflog|shortlog|branch|tag)\b")
 EKKO_READ = re.compile(r"^mcp__.*ekko.*__(context|search|next|prime|changes|roadmap)$")
+# What a refusal of bin/no-elsewhere says the run is: a replay of a past start,
+# or a copy of the repository as it is now. A refusal is counted by the words
+# both messages end with, which the study's first runs' message ends with too.
+REPLAY = "This session replays a past moment in a copy of the repository"
+NOW = "This session works in a copy of the repository as it is now"
+REFUSED = "folders outside it are not available here"
 
 
 def git(cwd, *args, check=True):
@@ -541,7 +547,7 @@ def child_env(run_dir):
     return env
 
 
-def settings(run_dir, extra_path):
+def settings(run_dir, extra_path, why=REPLAY):
     wrapper = open(os.path.realpath(shutil.which("claude"))).read()
     found = re.search(r"--settings (\S+)", wrapper)
     base = json.load(open(found.group(1))) if found else {}
@@ -554,7 +560,7 @@ def settings(run_dir, extra_path):
     # The run's own transcript folder is let through: Claude Code names it after
     # the run's folder, every character not a letter or digit made a dash.
     own = "projects/" + re.sub(r"[^A-Za-z0-9]", "-", os.path.dirname(ROOT))
-    guard = (f"NO_ELSEWHERE={shlex.quote(STUDY['guard'])} NO_ELSEWHERE_OWN={shlex.quote(own)} "
+    guard = (f"NO_ELSEWHERE={shlex.quote(STUDY['guard'])} NO_ELSEWHERE_OWN={shlex.quote(own)} NO_ELSEWHERE_WHY={shlex.quote(why)} "
              + shlex.quote(os.path.join(HERE, "bin", "no-elsewhere")))
     base["hooks"].setdefault("PreToolUse", []).append({"matcher": "*", "hooks": [{"type": "command", "command": guard}]})
     path = os.path.join(run_dir, "settings.json")
@@ -638,8 +644,8 @@ def measure(stream_path):
         return (t["input"] or {}).get("command") or "" if t["name"] == "Bash" else json.dumps(t["input"] or {})
     looks = [t for t in tools if t["name"] == "Bash" and GIT_LOOK.search(command(t))]
     reads = [t for t in tools if EKKO_READ.match(t["name"] or "")]
-    peeks = [command(t)[:200] for t in tools if PEEK.search(command(t)) and "replays a past moment" not in (results.get(t["id"]) or "")]
-    refused = sum(1 for t in tools if "replays a past moment" in (results.get(t["id"]) or ""))
+    peeks = [command(t)[:200] for t in tools if PEEK.search(command(t)) and REFUSED not in (results.get(t["id"]) or "")]
+    refused = sum(1 for t in tools if REFUSED in (results.get(t["id"]) or ""))
     return {
         "model": model, "claude_code_version": version, "calls": len(calls), "units": round(units), "units_cold": round(units_cold),
         "first_call": first, "output_tokens": output_tokens, "thinking_tokens": thinking_tokens,
@@ -670,7 +676,7 @@ def run(name, arm, rep, prompt=None, effort=None):
     extra = os.path.join(run_dir, "extra.txt")
     with open(extra, "w") as handle:
         handle.write(facts_["texts"][arm])
-    settings_path = settings(run_dir, extra)
+    settings_path = settings(run_dir, extra, REPLAY if name in SCENARIOS else NOW)
     env = child_env(run_dir)
     sid = str(uuid.uuid4())
     command = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--include-hook-events",
