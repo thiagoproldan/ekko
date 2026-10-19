@@ -1,13 +1,14 @@
 """Task 507, free exploration: what a session's context is made of, and what
 each part costs while it stays there. Every token in the context is read
 again on every later call, so what a tool result costs is its size times the
-calls it survives: r*(2 + 0.1*T) in units of one uncached input token, a
-1-hour cache write 2 and a cache read 0.1, over the T main-thread calls left
-before the context is cleared or compacted.
+calls it survives: r*(2 + w*T) in units of one uncached input token, a
+1-hour cache write 2 and a cache read w, over the T main-thread calls left
+before the context is cleared or compacted. w is the read weight of the model
+each call ran (transcripts.read_weight: 0.05 on Opus 5.5, 0.1 on Opus 5).
 
 Each tool result is priced that way and summed by tool, and Bash by the
 command it ran; the model's own output by the same rule; the prefix every
-call re-reads (the floor, note 441) at 0.1 a call. What the usage fields show
+call re-reads (the floor, note 441) at w a call. What the usage fields show
 beyond those -- the growth nothing here names -- is left as the remainder.
 
     nix develop -c python3 evals/recall/composition.py [--since 2026-08-25]
@@ -21,7 +22,17 @@ import os
 import re
 import statistics
 
-from replay import LOCAL, OUT, W_CR, W_CW1H, W_OUT, calls_left, ekko_op, scan, tokens
+from replay import (
+    LOCAL,
+    OUT,
+    W_CW1H,
+    W_OUT,
+    calls_left,
+    ekko_op,
+    read_weight,
+    scan,
+    tokens,
+)
 
 # Note 441: the floor each profile's sessions start from, in tokens.
 FLOOR = {".claude-trabalho": 38_300, ".claude": 42_300}
@@ -68,9 +79,9 @@ def main():
         for call in calls:
             bill += call.cost
             calls_total += 1
-            floor_units += W_CR * FLOOR[profile]
+            floor_units += read_weight(call.model) * FLOOR[profile]
             # what the model wrote stays: written once at the next call, read after
-            output_units += call.out * (W_CW1H + W_CR * call.left)
+            output_units += call.out * (W_CW1H + read_weight(call.model) * call.left)
             for name, use_id, arguments in call.uses:
                 if name == "Bash":
                     label = family(arguments.get("command") or "")
@@ -80,13 +91,13 @@ def main():
         # the growth the usage fields show between two calls of one stretch
         for before, after in zip(calls, calls[1:]):
             if after.left == before.left - 1 and after.ctx > before.ctx:
-                growth_units += (after.ctx - before.ctx) * (W_CW1H + W_CR * after.left)
+                growth_units += (after.ctx - before.ctx) * (W_CW1H + read_weight(after.model) * after.left)
         for event in events:
             if event[0] != "result" or event[1] not in owner:
                 continue
             name, label, call = owner[event[1]]
             size = tokens(len(event[2]))
-            units = size * (W_CW1H + W_CR * call.left)
+            units = size * (W_CW1H + read_weight(call.model) * call.left)
             op = ekko_op(name)
             key = f"ekko {op}" if op else ("mcp other" if name.startswith("mcp__") else name)
             row = by_tool[key]
@@ -103,7 +114,7 @@ def main():
 
     named = sum(row["units"] for row in by_tool.values())
     print(f"since {args.since}: {calls_total:.0f} main-thread calls, bill {bill / 1e6:.0f}M units")
-    print(f"  floor re-read at 0.1 a call  {floor_units / 1e6:7.1f}M  {floor_units / bill:6.1%}")
+    print(f"  floor re-read on every call {floor_units / 1e6:7.1f}M  {floor_units / bill:6.1%}")
     print(f"  tool results, kept          {named / 1e6:7.1f}M  {named / bill:6.1%}")
     print(f"  the model's output, kept    {output_units / 1e6:7.1f}M  {output_units / bill:6.1%}  (thinking included)")
     print(f"  all growth, from usage      {growth_units / 1e6:7.1f}M  {growth_units / bill:6.1%}  (results + output + reminders + prompts)")

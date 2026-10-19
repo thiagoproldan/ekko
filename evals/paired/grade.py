@@ -43,8 +43,13 @@ HIDDEN_OUT = os.path.join(OUT, "hidden")
 MODEL = "claude-opus-5-5"  # the model every cell ran
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 # The interactive sessions that did the tasks first, read off the transcripts
-# on 2026-09-24 (note 549): calls and units, subagents included.
-ORIGINAL = {"394": (19, 630_000), "397": (36, 1_000_000), "396": (77, 3_000_000)}
+# on 2026-09-24 (note 549): calls and units, subagents included. They ran Opus
+# 5.5 and were priced at Opus 5's read weight, 630k, 1.0M and 3.0M; priced by
+# model (task 2204), 394 counted again from the prompt to its commit's result
+# gives the same 19 calls and 412k; 397 and 396, counted again the same way,
+# come to 37 and 89 calls, so their units here are the old ones times the
+# ratio that count measured, 0.747 and 0.626: estimates.
+ORIGINAL = {"394": (19, 412_000), "397": (36, 750_000), "396": (77, 1_900_000)}
 
 
 def records():
@@ -366,7 +371,7 @@ def claude(prompt, effort, stream_path):
     result = harness.result_of(stream_path)
     with open(stream_path, errors="replace") as handle:
         five = harness.windows(handle).get("five_hour", (0, 0))[0]
-    cost = units(result.get("usage") or {})
+    cost = units(result.get("usage") or {}, MODEL)
     log(f"{os.path.basename(stream_path)}: {cost / 1e6:.2f}M units, the 5-hour window at {five:.0%}")
     return result.get("result") or "", cost
 
@@ -439,7 +444,7 @@ class Call:
         self.ctx = (usage.get("input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0)
         self.out = usage.get("output_tokens") or 0
         self.think = (usage.get("output_tokens_details") or {}).get("thinking_tokens") or 0
-        self.units = units(usage)
+        self.units = units(usage, (row.get("message") or {}).get("model"))
         self.effort = row.get("effort")
         self.tools = []
 
@@ -499,8 +504,8 @@ def measure(record):
                              "reset": "compaction" if part else ("handoff" if number else None),
                              "fired": session.get("fired") if end == len(calls) else None})
         for sub in glob.glob(os.path.join(folder, "transcripts", session["sid"], "*.jsonl")):
-            for usage, _ in harness.calls_in(sub):
-                sub_units += units(usage)
+            for usage, row in harness.calls_in(sub):
+                sub_units += units(usage, (row.get("message") or {}).get("model"))
                 sub_calls += 1
     return segments, sub_units, sub_calls, versions
 
@@ -515,10 +520,10 @@ def billed(record):
         for stream in glob.glob(os.path.join(OUT, "runs", record["run"], f"{index}-*.stream.jsonl")):
             result = harness.result_of(stream)
             dollars += result.get("total_cost_usd") or 0
-            for usage in (result.get("modelUsage") or {}).values():
+            for model, usage in (result.get("modelUsage") or {}).items():
                 total += units({"input_tokens": usage.get("inputTokens"), "output_tokens": usage.get("outputTokens"),
                                 "cache_read_input_tokens": usage.get("cacheReadInputTokens"),
-                                "cache_creation_input_tokens": usage.get("cacheCreationInputTokens")})
+                                "cache_creation_input_tokens": usage.get("cacheCreationInputTokens")}, model)
     return total, dollars
 
 
@@ -554,9 +559,13 @@ def m(value):
 def report():
     runs = records()
     lines = [f"# Paired test: {len(runs)} runs, graded {harness.now():%Y-%m-%d %H:%M}", ""]
-    measured, by_effort = {}, {}
+    measured, by_effort, priced = {}, {}, {}
     for record in runs:
-        measured[record["run"]] = segments, _, _, _ = measure(record)
+        measured[record["run"]] = segments, sub_units, _, _ = measure(record)
+        # A run's record keeps the units it ended at, priced by the weights of
+        # its day; the run's transcripts give them again, priced by the model
+        # each call names (task 2204).
+        priced[record["run"]] = sum(call.units for segment in segments for call in segment["calls"]) + sub_units
         effort = by_effort.setdefault(record["effort"], {"calls": [], "growth": []})
         for segment in segments:
             calls = segment["calls"]
@@ -589,7 +598,7 @@ def report():
         account = record.get("account", "trabalho")
         cost, dollars = billed(record)
         lines.append(f"| {record['run']} | {record['status']} | {account} | {len(record['sessions'])} | {record['calls']} | {sub_calls} | "
-                     f"{m(record['units'])} | {m(cost)} | {dollars:.2f} | {cost / POINTS[account]:.0f} | "
+                     f"{m(priced[record['run']])} | {m(cost)} | {dollars:.2f} | {cost / POINTS[account]:.0f} | "
                      f"{sum(s['seconds'] for s in record['sessions']) / 60:.0f} | "
                      f"{max((c.ctx for seg in segments for c in seg['calls']), default=0) // 1000}k | {tests} | "
                      f"{'-' if not found else 'ok' if found['clippy'] else 'FAILED'} | "
@@ -597,7 +606,7 @@ def report():
                      f"{hidden('new')} | {hidden('guard')} |")
     versions = sorted(set().union(*(measured[record["run"]][3] for record in runs))) if runs else []
     lines += ["", f"Claude Code versions in the runs: {', '.join(versions) or '-'}. "
-              "Units are the transcripts' calls; billed units and dollars are each session's own tally, which also counts "
+              "Units are the transcripts' calls, each priced by the model it names; billed units and dollars are each session's own tally, which also counts "
               "a compaction's summary call and helper models. Points are of billed units, in the 5-hour window of the account each run went on, at "
               + ", ".join(f"{point // 1000}k units a point on {name}" for name, point in POINTS.items()) + ".", ""]
 
@@ -611,16 +620,17 @@ def report():
         if not all(pick.values()):
             continue
         high, top = pick["chigh"], pick["cmax"]
-        ratios.append(high["units"] / top["units"])
+        high_units, top_units = priced[high["run"]], priced[top["run"]]
+        ratios.append(high_units / top_units)
         calls, spent = ORIGINAL.get(task, (0, 0))
-        lines.append(f"| {task} | {m(top['units'])} | {m(high['units'])} | {high['units'] / top['units']:.2f} | {top['calls']} | {high['calls']} | "
+        lines.append(f"| {task} | {m(top_units)} | {m(high_units)} | {high_units / top_units:.2f} | {top['calls']} | {high['calls']} | "
                      f"{len(top['sessions']) - 1} | {len(high['sessions']) - 1} | {calls} calls, {m(spent)} |")
     if ratios:
         lines += ["", f"Median high / max over {len(ratios)} pairs: {median(ratios):.2f} (the rule: high becomes the default at 0.90 or less over 10 pairs, "
                   "with the hidden tests passing as often and the judge preferring max in at most 3 of 10)."]
     repeated = {}
     for record in runs:
-        repeated.setdefault((record["task"], record["cell"]), []).append(record["units"])
+        repeated.setdefault((record["task"], record["cell"]), []).append(priced[record["run"]])
     for (task, cell), values in sorted(repeated.items()):
         if len(values) > 1:
             lines.append(f"Spread, {task} {cell} over {len(values)} runs: {', '.join(m(v) for v in values)}; max / min {max(values) / min(values):.2f}.")

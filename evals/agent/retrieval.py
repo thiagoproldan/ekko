@@ -12,21 +12,29 @@ the longest chain of open blockers, ready tasks that release other work. A
 board keeps changing, and a question pinned to item 93 stops being a question
 once 93 is done.
 
-Two prices, both from notes 161-165 on the ekko board (week of 2026-09-08,
-Opus 5 weights: cache write 2x, cache read 0.1x, output 5x). A token that
-enters the context costs 2 + 0.1*T + 2*R input tokens over T later requests
-and R cold returns. A call is also one more request that re-reads the whole
-context, 0.1*C + 5*o for a context of C tokens and o output tokens.
+Two prices, both from notes 161-165 on the ekko board (week of 2026-09-08),
+in units of one uncached input token of the model priced (--model, Opus 5.5
+by default): a cache write 2, a cache read w, output 5, where w is the read
+weight evals/claude-code/transcripts.py gives the model (read_weight: 0.05 on
+Opus 5.5, 0.1 on Opus 5, the model of the notes' week). A token that enters
+the context costs 2 + w*T + 2*R input tokens over T later requests and R cold
+returns. A call is also one more request that re-reads the whole context,
+w*C + 5*o for a context of C tokens and o output tokens.
 """
 
 import argparse
 import json
+import os
 import re
 import statistics
+import sys
 import time
 import unicodedata
 
 from ekko_mcp import Mcp, cli, copy_real, cursor_of, line_ids, load, provenance, registered_projects, results_file, size, tokens
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "claude-code"))
+from transcripts import read_weight  # noqa: E402
 
 OPEN = ("pending", "in progress", "paused", "waiting")
 STATE_IN_LINE = re.compile(r"\[(pending|in progress|paused|waiting|done|cancelled|note)[\],]")
@@ -215,8 +223,9 @@ def session_model(path, m, board):
 
 def priced(nbytes, calls, args):
     entered = nbytes / 2.5
-    token_units = entered * (2 + 0.1 * args.later_requests + 2 * args.cold_returns)
-    call_units = calls * (0.1 * args.context_tokens + 5 * args.output_tokens)
+    weight = read_weight(args.model)
+    token_units = entered * (2 + weight * args.later_requests + 2 * args.cold_returns)
+    call_units = calls * (weight * args.context_tokens + 5 * args.output_tokens)
     return entered, token_units, call_units
 
 
@@ -227,6 +236,7 @@ def main():
     parser.add_argument("--output-tokens", type=float, default=1_439, help="o, output per request (note 163)")
     parser.add_argument("--later-requests", type=float, default=50, help="T, requests after a token enters the context")
     parser.add_argument("--cold-returns", type=float, default=1, help="R, returns after the cache expired")
+    parser.add_argument("--model", default="claude-opus-5-5", help="the model whose cache read weight prices it all (transcripts.read_weight)")
     args = parser.parse_args()
     project = args.project or ("ekko" if "ekko" in registered_projects() else None)
 
@@ -283,7 +293,8 @@ def main():
     entered, token_units, call_units = priced(total_bytes, total_calls, args)
     print(
         f"  priced: the tokens it put in context ≈ {token_units:,.0f} input-equivalent tokens; "
-        f"its {total_calls} calls re-read the context ≈ {call_units:,.0f} (C={args.context_tokens:,.0f}, o={args.output_tokens:,.0f})"
+        f"its {total_calls} calls re-read the context ≈ {call_units:,.0f} (C={args.context_tokens:,.0f}, o={args.output_tokens:,.0f}, "
+        f"{args.model}'s read weight {read_weight(args.model)})"
     )
     report["session"] = {
         "steps": steps,
@@ -292,6 +303,8 @@ def main():
         "prime_variant_bytes": total_bytes + variant if variant else None,
         "token_units": token_units,
         "call_units": call_units,
+        "model": args.model,
+        "read_weight": read_weight(args.model),
     }
 
     out = results_file("retrieval")

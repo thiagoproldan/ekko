@@ -53,6 +53,13 @@ jobs:
       - name: Semantics eval
         run: EKKO_BIN="$PWD/target/debug/ekko" python3 evals/agent/semantics.py
 
+      # The evals price a cache read at the weight of the model that ran the
+      # call, from one table (task 2204). This fails on a read weight written
+      # anywhere else, and on weights that stop matching what Claude Code
+      # billed for two real calls. Needs no transcripts.
+      - name: Eval price check
+        run: python3 evals/claude-code/prices.py
+
       # Nothing else pins the declared MSRV, so it would quietly rot: CI
       # builds on stable, which keeps working long after `rust-version`
       # stops being true. Build only -- the tests pull in dev-time APIs

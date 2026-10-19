@@ -4,8 +4,10 @@ decisions 161, 163 and 164). The 2026-09-15 pass was thrown away; this is its
 rewrite, checked by reproducing that week's numbers.
 
 Each API call is counted once, by message id, and priced in units of one
-uncached input token with Opus 5's weights: a 1-hour cache write 2x, a 5-minute
-one 1.25x, a cache read 0.1x, output 5x. Per period it reports the parameters
+uncached input token of the model that ran it: a 1-hour cache write 2x, a
+5-minute one 1.25x, output 5x, and a cache read as read_weight gives it for
+the model -- 0.1x on Opus 5, the model of that week, 0.05x on Opus 5.5
+(evals/claude-code/prices.py checks it). Per period it reports the parameters
 of the model (context per call, growth d, output o, floor b, orientation R),
 where the cost went, compactions, and every expensive restart: a cold resume
 (a gap over 60 minutes and the whole prefix written again, the baseline's
@@ -35,8 +37,20 @@ OUT = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "target", "evals", "claude-code", "transcripts")
 )
 
-# Opus 5, in units of one uncached input token.
-W_IN, W_CW1H, W_CW5M, W_CR, W_OUT = 1.0, 2.0, 1.25, 0.1, 5.0
+# In units of one uncached input token of the model that ran: a 1-hour cache
+# write 2x, a 5-minute one 1.25x and output 5x on every model; a cache read
+# weighs what read_weight says.
+W_IN, W_CW1H, W_CW5M, W_OUT = 1.0, 2.0, 1.25, 5.0
+# A cache read, by the model's id (platform.claude.com/docs/en/build-with-
+# claude/prompt-caching, read 2026-10-19): 0.025x on Fable 5.1 and Mythos
+# 5.1, 0.05x on Opus 5.5 and Sonnet 5.5, 0.1x on every other model. Until
+# task 2204 every eval here priced every read at Opus 5's 0.1 (gotcha 2198).
+READ_WEIGHTS = (("fable-5-1", 0.025), ("mythos-5-1", 0.025), ("opus-5-5", 0.05), ("sonnet-5-5", 0.05))
+
+
+def read_weight(model):
+    """A cache read of `model`, as the model id a call names: 'claude-opus-5-5'."""
+    return next((weight for name, weight in READ_WEIGHTS if name in (model or "")), 0.1)
 
 COLD_GAP = datetime.timedelta(minutes=60)
 WINDOW = datetime.timedelta(hours=5)
@@ -81,7 +95,7 @@ class Call:
 
     @property
     def cost(self):
-        return W_IN * self.inp + W_CW1H * self.cw1h + W_CW5M * self.cw5m + W_CR * self.cr + W_OUT * self.out
+        return W_IN * self.inp + W_CW1H * self.cw1h + W_CW5M * self.cw5m + read_weight(self.model) * self.cr + W_OUT * self.out
 
     @property
     def write_cost(self):
@@ -269,12 +283,12 @@ def continuing(before, segment_calls, first_work):
         if index == 0:
             # the cleared session reads its old prefix warm where the new one
             # wrote a base; content that is new is written in both
-            cost += W_IN * call.inp + W_CR * grown + (0 if whole else call.write_cost) + W_OUT * call.out
+            cost += W_IN * call.inp + read_weight(call.model) * grown + (0 if whole else call.write_cost) + W_OUT * call.out
         elif whole and call.ctx >= LARGE:
             # an invalidation writes the whole prefix again, and the old one is larger
             cost += call.cost + W_CW1H * (grown - call.ctx)
         else:
-            cost += call.cost + W_CR * (grown - call.ctx)
+            cost += call.cost + read_weight(call.model) * (grown - call.ctx)
     return cost
 
 
@@ -423,7 +437,7 @@ def report(calls, files, periods):
             "parts": {
                 "input": sum(W_IN * c.inp for c in inside) / total,
                 "cache_write": sum(c.write_cost for c in inside) / total,
-                "cache_read": sum(W_CR * c.cr for c in inside) / total,
+                "cache_read": sum(read_weight(c.model) * c.cr for c in inside) / total,
                 "output": sum(W_OUT * c.out for c in inside) / total,
             },
             "top3": sum(cost for _, cost in sessions.most_common(3)) / total,

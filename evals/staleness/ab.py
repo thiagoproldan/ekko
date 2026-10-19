@@ -49,7 +49,7 @@ import config as C
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "claude-code"))
 sys.path.insert(0, os.path.join(HERE, "..", "recall"))
-from transcripts import profiles  # noqa: E402
+from transcripts import W_CW1H, W_CW5M, W_IN, W_OUT, profiles, read_weight  # noqa: E402
 
 HOME = os.path.expanduser("~")
 STUDY = C.study()
@@ -89,11 +89,6 @@ DENY = STUDY["deny"]
 PEEK = re.compile(STUDY["peek"])
 GIT_LOOK = re.compile(r"\bgit\b[^|;&]*?\b(log|status|diff|show|rev-list|describe|reflog|shortlog|branch|tag)\b")
 EKKO_READ = re.compile(r"^mcp__.*ekko.*__(context|search|next|prime|changes|roadmap)$")
-W_IN, W_CW1H, W_CW5M, W_OUT = 1.0, 2.0, 1.25, 5.0
-
-
-def read_weight(model):
-    return 0.05 if any(name in (model or "") for name in ("opus-5-5", "sonnet-5-5")) else 0.1
 
 
 def git(cwd, *args, check=True):

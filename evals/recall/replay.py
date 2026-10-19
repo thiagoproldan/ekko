@@ -35,12 +35,13 @@ is today's: the board keeps no history before 2026-09-24.
              prompt and the reply's end; eheads is heads with embed last
 
 Prices as evals/claude-code/transcripts.py, in units of one uncached input
-token: a 1-hour cache write 2, a cache read 0.1, output 5. A lookup call
-avoided saves one request, 0.1*C + 5*o, and its result entering the context,
-r*(2 + 0.1*T) over the T calls left before the context is reset; injecting m
-tokens with a prompt costs m*(2 + 0.1*T). A context call is avoided only when
-every item it fetched was injected whole; a search call only when the items
-the turn went on to fetch from its hits were all injected.
+token: a 1-hour cache write 2, a cache read w, output 5, where w is the read
+weight of the model the call ran (read_weight: 0.05 on Opus 5.5, 0.1 on Opus
+5). A lookup call avoided saves one request, w*C + 5*o, and its result
+entering the context, r*(2 + w*T) over the T calls left before the context is
+reset; injecting m tokens with a prompt costs m*(2 + w*T). A context call is
+avoided only when every item it fetched was injected whole; a search call
+only when the items the turn went on to fetch from its hits were all injected.
 
     nix develop -c python3 evals/recall/replay.py [--since 2026-09-15] [--out DIR]
 
@@ -64,7 +65,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "claude-code"))
-from transcripts import LOCAL, SKIP, W_CR, W_CW1H, W_CW5M, W_IN, W_OUT, profiles, when  # noqa: E402
+from transcripts import LOCAL, SKIP, W_CW1H, W_CW5M, W_IN, W_OUT, profiles, read_weight, when  # noqa: E402
 
 OUT = os.path.normpath(os.path.join(HERE, "..", "..", "target", "evals", "recall"))
 
@@ -411,7 +412,7 @@ EN_MARKS = frozenset("the and that with this for you are not what have from was 
 
 
 class Call:
-    __slots__ = ("mid", "at", "inp", "cw1h", "cw5m", "cr", "out", "uses", "text", "stop", "left")
+    __slots__ = ("mid", "at", "model", "inp", "cw1h", "cw5m", "cr", "out", "uses", "text", "stop", "left")
 
     @property
     def ctx(self):
@@ -419,7 +420,7 @@ class Call:
 
     @property
     def cost(self):
-        return W_IN * self.inp + W_CW1H * self.cw1h + W_CW5M * self.cw5m + W_CR * self.cr + W_OUT * self.out
+        return W_IN * self.inp + W_CW1H * self.cw1h + W_CW5M * self.cw5m + read_weight(self.model) * self.cr + W_OUT * self.out
 
     def productive(self):
         """A file edited, a board write, a commit, or the turn handed back."""
@@ -491,7 +492,7 @@ def scan(since):
                         if call.cw1h is None and call.cw5m is None:
                             call.cw1h, call.cw5m = usage.get("cache_creation_input_tokens") or 0, 0
                         call.cw1h, call.cw5m = call.cw1h or 0, call.cw5m or 0
-                        call.mid, call.at = mid, at
+                        call.mid, call.at, call.model = mid, at, message.get("model") or ""
                         call.inp = usage.get("input_tokens") or 0
                         call.cr = usage.get("cache_read_input_tokens") or 0
                         call.out = usage.get("output_tokens") or 0
@@ -796,8 +797,9 @@ def main():
             if call.uses and all(ekko_op(n) in READS for n, _, _ in call.uses):
                 results = [t["result"] for t in row["targets"] if t["call"] is call]
                 results += [s["result"] for s in row["turn"]["searches"] if s["call"] is call]
-                oracle += W_CR * call.ctx + W_OUT * call.out + tokens(sum(results) or 1500) * (W_CW1H + W_CR * call.left)
-                overhead += W_CR * call.ctx + W_OUT * call.out
+                weight = read_weight(call.model)
+                oracle += weight * call.ctx + W_OUT * call.out + tokens(sum(results) or 1500) * (W_CW1H + weight * call.left)
+                overhead += weight * call.ctx + W_OUT * call.out
                 oracle_calls += 1
                 if at + 1 < len(calls):
                     seconds += (calls[at + 1].at - call.at).total_seconds()
@@ -880,7 +882,9 @@ def price(rows, arm, k, clip, floor, tuned=False):
     session_injected = collections.defaultdict(set)
     for row in rows:
         turn, board = row["turn"], row["turn"]["board"]
-        key = turn["session"]
+        # Item ids are a board's own: a session that moved to another board
+        # starts that board's injected set afresh.
+        key = (turn["session"], board)
         ranked = row["arms"][arm]
         if tuned:
             if len(content_terms(turn["prompt"])) < 3 or PASTED.match(turn["prompt"]):
@@ -891,7 +895,9 @@ def price(rows, arm, k, clip, floor, tuned=False):
         left = turn["left"] or 0
         items = BOARDS_CACHE[board].items
         chars = sum(min(len(items[iid]["desc"]), clip) + ITEM_HEADER for iid in fresh)
-        injected_cost += tokens(chars) * (W_CW1H + W_CR * left)
+        # Injected with the prompt: read at the weight of the model the turn ran.
+        weight = read_weight(turn["calls"][0].model if turn["calls"] else None)
+        injected_cost += tokens(chars) * (W_CW1H + weight * left)
         injected_items += len(fresh)
         useful += sum(1 for iid in fresh if iid in turn["later"] or any(t["id"] == iid for t in row["targets"]))
         session_injected[key] |= set(fresh)
@@ -918,7 +924,8 @@ def price(rows, arm, k, clip, floor, tuned=False):
                 result = sum(s["result"] for s in searches)
             else:
                 continue
-            saved += W_CR * call.ctx + W_OUT * call.out + tokens(result) * (W_CW1H + W_CR * call.left)
+            weight = read_weight(call.model)
+            saved += weight * call.ctx + W_OUT * call.out + tokens(result) * (W_CW1H + weight * call.left)
             avoided_calls += 1
             if at + 1 < len(calls):
                 avoided_seconds += (calls[at + 1].at - call.at).total_seconds()

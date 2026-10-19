@@ -6,9 +6,13 @@ import collections
 import json
 import os
 import statistics
+import sys
 
 import config as C
 from classes import born_tasks, kind, resume_ask
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "claude-code"))
+from transcripts import read_weight  # noqa: E402
 
 rows = [json.loads(line) for line in open(os.path.join(C.DATA, "starts.jsonl"))]
 CPT = 2.59
@@ -16,7 +20,7 @@ CPT = 2.59
 
 def w(r):
     """The read weight of the model the start ran (gotcha 2198)."""
-    return 0.05 if any(n in (r.get("model") or "") for n in ("opus-5-5", "sonnet-5-5")) else 0.1
+    return read_weight(r.get("model"))
 
 
 def q(values, p):

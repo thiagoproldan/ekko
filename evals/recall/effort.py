@@ -2,7 +2,7 @@
 varies with the effort level each call ran at."""
 import sys, os, datetime, statistics, json, glob, collections
 import replay
-from replay import scan, calls_left, LOCAL, W_CR, W_CW1H, W_OUT
+from replay import scan, calls_left, LOCAL, W_CW1H, W_OUT, read_weight
 
 meta = {}
 for base in replay.profiles():
@@ -28,11 +28,11 @@ for path, events in scan(since):
         think = min(think, call.out)
         bill += call.cost
         gen_think += W_OUT * think
-        kept_think += think * (W_CW1H + W_CR * call.left)
-        kept_visible += (call.out - think) * (W_CW1H + W_CR * call.left)
+        kept_think += think * (W_CW1H + read_weight(call.model) * call.left)
+        kept_visible += (call.out - think) * (W_CW1H + read_weight(call.model) * call.left)
         e = by_effort[effort]
         e["calls"] += 1; e["think"].append(think); e["out"].append(call.out); e["cost"] += call.cost
-        e["kept_think"] += think * (W_CW1H + W_CR * call.left)
+        e["kept_think"] += think * (W_CW1H + read_weight(call.model) * call.left)
         if i + 1 < len(calls) and calls[i + 1].left == call.left - 1:
             e["grow"].append(calls[i + 1].ctx - call.ctx)
 print(f"bill since 08-25: {bill/1e6:.0f}M units")

@@ -7,7 +7,8 @@ returned, and what it would cost had the prime carried it instead.
 
 A tool call's result is priced as part A prices it: its tokens (2.28
 characters each for tool results, note 286) written once (2) and read by every
-later call of the run (0.05 each, Opus 5.5). A round trip is the call that
+later call of the run, at the read weight of the run's model (0.05 each on
+Opus 5.5, transcripts.read_weight). A round trip is the call that
 asked for it: one more API call, whose seconds the run measured.
 """
 
@@ -16,8 +17,12 @@ import json
 import os
 import re
 import statistics
+import sys
 
 import config as C
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "claude-code"))
+from transcripts import read_weight  # noqa: E402
 
 RUNS = os.path.join(C.DATA, "runs")
 TRUTH = json.load(open(os.path.join(C.DATA, "truth.json")))
@@ -107,6 +112,7 @@ def main():
         named, task = set(facts.get("named") or []), facts.get("task")
         order, calls, results = run_calls(os.path.join(RUNS, name, "stream.jsonl"))
         arm = run["arm"]
+        weight = read_weight(run.get("model"))
         runs_by_arm[arm] += 1
         n_calls = len(order)
         tool_round_trips[arm].append(sum(1 for mid in order if calls[mid]))
@@ -118,7 +124,7 @@ def main():
                 cell = per_arm[arm][cat]
                 cell["calls"] += 1
                 cell["chars"] += chars
-                cell["units"] += chars / CPT_RESULT * (2 + 0.05 * later)
+                cell["units"] += chars / CPT_RESULT * (2 + weight * later)
                 cell["runs"].add(name)
                 if index == 0:
                     first_moves[cat] += 1

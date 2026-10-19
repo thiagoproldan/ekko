@@ -10,7 +10,8 @@ The line, as the reduced 1433 would print it under the handoff:
   B2 (always): B1, or "Nothing moved since it was written, at f9564f4." when
     nothing did.
 Its price on a start: its tokens (2.59 characters each, note 286) written once
-into the cache (2) and read by every later call of the segment (0.1 each).
+into the cache (2) and read by every later call of the segment, at the read
+weight of the model the start ran (transcripts.read_weight: 0.05 on Opus 5.5).
 The most it could save: every git look the session made before its first
 productive action (the calls and their results carried, starts.py), had the
 line made them all needless. The share it must remove to pay for itself is
@@ -20,8 +21,12 @@ f* = (sum of prices) / (sum of savings at most).
 import json
 import os
 import statistics
+import sys
 
 import config as C
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "claude-code"))
+from transcripts import read_weight  # noqa: E402
 
 rows = [json.loads(line) for line in open(os.path.join(C.DATA, "starts.jsonl"))]
 CPT = 2.59
@@ -29,7 +34,7 @@ CPT = 2.59
 
 def w(r):
     """The read weight of the model the start ran (gotcha 2198)."""
-    return 0.05 if any(n in (r.get("model") or "") for n in ("opus-5-5", "sonnet-5-5")) else 0.1
+    return read_weight(r.get("model"))
 
 
 def stale(r):

@@ -24,13 +24,16 @@ import json
 import math
 import os
 import statistics
+import sys
 
 import config as C
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "claude-code"))
+from transcripts import read_weight  # noqa: E402
 
 RUNS = os.path.join(C.DATA, "runs")
 TRUTH = json.load(open(os.path.join(C.DATA, "truth.json")))
 CPT = 2.59           # characters per token of ekko's text (note 286)
-W_READ = 0.05        # Opus 5.5's cache read weight (gotcha 2198)
 LATER_CALLS = 90     # median calls after the first in a user's session (part A)
 METRICS = (("units_cold", True), ("calls", True), ("seconds", True), ("cost_usd", True),
            ("git_looks", True), ("ekko_reads", True), ("tool_calls", True))
@@ -89,6 +92,15 @@ def mean_by_class(runs, metric, arm, klass):
     return statistics.fmean(values) if values else None
 
 
+def read_weight_of(runs):
+    """The cache read weight of the model the runs ran: one model for them all,
+    since I_later prices the line on the calls of the session that follows."""
+    models = {run.get("model") for run in runs}
+    if len(models) != 1:
+        raise SystemExit(f"the runs ran {sorted(map(str, models))}: I_later needs one model's read weight")
+    return read_weight(models.pop())
+
+
 def line_tokens(runs, arm, klass):
     texts = [len(r.get("text") or "") for r in runs if r["arm"] == arm and r["class"] == klass]
     return statistics.fmean(texts) / CPT if texts else 0.0
@@ -100,6 +112,7 @@ def main():
     parser.add_argument("--exclude", nargs="+", default=(), metavar="RUN", help="runs left out, for a sensitivity check")
     args = parser.parse_args()
     runs = load(args.grades, set(args.exclude))
+    w_read = read_weight_of(runs)
     if args.exclude:
         print(f"left out: {sorted(args.exclude)}")
     arms = sorted({r["arm"] for r in runs})
@@ -188,7 +201,7 @@ def main():
                     continue
                 later = 0.0
                 if metric == "units_cold":
-                    later = (p * line_tokens(runs, arm, "stale") + (1 - p) * line_tokens(runs, arm, "fresh")) * W_READ * LATER_CALLS
+                    later = (p * line_tokens(runs, arm, "stale") + (1 - p) * line_tokens(runs, arm, "fresh")) * w_read * LATER_CALLS
                 row.append(f"{arm} {p * s + (1 - p) * f + later:>10,.1f}")
             print(f"    p {p:4.2f} ({label:22}) " + "  ".join(row))
     print()
@@ -206,7 +219,7 @@ def main():
                     continue
                 later = 0.0
                 if metric == "units_cold":
-                    later = (p * line_tokens(runs, arm, "stale") + (1 - p) * line_tokens(runs, arm, "fresh")) * W_READ * LATER_CALLS
+                    later = (p * line_tokens(runs, arm, "stale") + (1 - p) * line_tokens(runs, arm, "fresh")) * w_read * LATER_CALLS
                 d = p * gs["d"] + (1 - p) * gf["d"] + later
                 se = math.sqrt((p * gs["se"]) ** 2 + ((1 - p) * gf["se"]) ** 2)
                 row.append(f"{arm} {d:+12,.1f} (SE {se:9,.1f})")
@@ -224,7 +237,7 @@ def main():
                     continue
                 later = 0.0
                 if metric == "units_cold":
-                    later = sum(sign * (p * line_tokens(runs, a, "stale") + (1 - p) * line_tokens(runs, a, "fresh")) * W_READ * LATER_CALLS
+                    later = sum(sign * (p * line_tokens(runs, a, "stale") + (1 - p) * line_tokens(runs, a, "fresh")) * w_read * LATER_CALLS
                                 for sign, a in ((1, arm), (-1, control)))
                 d = p * gs["d"] + (1 - p) * gf["d"] + later
                 se = math.sqrt((p * gs["se"]) ** 2 + ((1 - p) * gf["se"]) ** 2)
@@ -232,9 +245,9 @@ def main():
                 row.append(f"{arm}-{control} {d:+10,.1f} (SE {se:8,.1f}) {verdict:5}")
             print(f"    p {p:4.2f} ({label:22}) " + "  ".join(row))
     print()
-    print("== the line's price after the answer, units per start (its tokens x 0.05 x 90 later calls)")
+    print(f"== the line's price after the answer, units per start (its tokens x {w_read} x {LATER_CALLS} later calls)")
     for arm in arms:
-        print(f"  {arm}: stale {line_tokens(runs, arm, 'stale') * W_READ * LATER_CALLS:6.0f}, fresh {line_tokens(runs, arm, 'fresh') * W_READ * LATER_CALLS:6.0f}"
+        print(f"  {arm}: stale {line_tokens(runs, arm, 'stale') * w_read * LATER_CALLS:6.0f}, fresh {line_tokens(runs, arm, 'fresh') * w_read * LATER_CALLS:6.0f}"
               f"  (chars: stale {line_tokens(runs, arm, 'stale') * CPT:5.0f}, fresh {line_tokens(runs, arm, 'fresh') * CPT:5.0f})")
 
 

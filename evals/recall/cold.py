@@ -9,7 +9,7 @@ go-live, --until another change's go-live to split the count (note 864). Task
 929 added the returns after an hour idle at any size, and the period's bill:
 a return to a session auto-reset has already cleared is small and cheap."""
 import sys, datetime, statistics, collections, argparse
-from replay import scan, calls_left, LOCAL, W_CR, W_CW1H, W_CW5M, W_IN, W_OUT, ekko_op
+from replay import scan, calls_left, LOCAL, W_CW1H, W_CW5M, ekko_op
 parser = argparse.ArgumentParser()
 parser.add_argument("--since", default="2026-08-25", help="local time")
 parser.add_argument("--until", help="local time: only the rewrites before it")
@@ -33,7 +33,7 @@ for path, events in scan(since):
         elif ev[0] == "call":
             call = ev[1]
             if until is None or call.at < until:
-                bill += W_IN * call.inp + W_CW1H * call.cw1h + W_CW5M * call.cw5m + W_CR * call.cr + W_OUT * call.out
+                bill += call.cost
                 if prev is not None and (call.at - prev.at).total_seconds() >= 3600:
                     returns.append(call.ctx)
             for name, _, args in call.uses:

@@ -11,7 +11,8 @@ A start is a SessionStart whose ekko --prime hook output holds "Where the last
 session stopped". Its segment runs to the next start or compaction in the same
 transcript. Calls are counted once by message id, main thread only, and priced
 as evals/claude-code/transcripts.py prices them (units of one uncached input
-token: 1 h cache write 2, 5 min write 1.25, read 0.1, output 5).
+token: 1 h cache write 2, 5 min write 1.25, read by the call's model as
+transcripts.read_weight says -- 0.05 on Opus 5.5, 0.1 on Opus 5 -- output 5).
 
 What moved is read from what exists today, so it is an estimate where history
 is gone: commits from each repository's reflog-free history (every ref, by
@@ -46,11 +47,6 @@ CHARS_PER_TOKEN_TOOL = 2.28  # note 286: other tools' results
 CHARS_PER_TOKEN_EKKO = 2.59  # note 286: ekko's text
 
 
-def read_weight(model):
-    """A cache read in units of the model's own uncached input token: 0.05 on
-    Opus 5.5 and Sonnet 5.5, 0.1 before (pricing page, 2026-10-19; gotcha 2198)."""
-    return 0.05 if any(name in (model or "") for name in ("opus-5-5", "sonnet-5-5")) else 0.1
-
 HEADER = re.compile(
     r"Where the last session stopped: handoff (\d+) on task (\d+) \[([a-z ]+)\]"
     r"(?:, written (\d{4}-\d{2}-\d{2} \d{2}:\d{2}))?(.*)"
@@ -73,7 +69,7 @@ class Call:
 
     @property
     def w_cr(self):
-        return read_weight(self.model)
+        return T.read_weight(self.model)
 
     @property
     def cost(self):
@@ -478,7 +474,7 @@ def main():
             record["git_look_chars"] = sum(len(results.get(t["id"]) or "") for t in look)
             # What the git looks before the first productive action cost, in units: each
             # call that made one (all of it, an upper bound when it made other calls too),
-            # and its results carried: written once at 2, read at 0.1 by every later call.
+            # and its results carried: written once at 2, read at w_cr by every later call.
             look_units = 0.0
             for position, c in enumerate(calls[:index]):
                 mine = [t for t in c.tools if t["name"] == "Bash" and GIT_LOOK.search(t["arg"])]

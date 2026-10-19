@@ -41,7 +41,7 @@ import uuid
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(HERE, "..", "claude-code"))
-from transcripts import W_CR, W_CW1H, W_CW5M, W_IN, W_OUT  # noqa: E402
+from transcripts import W_CW1H, W_CW5M, W_IN, W_OUT, read_weight  # noqa: E402
 
 HOME = os.path.expanduser("~")
 # The account that pays, `--account`: the pilot's short runs went on trabalho,
@@ -65,8 +65,12 @@ T = 160_000
 WINDOW = T + 33_000
 # Units a point of each account's 5-hour window. Default: 3.95M units took it
 # from 1% to 64% on 2026-09-26 (00:57-01:43), not note 444's 175k; trabalho:
-# 1.85M units took it from 67% to 91% on 2026-09-24.
-POINTS = {"default": 63_000, "trabalho": 77_000}
+# 1.85M units took it from 67% to 91% on 2026-09-24. Those were priced at
+# Opus 5's read weight, and every call ran Opus 5.5: priced by model (task
+# 2204) the same calls come to 0.754 of that on default (that window, 4.02M
+# to 3.03M) and 0.779 on trabalho (runs 397-chigh-1 and 397-cmax-1, 1.84M to
+# 1.43M), so 2.98M over 63 points and 1.44M over 24.
+POINTS = {"default": 47_000, "trabalho": 60_000}
 # The headless stream reports the account's windows (rate_limit_event): a run
 # starts only if the 5-hour window can take it whole (its expected points on top
 # stay under FIVE_HOUR), and the pilot stops at SEVEN_DAY of the week, so that
@@ -75,7 +79,9 @@ POINTS = {"default": 63_000, "trabalho": 77_000}
 FIVE_HOUR, SEVEN_DAY = 0.95, 0.70
 SEGMENTS = 8  # sessions a run may take before it is stopped
 AFTER_HANDOFF = 180  # seconds a session may go on once its handoff is written
-STAGE_CAP = 25_000_000  # stage 1's units, every run together
+# Budgets below were set in units at Opus 5's read weight; each is that
+# budget priced by model, at the ratios POINTS measured (task 2204).
+STAGE_CAP = 19_000_000  # stage 1's units, every run together: 25M before
 NIGHT = (datetime.time(23, 0), datetime.time(7, 30))  # when a run may start
 
 # The prompt the user typed, the commit that answered it, when the prompt was
@@ -86,8 +92,8 @@ TASKS = {
     "394": ("faz a 394", "2779afb", 1790206340347, "short"),
     "397": ("faz a 397", "e01e6d1", 1790205358820, "short"),
 }
-CAP = {"long": 9_000_000, "short": 3_000_000}  # units: a run is stopped past this
-EXPECTED = {"long": 3_800_000, "short": 1_000_000}  # units a run is expected to take
+CAP = {"long": 6_800_000, "short": 2_300_000}  # units: a run is stopped past this (9M and 3M before)
+EXPECTED = {"long": 2_900_000, "short": 780_000}  # units a run is expected to take (3.8M and 1M before)
 # The user's word on 2026-09-24: the two short tasks first, the long ones after
 # their numbers.
 PILOT = [("397", ("cmax", "chigh")), ("394", ("cmax", "chigh"))]
@@ -290,13 +296,13 @@ def calls_in(path):
             yield usage, row
 
 
-def units(usage):
+def units(usage, model):
     split = usage.get("cache_creation") or {}
     cw1h, cw5m = split.get("ephemeral_1h_input_tokens"), split.get("ephemeral_5m_input_tokens")
     if cw1h is None and cw5m is None:
         cw1h, cw5m = usage.get("cache_creation_input_tokens") or 0, 0
     return (W_IN * (usage.get("input_tokens") or 0) + W_CW1H * (cw1h or 0) + W_CW5M * (cw5m or 0)
-            + W_CR * (usage.get("cache_read_input_tokens") or 0) + W_OUT * (usage.get("output_tokens") or 0))
+            + read_weight(model) * (usage.get("cache_read_input_tokens") or 0) + W_OUT * (usage.get("output_tokens") or 0))
 
 
 def spent(sids):
@@ -304,8 +310,8 @@ def spent(sids):
     for sid in sids:
         main, subagents = files_of(sid)
         for path in main + subagents:
-            for usage, _ in calls_in(path):
-                total += units(usage)
+            for usage, row in calls_in(path):
+                total += units(usage, (row.get("message") or {}).get("model"))
                 calls += 1
     return total, calls
 
