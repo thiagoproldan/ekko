@@ -202,6 +202,39 @@ fn a_write_names_the_work_it_set_free() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// batch takes its list as operations too: 9 of 153 batch calls in the
+/// transcripts of 2026-10-08 to 19 sent it under that name, reading "several
+/// operations in one write", and were refused (task 1441). Both names at once
+/// are refused, so neither list is dropped unread.
+#[test]
+fn batch_takes_its_list_as_operations_too() {
+    let home = temp_home();
+    let replies = session(
+        &home,
+        &[
+            call(1, "batch", json!({"operations": [{"op": "create", "text": "sent as operations"}, {"op": "create", "text": "after it", "blocked_by": ["$1"]}]})),
+            call(2, "batch", json!({"ops": [{"op": "create", "text": "under ops"}], "operations": [{"op": "create", "text": "under operations"}]})),
+            call(3, "batch", json!({})),
+            call(4, "context", json!({"item": 2})),
+            call(5, "context", json!({"item": 3})),
+        ],
+    );
+
+    let written: Value = serde_json::from_str(text(&replies["1"])).unwrap();
+    assert_eq!(written["ok"], true, "{written}");
+    let second = text(&replies["4"]);
+    assert!(second.starts_with("   2. after it\n"), "{second}");
+    assert!(second.contains("1. [pending] sent as operations"), "$1 named the first one: {second}");
+
+    assert_eq!(replies["2"]["result"]["isError"], true, "{}", replies["2"]);
+    assert_eq!(text(&replies["2"]), "INVALID_INPUT: batch takes its list as ops, or as operations, not both");
+    assert_eq!(replies["5"]["result"]["isError"], true, "the refused batch wrote item 3: {}", text(&replies["5"]));
+
+    assert_eq!(text(&replies["3"]), "INVALID_INPUT: batch needs ops");
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// A task's title past 80 characters is cut at a word rather than refused,
 /// and the reply of each tool that writes one says where (decision 1504):
 /// create, batch, edit and the artifact tool's steps. A title that fits

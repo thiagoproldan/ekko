@@ -1317,7 +1317,13 @@ impl Server {
                 artifact(&ekko, &spec, &self.home, &location)
             }
             "batch" => {
-                let ops = args.remove("ops").ok_or_else(|| invalid("batch needs ops"))?;
+                // operations is taken as another name for ops: sessions sent it, reading the
+                // instructions' "several operations in one write" (task 1441).
+                let ops = match (args.remove("ops"), args.remove("operations")) {
+                    (Some(ops), None) | (None, Some(ops)) => ops,
+                    (Some(_), Some(_)) => return Err(invalid("batch takes its list as ops, or as operations, not both")),
+                    (None, None) => return Err(invalid("batch needs ops")),
+                };
                 finish(args)?;
                 batch(&ekko, ops)
             }
