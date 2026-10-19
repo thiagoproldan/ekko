@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# PreToolUse guard for study 2197's runs: a run works in a scratch copy and
+# must not reach the real folders -- for a replay of a past start they hold
+# its future, and for any run they hold what the study wrote about it. Any
+# tool call naming them is refused. ab.py passes the pattern, an extended regex from
+# study.json's "guard", as NO_ELSEWHERE, and the run's own transcript folder
+# (its persisted tool results), which stays open, as NO_ELSEWHERE_OWN.
+if [ -z "${NO_ELSEWHERE:-}" ]; then
+  echo "no-elsewhere: NO_ELSEWHERE is not set, so every call is refused" >&2
+  exit 2
+fi
+input=$(cat)
+text=$(printf '%s' "$input" | jq -r '.tool_input | tostring' 2>/dev/null)
+if [ -n "${NO_ELSEWHERE_OWN:-}" ]; then
+  text=${text//"$NO_ELSEWHERE_OWN"/OWN-RUN}
+fi
+if printf '%s' "$text" | grep -Eq -- "$NO_ELSEWHERE"; then
+  echo "This session replays a past moment in a copy of the repository; folders outside it are not available here." >&2
+  exit 2
+fi
+exit 0
