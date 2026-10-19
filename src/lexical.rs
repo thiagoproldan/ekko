@@ -40,6 +40,9 @@ const PREFIX_FROM: usize = 3;
 #[derive(Debug, Clone, Default)]
 pub struct Query {
     terms: Vec<String>,
+    /// For each term, whether it matches only a whole word: one shorter than
+    /// `PREFIX_FROM`.
+    whole: Vec<bool>,
 }
 
 impl Query {
@@ -51,7 +54,8 @@ impl Query {
                 terms.push(term);
             }
         }
-        Query { terms }
+        let whole = terms.iter().map(|term| term.chars().count() < PREFIX_FROM).collect();
+        Query { terms, whole }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -60,7 +64,16 @@ impl Query {
 
     /// The query word a folded word of the text matches, if any.
     fn term_of(&self, word: &str) -> Option<usize> {
-        self.terms.iter().position(|term| matches(term, word))
+        (0..self.terms.len()).find(|&at| self.matches(at, word))
+    }
+
+    /// Whether a folded word of the text matches query word `at`: a word it
+    /// starts, or only itself when it is short.
+    fn matches(&self, at: usize, word: &str) -> bool {
+        match self.whole[at] {
+            true => word == self.terms[at],
+            false => word.starts_with(self.terms[at].as_str()),
+        }
     }
 }
 
@@ -86,14 +99,6 @@ fn stem(word: &str) -> String {
         .unwrap_or_else(|| word.to_string())
 }
 
-fn matches(term: &str, word: &str) -> bool {
-    if term.chars().count() >= PREFIX_FROM {
-        word.starts_with(term)
-    } else {
-        word == term
-    }
-}
-
 /// One matching text: its position among the texts ranked, how many query
 /// words it matched, and its BM25 score.
 #[derive(Debug, Clone, PartialEq)]
@@ -114,21 +119,8 @@ pub struct Ranked {
 /// Ranks `texts` against `query` by the rules the module describes.
 pub fn rank(query: &Query, texts: &[&str]) -> Ranked {
     let terms = query.terms.len();
-    let counted: Vec<(usize, Vec<usize>)> = texts
-        .iter()
-        .map(|text| {
-            let found = words(&text.chars().collect::<Vec<_>>());
-            let mut counts = vec![0; terms];
-            for word in &found {
-                for (at, term) in query.terms.iter().enumerate() {
-                    if matches(term, &word.folded) {
-                        counts[at] += 1;
-                    }
-                }
-            }
-            (found.len(), counts)
-        })
-        .collect();
+    let mut word = String::new();
+    let counted: Vec<(usize, Vec<usize>)> = texts.iter().map(|text| count(query, text, &mut word)).collect();
 
     let documents = texts.len() as f64;
     let average = (counted.iter().map(|(length, _)| *length).sum::<usize>() as f64 / documents.max(1.0)).max(1.0);
@@ -159,6 +151,30 @@ pub fn rank(query: &Query, texts: &[&str]) -> Ranked {
         .collect();
     hits.sort_by(|a, b| b.matched.cmp(&a.matched).then(b.score.total_cmp(&a.score)).then(a.index.cmp(&b.index)));
     Ranked { hits, every_word }
+}
+
+/// How many words `text` holds, and how many of them match each query word.
+/// A search reads every text on the board, so each word is folded into
+/// `word`, one at a time, and matched there, keeping none (task 2225).
+fn count(query: &Query, text: &str, word: &mut String) -> (usize, Vec<usize>) {
+    let (mut length, mut counts, mut in_word) = (0, vec![0; query.terms.len()], false);
+    word.clear();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_alphanumeric() {
+            fold_char(c, word);
+            in_word = true;
+        } else if in_word {
+            length += 1;
+            for (at, count) in counts.iter_mut().enumerate() {
+                if query.matches(at, word) {
+                    *count += 1;
+                }
+            }
+            word.clear();
+            in_word = false;
+        }
+    }
+    (length, counts)
 }
 
 /// `text` on one line, cut to `window` characters around where it best
@@ -240,7 +256,20 @@ pub(crate) fn folded(text: &str) -> String {
 /// Lowercase, with the Latin letters that carry diacritics read as their base.
 fn fold(chars: &[char]) -> String {
     let mut out = String::with_capacity(chars.len());
-    for c in chars.iter().flat_map(|c| c.to_lowercase()) {
+    for &c in chars {
+        fold_char(c, &mut out);
+    }
+    out
+}
+
+/// One character of `fold`, onto `out`. ASCII, most of every board, has
+/// no diacritics to read and lowercases as one character of its own.
+fn fold_char(c: char, out: &mut String) {
+    if c.is_ascii() {
+        out.push(c.to_ascii_lowercase());
+        return;
+    }
+    for c in c.to_lowercase() {
         match c {
             'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => out.push('a'),
             'ç' | 'ć' | 'č' => out.push('c'),
@@ -263,7 +292,6 @@ fn fold(chars: &[char]) -> String {
             other => out.push(other),
         }
     }
-    out
 }
 
 #[cfg(test)]
@@ -273,6 +301,50 @@ mod tests {
     fn ranked(query: &str, texts: &[&str]) -> (Vec<usize>, bool) {
         let ranked = rank(&Query::new(query), texts);
         (ranked.hits.iter().map(|hit| hit.index).collect(), ranked.every_word)
+    }
+
+    /// `count` finds what `rank` found when it kept every word of a text
+    /// folded (before task 2225): the same number of words and the same
+    /// matches per query word, on texts drawn at random from words that fold,
+    /// split or end a text in every way the boards hold.
+    #[test]
+    fn counting_finds_what_keeping_every_word_found() {
+        fn kept(query: &Query, text: &str) -> (usize, Vec<usize>) {
+            let found = words(&text.chars().collect::<Vec<_>>());
+            let counts = (0..query.terms.len())
+                .map(|at| {
+                    let term = &query.terms[at];
+                    found
+                        .iter()
+                        .filter(|word| match term.chars().count() >= PREFIX_FROM {
+                            true => word.folded.starts_with(term.as_str()),
+                            false => word.folded == *term,
+                        })
+                        .count()
+                })
+                .collect();
+            (found.len(), counts)
+        }
+        let vocabulary = [
+            "Decisão", "AÇÃO", "straße", "İstanbul", "œuvre", "naïve", "x86_64", "foo-bar", "a.b", "日本語", "emoji😀word",
+            "2026", "id", "ids", "idea", "cycle", "recycled", "cycles", "\n", "\t", " ", ",", "decisões", "handoff", "ÆON",
+        ];
+        let queries = ["decisao", "acao", "strasse", "istanbul", "oeuvre", "naive", "x86", "foo bar", "日本", "id", "cycles", "2026 word", "decisoes aeon"];
+        let mut seed: u64 = 0x2225;
+        let mut next = |below: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % below
+        };
+        let mut word = String::from("left over");
+        let mut compared = 0;
+        for _ in 0..300 {
+            let text = (0..next(12)).map(|_| vocabulary[next(vocabulary.len())]).collect::<Vec<_>>().join(["", " ", "-"][next(3)]);
+            for query in queries.map(Query::new) {
+                assert_eq!(count(&query, &text, &mut word), kept(&query, &text), "{text:?}");
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 300 * queries.len());
     }
 
     #[test]

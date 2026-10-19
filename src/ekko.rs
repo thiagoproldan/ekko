@@ -2844,23 +2844,44 @@ fn reorder_attached(items: &mut Vec<Item>) {
         return;
     }
 
-    let (attached, mut rest): (Vec<Item>, Vec<Item>) =
-        items.drain(..).partition(|item| item.attached_to.is_some());
+    let (attached, rest): (Vec<Item>, Vec<Item>) = items.drain(..).partition(|item| item.attached_to.is_some());
 
+    // In id order, each note goes right after its task, or after a note
+    // placed before it, so a later note sits closer to what it explains.
+    // Built as a tree and laid out once: inserting each note in the list
+    // moved the whole list for every note, 15 ms of each search on this
+    // board (task 2225).
+    let mut placed: HashSet<String> = rest.iter().filter_map(|item| item.uid.clone()).collect();
+    let mut under: HashMap<String, Vec<Item>> = HashMap::new();
     let mut orphans = Vec::new();
     for note in attached {
-        let target = note.attached_to.as_deref().expect("partitioned on attached_to being set");
-        match rest.iter().position(|item| item.uid.as_deref() == Some(target)) {
-            Some(at) => rest.insert(at + 1, note),
-            None => orphans.push(note),
+        let target = note.attached_to.clone().expect("partitioned on attached_to being set");
+        if placed.contains(&target) {
+            if let Some(uid) = &note.uid {
+                placed.insert(uid.clone());
+            }
+            under.entry(target).or_default().push(note);
+        } else {
+            orphans.push(note);
         }
+    }
+    fn lay_out(item: Item, under: &mut HashMap<String, Vec<Item>>, out: &mut Vec<Item>) {
+        let notes = item.uid.as_ref().and_then(|uid| under.remove(uid)).unwrap_or_default();
+        out.push(item);
+        for note in notes.into_iter().rev() {
+            lay_out(note, under, out);
+        }
+    }
+    let mut laid = Vec::with_capacity(rest.len() + orphans.len() + under.values().map(Vec::len).sum::<usize>());
+    for item in rest {
+        lay_out(item, &mut under, &mut laid);
     }
 
     // Orphans keep their id order among themselves, appended rather than
     // dropped: a note whose task is elsewhere is still this board's note.
     orphans.sort_by_key(|item| item.id);
-    rest.extend(orphans);
-    *items = rest;
+    laid.extend(orphans);
+    *items = laid;
 }
 
 /// The display id of the item carrying `uid`, if any.
@@ -5241,6 +5262,67 @@ mod tests {
         assert_eq!((inversions[0].blocked, inversions[0].blocker), (2, 1));
 
         cleanup(&dir);
+    }
+
+    /// Attached notes land where inserting each after its item, in id order,
+    /// put them -- the way reorder_attached worked until task 2225 -- on
+    /// groups drawn at random: notes on tasks, on notes placed before or
+    /// after them, on items not in the group, and items without a uid.
+    #[test]
+    fn attached_notes_land_where_inserting_them_one_by_one_put_them() {
+        fn inserted(items: &mut Vec<Item>) {
+            if !items.iter().any(|item| item.attached_to.is_some()) {
+                return;
+            }
+            let (attached, mut rest): (Vec<Item>, Vec<Item>) = items.drain(..).partition(|item| item.attached_to.is_some());
+            let mut orphans = Vec::new();
+            for note in attached {
+                let target = note.attached_to.as_deref().unwrap();
+                match rest.iter().position(|item| item.uid.as_deref() == Some(target)) {
+                    Some(at) => rest.insert(at + 1, note),
+                    None => orphans.push(note),
+                }
+            }
+            orphans.sort_by_key(|item| item.id);
+            rest.extend(orphans);
+            *items = rest;
+        }
+        let mut seed: u64 = 0x2225;
+        let mut next = |below: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % below
+        };
+        let mut differing = 0;
+        for _ in 0..500 {
+            let count = 1 + next(40) as u32;
+            let mut items: Vec<Item> = (1..=count)
+                .map(|id| {
+                    let mut item = if next(3) == 0 {
+                        Item::new_task(id, format!("task {id}"), vec!["My Board".into()], 1)
+                    } else {
+                        Item::new_note(id, format!("note {id}"), vec!["My Board".into()])
+                    };
+                    item.uid = (next(10) != 0).then(|| format!("u{id}"));
+                    item
+                })
+                .collect();
+            for item in items.iter_mut() {
+                if !item.is_task && next(4) != 0 {
+                    item.attached_to = Some(match next(8) {
+                        0 => "elsewhere".to_string(),
+                        _ => format!("u{}", 1 + next(u64::from(count))),
+                    });
+                }
+            }
+            let (mut old, mut new) = (items.clone(), items);
+            inserted(&mut old);
+            reorder_attached(&mut new);
+            let ids = |items: &[Item]| items.iter().map(|item| item.id).collect::<Vec<_>>();
+            if ids(&old) != ids(&new) {
+                differing += 1;
+            }
+        }
+        assert_eq!(differing, 0, "groups laid out differently");
     }
 
     /// The roadmap counts what the board shows: a stashed or trashed item is

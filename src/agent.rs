@@ -2031,7 +2031,22 @@ pub fn search(ekko: &Ekko, text: Option<&str>, filters: &[String], limit: usize)
 
 /// The items `--list` gives for `filters`, each once however many boards it
 /// is on, in id order.
+///
+/// With no filters, or the stash's alone, that is every item the listing
+/// starts from that is on some board, read here off the shared board: the
+/// listing copies the board twice, 8 ms of each search on this board (task
+/// 2225). `listing` is the listing itself, which a test holds this to.
 fn passing<'a>(ekko: &Ekko, filters: &[String], all: &'a ItemMap) -> Result<Vec<&'a Item>, EkkoError> {
+    let starts: fn(&Item) -> bool = match filters {
+        [] => visible,
+        [only] if only == STASHED => |item| item.trashed.is_none() && item.stashed.is_some(),
+        _ => return listing(ekko, filters, all),
+    };
+    Ok(all.values().filter(|item| starts(item) && !item.boards.is_empty()).collect())
+}
+
+/// `passing`, through the listing `--list` prints.
+fn listing<'a>(ekko: &Ekko, filters: &[String], all: &'a ItemMap) -> Result<Vec<&'a Item>, EkkoError> {
     let groups = match ekko.list_by_attributes(filters)? {
         Outcome::List(groups) => groups,
         _ => Vec::new(),
@@ -5130,6 +5145,40 @@ mod tests {
         ] {
             assert_eq!(cited_ids(text), ids, "{text}");
         }
+    }
+
+    /// Search's candidates, read off the board with no filters and with the
+    /// stash's alone, are the listing's (task 2225): every item it starts
+    /// from that is on a board, in id order -- multi-board, stashed, trashed
+    /// and boardless items included.
+    #[test]
+    fn search_candidates_are_the_listings() {
+        let (ekko, dir) = board("search-candidates");
+        for text in [
+            &["@alpha", "on alpha"][..],
+            &["@alpha", "@beta", "on two boards"],
+            &["stashed"],
+            &["trashed"],
+            &["stashed, then trashed"],
+            &["on no board"],
+            &["@beta", "stashed on beta"],
+        ] {
+            ekko.create_task(&words(text)).unwrap();
+        }
+        ekko.create_note(&words(&["a note on My Board"])).unwrap();
+        ekko.set_stashed(&words(&["3", "5", "7"]), true).unwrap();
+        ekko.delete_items(&words(&["4", "5"])).unwrap();
+        let mut data = ekko.storage.get().unwrap();
+        data.get_mut(&6).unwrap().boards.clear();
+        ekko.storage.set(&data).unwrap();
+
+        let all = ekko.storage.get_shared().unwrap();
+        let ids = |items: Vec<&Item>| items.iter().map(|item| item.id).collect::<Vec<_>>();
+        for (filters, expected) in [(vec![], vec![1, 2, 8]), (vec![STASHED.to_string()], vec![3, 7])] {
+            assert_eq!(ids(listing(&ekko, &filters, &all).unwrap()), expected, "the listing, {filters:?}");
+            assert_eq!(ids(passing(&ekko, &filters, &all).unwrap()), expected, "{filters:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Every citing word cites, in any ASCII case, at the start of a text
