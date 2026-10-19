@@ -86,11 +86,12 @@ const SCREEN_OUT: &str = "\x1b[?1004l\x1b[?25h\x1b[H\x1b[2J\x1b[?1049l";
 /// `--standalone`, Black Box hands the command to the instance already
 /// running, which runs it with its own environment and folder, and where
 /// none runs, the terminal this server starts becomes the instance the
-/// user's later windows open in. Each showing only the menu, as the user
-/// asked of its window (task 2166): Black Box without its header bar, which
-/// holds the tabs and the menu, and Konsole without its bars.
+/// user's later windows open in. Each showing only the menu under the
+/// window's title and buttons, which move and close it, as the user asked of
+/// its window (tasks 2166 and 2174): Black Box `--minimal`, without tabs or
+/// menu, and Konsole without its bars.
 const KNOWN: &[(&str, &[&str])] = &[
-    ("blackbox-terminal", &["--standalone", "--hide-headerbar", "-c"]),
+    ("blackbox-terminal", &["--standalone", "--minimal", "-c"]),
     ("konsole", &["--separate", "--hide-menubar", "--hide-tabbar", "--hide-toolbars", "-e"]),
     ("gnome-terminal", &["--"]),
     ("kitty", &[]),
@@ -170,14 +171,15 @@ pub fn place() -> Option<Place> {
 }
 
 /// Whether the Black Box at `program` takes the options in `run`, the words
-/// before its `-c`, and with `--standalone` `--geometry`: those two
-/// came to the author's port together (task 2156), `--hide-headerbar` after
-/// them (task 2166). Upstream's 0.14, which Debian and Ubuntu ship as
+/// before its `-c`, and with `--standalone` `--geometry`: those two came to
+/// the author's port together (task 2156), `--minimal` after them (task
+/// 2174). Upstream's 0.14, which Debian and Ubuntu ship as
 /// `blackbox-terminal` too, refuses an option it lacks, "Unknown option
 /// --standalone" and exit 255, and opens no window; so does the port before
-/// `--hide-headerbar`. Asked once per server and program, with those options
-/// and `--version`, which prints and exits: 240 ms for either on a private
-/// Xvfb here.
+/// `--minimal`, "Unknown option --minimal", the one with task 2166's
+/// `--hide-headerbar` included. Asked once per server and program, with
+/// those options and `--version`, which prints and exits: 240 ms for either
+/// on a private Xvfb here.
 fn takes(program: &str, run: &[&str]) -> bool {
     static TAKES: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
     let mut takes = TAKES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1562,11 +1564,11 @@ mod tests {
             .map(str::to_string)
             .to_vec();
         let (program, run) = KNOWN[0];
-        assert_eq!((program, run), ("blackbox-terminal", &["--standalone", "--hide-headerbar", "-c"][..]), "Black Box is looked for first");
+        assert_eq!((program, run), ("blackbox-terminal", &["--standalone", "--minimal", "-c"][..]), "Black Box is looked for first");
         for program in [program, "/etc/profiles/per-user/u/bin/blackbox-terminal"] {
             let terminal: Vec<String> = std::iter::once(program).chain(run.iter().copied()).map(str::to_string).collect();
             let words = arguments(&terminal, &spec, &line);
-            assert_eq!(words[..4], [format!("--geometry={columns}x{rows}"), "--standalone".to_string(), "--hide-headerbar".to_string(), "-c".to_string()], "{words:?}");
+            assert_eq!(words[..4], [format!("--geometry={columns}x{rows}"), "--standalone".to_string(), "--minimal".to_string(), "-c".to_string()], "{words:?}");
             assert_eq!(words.len(), 5, "{words:?}");
             let read = Command::new("sh").arg("-c").arg(format!("printf '%s\\n' {}", words[4])).output().unwrap();
             assert_eq!(String::from_utf8_lossy(&read.stdout).lines().collect::<Vec<_>>(), line, "{}", words[4]);
