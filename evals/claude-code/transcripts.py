@@ -16,7 +16,7 @@ continuing the cleared session would have cost instead.
 
     nix develop -c python3 evals/claude-code/transcripts.py [--handoffs-from 2026-09-21T01:50] [--until ...]
 
-Times are local (UTC-3). Only reads ~/.claude*/projects/; the numbers land in
+Times are local (UTC-3). Only reads the profiles' projects/ (profiles()); the numbers land in
 target/evals/claude-code/transcripts/report.json.
 """
 
@@ -118,9 +118,15 @@ SKIP = "ekko-paired"
 
 
 def profiles():
-    """Every Claude Code config dir in the home folder: ~/.claude, and each
-    ~/.claude-<name> beside it that a profile keeps apart."""
-    return sorted(path for path in glob.glob(os.path.join(HOME, ".claude*")) if os.path.isdir(os.path.join(path, "projects")))
+    """Every Claude Code config dir on this machine that holds transcripts:
+    ~/.claude and each ~/.claude-<name> beside it, any folder in the home
+    folder holding its own .claude.json (as one CLAUDE_CONFIG_DIR names does,
+    whatever its name), and CLAUDE_CONFIG_DIR itself (task 2213)."""
+    found = glob.glob(os.path.join(HOME, ".claude*"))
+    found += [os.path.dirname(p) for p in glob.glob(os.path.join(HOME, "*", ".claude.json")) + glob.glob(os.path.join(HOME, ".*", ".claude.json"))]
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        found.append(os.path.expanduser(os.environ["CLAUDE_CONFIG_DIR"]))
+    return sorted({os.path.realpath(path) for path in found if os.path.isdir(os.path.join(path, "projects"))})
 
 
 def scan():

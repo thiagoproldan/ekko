@@ -9,7 +9,7 @@ answer changed is counted apart, since it needed the full answer anyway.
 
     nix develop -c python3 evals/claude-code/rereads.py
 
-Only reads ~/.claude*/projects/, skipping the paired runs' folder.
+Only reads the profiles' projects/ (transcripts.py's profiles()), skipping the paired runs' folder.
 """
 
 import collections
@@ -18,13 +18,11 @@ import json
 import os
 import re
 
+from transcripts import profiles
+
 HOME = os.path.expanduser("~")
 SKIP = "ekko-paired"
 EKKO_READ = re.compile(r"^mcp__(?:plugin_ekko_)?ekko__(context|search|prime|next|changes)$")
-
-
-def profiles():
-    return sorted(path for path in glob.glob(os.path.join(HOME, ".claude*")) if os.path.isdir(os.path.join(path, "projects")))
 
 
 def text_of(content):

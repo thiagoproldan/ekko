@@ -14,7 +14,7 @@ what the file held then; a transcript without one is placed by the clock.
 
     nix develop -c python3 evals/claude-code/silence.py [--since 2026-09-23] [--until ...] [--list]
 
-Times are local (UTC-3). Only reads ~/.claude*/projects/, skipping the paired
+Times are local (UTC-3). Only reads the profiles' projects/ (transcripts.py's profiles()), skipping the paired
 runs' folder; the numbers land in target/evals/claude-code/silence/report.json.
 """
 
@@ -24,6 +24,8 @@ import datetime
 import glob
 import json
 import os
+
+from transcripts import profiles
 
 HOME = os.path.expanduser("~")
 LOCAL = datetime.timezone(datetime.timedelta(hours=-3))
@@ -43,10 +45,6 @@ def when(stamp):
 
 def local(text):
     return datetime.datetime.fromisoformat(text).replace(tzinfo=LOCAL)
-
-
-def profiles():
-    return sorted(path for path in glob.glob(os.path.join(HOME, ".claude*")) if os.path.isdir(os.path.join(path, "projects")))
 
 
 def is_prompt(row):
