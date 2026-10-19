@@ -66,18 +66,31 @@ const SETTLE: Duration = Duration::from_secs(1);
 /// runs on, still meant for another window, is dropped as a whole.
 const QUIET: Duration = Duration::from_millis(400);
 
-/// What the menu writes before its first draw. Mode 1049: the alternate
-/// screen, where each draw's clear drops what it clears. On the main screen,
-/// Black Box's terminal (alacritty_terminal's `clear_viewport`) scrolls the
-/// cleared lines into the history, so every key left a copy of the menu
-/// there and the scrollbar grew (task 2165). Mode 1004: the terminal reports
-/// taking the focus, and keys wait SETTLE after it as after the first draw.
-const SCREEN_IN: &str = "\x1b[?1049h\x1b[?1004h";
+/// What the menu writes before its first draw.
+///
+/// CSI 22 ; 0 t: the terminal saves its title on its title stack, since
+/// each draw sets the menu's own title with OSC 0, and SCREEN_OUT gives the
+/// old one back (task 2171). The 0, the icon and window title, is what
+/// tmux's source acts on, along with 2; it ignores the sequence without it.
+/// VTE, xterm and Black Box's alacritty_terminal keep the stack too.
+/// Konsole's source (master, read 2026-10-19) ignores both sequences, so
+/// there the menu's title stays once it is done, as it did before.
+///
+/// Mode 1049: the alternate screen, where each draw's clear drops what it
+/// clears. On the main screen, Black Box's terminal (alacritty_terminal's
+/// `clear_viewport`) scrolls the cleared lines into the history, so every
+/// key left a copy of the menu there and the scrollbar grew (task 2165).
+///
+/// Mode 1004: the terminal reports taking the focus, and keys wait SETTLE
+/// after it as after the first draw.
+const SCREEN_IN: &str = "\x1b[22;0t\x1b[?1049h\x1b[?1004h";
 
-/// What the menu writes once it is done: the modes back, the screen cleared
-/// for a terminal without the alternate screen, and the main screen back as
-/// it was before the menu.
-const SCREEN_OUT: &str = "\x1b[?1004l\x1b[?25h\x1b[H\x1b[2J\x1b[?1049l";
+/// What the menu writes once it is done:
+/// - the modes back;
+/// - the screen cleared, for a terminal without the alternate screen;
+/// - the main screen back as it was before the menu;
+/// - the title back, from the stack.
+const SCREEN_OUT: &str = "\x1b[?1004l\x1b[?25h\x1b[H\x1b[2J\x1b[?1049l\x1b[23;0t";
 
 /// Terminals looked for on PATH when `EKKO_TERMINAL` is unset, each with
 /// what runs a command in it. Black Box first, the author's own terminal (task
@@ -178,8 +191,10 @@ pub fn place() -> Option<Place> {
 /// --standalone" and exit 255, and opens no window; so does the port before
 /// `--minimal`, "Unknown option --minimal", the one with task 2166's
 /// `--hide-headerbar` included. Asked once per server and program, with
-/// those options and `--version`, which prints and exits: 240 ms for either
-/// on a private Xvfb here.
+/// those options and `--version`, which prints and exits. On a private Xvfb
+/// here that took 240 ms, whether the port took the options or refused them.
+/// Since its task 661 the port answers in 44 ms: it no longer starts GTK for
+/// a line that opens no window.
 fn takes(program: &str, run: &[&str]) -> bool {
     static TAKES: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
     let mut takes = TAKES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1302,6 +1317,48 @@ mod tests {
         // The checker says no: 0.44.0's opening and closing, without 1049.
         let old = written.replacen(SCREEN_IN, "\x1b[?1004h", 1).replace(SCREEN_OUT, "\x1b[?1004l\x1b[?25h\x1b[H\x1b[2J");
         assert_eq!(main_screen_clears(&old).0.len(), 11, "each of 0.44.0's draws, and its closing, cleared the main screen");
+    }
+
+    /// The title a terminal shows after `written`, from `before`. OSC 0 and
+    /// 2 set it. CSI 22 and 23 push and pop it on the title stack only with a
+    /// second parameter of 0 or 2, as tmux's source reads them; VTE and
+    /// xterm take those too.
+    fn title_after(before: &str, written: &str) -> String {
+        let (mut title, mut stack) = (before.to_string(), Vec::new());
+        for (at, _) in written.match_indices('\x1b') {
+            let rest = &written[at..];
+            if let Some(set) = rest.strip_prefix("\x1b]0;").or_else(|| rest.strip_prefix("\x1b]2;")) {
+                title = set.split('\x07').next().unwrap_or_default().to_string();
+            } else if ["\x1b[22;0t", "\x1b[22;2t"].iter().any(|push| rest.starts_with(push)) {
+                stack.push(title.clone());
+            } else if ["\x1b[23;0t", "\x1b[23;2t"].iter().any(|pop| rest.starts_with(pop)) {
+                if let Some(popped) = stack.pop() {
+                    title = popped;
+                }
+            }
+        }
+        title
+    }
+
+    #[test]
+    fn the_menu_gives_the_terminal_its_title_back() {
+        // A session as run writes it, as `ekko --answer` does in a terminal
+        // whose shell set its title: the opening, a draw after each key,
+        // then the closing.
+        let mut menu = Menu::new(vec![posed(1, "First?", yes_no(), false), posed(2, "Which?", yes_no(), true)]);
+        let mut written = String::from(SCREEN_IN);
+        written.push_str(&menu.draw(72));
+        for key in [Key::Down, Key::Enter, Key::Char(' ')] {
+            menu.press(key);
+            written.push_str(&menu.draw(72));
+        }
+        let drawn = written.clone();
+        written.push_str(SCREEN_OUT);
+        assert_eq!(title_after("~/site: vim", &drawn), "ekko: 2 questions", "the draws set the menu's title");
+        assert_eq!(title_after("~/site: vim", &written), "~/site: vim", "the closing gives the old title back");
+        // The checker says no: 0.44.2's opening and closing, without the stack.
+        let old = written.replacen(SCREEN_IN, "\x1b[?1049h\x1b[?1004h", 1).replace(SCREEN_OUT, "\x1b[?1004l\x1b[?25h\x1b[H\x1b[2J\x1b[?1049l");
+        assert_eq!(title_after("~/site: vim", &old), "ekko: 2 questions", "0.44.2 left its title");
     }
 
     /// The lines of a drawn screen as the terminal shows them: escape
