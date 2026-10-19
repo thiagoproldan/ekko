@@ -42,9 +42,9 @@ impl Process {
     }
 
     /// Whether it is still running: the same pid, started at the same tick,
-    /// in the same boot.
+    /// in the same boot, and no zombie (`runs`).
     pub fn alive(&self) -> bool {
-        boot().is_some_and(|boot| boot == self.boot) && stat(self.pid).is_some_and(|(_, start)| start == self.start)
+        boot().is_some_and(|boot| boot == self.boot) && runs(self.pid, self.start)
     }
 }
 
@@ -425,7 +425,7 @@ impl Registry {
         let runs = |name: &str| {
             let mut parts = name.strip_suffix(".json")?.splitn(3, '-');
             let (recorded, pid, start) = (parts.next()?, parts.next()?.parse::<u32>().ok()?, parts.next()?.parse::<u64>().ok()?);
-            Some(recorded == boot && stat(pid).is_some_and(|(_, at)| at == start))
+            Some(recorded == boot && runs(pid, start))
         };
         entries
             .flatten()
@@ -544,13 +544,46 @@ pub fn when(millis: i64) -> String {
     }
 }
 
-/// `pid`'s parent and its start, from /proc/<pid>/stat. The name in field 2
-/// can hold spaces and parentheses, so the fields are counted from its end:
-/// the parent is field 4 and the start field 22.
+/// `pid`'s parent and its start, from /proc/<pid>/stat (`status`).
 pub(crate) fn stat(pid: u32) -> Option<(u32, u64)> {
+    status(pid).map(|(_, parent, start)| (parent, start))
+}
+
+/// Whether `pid` runs now as the process that started at tick `start`: the
+/// same start, and neither a zombie nor dead. A process that exited stays
+/// in /proc as a zombie, its start time still there, until its parent reaps
+/// it, which a launcher that never waits on its children does not (task
+/// 1450). Every check of whether a process recorded before still runs comes
+/// here: `Process::alive`, and `Registry::running`, which reads file names;
+/// the menu's check on its own pid comes to `ended`.
+pub(crate) fn runs(pid: u32, start: u64) -> bool {
+    status(pid).is_some_and(|(state, _, at)| at == start && !gone(state))
+}
+
+/// Whether `pid` is listed in /proc as a process that has ended: a zombie
+/// its parent has not reaped, or dead. For a check that knows no start time,
+/// such as the menu's on its own pid.
+pub(crate) fn ended(pid: u32) -> bool {
+    status(pid).is_some_and(|(state, _, _)| gone(state))
+}
+
+/// Whether a state /proc gives is that of a process that has ended: Z, a
+/// zombie, or X, dead (x before Linux 3.14).
+fn gone(state: char) -> bool {
+    matches!(state, 'Z' | 'X' | 'x')
+}
+
+/// `pid`'s state, parent and start, from /proc/<pid>/stat. The name in
+/// field 2 can hold spaces and parentheses, so the fields are counted from
+/// its end: the state is field 3, the parent field 4 and the start field 22.
+fn status(pid: u32) -> Option<(char, u32, u64)> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let fields: Vec<&str> = stat.get(stat.rfind(')')? + 1..)?.split_whitespace().collect();
-    Some((fields.get(1)?.parse().ok()?, fields.get(19)?.parse().ok()?))
+    let mut fields = stat.get(stat.rfind(')')? + 1..)?.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let parent = fields.next()?.parse().ok()?;
+    // Fields 5 to 21 lie between the parent and the start.
+    let start = fields.nth(17)?.parse().ok()?;
+    Some((state, parent, start))
 }
 
 pub(crate) fn boot() -> Option<String> {
@@ -619,6 +652,45 @@ mod tests {
         assert!(me.alive());
         assert!(!Process { start: me.start + 1, ..me.clone() }.alive(), "another process that got the pid");
         assert!(!Process { boot: "another boot".into(), ..me.clone() }.alive());
+    }
+
+    /// A process that exited and that its parent has not reaped is a zombie:
+    /// /proc lists it, with its start, until the parent waits on it, so only
+    /// its state tells that it ended (task 1450). Every check of whether a
+    /// process runs says so of a live child, and none of a zombie child:
+    /// `Process::alive`, a holder's claim, the registry's `running`, and the
+    /// menu's `alive` on its own pid.
+    #[test]
+    fn a_zombie_runs_for_no_check_of_a_process() {
+        let dir = crate::paths::test_dir("ekko-zombie");
+        let registry = Registry::at(dir.clone());
+        let checks = |child: &std::process::Child, conversation: &str| -> [bool; 4] {
+            let process = Process::of(child.id()).expect("/proc lists the child, a zombie too");
+            let actor = Actor { process: Some(process.clone()), profile: None, tty: None, registry: None };
+            let (pid, start, boot) = (process.pid, process.start, process.boot.clone());
+            let (profile, tty, config_dir, board, transcript) = (None, None, None, None, None);
+            let conversation = conversation.to_string();
+            registry.record(Running { pid, start, boot, profile, tty, config_dir, board, transcript, conversation: conversation.clone(), earlier: Vec::new(), since: 0 }).unwrap();
+            [
+                process.alive(),
+                actor.holder(1).alive(),
+                registry.running().iter().any(|running| running.conversation == conversation),
+                crate::menu::alive(i32::try_from(child.id()).unwrap()),
+            ]
+        };
+        let mut live = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        assert_eq!(checks(&live, "live"), [true; 4], "a live child runs for every check");
+        let mut zombie = std::process::Command::new("true").spawn().unwrap();
+        let began = std::time::Instant::now();
+        while status(zombie.id()).map(|(state, _, _)| state) != Some('Z') {
+            assert!(began.elapsed() < std::time::Duration::from_secs(10), "the child never became a zombie: {:?}", status(zombie.id()));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(checks(&zombie, "zombie"), [false; 4], "a zombie runs for no check");
+        live.kill().unwrap();
+        live.wait().unwrap();
+        zombie.wait().unwrap();
+        fs::remove_dir_all(dir).ok();
     }
 
     /// `running` lists the processes that run, by the file names alone: not

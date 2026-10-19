@@ -337,9 +337,12 @@ fn pid_file(file: &Path) -> PathBuf {
     file.with_extension("pid")
 }
 
-fn alive(pid: i32) -> bool {
+/// Whether the menu runs as `pid`: signal 0 finds it, and it is no zombie,
+/// which signal 0 finds as well until its parent reaps it (task 1450).
+pub(crate) fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 checks the process exists and sends nothing.
-    unsafe { libc::kill(pid, 0) == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+    let found = unsafe { libc::kill(pid, 0) == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) };
+    found && u32::try_from(pid).is_ok_and(|pid| !crate::holder::ended(pid))
 }
 
 /// The menu's command line: in `cwd`, where the board is found from, with the

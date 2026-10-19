@@ -3183,7 +3183,7 @@ pub fn watch(home: &Path, cwd: &Path, args: &[String]) -> std::process::ExitCode
     let after = i64::try_from(after.as_millis()).unwrap_or(i64::MAX);
     let mut told: Option<i64> = None;
     loop {
-        if !running(&process) {
+        if !process.alive() {
             // Where ekko's state is gone with its home, as a test's is once
             // it has run, nothing is left to tell, nor made again.
             if born_dir(home).is_dir() {
@@ -3400,7 +3400,7 @@ pub fn answer(home: &Path, cwd: &Path, args: &[String]) -> std::process::ExitCod
     let process = Process { pid, start, boot };
     let mut seen_waiting = false;
     loop {
-        if !running(&process) || read_born(home, session).waiting.is_none() {
+        if !process.alive() || read_born(home, session).waiting.is_none() {
             return ExitCode::SUCCESS;
         }
         let status = claude_status(home, session, pid);
@@ -3461,12 +3461,12 @@ pub fn close(home: &Path, cwd: &Path, args: &[String]) -> std::process::ExitCode
         return ExitCode::SUCCESS;
     }
     let process = Process { pid, start, boot };
-    if running(&process) {
+    if process.alive() {
         stop_background(home, session, &tasks, &process);
         // SAFETY: a plain kill(2) of the process this pid names now, which
-        // `running` has just found to be the session's own.
+        // `alive` has just found to be the session's own.
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-        if !within(GONE_WITHIN, || !running(&process)) {
+        if !within(GONE_WITHIN, || !process.alive()) {
             log(home, session, &tasks, &format!("not closed: its Claude Code, pid {pid}, still runs {} s after SIGTERM", GONE_WITHIN.as_secs()));
             return ExitCode::FAILURE;
         }
@@ -3488,15 +3488,6 @@ pub fn close(home: &Path, cwd: &Path, args: &[String]) -> std::process::ExitCode
         }
     }
     ExitCode::SUCCESS
-}
-
-/// Whether `process` still runs: alive, and not a zombie waiting for its
-/// parent to reap it.
-fn running(process: &Process) -> bool {
-    let state = std::fs::read_to_string(format!("/proc/{}/stat", process.pid))
-        .ok()
-        .and_then(|stat| Some(stat.get(stat.rfind(')')? + 1..)?.split_whitespace().next()?.to_string()));
-    process.alive() && state.is_some_and(|state| state != "Z")
 }
 
 /// What the command line of a shell Claude Code runs a Bash or a Monitor
@@ -3584,9 +3575,9 @@ fn stop_background(home: &Path, session: &str, tasks: &str, claude: &Process) {
         return;
     }
     let signal = |process: &Process, signal: libc::c_int| {
-        if running(process) {
+        if process.alive() {
             // SAFETY: a plain kill(2) of the process this pid names now,
-            // which `running` has just found to be the one listed.
+            // which `alive` has just found to be the one listed.
             unsafe { libc::kill(process.pid as libc::pid_t, signal) };
         }
     };
@@ -3594,12 +3585,12 @@ fn stop_background(home: &Path, session: &str, tasks: &str, claude: &Process) {
     for process in &members {
         signal(process, libc::SIGTERM);
     }
-    if !within(BACKGROUND_GONE_WITHIN, || members.iter().all(|process| !running(process))) {
+    if !within(BACKGROUND_GONE_WITHIN, || members.iter().all(|process| !process.alive())) {
         for process in &members {
             signal(process, libc::SIGKILL);
         }
     }
-    let left: Vec<String> = members.iter().filter(|process| running(process)).map(|process| process.pid.to_string()).collect();
+    let left: Vec<String> = members.iter().filter(|process| process.alive()).map(|process| process.pid.to_string()).collect();
     let commands: Vec<String> = work.iter().map(|(command, _)| format!("`{}`", crate::agent::clip(command, 200))).collect();
     let mut said = format!(
         "its background work stopped, its tasks being finished: {} shell{} ({} process{}): {}",
