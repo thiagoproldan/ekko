@@ -134,6 +134,19 @@ const CITING: [&str; 24] = [
     "questions", "question", "handoffs", "handoff", "tarefas", "tarefa", "notas", "nota", "procedimentos",
     "procedimento", "perguntas", "pergunta", "decisões", "decisão",
 ];
+/// The bytes a word of `CITING` starts with, in either case: where none
+/// starts, `cited_ids` tries none of them (task 2223).
+const CITING_STARTS: [bool; 256] = {
+    let mut starts = [false; 256];
+    let mut word = 0;
+    while word < CITING.len() {
+        let first = CITING[word].as_bytes()[0];
+        starts[first.to_ascii_lowercase() as usize] = true;
+        starts[first.to_ascii_uppercase() as usize] = true;
+        word += 1;
+    }
+    starts
+};
 /// What may stand between two numbers a citing word names.
 const CITED_GAPS: [&str; 7] = [", and ", ", e ", ", ", " and ", " e ", " or ", " ou "];
 /// The longest a "+N more" line gets, reserved for each section a cut leaves
@@ -919,11 +932,18 @@ pub(crate) fn cited_ids(text: &str) -> Vec<u32> {
     let mut ids = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
-        let starts = at == 0 || !part_of_word(bytes[at - 1]);
-        let word = CITING
-            .iter()
-            .filter(|_| starts)
-            .find(|word| bytes.get(at..at + word.len()).is_some_and(|start| start.eq_ignore_ascii_case(word.as_bytes())));
+        // A prime runs this over every item's text, so the words are tried
+        // only where one of them could start, a word starting here with
+        // the letter they start with.
+        let first = bytes[at];
+        let starts = CITING_STARTS[usize::from(first)] && (at == 0 || !part_of_word(bytes[at - 1]));
+        let word = match starts {
+            true => CITING.iter().find(|word| {
+                word.as_bytes()[0].eq_ignore_ascii_case(&first)
+                    && bytes.get(at..at + word.len()).is_some_and(|start| start.eq_ignore_ascii_case(word.as_bytes()))
+            }),
+            false => None,
+        };
         let Some(word) = word else {
             at += 1;
             continue;
@@ -5109,6 +5129,22 @@ mod tests {
             ("version 0.31.0", vec![]),
         ] {
             assert_eq!(cited_ids(text), ids, "{text}");
+        }
+    }
+
+    /// Every citing word cites, in any ASCII case, at the start of a text
+    /// and after a space -- `cited_ids` skips the bytes no citing word
+    /// starts with, so a word the skip missed would cite nothing -- and
+    /// none cites from inside another word.
+    #[test]
+    fn every_citing_word_cites_in_any_case() {
+        for word in CITING {
+            let title = format!("{}{}", word[..1].to_ascii_uppercase(), &word[1..]);
+            for written in [word.to_string(), word.to_ascii_uppercase(), title] {
+                assert_eq!(cited_ids(&format!("{written} 7")), vec![7], "{written}");
+                assert_eq!(cited_ids(&format!("see {written} 8")), vec![8], "{written}");
+                assert_eq!(cited_ids(&format!("x{written} 9")), Vec::<u32>::new(), "{written}");
+            }
         }
     }
 

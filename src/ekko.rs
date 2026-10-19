@@ -2701,12 +2701,6 @@ impl Ekko {
         Ok(Outcome::Phases(cleaned))
     }
 
-    /// The roadmap: declared phases in order, each with how far it has got,
-    /// and which one holds work in progress.
-    ///
-    /// Nothing here is stored beyond the sequence itself -- the counts and
-    /// the cursor are read off the items every time, so the view cannot
-    /// drift from the board it describes.
     /// `ekko docs` (task 915): the board's documentation, written as markdown
     /// into `folder`. `board_dir` holds the project's page, which opens the
     /// index, and the commits naming each task are read from the project's
@@ -2722,14 +2716,24 @@ impl Ekko {
         Ok(Outcome::Docs(Box::new(written)))
     }
 
+    /// The roadmap: declared phases in order, each with how far it has got,
+    /// and which one holds work in progress.
+    ///
+    /// Nothing here is stored beyond the sequence itself -- the counts and
+    /// the cursor are read off the items every time, so the view cannot
+    /// drift from the board it describes.
+    ///
+    /// Read off the board every read in this process shares, not a copy of
+    /// it: a prime counts the roadmap too, and copying every item cost it
+    /// more than the counting did (task 2223).
     pub fn display_roadmap(&self) -> Result<Outcome, EkkoError> {
-        let data = self.visible()?;
+        let board = self.storage.get_shared()?;
+        let visible = || board.values().filter(|item| item.stashed.is_none() && item.trashed.is_none());
         let phases = self.storage.get_phases()?;
 
         let mut steps = Vec::new();
         for name in &phases {
-            let items: Vec<&Item> =
-                data.values().filter(|i| i.phase.as_deref() == Some(name.as_str())).collect();
+            let items: Vec<&Item> = visible().filter(|i| i.phase.as_deref() == Some(name.as_str())).collect();
 
             // Counted by `tally`, the one definition of a total: cancelled work
             // is not work, here as in the percentage and the board title.
@@ -2747,20 +2751,19 @@ impl Ekko {
 
         // Anything inside the project but outside every phase. Counted rather
         // than hidden: the root is a deliberate exception, not a hole.
-        let rootless = data.values().filter(|i| i.phase.is_none()).count() as u32;
+        let rootless = visible().filter(|i| i.phase.is_none()).count() as u32;
 
         // Dependencies that run against the phase order -- possible only when
         // phases were reordered underneath them, since --blocked-by refuses
         // making one. Named rather than hidden.
         let order = phase_order(&phases);
-        let index = uid_index(&data);
-        let inversions: Vec<Inversion> = data
-            .values()
+        let index: HashMap<&str, &Item> = visible().filter_map(|item| Some((item.uid.as_deref()?, item))).collect();
+        let inversions: Vec<Inversion> = visible()
             .flat_map(|item| {
-                item.blocked_by.iter().flatten().filter_map(|uid| {
-                    let blocker = data.get(index.get(uid.as_str())?)?;
-                    phase_inversion(&order, item, blocker)
-                })
+                item.blocked_by
+                    .iter()
+                    .flatten()
+                    .filter_map(|uid| phase_inversion(&order, item, index.get(uid.as_str())?))
             })
             .collect();
 
@@ -5236,6 +5239,40 @@ mod tests {
         let Outcome::Roadmap { inversions, .. } = ekko.display_roadmap().unwrap() else { panic!() };
         assert_eq!(inversions.len(), 1);
         assert_eq!((inversions[0].blocked, inversions[0].blocker), (2, 1));
+
+        cleanup(&dir);
+    }
+
+    /// The roadmap counts what the board shows: a stashed or trashed item is
+    /// in no phase's tally, nor at the root, and on neither side of an
+    /// inversion.
+    #[test]
+    fn the_roadmap_leaves_out_stashed_and_trashed_items() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.set_phases(&words(&["early", "late"])).unwrap();
+        for (text, phase) in [
+            ("kept", Some("early")),
+            ("stashed", Some("early")),
+            ("trashed", Some("early")),
+            ("waits", Some("late")),
+            ("waits, stashed", Some("late")),
+            ("stashed at the root", None),
+            ("trashed at the root", None),
+        ] {
+            ekko.create_task_in(&words(&[text]), phase).unwrap();
+        }
+        ekko.set_blocked_by(&words(&["@4", "1", "2", "3"])).unwrap();
+        ekko.set_blocked_by(&words(&["@5", "1"])).unwrap();
+        ekko.set_stashed(&words(&["2", "5", "6"]), true).unwrap();
+        ekko.delete_items(&words(&["3", "7"])).unwrap();
+        ekko.set_phases(&words(&["late", "early"])).unwrap();
+
+        let Outcome::Roadmap { steps, rootless, inversions } = ekko.display_roadmap().unwrap() else { panic!() };
+
+        let totals: Vec<(&str, u32)> = steps.iter().map(|step| (step.name.as_str(), step.total)).collect();
+        assert_eq!((totals, rootless), (vec![("late", 1), ("early", 1)], 0));
+        let pairs: Vec<(u32, u32)> = inversions.iter().map(|inversion| (inversion.blocked, inversion.blocker)).collect();
+        assert_eq!(pairs, vec![(4, 1)]);
 
         cleanup(&dir);
     }
