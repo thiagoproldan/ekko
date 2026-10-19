@@ -386,6 +386,15 @@ pub struct Choice {
     pub example: Option<String>,
 }
 
+/// Keeps on `question` what the board holds of the `options` ask offered
+/// beside the note's text: each option whole (task 1448), and the aids of
+/// those that have any (task 1110). Every way ask records a question comes
+/// here.
+fn keep_options(question: &mut Question, options: &[Choice]) {
+    question.options = crate::dialog::offered(options);
+    question.aids = aids(options);
+}
+
 /// What the board keeps of `options` beside the note's text (task 1110):
 /// each option's why, example and preview, for the options that have any.
 fn aids(options: &[Choice]) -> Vec<Aid> {
@@ -1363,7 +1372,7 @@ impl<'a> Draft<'a> {
         let asked_by = self.ekko.actor.as_ref().filter(|actor| !actor.is_person()).map(|actor| actor.holder(now));
         // The revision is the write's own, stamped as it is saved.
         self.item(id).question =
-            Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, link: None, applies: None, approve: None, aids: Vec::new(), unknown: Default::default() }));
+            Some(Box::new(Question { asked_by, rev: 0, answer: None, cue: None, allow: None, link: None, applies: None, approve: None, aids: Vec::new(), options: Vec::new(), unknown: Default::default() }));
         Ok(id)
     }
 
@@ -1676,7 +1685,7 @@ impl<'a> Draft<'a> {
                 let noted = crate::dialog::noted(&inquiry.text, inquiry.explain.as_deref(), &inquiry.options, inquiry.multiple);
                 let id = self.ask(&noted, about)?;
                 if let Some(question) = self.item(id).question.as_mut() {
-                    question.aids = aids(&inquiry.options);
+                    keep_options(question, &inquiry.options);
                 }
                 return Ok((id, inquiry.clone()));
             }
@@ -1738,7 +1747,7 @@ impl<'a> Draft<'a> {
         let applies = inquiry.options.first().map(|option| option.label.trim().to_string());
         if let Some(question) = self.item(id).question.as_mut() {
             question.applies = applies;
-            question.aids = aids(&inquiry.options);
+            keep_options(question, &inquiry.options);
             propose(question);
         }
         Ok((id, Inquiry { explain: Some(explain), quick: false, cue: None, allow: None, link_project: None, approve: None, ..inquiry.clone() }))

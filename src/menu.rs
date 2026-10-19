@@ -927,6 +927,25 @@ fn framed(lines: &[String], width: usize) -> Vec<String> {
     boxed
 }
 
+/// What question `item` asks, as `parse` reads it from its text, with the
+/// options the board keeps beside the text in place of those the text lists
+/// (task 1448), whose labels may hold ": ". A question asked before the
+/// board kept them has its options from the text alone. Every reader of a
+/// question's options on the board comes here: the menu of `ekko --answer`,
+/// the artifact's page and its answers, and the answers of an approval.
+pub fn question_of(item: &crate::item::Item) -> (String, Option<String>, Vec<Choice>, bool) {
+    let (text, explain, listed, multiple) = parse(&item.description);
+    let kept = item.question.as_ref().map(|asked| asked.options.as_slice()).unwrap_or_default();
+    if kept.is_empty() {
+        return (text, explain, listed, multiple);
+    }
+    let options = kept
+        .iter()
+        .map(|option| Choice { label: option.label.clone(), description: option.description.clone(), recommended: option.recommended, ..Choice::default() })
+        .collect();
+    (text, explain, options, multiple)
+}
+
 /// The question's text, its explanation, the options it offers and whether
 /// several may be chosen, read back from the note `dialog::noted` recorded:
 /// the explanation after the text, then an options list last, one
@@ -995,7 +1014,7 @@ pub fn run_one(ekko: &Ekko, reference: &str) -> Result<Vec<Outcome>, EkkoError> 
 /// the board keeps beside the note (task 1110), so `ekko --answer` and the
 /// artifact's page show what the menu ask opened showed.
 pub fn posed(item: &crate::item::Item) -> Posed {
-    let (text, explain, mut options, multiple) = parse(&item.description);
+    let (text, explain, mut options, multiple) = question_of(item);
     if let Some(asked) = &item.question {
         for option in &mut options {
             if let Some(aid) = asked.aid(&option.label) {

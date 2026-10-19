@@ -466,6 +466,28 @@ pub struct Question {
     /// board without them is stored exactly as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aids: Vec<Aid>,
+    /// The options ask offered, as the note's text lists them, kept apart
+    /// from it so that a label may hold ": " and still be read back whole
+    /// (task 1448): the text's "- label: description" cannot tell where such
+    /// a label ends. Absent on a question offering none, or asked before,
+    /// whose options are read from the text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<Offered>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// One option a question offered (task 1448): its label, what choosing it
+/// means, and whether the asking session recommended it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Offered {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -1923,7 +1945,8 @@ mod tests {
                 "cue": {"gotcha": "18d917b69b8bd112-ffdc4", "cue": {"command": "git", "words": ["reset", "--hard"], "folder": "/tmp"}},
                 "allow": {"code": "bv762s", "tool": "Bash", "call": "git reset --hard", "cwd": "/tmp", "reasons": ["a gotcha"],
                     "used": {"toolUseId": "toolu_01Ptw84Fh7BCgVdBoivkzhZd", "at": 1790488580406_i64}},
-                "aids": [{"label": "Allow once", "why": "the call runs this once", "example": "git reset --hard, now", "preview": "$ git reset --hard"}]
+                "aids": [{"label": "Allow once", "why": "the call runs this once", "example": "git reset --hard, now", "preview": "$ git reset --hard"}],
+                "options": [{"label": "Allow once: this call", "description": "the call runs", "recommended": true}, {"label": "Deny"}]
             },
             "wait": {"on": "18d917d885e497e8-ffdc4", "until": "answered", "by": holder, "rev": 903,
                 "over": {"how": "answered", "by": holder, "at": 1790488580406_i64, "rev": 904}},
@@ -1995,7 +2018,7 @@ mod tests {
         checked.sort();
         let expected = [
             "AgentsSettings", "Aid", "Allowance", "Anchor", "Answer", "Approving", "Artifact", "Born", "Comment", "Counters", "Cue", "Earlier", "Failure", "Holder", "Item",
-            "Linking", "Moved", "OnUser", "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Seen", "State", "Step",
+            "Linking", "Moved", "Offered", "OnUser", "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Seen", "State", "Step",
             "StillTrue", "Unread", "Use", "Used", "Wait", "Waiting",
         ];
         assert_eq!(checked, expected, "the scan finds the structs it should");

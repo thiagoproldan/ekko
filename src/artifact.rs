@@ -430,7 +430,7 @@ pub fn approvals_asked<'a>(item: &Item, all: &'a ItemMap) -> Vec<&'a Item> {
 /// without its own), and the other, which a review requesting changes gives.
 pub fn approval_answers(question: &Item) -> (String, String) {
     let approves = question.question.as_ref().and_then(|asked| asked.applies.clone()).unwrap_or_else(|| APPROVE.to_string());
-    let (_, _, options, _) = crate::menu::parse(&question.description);
+    let (_, _, options, _) = crate::menu::question_of(question);
     let other = options.into_iter().map(|option| option.label).find(|label| *label != approves).unwrap_or_else(|| "Request changes".to_string());
     (approves, other)
 }
@@ -7650,6 +7650,67 @@ mod tests {
             let mut draft = Draft::open(ekko)?;
             draft.answer(&Ref::Id(question), text)?;
             Ok(draft.commit(false)?.notices)
+        }
+
+        /// A label may hold ": " (task 1448): 17 of 228 ask calls in the
+        /// transcripts of 2026-10-08 to 19 were refused for one. The board
+        /// keeps each option whole beside the note's text, whose "- label:
+        /// description" cannot tell where such a label ends, and every reader
+        /// of a question's options reads it from there: the menu of ekko
+        /// --answer (`posed`), the page and the answers given on it, and an
+        /// approval's two answers. A question asked before the board kept
+        /// them is read from its text.
+        #[test]
+        fn a_label_holding_a_colon_is_read_back_whole_wherever_options_are_read() {
+            let home = crate::paths::test_dir("ekko-artifact-colon");
+            let dir = home.join(".ekko");
+            let (session, _, _) = test_sessions();
+            let (as_session, as_user) = (ekko_at(&dir, &session), ekko_at(&dir, &Actor::person()));
+            let target = artifact(&as_session, json!({"text": plan("Ship the page"), "steps": [{"key": "one", "text": "The one"}]})).unwrap();
+            let asked = |question: Value| -> u32 {
+                let mut draft = Draft::open(&as_session).unwrap();
+                let (id, _) = draft.ask_inquiry(&serde_json::from_value::<Inquiry>(question).unwrap(), Some(&Ref::Id(target)), &home).unwrap();
+                draft.commit(false).unwrap();
+                id
+            };
+            let approval = asked(json!({"text": "Aprovo o plano?", "approve": target, "explain": "O que a aprovação faz.", "options": [
+                {"label": "Sim: aprovar", "recommended": true, "why": "as tarefas nascem", "example": "uma por passo"},
+                {"label": "Não: ainda não", "why": "nada muda", "example": "o plano segue"}
+            ]}));
+            let push = asked(json!({"text": "Commit?", "quick": true, "options": [
+                {"label": "Sim: commit e push", "description": "tudo  de\numa vez", "recommended": true},
+                {"label": "Não: ainda não"}
+            ]}));
+            let before = {
+                let options = [crate::ops::Choice { label: "Yes".into(), description: Some("all four".into()), ..Default::default() }, crate::ops::Choice { label: "No".into(), ..Default::default() }];
+                let mut draft = Draft::open(&as_session).unwrap();
+                let id = draft.ask(&crate::dialog::noted("Mark them?", None, &options, false), Some(&Ref::Id(target))).unwrap();
+                draft.commit(false).unwrap();
+                id
+            };
+            let data = as_user.storage.get().unwrap();
+            let read = |id: u32| -> Vec<(String, Option<String>, bool)> {
+                crate::menu::posed(&data[&id]).options.into_iter().map(|option| (option.label, option.description, option.recommended)).collect()
+            };
+
+            assert_eq!(
+                data[&push].description,
+                "Commit?\nOptions:\n- Sim: commit e push (recommended): tudo de uma vez\n- Não: ainda não",
+                "the text lists the options as before"
+            );
+            assert_eq!(read(push), [("Sim: commit e push".into(), Some("tudo de uma vez".into()), true), ("Não: ainda não".into(), None, false)]);
+            assert_eq!(crate::menu::posed(&data[&push]).text, "Commit?");
+            assert_eq!(approval_answers(&data[&approval]), ("Sim: aprovar".to_string(), "Não: ainda não".to_string()));
+            assert_eq!(read(before), [("Yes".into(), Some("all four".into()), false), ("No".into(), None, false)], "from the text");
+            assert!(data[&before].question.as_ref().unwrap().options.is_empty());
+
+            let (html, _) = page(&data[&target], &data, None);
+            assert!(html.contains("data-label=\"Sim: commit e push\"><span class=\"n\">1</span><span class=\"label\">Sim: commit e push<span class=\"tag\">recommended</span></span><span class=\"desc\">tudo de uma vez</span>"), "{html}");
+            let mut draft = Draft::open(&as_user).unwrap();
+            let id = draft.answer_on_page(&Ref::Id(target), &data[&push].uid.clone().unwrap(), &["Sim: commit e push".to_string()], None, None).unwrap();
+            let answered = draft.commit(false).unwrap().data[&id].question.as_ref().unwrap().answer.as_ref().unwrap().text.clone();
+            assert_eq!(answered, "Sim: commit e push");
+            std::fs::remove_dir_all(&home).ok();
         }
 
         /// A plan, and the tasks its approval makes of its steps, are not

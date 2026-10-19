@@ -23,6 +23,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
+use crate::item::Offered;
 use crate::ops::{Choice, Inquiry};
 
 /// The value of "Other answer…" in the choice: no label can take it, since
@@ -250,8 +251,10 @@ pub fn refuse(options: &[Choice]) -> Option<String> {
         if label.is_empty() || label == OTHER {
             return Some("each option needs a label".to_string());
         }
-        if label.contains(": ") || label.contains('\n') {
-            return Some(format!("a label holds no \": \" and no line break, since the note lists each option as \"label: description\": {label}"));
+        // A label may hold ": " (task 1448): the board keeps the options apart
+        // from the note's text, which cannot tell where such a label ends.
+        if label.contains('\n') {
+            return Some(format!("a label holds no line break, since the note lists each option on a line of its own: {label}"));
         }
         if options[..n].iter().any(|earlier| earlier.label.trim() == label) {
             return Some(format!("two options are labelled {label}"));
@@ -285,10 +288,32 @@ pub fn noted(text: &str, explain: Option<&str>, options: &[Choice], multiple: bo
 
 fn title(option: &Choice) -> String {
     let label = format!("{}{}", option.label.trim(), if option.recommended { RECOMMENDED } else { "" });
-    match option.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-        Some(description) => format!("{label}: {}", description.split_whitespace().collect::<Vec<_>>().join(" ")),
+    match described(option) {
+        Some(description) => format!("{label}: {description}"),
         None => label,
     }
+}
+
+/// An option's description as the note lists it: on one line, its runs of
+/// white space made one space; none when it is blank.
+pub fn described(option: &Choice) -> Option<String> {
+    let description = option.description.as_deref()?.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!description.is_empty()).then_some(description)
+}
+
+/// The options as the board keeps them beside the note's text (task 1448):
+/// each label whole, its description as the note lists it, and whether it
+/// is the one recommended.
+pub fn offered(options: &[Choice]) -> Vec<Offered> {
+    options
+        .iter()
+        .map(|option| Offered {
+            label: option.label.trim().to_string(),
+            description: described(option),
+            recommended: option.recommended,
+            unknown: Default::default(),
+        })
+        .collect()
 }
 
 /// The form request's params, the same under either revision.
@@ -401,6 +426,20 @@ mod tests {
         assert!(refuse(&[choice("A", None), choice(OTHER, None)]).is_some());
         assert!(refuse(&[choice("A", None), choice(" A", None)]).is_some());
         assert!(refuse(&(0..7).map(|n| choice(&n.to_string(), None)).collect::<Vec<_>>()).is_some());
+        // The board keeps the options whole beside the note's text (task 1448).
+        assert!(refuse(&[choice("Sim: commit e push", None), choice("Não: ainda não", None)]).is_none());
+        assert!(refuse(&[choice("A\nB", None), choice("C", None)]).unwrap_or_default().starts_with("a label holds no line break"));
+    }
+
+    /// What the board keeps of each option beside the note's text: the
+    /// label whole, the description as the text lists it, the recommendation.
+    #[test]
+    fn the_board_keeps_each_option_whole_beside_the_text() {
+        let options = [Choice { recommended: true, ..choice(" Sim: commit e push ", Some(" all\n of  it ")) }, choice("Não", Some("  "))];
+        let kept: Vec<(String, Option<String>, bool)> =
+            offered(&options).into_iter().map(|option| (option.label, option.description, option.recommended)).collect();
+        assert_eq!(kept, [("Sim: commit e push".into(), Some("all of it".into()), true), ("Não".into(), None, false)]);
+        assert_eq!(noted("Commit?", None, &options, false), "Commit?\nOptions:\n- Sim: commit e push (recommended): all of it\n- Não");
     }
 
     #[test]

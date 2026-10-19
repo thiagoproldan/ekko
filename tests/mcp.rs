@@ -1098,6 +1098,38 @@ fn a_question_is_put_to_the_user_in_a_dialog_and_the_answer_recorded() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// An option labelled with ": " in it is asked, and its answer recorded
+/// under the label whole (task 1448): ask refused 17 of 228 calls for one
+/// in the transcripts written from 2026-10-08 to 19, such as "Instalar:
+/// flake.lock + switch".
+#[test]
+fn an_option_whose_label_holds_a_colon_is_asked_and_answered_whole() {
+    let home = temp_home();
+    let options = json!([{"label": "Sim: commit e push", "description": "all of it"}, {"label": "Não: ainda não"}]);
+    let messages = transcript(
+        &home,
+        &[
+            elicitation_client(),
+            call(2, "ask", json!({"questions": [{"quick": true, "text": "Commit?", "options": options}]})),
+            dialog_answer("ekko-ask-1", json!({"action": "accept", "content": {"answer": "Sim: commit e push"}})),
+            call(3, "context", json!({"item": 1})),
+        ],
+    );
+    let by_id = |id: u64| messages.iter().find(|m| m["id"] == id && m.get("method").is_none()).unwrap_or_else(|| panic!("no reply {id}: {messages:?}"));
+    let asked: Vec<&Value> = messages.iter().filter(|m| m["method"] == "elicitation/create").collect();
+    assert_eq!(asked.len(), 1, "the question was not asked: {}", by_id(2));
+    let choices = &asked[0]["params"]["requestedSchema"]["properties"]["answer"]["oneOf"];
+    assert_eq!(choices[0], json!({"const": "Sim: commit e push", "title": "Sim: commit e push: all of it"}));
+    assert_eq!(choices[1], json!({"const": "Não: ainda não", "title": "Não: ainda não"}));
+    let answered: Value = serde_json::from_str(text(by_id(2))).unwrap();
+    assert_eq!(answered["answers"], json!([{"id": 1, "answer": "Sim: commit e push"}]), "{answered}");
+    let read = text(by_id(3));
+    assert!(read.contains("Commit?\nOptions:\n- Sim: commit e push: all of it\n- Não: ainda não"), "{read}");
+    assert!(read.contains(": Sim: commit e push\n"), "{read}");
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// What leaves a question open: a dialog declined or dismissed -- Claude Code
 /// under -p dismisses every one at once -- a call the client cancels, whose
 /// dialog is then closed, and a client that shows no forms at all.
