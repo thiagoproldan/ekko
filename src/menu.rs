@@ -839,7 +839,9 @@ fn aids(option: &Choice, inner: usize) -> Vec<String> {
 /// The keys a screen takes, joined with " · ", a line broken between two of
 /// them where the next would run past `width`. A terminal wrapping the line
 /// cuts a word in two instead: at 72 columns, where a question with no aids
-/// opens, every hint ran past the edge (task 2165).
+/// opens, the keys under the options ran past the edge, 81 columns for one
+/// question and 86 with several to mark, and so did the review's, 75 (task
+/// 2165).
 fn hint(parts: &[&str], width: usize) -> String {
     let mut out = String::new();
     let mut line = 0;
