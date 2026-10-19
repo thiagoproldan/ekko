@@ -67,7 +67,7 @@ const HELP: &str = r#"
         none              Display board view
       --answer <ID>       Answer a question asked on the board; the id alone opens a menu
       --archive, -a       Display archived items
-      --attached-to <IDS> Attach a note to the task it explains
+      --attached-to <IDS> Attach a note to the task it explains: @NOTE TASK; no task detaches
       --begin, -b         Start/pause task
       --blocked-by <IDS>  Record what an item is blocked by
       --check, -c         Check/uncheck task

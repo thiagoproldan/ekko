@@ -2195,18 +2195,24 @@ impl Ekko {
     /// Passing no task detaches, designed in from the start rather than
     /// discovered missing: `--blocked-by` shipped without it and left a
     /// wrong dependency with no way back.
+    ///
+    /// The note is the id marked with @, or, with no @, the one of two ids
+    /// that is a note (`unmarked_attachment`).
     pub fn set_attached_to(&self, input: &[String]) -> Result<Outcome, EkkoError> {
         let _lock = self.storage.acquire_lock()?;
         let mut data = self.storage.get()?;
 
-        let (id_str, rest) = self.extract_single_id_target(input)?;
+        let (id_str, raw) = match self.extract_single_id_target(input) {
+            Ok((id, rest)) => (id, rest.into_iter().cloned().collect()),
+            Err(EkkoError::MissingId) if !input.is_empty() => self.unmarked_attachment(input, &data)?,
+            Err(error) => return Err(error),
+        };
         let id = self.validate_ids(&[id_str], &data)?[0];
 
         if data.get(&id).is_some_and(|item| item.is_task) {
             return Err(EkkoError::AttachNotANote(id));
         }
 
-        let raw: Vec<String> = rest.into_iter().cloned().collect();
         if raw.len() > 1 {
             return Err(EkkoError::InvalidIdsNumber);
         }
@@ -2219,6 +2225,35 @@ impl Ekko {
 
         self.save_touching(&mut data)?;
         Ok(Outcome::Attached { item: updated, target: target.map(|(id, _)| id) })
+    }
+
+    /// The note and the task of an `--attached-to` that marks neither with @
+    /// (task 1453): two ids, the note being the one that is a note, in either
+    /// order, since sessions wrote both and were told no id was given. Two of
+    /// one kind are taken as given, the note first, for `attach_target` to
+    /// refuse by name. Anything else is refused with the form: a guess could
+    /// attach the wrong note, or detach one, and a text where an id goes was
+    /// meant as a new note's.
+    fn unmarked_attachment(&self, input: &[String], data: &ItemMap) -> Result<(String, Vec<String>), EkkoError> {
+        let form = || {
+            EkkoError::InvalidInput(
+                "--attached-to takes a note and its task: ekko --attached-to @16 12 attaches note 16 to task 12, as does \
+                 ekko --attached-to 16 12 when 16 is a note and 12 a task, and ekko --attached-to @16 detaches note 16. \
+                 It attaches a note already on the board: write a new one with --note first"
+                    .to_string(),
+            )
+        };
+        let [first, second] = input else { return Err(form()) };
+        let id_like = |raw: &String| raw.parse::<u32>().is_ok() || find_by_uid(data, raw).is_some();
+        if !id_like(first) || !id_like(second) {
+            return Err(form());
+        }
+        let [one, other] = self.validate_ids(&[first.clone(), second.clone()], data)?[..] else { return Err(form()) };
+        Ok(if data[&one].is_task && !data[&other].is_task {
+            (second.clone(), vec![first.clone()])
+        } else {
+            (first.clone(), vec![second.clone()])
+        })
     }
 
     /// The task a note is to be attached to, with the uid to store, or `None`
@@ -4593,6 +4628,45 @@ mod tests {
             ekko.set_attached_to(&words(&["@2", "3"])),
             Err(EkkoError::AttachTargetNotATask(3))
         ));
+
+        cleanup(&dir);
+    }
+
+    /// With no @, two ids attach the one that is a note to the one that is
+    /// a task, in either order: 19 of 88 `--attached-to` calls in the
+    /// transcripts of 2026-10-08 to 19 were refused as giving no id, most of
+    /// them two bare ids, written both ways (task 1453). What cannot be told
+    /// apart is refused with the form, and a text with it: it was meant as a
+    /// new note's.
+    #[test]
+    fn two_ids_with_no_at_attach_the_note_to_the_task_either_way() {
+        let (ekko, dir) = fresh_ekko();
+        ekko.create_task(&words(&["@a", "a task"])).unwrap();
+        ekko.create_note(&words(&["@a", "a note"])).unwrap();
+        ekko.create_note(&words(&["@a", "another note"])).unwrap();
+        ekko.create_task(&words(&["@a", "another task"])).unwrap();
+        let attach = |input: &[&str]| match ekko.set_attached_to(&words(input)) {
+            Ok(Outcome::Attached { item, target }) => Ok((item.id, target)),
+            Ok(_) => panic!("expected an Attached outcome"),
+            Err(error) => Err(error),
+        };
+
+        assert_eq!(attach(&["2", "1"]).unwrap(), (2, Some(1)), "the note first");
+        assert_eq!(attach(&["4", "3"]).unwrap(), (3, Some(4)), "the task first");
+        let uid = |id: u32| ekko.storage.get().unwrap()[&id].uid.clone().unwrap();
+        assert_eq!(attach(&[uid(1).as_str(), uid(3).as_str()]).unwrap(), (3, Some(1)), "by uid");
+        assert!(matches!(attach(&["1", "4"]), Err(EkkoError::AttachNotANote(1))), "two tasks, named");
+        assert!(matches!(attach(&["2", "3"]), Err(EkkoError::AttachTargetNotATask(3))), "two notes, named");
+        assert!(matches!(attach(&["2", "99"]), Err(EkkoError::InvalidId(id)) if id == "99"));
+        for input in [&["2"][..], &["1", "a new note"], &["1", "-"], &["2", "1", "4"], &["2", "2"]] {
+            let refused = attach(input).unwrap_err();
+            assert!(
+                matches!(&refused, EkkoError::InvalidInput(form) if form.starts_with("--attached-to takes a note and its task: ekko --attached-to @16 12")),
+                "{input:?}: {refused}"
+            );
+        }
+        assert!(matches!(attach(&[]), Err(EkkoError::MissingId)));
+        assert_eq!(attach(&["@2"]).unwrap(), (2, None), "@ alone still detaches");
 
         cleanup(&dir);
     }

@@ -126,7 +126,7 @@ $ ekko --help
         none              Display board view
       --answer <ID>       Answer a question asked on the board; the id alone opens a menu
       --archive, -a       Display archived items
-      --attached-to <IDS> Attach a note to the task it explains
+      --attached-to <IDS> Attach a note to the task it explains: @NOTE TASK; no task detaches
       --begin, -b         Start/pause task
       --blocked-by <IDS>  Record what an item is blocked by
       --check, -c         Check/uncheck task
@@ -535,6 +535,8 @@ $ ekko
     4. ☐  Ship the package
     5. ●  a note about nothing in particular
 ```
+
+The @ marks the note. Without it, two ids are taken as a note and its task when one is a note and the other a task, in either order: `ekko --attached-to 2 3` attaches note 3 to task 2 as well. Anything else without an @ is refused with the form, since a guess could attach the wrong note.
 
 Passing no task detaches it: `ekko --attached-to @3`. This was `--anchor` until it was renamed; the old name now answers with `RENAMED_FLAG` and this one, and boards attached under the old name keep their attachments.
 

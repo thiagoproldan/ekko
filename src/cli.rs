@@ -239,8 +239,9 @@ pub enum Agents {
 #[command(disable_help_flag = true, disable_version_flag = true)]
 #[command(group(clap::ArgGroup::new("hooked").args(["prime", "memory", "tasklist", "wake", "guard", "born"])))]
 pub struct Cli {
-    /// Attach a note to the task it explains, by id: the note first, then
-    /// its task. No task detaches it.
+    /// Attach a note to the task it explains, by id: the note's marked with
+    /// @, then its task's, or two ids with no @, one a note and the other a
+    /// task, in either order. No task detaches it.
     #[arg(long = "attached-to", num_args = 0.., value_name = "IDS")]
     pub attached_to: Option<Vec<String>>,
 
