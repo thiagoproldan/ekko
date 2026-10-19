@@ -2366,6 +2366,147 @@ fn commits_name_their_tasks_and_context_lists_them() {
     fs::remove_dir_all(&home).ok();
 }
 
+/// A handoff records the commit it was written at and the tasks it names as
+/// they stood (task 2205), and the prime says under it what moved since:
+/// nothing; a file changed and not committed; commits and the releases
+/// among them, a named task closed and one reopened -- and not a release or
+/// a task closed before it was written, nor a task it does not name. Its text written again
+/// reads it all from then; a later handoff on the task takes its record
+/// along with its flag; and HEAD reset behind it is said so.
+#[test]
+fn the_prime_says_what_moved_since_the_handoff_was_written() {
+    let home = temp_home();
+    let repo = home.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = common::command("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=ekko", "-c", "user.email=ekko@example.com", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"])
+            .args(args)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let prime = || {
+        let out = common::ekko().arg("--prime").current_dir(&repo).env("HOME", &home).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // The line, right under the one that says when the handoff was written.
+    let under = |prime: &str| {
+        let (_, after) = prime.split_once("\nWhere the last session stopped: handoff ").expect("a handoff shown");
+        after.lines().nth(1).unwrap_or_default().to_string()
+    };
+    git(&["init", "-q"]);
+    fs::write(repo.join("a.txt"), "one\n").unwrap();
+    git(&["add", "a.txt"]);
+    git(&["commit", "-q", "-m", "first"]);
+    git(&["tag", "v0"]);
+    let first = git(&["rev-parse", "--short=7", "HEAD"]);
+    let init = common::ekko().arg("init").current_dir(&repo).env("HOME", &home).output().unwrap();
+    assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+
+    let mut session = Session::in_folder(&home, &repo);
+    for task in ["the work", "closed before the handoff", "closed after it", "reopened after it", "not named"] {
+        session.call("create", json!({"text": task}));
+    }
+    session.call("set_state", json!({"items": [1], "state": "progress"}));
+    session.call("set_state", json!({"items": [2, 4], "state": "done"}));
+    let text = "Stopped at the parser: tasks 2, 3 and 4 are next.";
+    session.call("create", json!({"kind": "handoff", "attached_to": 1, "text": text}));
+
+    let board: Value = serde_json::from_str(&fs::read_to_string(repo.join(".ekko/storage/storage.json")).unwrap()).unwrap();
+    let baseline = &board["6"]["baseline"];
+    assert_eq!(baseline["commit"].as_str().map(|sha| &sha[..7]), Some(first.as_str()), "{baseline}");
+    assert_eq!((&baseline["branch"], &baseline["repository"]), (&json!("main"), &json!(true)), "{baseline}");
+    let named: Vec<(&str, bool)> =
+        baseline["tasks"].as_array().unwrap().iter().map(|task| (task["uid"].as_str().unwrap(), task["closed"] == true)).collect();
+    let uid = |id: &str| board[id]["uid"].as_str().unwrap();
+    assert_eq!(named, vec![(uid("1"), false), (uid("2"), true), (uid("3"), false), (uid("4"), true)], "{baseline}");
+
+    let still = format!("    Since it was written, at {first} on main: no commit; the tasks it names are as it left them.");
+    assert_eq!(under(&prime()), still);
+
+    fs::write(repo.join("a.txt"), "two\n").unwrap();
+    assert_eq!(under(&prime()), format!("{}; 1 changed file not committed.", still.trim_end_matches('.')));
+
+    git(&["commit", "-q", "-am", "second"]);
+    git(&["tag", "v1"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "third"]);
+    git(&["tag", "-a", "v2", "-m", "the second release"]);
+    session.call("set_state", json!({"items": [3, 5], "state": "done"}));
+    session.call("set_state", json!({"items": [4], "state": "undone"}));
+    assert_eq!(
+        under(&prime()),
+        format!("    Since it was written, at {first} on main: 2 commits, released v1 to v2; of the tasks it names, closed since: 3; reopened since: 4.")
+    );
+
+    // Its text written again: what it was written against is now.
+    session.call("edit", json!({"item": 6, "append": "Later: both committed."}));
+    let third = git(&["rev-parse", "--short=7", "HEAD"]);
+    assert_eq!(under(&prime()), format!("    Since it was written, at {third} on main: no commit; the tasks it names are as it left them."));
+
+    git(&["reset", "-q", "--hard", &first]);
+    assert_eq!(
+        under(&prime()),
+        format!("    Since it was written, at {third} on main: HEAD no longer holds it, now at {first}; the tasks it names are as it left them.")
+    );
+
+    // A later handoff on the task demotes this one, and takes its record.
+    session.call("create", json!({"kind": "handoff", "attached_to": 1, "text": "Stopped again."}));
+    let board: Value = serde_json::from_str(&fs::read_to_string(repo.join(".ekko/storage/storage.json")).unwrap()).unwrap();
+    assert_eq!((board["6"].get("handoff"), board["6"].get("baseline")), (None, None), "{}", board["6"]);
+    assert_eq!(board["7"]["baseline"]["commit"].as_str().map(|sha| &sha[..7]), Some(first.as_str()));
+    session.close();
+
+    fs::remove_dir_all(&home).ok();
+}
+
+/// Outside a repository the line says what the board says, and nothing of
+/// git; a handoff written before ekko recorded what it was written against
+/// shows no line at all, and a write that leaves its text alone records
+/// nothing for it, which would date it from that write (task 2205).
+#[test]
+fn outside_a_repository_the_line_is_the_boards_and_an_old_handoff_has_none() {
+    let home = temp_home();
+    let folder = home.join("plain");
+    fs::create_dir_all(&folder).unwrap();
+    let prime = || {
+        let out = common::ekko().arg("--prime").current_dir(&folder).env("HOME", &home).output().unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let storage = folder.join(".ekko/storage/storage.json");
+    assert!(common::ekko().arg("init").current_dir(&folder).env("HOME", &home).status().unwrap().success());
+    let mut session = Session::in_folder(&home, &folder);
+    session.call("create", json!({"text": "the work"}));
+    session.call("create", json!({"text": "a step"}));
+    session.call("set_state", json!({"items": [1], "state": "progress"}));
+    session.call("create", json!({"kind": "handoff", "attached_to": 1, "text": "Stopped; task 2 is next."}));
+    session.call("set_state", json!({"items": [2], "state": "done"}));
+    let shown = prime();
+    assert!(shown.contains("\n    Since it was written: of the tasks it names, closed since: 2.\n    > Stopped; task 2 is next.\n"), "{shown}");
+    let board: Value = serde_json::from_str(&fs::read_to_string(&storage).unwrap()).unwrap();
+    assert_eq!(board["3"]["baseline"].get("repository"), None, "no repository: {}", board["3"]);
+
+    // As an older ekko left it: no record.
+    let mut board = board;
+    board["3"].as_object_mut().unwrap().remove("baseline");
+    fs::write(&storage, serde_json::to_string(&board).unwrap()).unwrap();
+    session.call("set_state", json!({"items": [3], "state": "starred"}));
+    let shown = prime();
+    assert!(shown.contains("\nWhere the last session stopped: handoff 3 ") && !shown.contains("Since it was written"), "{shown}");
+    let board: Value = serde_json::from_str(&fs::read_to_string(&storage).unwrap()).unwrap();
+    assert_eq!((board["3"]["isStarred"].clone(), board["3"].get("baseline")), (json!(true), None), "{}", board["3"]);
+    session.close();
+
+    fs::remove_dir_all(&home).ok();
+}
+
 /// move_to over MCP (task 909): to a board the user linked it moves at once;
 /// to any other -- the default board, which links to none -- it is refused
 /// with a code, and the user's first answer in ekko's menu lets that exact

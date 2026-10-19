@@ -1535,6 +1535,9 @@ impl Ekko {
         // `Rests on:` line read again (task 1324), whatever wrote it too.
         let writer = crate::anchors::Writer { actor: self.actor.as_ref(), claude_code: self.claude_code.as_deref() };
         let rests_read = crate::anchors::keep(before, arrived, data, &changed, self.folder.as_deref(), writer, now);
+        // A handoff whose text it wrote records what that text was written
+        // against (task 2205): the commit, and the tasks it names as they stand.
+        crate::baseline::keep(before, arrived, data, &changed, self.folder.as_deref(), now);
 
         let kept = self.storage.get_counters()?;
         let mut counters = kept.clone();

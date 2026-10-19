@@ -294,6 +294,18 @@ pub struct Item {
     /// without the line is stored exactly as before. Boxed; see `question`.
     #[serde(rename = "restsOn", default, skip_serializing_if = "Option::is_none")]
     pub rests_on: Option<Box<RestsOn>>,
+    /// On a handoff: what its text was written against (task 2205) -- the
+    /// commit HEAD was on and its branch, and whether each task it names was
+    /// closed -- so the prime can say what moved since: commits, releases,
+    /// the tasks it names closed or reopened since, files changed and not
+    /// committed (study 2197, note 2211). Recorded by every write that writes
+    /// a handoff's text or makes a note a handoff, and dropped from any other
+    /// item; see `crate::baseline`. A handoff written before it existed has
+    /// none, and the prime says nothing of what moved under it. Absent unless
+    /// set, so a board without handoffs is stored exactly as before. Boxed;
+    /// see `question`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<Box<Baseline>>,
     // Old data may have this stored as a JSON string (a bug in the JS
     // version's --priority path, fixed here rather than carried forward) --
     // still readable, but always written back out as a number now.
@@ -350,6 +362,7 @@ impl Item {
             comment: None,
             review: None,
             rests_on: None,
+            baseline: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -394,6 +407,7 @@ impl Item {
             comment: None,
             review: None,
             rests_on: None,
+            baseline: None,
             held_by: None,
             done_by: None,
             created_by: None,
@@ -777,6 +791,46 @@ pub struct Anchor {
     /// The line of the file where the words began, from 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// What a handoff was written against (task 2205); see `Item::baseline`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Baseline {
+    /// When, in epoch milliseconds.
+    pub at: i64,
+    /// Whether the project's folder was in a git repository.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repository: bool,
+    /// The commit HEAD was on, in full: absent outside a repository, and in
+    /// one before its first commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The branch checked out: absent outside a repository, and on a
+    /// detached HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The tasks the handoff names -- the one it hands over, and each its
+    /// text cites -- by uid, with whether each was closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<NamedTask>,
+    /// What a later version keeps here that this one does not know, written
+    /// back as read; see `Item::unknown`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+/// A task a handoff names, as it stood when the handoff was written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NamedTask {
+    pub uid: String,
+    /// Done or cancelled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed: bool,
     /// What a later version keeps here that this one does not know, written
     /// back as read; see `Item::unknown`.
     #[serde(flatten)]
@@ -1928,8 +1982,9 @@ mod tests {
 
     /// What an item holds keeps a later version's fields as the item does
     /// (task 829): the question, its answer, the cue it proposes and the call
-    /// it allows, the wait and how it ended, the cue that is on, and every
-    /// holder. Before, a v0.24.0 write dropped every question's cue and allow.
+    /// it allows, the wait and how it ended, the cue that is on, what a note
+    /// rests on, what a handoff was written against, and every holder.
+    /// Before, a v0.24.0 write dropped every question's cue and allow.
     #[test]
     fn every_object_an_item_holds_keeps_what_it_does_not_know() {
         let holder = serde_json::json!({"pid": 1047920, "start": 10288721, "boot": "016877cc", "profile": "trabalho",
@@ -1956,6 +2011,8 @@ mod tests {
                 "anchors": [{"path": "src/item.rs", "words": "pub struct Item", "held": true, "line": 21}, {"claudeCode": "2.1.289"}],
                 "unread": [{"text": "the readme", "why": "an anchor is a path in backticks"}],
                 "stillTrue": {"at": 1790488580406_i64, "by": holder, "claudeCode": "2.1.292"}},
+            "baseline": {"at": 1790488580406_i64, "repository": true, "commit": "3a00b7e8c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6", "branch": "main",
+                "tasks": [{"uid": "18d917d885e497e8-ffdc4", "closed": true}, {"uid": "18d917b69b8bd112-ffdc4"}]},
             "priority": 1
         }));
     }
@@ -2017,9 +2074,9 @@ mod tests {
         assert!(missing.is_empty(), "no `unknown`, and no reason given here for none: {missing:?}");
         checked.sort();
         let expected = [
-            "AgentsSettings", "Aid", "Allowance", "Anchor", "Answer", "Approving", "Artifact", "Born", "Comment", "Counters", "Cue", "Earlier", "Failure", "Holder", "Item",
-            "Linking", "Moved", "Offered", "OnUser", "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Seen", "State", "Step",
-            "StillTrue", "Unread", "Use", "Used", "Wait", "Waiting",
+            "AgentsSettings", "Aid", "Allowance", "Anchor", "Answer", "Approving", "Artifact", "Baseline", "Born", "Comment", "Counters", "Cue", "Earlier", "Failure", "Holder",
+            "Item", "Linking", "Moved", "NamedTask", "Offered", "OnUser", "Over", "Proposal", "Question", "Quote", "Refused", "Registered", "Registry", "RestsOn", "Review", "Seen",
+            "State", "Step", "StillTrue", "Unread", "Use", "Used", "Wait", "Waiting",
         ];
         assert_eq!(checked, expected, "the scan finds the structs it should");
     }

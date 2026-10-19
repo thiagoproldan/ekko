@@ -338,6 +338,9 @@ pub(crate) fn references(item: &Item) -> Vec<(&'static str, &str)> {
         unknown: _,
         // Paths, words, versions and dates: no item.
         rests_on: _,
+        // The tasks a handoff names, by uid: dropped as it arrives
+        // (`arriving`), so none of them needs to go with it.
+        baseline: _,
     } = item;
     let mut found: Vec<(&'static str, &str)> = Vec::new();
     found.extend(blocked_by.iter().flatten().map(|uid| ("is blocked by", uid.as_str())));
@@ -412,6 +415,10 @@ fn arriving(item: &Item, id: u32) -> Item {
         // Read against the folder of the board it leaves; a write there that
         // changes its text reads it again against that board's.
         rests_on,
+        // A handoff's commit is in the repository of the board it leaves,
+        // and the other one says nothing of it: no line of what moved since,
+        // until a write there writes its text again (task 2205).
+        baseline: _,
         // Declared there, as `move_to` checks.
         phase,
         // Uids of items that move with it, as `splits` checks.
@@ -516,6 +523,7 @@ fn arriving(item: &Item, id: u32) -> Item {
         priority: *priority,
         unknown: unknown.clone(),
         rests_on: rests_on.clone(),
+        baseline: None,
         phase: phase.clone(),
         blocked_by: blocked_by.clone(),
         attached_to: attached_to.clone(),
@@ -965,6 +973,22 @@ mod tests {
         assert!(matches!(home.move_to(&here, "~", &["2"]), Err(EkkoError::InvalidInput(message)) if message.contains("is this board")));
     }
 
+    /// A handoff arrives without what it was written against, and the write
+    /// that brings it records none (task 2205): its commit is in the
+    /// repository of the board it left, and its text was not written here.
+    #[test]
+    fn a_handoff_arrives_without_what_it_was_written_against() {
+        let home = Home::new("handoff-baseline");
+        let person = Actor::person();
+        let (here, there) = (home.default_board(&person), home.project(&person));
+        batch(&here, &[json!({"op": "create", "text": "the work"}), json!({"op": "create", "kind": "handoff", "text": "stopped at the parser", "attached_to": "$1"})]);
+        assert!(board(&here)[&2].baseline.is_some(), "recorded where it was written");
+        home.move_to(&here, "notes", &["1"]).unwrap();
+        let arrived = board(&there);
+        let handoff = arrived.values().find(|item| item.handoff).expect("the handoff went with its task");
+        assert_eq!(handoff.baseline, None, "{handoff:?}");
+    }
+
     /// Every field is placed: on an item that sets each one, `arriving` keeps
     /// all but the board's, and `references` names every uid.
     #[test]
@@ -996,6 +1020,7 @@ mod tests {
         value["wait"] = json!({"on": "w", "until": "done", "by": holder, "rev": 19, "over": {"how": "done", "by": holder, "at": 20, "rev": 21}});
         value["cue"] = json!({"command": "cargo", "words": ["fmt"], "question": "q", "at": 22});
         value["restsOn"] = json!({"at": 24, "by": holder, "anchors": [{"path": "src/a.rs", "words": "fn a", "held": true, "line": 3}], "unread": [{"text": "x", "why": "y"}]});
+        value["baseline"] = json!({"at": 25, "repository": true, "commit": "c0ffee", "branch": "main", "tasks": [{"uid": "t", "closed": true}]});
         let item: Item = serde_json::from_value(value).unwrap();
         assert_eq!(item.unknown.keys().collect::<Vec<_>>(), ["a later field"], "every other key is a field");
         assert!(item.question.as_ref().unwrap().unknown.is_empty(), "every key of the question is a field");
@@ -1003,11 +1028,13 @@ mod tests {
         assert!(artifact.unknown.is_empty() && artifact.steps[0].unknown.is_empty() && artifact.earlier[0].unknown.is_empty(), "every key of the artifact is a field");
         let rests = item.rests_on.as_ref().unwrap();
         assert!(rests.unknown.is_empty() && rests.anchors[0].unknown.is_empty() && rests.unread[0].unknown.is_empty(), "every key of what it rests on is a field");
+        let baseline = item.baseline.as_ref().unwrap();
+        assert!(baseline.unknown.is_empty() && baseline.tasks[0].unknown.is_empty(), "every key of what it was written against is a field");
 
         let arrived = arriving(&item, 99);
         let board_s = |item: &Item| {
             let mut value = serde_json::to_value(item).unwrap();
-            for key in ["_id", "rev", "updatedAt"] {
+            for key in ["_id", "rev", "updatedAt", "baseline"] {
                 value.as_object_mut().unwrap().remove(key);
             }
             for path in ["/question", "/question/answer", "/wait", "/wait/over"] {
@@ -1018,6 +1045,7 @@ mod tests {
         assert_eq!(board_s(&arrived), board_s(&item), "all but the board's fields arrive as they left");
         let (question, wait) = (arrived.question.as_ref().unwrap(), arrived.wait.as_ref().unwrap());
         assert_eq!((arrived.id, arrived.rev, arrived.updated_at), (99, None, None));
+        assert_eq!(arrived.baseline, None, "a handoff's commit is the repository's of the board it left");
         assert_eq!(
             [question.rev, question.answer.as_ref().unwrap().rev, wait.rev, wait.over.as_ref().unwrap().rev],
             [0; 4],

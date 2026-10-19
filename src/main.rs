@@ -6,6 +6,7 @@ mod agents_merge;
 mod agents_view;
 mod anchors;
 mod artifact;
+mod baseline;
 mod claims;
 mod cli;
 mod commits;

@@ -913,7 +913,7 @@ fn head(mut id: u32, superseded_by: &HashMap<u32, Vec<u32>>) -> u32 {
 /// The ids `text` cites: a citing word, then a number or a list of them --
 /// "procedure 234", "notes 990, 992 and 994", "tarefas 5 e 6". A number of
 /// more than five digits, or running into a letter, is none.
-fn cited_ids(text: &str) -> Vec<u32> {
+pub(crate) fn cited_ids(text: &str) -> Vec<u32> {
     let bytes = text.as_bytes();
     let part_of_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80;
     let mut ids = Vec::new();
@@ -1307,6 +1307,10 @@ pub struct Handoff {
     /// or one of its steps, or the reader, through a step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held: Option<String>,
+    /// What moved since it was written (task 2205): absent for a handoff
+    /// written before ekko recorded what it was written against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<crate::baseline::Since>,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -1434,6 +1438,9 @@ pub fn prime(ekko: &Ekko, board: &str) -> Result<Prime, EkkoError> {
             // Its author's line says so already when that session holds it.
             let said = reader.whose(note) == Some(Whose::Running) && reader.author(note).as_deref() == Some(held.by.as_str());
             (held.elsewhere() && !said).then(|| format!("held by {}{through}: that session's, not this one's", held.by))
+        }),
+        since: note.baseline.as_deref().map(|baseline| {
+            crate::baseline::since(baseline, ekko.folder.as_deref(), |uid| reader.uid(uid).and_then(|id| all.get(&id)))
         }),
     });
     if let Some(shown) = &handoff {
@@ -3371,8 +3378,13 @@ impl Handoff {
             "\nWhere the last session stopped: handoff {} on task {} [{}], written {written}{by}{held}\n",
             self.id, self.task, self.task_state
         );
+        // What moved since, under the line that says when it was written:
+        // read before the handoff, as the present it is to be read against,
+        // and counted within the handoff's budget, so the prime grows none.
+        let since = self.since.as_ref().map(crate::baseline::Since::line).unwrap_or_default();
+        out.push_str(&since);
         let body = self.description.trim();
-        let cut = handoff_cut(&body.lines().collect::<Vec<_>>(), HANDOFF_BUDGET);
+        let cut = handoff_cut(&body.lines().collect::<Vec<_>>(), HANDOFF_BUDGET.saturating_sub(since.chars().count()));
         let mark = format!("    \u{2026} +{} chars: context {} reads it whole\n", body.chars().count().saturating_sub(cut.shown), self.id);
         for line in &cut.head {
             let _ = writeln!(out, "    > {line}");
@@ -4632,7 +4644,8 @@ mod tests {
         let text = prime(&ekko, "default board").unwrap().text();
         let quoted = text.split("\nWhere the last session stopped: ").nth(1).unwrap_or_default();
         let quoted: String = quoted.lines().skip(1).take_while(|line| line.starts_with("    ")).map(|line| format!("{line}\n")).collect();
-        assert!(quoted.starts_with("    > Where it stopped.\n    > line 1: "), "the head: {quoted}");
+        let since = "    Since it was written: the tasks it names are as it left them.\n";
+        assert!(quoted.starts_with(&format!("{since}    > Where it stopped.\n    > line 1: ")), "the head: {quoted}");
         assert!(quoted.ends_with("    > NEXT STEP: rebuild, then rerun the eval\n    > and read its log first\n"), "the end: {quoted}");
         assert!(quoted.contains("chars: context 3 reads it whole\n"), "what was left out: {quoted}");
         assert!(quoted.chars().count() <= HANDOFF_BUDGET + 100, "{} characters: {quoted}", quoted.chars().count());
@@ -5528,13 +5541,14 @@ mod tests {
 
         let mine = prime(&as_(&me), "default board").unwrap().text();
         assert!(mine.contains("Where the last session stopped: handoff 5 on task 2 [waiting], written "), "{mine}");
-        assert!(mine.contains(" by this session\n    > my stop"), "{mine}");
+        let since = "    Since it was written: the tasks it names are as it left them.\n";
+        assert!(mine.contains(&format!(" by this session\n{since}    > my stop")), "{mine}");
         assert!(mine.contains("Other handoffs in the last hour: 4 on task 1 ("), "{mine}");
         assert!(mine.contains(", by default on pts/3, ended); 6 on task 3 ("), "{mine}");
         assert!(mine.contains(", by default on pts/2)\n"), "{mine}");
         let theirs = prime(&as_(&other), "default board").unwrap().text();
         assert!(theirs.contains("Where the last session stopped: handoff 6 on task 3 [pending], written "), "{theirs}");
-        assert!(theirs.contains(" by this session\n    > their stop"), "{theirs}");
+        assert!(theirs.contains(&format!(" by this session\n{since}    > their stop")), "{theirs}");
 
         // A reader that wrote none -- a new session, or the user -- takes up
         // the ended session's work, not the newer one a session still runs.

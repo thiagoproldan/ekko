@@ -121,7 +121,7 @@ pub fn branch(folder: &Path) -> Option<String> {
 /// `git -C folder <args>`'s output, or `None` when it could not run or
 /// failed. A signature check a user's config asks of `git log` would print
 /// its own lines among the commits, so it is turned off.
-fn git(folder: &Path, args: &[&str]) -> Option<String> {
+pub(crate) fn git(folder: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(folder)
