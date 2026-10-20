@@ -140,6 +140,21 @@ fn every_variable_ekko_reads_is_one_the_tests_keep_set_or_let_through() {
     assert!(unread.is_empty(), "tests/common/mod.rs places {unread:?}, which ekko does not read");
 }
 
+/// No process a test starts reaches the session bus of whoever runs the
+/// tests (task 2250): a born session's watcher telling of a wait, or a
+/// menu's reminder, goes through busctl, which would show it on their
+/// desktop. Where there is no session bus, or no busctl, this cannot fail.
+#[test]
+fn no_process_a_test_starts_reaches_the_desktop_of_whoever_runs_the_tests() {
+    let reached = common::command("busctl")
+        .args(["--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetId"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(!reached, "busctl, started as a test starts a process, reached a session bus: a notification would show on the desktop of whoever runs the tests");
+}
+
 /// What ekko keeps of sessions goes under XDG_STATE_HOME when it is set,
 /// and under the home's .local/state otherwise: the unit tests, which keep
 /// theirs under their own homes whatever it says, cannot show it (task

@@ -50,6 +50,14 @@ pub const SESSION_VARIABLES: &[&str] = &[
 /// HOME until a test sets its own: a folder that does not exist.
 pub const NO_HOME: &str = "/nonexistent/ekko-test-home";
 
+/// The session bus every process a test starts is given: an address where
+/// no bus is (task 2250). A desktop notification -- a born session's
+/// watcher telling of a wait, a menu's reminder -- goes through busctl,
+/// which finds the bus of whoever runs the tests through this variable, or
+/// else XDG_RUNTIME_DIR, which tests inherit; with it here, busctl fails
+/// to connect, and nothing reaches their desktop.
+pub const NO_BUS: &str = "unix:path=/nonexistent/ekko-test-bus";
+
 /// The variables ekko reads that tests inherit as they are, each for a
 /// reason: PATH finds the programs a test runs, XDG_RUNTIME_DIR is where a
 /// menu's file goes, and a test that opens one sets it; the rest are read
@@ -65,14 +73,15 @@ pub const INHERITED: &[&str] = &[
     "EKKO_SHELL_OUT",
 ];
 
-/// `program`, started without any of `SESSION_VARIABLES` and with HOME at
-/// `NO_HOME`.
+/// `program`, started without any of `SESSION_VARIABLES`, with HOME at
+/// `NO_HOME`, and with the session bus at `NO_BUS`.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     for name in SESSION_VARIABLES {
         command.env_remove(name);
     }
     command.env("HOME", NO_HOME);
+    command.env("DBUS_SESSION_BUS_ADDRESS", NO_BUS);
     command
 }
 
