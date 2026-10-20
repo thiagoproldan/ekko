@@ -1,10 +1,11 @@
 """A board's items as ekko keeps them, for the evals (task 2233).
 
 From the ekko that brought it, a board lives in storage/board.sqlite, and
-storage.json beside it is only a stamp a watcher follows:
-{"0": "This board is kept in board.sqlite ..."}. A board no such ekko has
-written to yet is storage.json alone, and its first write moves it into the
-database. Every eval reads, seeds, copies and scrubs boards through here, so
+storage.json beside it is only a stamp a watcher follows: {"0": "An ekko
+from before boards were kept in SQLite cannot read this board: ..."}, the
+words of STAMP in src/storage.rs. A board no such ekko has written to yet
+is storage.json alone, and its first write moves it into the database.
+Every eval reads, seeds, copies and scrubs boards through here, so
 neither form is assumed, and the database's layout is known in this one place
 on the Python side, as tests/common/mod.rs knows it on the Rust side. Reading
 the database straight, not through `ekko --export`, keeps the ground truth an
