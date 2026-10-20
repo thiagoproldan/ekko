@@ -606,17 +606,23 @@ impl Storage {
     /// Brings the copy of the board's database under `copy_dir` up to date
     /// with the write just made (task 503): the same write, given to the
     /// copy where it holds every transaction before this one and no other,
-    /// or the whole database copied again where it does not. Best effort, as
-    /// every copy is: a copy that cannot be made never stops the write.
+    /// or the whole database copied again where it does not. A copy that
+    /// cannot be read or written -- one a power loss left unreadable, since
+    /// it is written with synchronous=OFF -- is out of step too, and made
+    /// again (task 2244). Best effort, as every copy is: a copy that cannot
+    /// be made never stops the write.
     fn mirror(&self, db: &Database, write: &Write, written: database::Written) {
         let Some(copy) = self.copy_of(&self.database_file) else { return };
-        let done = (|| -> Result<(), StorageError> {
-            if let Some(mut there) = Database::open(&copy)? {
-                there.relax()?;
-                if there.layout()? == database::LAYOUT && there.commits()? == written.commits - 1 && there.write(write).is_ok_and(|then| then == written) {
-                    return Ok(());
-                }
-            }
+        // The copy's connection ends inside, before a new copy takes its place.
+        let given = (|| -> Result<bool, StorageError> {
+            let Some(mut there) = Database::open(&copy)? else { return Ok(false) };
+            there.relax()?;
+            Ok(there.layout()? == database::LAYOUT && there.commits()? == written.commits - 1 && there.write(write)? == written)
+        })();
+        if matches!(given, Ok(true)) {
+            return;
+        }
+        let made = (|| -> Result<(), StorageError> {
             let parent = copy.parent().ok_or_else(|| StorageError::Refused("no folder for the copy".into()))?;
             fs::create_dir_all(parent)?;
             let temp = temp_file_path(&copy, parent);
@@ -627,9 +633,9 @@ impl Storage {
             database::put_in_place(&temp, &copy)?;
             Ok(())
         })();
-        if let Err(why) = done {
+        if let Err(why) = made {
             if !self.said.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("ekko: the copy of the board's database under {} was not brought up to date: {why}", copy.display());
+                eprintln!("ekko: the copy of the board's database under {} could not be made again: {why}", copy.display());
             }
         }
     }
@@ -2569,6 +2575,33 @@ mod tests {
         board.insert(4, sample_item(4));
         storage.set(&board).unwrap();
         assert_eq!(stored(&copy), stored(&dir), "a copy out of step, made again");
+
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(copy.parent().unwrap()).ok();
+    }
+
+    /// A copy a crash left unreadable -- its first page overwritten, as a
+    /// power loss may leave a database written with synchronous=OFF -- is
+    /// made again whole at the next write, not left as it is (task 2244).
+    #[test]
+    fn a_copy_a_crash_left_unreadable_is_made_again_at_the_next_write() {
+        let dir = temp_ekko_dir();
+        let copy = temp_ekko_dir().join("copy");
+        let storage = Storage::new(&dir).unwrap().copied_to(Ok(Some(copy.clone())));
+        let mut board = BTreeMap::from([(1, sample_item(1))]);
+        storage.set(&board).unwrap();
+        assert_eq!(stored(&copy), stored(&dir));
+
+        let file = copy.join("storage").join(database::FILE);
+        let mut bytes = fs::read(&file).unwrap();
+        bytes[..100].fill(b'x');
+        fs::write(&file, &bytes).unwrap();
+        let unreadable = Database::open(&file).and_then(|db| db.expect("the copy is there").layout());
+        assert!(unreadable.is_err(), "the overwritten copy still reads: {unreadable:?}");
+
+        board.insert(2, sample_item(2));
+        storage.set(&board).unwrap();
+        assert_eq!(stored(&copy), stored(&dir), "an unreadable copy, made again");
 
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(copy.parent().unwrap()).ok();
