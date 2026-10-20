@@ -16,10 +16,13 @@ session of the user's, so today's ekko and ctx serve every cell alike.
 Its transcripts, main thread and subagents, are copied into
 target/evals/paired/ as soon as each session ends: they outlive the profile.
 
+    nix develop -c python3 evals/paired/harness.py check [--live]
     nix develop -c python3 evals/paired/harness.py probe
     nix develop -c python3 evals/paired/harness.py run TASK CELL [--rep N]
     nix develop -c python3 evals/paired/harness.py pilot [--dry-run] [--anytime] [--long]
 
+`check` tests the guard that keeps a run from where the answer is; --live
+spends two tiny sessions to see the deny rules refuse what they name.
 `trigger` is the PostToolUse hook the C cells run under; it reads the hook's
 input on stdin.
 """
@@ -41,19 +44,24 @@ import uuid
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(HERE, "..", "claude-code"))
-from transcripts import W_CW1H, W_CW5M, W_IN, W_OUT, read_weight  # noqa: E402
+from transcripts import W_CW1H, W_CW5M, W_IN, W_OUT, profiles, read_weight  # noqa: E402
 
 HOME = os.path.expanduser("~")
 # The account that pays, `--account`: the pilot's short runs went on trabalho,
 # 259's long runs on default (decisions 741 and 744). PROFILE, PROFILE_ENV and
 # POINT follow it (use_account).
 ACCOUNT = "default"
-# The run repos: big once built, outside ~/Projetos, and a folder name the
-# transcript studies skip (evals/claude-code/transcripts.py, SKIP).
+# Each account's Claude Code config folder, which a run's CLAUDE_CONFIG_DIR
+# names; the `claude` wrapper exports the default's when it is unset. They
+# were ~/.claude and ~/.claude-trabalho until the profiles moved, found on
+# 2026-10-19 (task 2214), so preflight() checks the folder before a run
+# spends.
+PROFILES = {"default": os.path.join(HOME, ".nyx"), "trabalho": os.path.join(HOME, ".nox")}
+# The run repos: big once built, outside the projects folder, and a folder
+# name the transcript studies skip (evals/claude-code/transcripts.py, SKIP).
 ROOT = os.path.join(HOME, ".cache", "ekko-paired")
 OUT = os.path.join(REPO, "target", "evals", "paired")
 BOARD = os.path.join(REPO, ".ekko")
-HANDOFF_SKILL = os.path.join(HOME, "Projetos", "ctx", "src", "skills", "handoff", "SKILL.md")
 CTX_WORKER_HOME = os.path.join(HOME, ".local", "state", "ctx", "worker-home")
 LOCAL = datetime.timezone(datetime.timedelta(hours=-3))
 
@@ -127,16 +135,15 @@ DISALLOWED = [
     "Bash(gh:*)",
     "Bash(git push:*)",
 ]
-# Where the answer is: the real repos, and the transcripts of the sessions
-# that wrote it.
-DENY = [
-    "Read(~/Projetos/**)",
-    "Edit(~/Projetos/**)",
-    "Edit(~/NixOS/**)",
-    "Read(~/.claude/projects/**)",
-    "Read(~/.claude-trabalho/projects/**)",
-]
-PEEK = re.compile(r"Projetos/(ekko|ctx)|\.claude(-trabalho)?/projects|\bbccf056|\b2779afb|\be01e6d1")
+# What a session reads in a config folder by Claude Code's own direction: its
+# plugins' and skills' files and the user's CLAUDE.md. Beside these, its own
+# folder in projects/ stays open, where a large tool result is saved for it to
+# read: runs 396-cmax-1 and probe-cmax-0, denied all of projects/, were each
+# refused their own hook output.
+KEEP = ("plugins", "skills", "CLAUDE.md")
+# Seconds a session may run before its transcript must be found: a session
+# that cannot be priced cannot be capped either.
+UNPRICED = 120
 
 
 def git(cwd, *args):
@@ -149,6 +156,136 @@ def now():
 
 def log(text):
     print(f"{now():%m-%d %H:%M:%S} {text}", flush=True)
+
+
+# ---- the guard: where the answer is --------------------------------------------
+
+
+def projects_folder():
+    """The folder the real repos live in, by its real path: REPO's."""
+    return os.path.dirname(os.path.realpath(REPO))
+
+
+def links_to_projects():
+    """The home folder's links to the projects folder, as ~/Projects."""
+    top = projects_folder()
+    return [path for path in (os.path.join(HOME, name) for name in sorted(os.listdir(HOME)))
+            if os.path.islink(path) and os.path.realpath(path) == top]
+
+
+def folder_name(path):
+    """The folder of a profile's projects/ that holds the sessions started in
+    `path`: each character but an ASCII letter or digit turned to '-', as in
+    src/repeats.rs."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def guarded(run_dir):
+    """Where the answer is, for the run in run_dir, as (path, is_dir) as it
+    stands now: the projects folder; in every profile, each entry but KEEP,
+    and in projects/ each folder but the run's own; and each other entry of
+    ROOT, other runs' repos and the studies' copies among them."""
+    own_run, own_folder = os.path.basename(run_dir), folder_name(os.path.join(run_dir, "repo"))
+    places = [(projects_folder(), True)]
+    for profile in profiles():
+        for entry in sorted(os.listdir(profile)):
+            path = os.path.join(profile, entry)
+            if entry in KEEP:
+                continue
+            if entry == "projects":
+                places += [(os.path.join(path, name), os.path.isdir(os.path.join(path, name)))
+                           for name in sorted(os.listdir(path)) if name != own_folder]
+            else:
+                places.append((path, os.path.isdir(path)))
+    if os.path.isdir(ROOT):
+        places += [(os.path.join(ROOT, name), os.path.isdir(os.path.join(ROOT, name)))
+                   for name in sorted(os.listdir(ROOT)) if name != own_run]
+    return places
+
+
+def literal(path):
+    """`path` as a gitignore pattern that matches it alone."""
+    return re.sub(r"([\\\[\]*?])", r"\\\1", path)
+
+
+def deny_rules(run_dir):
+    """The run's deny rules: Read on every guarded place, written from the
+    filesystem root (//), and Edit on the projects folder and ~/NixOS. A deny
+    rule also refuses a path through a link to what it names (permissions
+    docs, Symlinks; check --live saw a read through ~/Projects refused on
+    2026-10-19), so the links need no rules of their own. A place made after
+    the run starts goes unnamed, and a command that opens files itself, as a
+    script does, is past any deny rule (the same docs); peek_pattern() sees
+    both in the transcripts."""
+    rules = [f"Read(/{literal(path)}{'/**' if is_dir else ''})" for path, is_dir in guarded(run_dir)]
+    return rules + [f"Edit(/{literal(projects_folder())}/**)", "Edit(~/NixOS/**)"]
+
+
+def spelled(path):
+    """A regex for `path` as a tool's input may write it: absolute, or from
+    the home folder as ~, $HOME or ${HOME}; never the tail of a longer path."""
+    tail = r"(?<![\w.~$}/-])"
+    for home in sorted({HOME, os.path.realpath(HOME)}):
+        if path.startswith(home + "/"):
+            return r"(?:" + tail + re.escape(home) + r"|~|\$HOME|\$\{HOME\})" + re.escape(path[len(home):])
+    return tail + re.escape(path)
+
+
+def peek_pattern(run_dir):
+    """What makes a tool call a peek, for the run in run_dir: naming the
+    projects folder, by its path or a link; an entry of a profile but KEEP
+    and the run's own transcript folder; an entry of ROOT but the run's own;
+    or a task's reference commit. Unlike the deny rules, it also covers
+    places made after the run started."""
+    own_run, own_folder = os.path.basename(run_dir), folder_name(os.path.join(run_dir, "repo"))
+    end = r"(?![\w.-])"
+    parts = [spelled(path) + end for path in [projects_folder(), *links_to_projects()]]
+    kept = "|".join([re.escape(name) + end for name in KEEP] + ["projects/" + re.escape(own_folder) + end])
+    parts += [spelled(profile) + "/(?!" + kept + ")" for profile in profiles()]
+    parts.append(spelled(ROOT) + "/(?!" + re.escape(own_run) + end + ")")
+    commits = [commit for _, commit, _, _ in TASKS.values() if re.fullmatch(r"[0-9a-f]{7,40}", commit)]
+    parts.append(r"\b(?:" + "|".join(commits) + ")")
+    return re.compile("|".join(parts))
+
+
+def strings(value):
+    """Every string a tool's input holds, however nested."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
+
+
+def peeked(peek, given):
+    """Whether a tool call's input matches `peek`, string by string: in the
+    input's JSON, a path that starts a command's second line follows the
+    letter of its escaped newline, and would not be at a start."""
+    return any(peek.search(text) for text in strings(given))
+
+
+def handoff_skill(profile):
+    """ctx's /handoff, as `profile` serves it to a session."""
+    return os.path.join(profile, "skills", "handoff", "SKILL.md")
+
+
+def preflight():
+    """What a run needs of this machine, checked before it spends: the
+    account's config folder, which holds its own .claude.json, with the
+    /handoff it serves; and the runs kept outside the projects folder, which
+    every run is denied. Whether Claude Code accepts the account shows only
+    in a session: one it refuses ends in an error (run's status "error")."""
+    problems = []
+    if not os.path.isfile(os.path.join(PROFILE, ".claude.json")):
+        problems.append(f"{PROFILE} holds no .claude.json, so it is not {ACCOUNT}'s config folder")
+    if not os.path.isfile(handoff_skill(PROFILE)):
+        problems.append(f"{handoff_skill(PROFILE)} is missing: a C cell would not ask in /handoff's words")
+    if (os.path.realpath(ROOT) + "/").startswith(projects_folder() + "/"):
+        problems.append(f"{ROOT} is inside {projects_folder()}, which every run is denied")
+    return problems
 
 
 # ---- the board as it stood ----------------------------------------------------
@@ -216,10 +353,11 @@ def prepare(name, run_dir, build=True):
     return repo, parent, count, newer
 
 
-def settings(run_dir, trigger):
-    """The wrapper's own settings, with the harness's deny rules and, for the
-    C cells, the trigger. Written whole, so it holds whether Claude Code
-    merges a second --settings or keeps only the last."""
+def settings(run_dir, trigger, guard=True):
+    """The wrapper's own settings, with the run's deny rules (unless guard is
+    off, for check_live's control) and, for the C cells, the trigger. Written
+    whole, so it holds whether Claude Code merges a second --settings or keeps
+    only the last."""
     wrapper = open(os.path.realpath(shutil.which("claude"))).read()
     found = re.search(r"--settings (\S+)", wrapper)
     base = json.load(open(found.group(1))) if found else {}
@@ -230,7 +368,8 @@ def settings(run_dir, trigger):
     # compact there. Every cell alike, as on trabalho, where it is on.
     base["autoCompactEnabled"] = True
     permissions = base.setdefault("permissions", {})
-    permissions["deny"] = list(dict.fromkeys(permissions.get("deny", []) + DENY))
+    if guard:
+        permissions["deny"] = list(dict.fromkeys(permissions.get("deny", []) + deny_rules(run_dir)))
     if trigger:
         command = f"{sys.executable} {os.path.abspath(__file__)} trigger"
         base.setdefault("hooks", {}).setdefault("PostToolUse", []).append({"hooks": [{"type": "command", "command": command}]})
@@ -265,8 +404,14 @@ def child_env(run_dir, trigger):
 
 
 def files_of(sid):
-    main = glob.glob(os.path.join(PROFILE, "projects", "*", sid + ".jsonl"))
-    subagents = glob.glob(os.path.join(PROFILE, "projects", "*", sid, "subagents", "*.jsonl"))
+    """A session's transcripts, main thread and subagents, in whichever
+    profile Claude Code wrote them: looked for in PROFILE alone, they were
+    not found once the profiles moved, and a run read as costing nothing
+    would never have reached its cap (task 2214)."""
+    main, subagents = [], []
+    for profile in profiles():
+        main += glob.glob(os.path.join(profile, "projects", "*", sid + ".jsonl"))
+        subagents += glob.glob(os.path.join(profile, "projects", "*", sid, "subagents", "*.jsonl"))
     return main, subagents
 
 
@@ -357,8 +502,10 @@ def last_context(transcript):
 
 
 def handoff_text(tokens, limit):
+    # The hook runs in the session's environment, whose CLAUDE_CONFIG_DIR is
+    # the run's profile; preflight() checked its /handoff before the run.
     try:
-        text = open(HANDOFF_SKILL).read().split("---", 2)[2].strip()
+        text = open(handoff_skill(os.environ.get("CLAUDE_CONFIG_DIR") or PROFILE)).read().split("---", 2)[2].strip()
     except (OSError, IndexError):
         text = "Write a handoff (kind handoff) on the ekko task in progress."
     text = re.sub(r"- Then end with one line telling the user[^\n]*",
@@ -424,13 +571,11 @@ def windows(lines):
 
 def use_account(name):
     """Log in with `name`'s profile from now on, and price runs by its point.
-    Default's profile is ~/.claude with its global config in ~/.claude.json,
-    which Claude Code reads only while CLAUDE_CONFIG_DIR is unset: set to
-    ~/.claude it looks for ~/.claude/.claude.json instead."""
+    Each profile holds its own .claude.json, so CLAUDE_CONFIG_DIR names it
+    for the default as for any other."""
     global ACCOUNT, PROFILE, PROFILE_ENV, POINT
-    ACCOUNT, POINT = name, POINTS[name]
-    PROFILE = os.path.join(HOME, ".claude" if name == "default" else ".claude-" + name)
-    PROFILE_ENV = {} if name == "default" else {"CLAUDE_CONFIG_DIR": PROFILE}
+    ACCOUNT, POINT, PROFILE = name, POINTS[name], PROFILES[name]
+    PROFILE_ENV = {"CLAUDE_CONFIG_DIR": PROFILE}
 
 
 use_account(ACCOUNT)
@@ -496,6 +641,9 @@ def run(name, cell, rep, window=None, prompt=None, cap=None, effort=None, extra_
               "guards": {"five_hour": FIVE_HOUR, "week": SEVEN_DAY, "week_stop": week_stop(), "cap": cap}}
     settings_path, env = settings(run_dir, spec["trigger"]), child_env(run_dir, spec["trigger"])
     env.update(extra_env or {})
+    # The settings the run ran with, deny rules and all, beside its record.
+    shutil.copy(settings_path, os.path.join(out_dir, "settings.json"))
+    record["guards"]["deny_rules"] = len(json.load(open(settings_path))["permissions"]["deny"])
     text, status = prompt, "done"
     for segment in range(SEGMENTS):
         sid = str(uuid.uuid4())
@@ -513,6 +661,10 @@ def run(name, cell, rep, window=None, prompt=None, cap=None, effort=None, extra_
             cleared = None
             while proc.poll() is None:
                 time.sleep(10)
+                if not files_of(sid)[0] and time.time() - began > UNPRICED:
+                    status = "unpriced"
+                    stop(proc)
+                    break
                 total, _ = spent([s["sid"] for s in record["sessions"]] + [sid])
                 if total > cap:
                     status = "capped"
@@ -548,8 +700,11 @@ def run(name, cell, rep, window=None, prompt=None, cap=None, effort=None, extra_
                    "result": {k: result.get(k) for k in ("subtype", "is_error", "num_turns", "total_cost_usd")},
                    "result_text": (result.get("result") or "")[:500]}
         record["sessions"].append(session)
-        if result.get("is_error") and re.search(r"limit|rate", str(result.get("result")), re.I):
-            status = "limit"
+        # A session Claude Code ended in an error is no measurement: when it
+        # refuses the account, each session ends in one synthetic message
+        # (seen 2026-10-19), and read as done such a run is priced at 0.
+        if status == "done" and result.get("is_error"):
+            status = "limit" if re.search(r"limit|rate", str(result.get("result")), re.I) else "error"
         if status != "done" or not fired:
             break
         text = "continuando"
@@ -562,11 +717,11 @@ def run(name, cell, rep, window=None, prompt=None, cap=None, effort=None, extra_
                   dirty=bool(git(repo, "status", "--porcelain")))
     with open(os.path.join(out_dir, "result.diff"), "w") as handle:
         handle.write(git(repo, "diff", parent))
-    peeks = []
+    peek, peeks = peek_pattern(run_dir), []
     for path in glob.glob(os.path.join(out_dir, "transcripts", "**", "*.jsonl"), recursive=True):
         for usage, row in calls_in(path):
             for block in (row.get("message") or {}).get("content") or []:
-                if isinstance(block, dict) and block.get("type") == "tool_use" and PEEK.search(json.dumps(block.get("input"))):
+                if isinstance(block, dict) and block.get("type") == "tool_use" and peeked(peek, block.get("input")):
                     peeks.append(json.dumps(block.get("input"))[:200])
     record["peeks"] = peeks
     shutil.copy(os.path.join(repo, ".ekko", "storage", "storage.json"), os.path.join(out_dir, "board.json"))
@@ -639,6 +794,12 @@ def pilot(dry_run, anytime, window, long=False):
         if record["status"] == "week":
             log(f"stopped mid-run: the week passed {week_stop():.0%}, {len(queue)} runs left")
             break
+        if record["status"] == "unpriced":
+            log(f"stopped: no profile holds the transcript of {name}/{cell}/{rep}, so no run can be capped; {len(queue)} runs left")
+            break
+        if record["status"] == "error":
+            log(f"stopped: {name}/{cell}/{rep} ended in an error, {record['sessions'][-1]['result_text'][:200]!r}; {len(queue)} runs left")
+            break
         if record["status"] == "limit":
             tries[(name, cell, rep)] = tries.get((name, cell, rep), 0) + 1
             log(f"usage limit: {name}/{cell}/{rep} discarded, again in an hour")
@@ -653,14 +814,159 @@ def pilot(dry_run, anytime, window, long=False):
     log(f"pilot over: {spent_units / 1e6:.1f}M units ({spent_units / POINT:.0f} points)")
 
 
+# ---- the guard's check ------------------------------------------------------------
+
+
+def check():
+    """The guard, tested as for a run in the folder of an old run whose
+    transcripts are still on disk: the peek pattern on calls it must flag and
+    calls it must let pass, and the deny rules over each entry of each profile
+    and of ROOT. Returns what is wrong, a line each."""
+    runs = sorted(os.listdir(ROOT)) if os.path.isdir(ROOT) else []
+    olds = [name for name in runs if any(os.path.isdir(os.path.join(profile, "projects", folder_name(os.path.join(ROOT, name, "repo"))))
+                                         for profile in profiles())]
+    own_run = olds[0] if olds else "397-cmax-1-0101-000000"
+    other = next((name for name in runs if name != own_run), "394-chigh-1-0101-000000")
+    run_dir = os.path.join(ROOT, own_run)
+    own = folder_name(os.path.join(run_dir, "repo"))
+    peek, rules = peek_pattern(run_dir), deny_rules(run_dir)
+    repo, top = os.path.realpath(REPO), projects_folder()
+
+    def tilde(path):
+        return "~" + path[len(HOME):] if path.startswith(HOME + "/") else path
+
+    flag = [f"cat {repo}/src/ops.rs", f"{top}/ctx/README.md", f"cd /tmp\n{top}/ekko/scripts/release.sh",
+            f"{tilde(ROOT)}/{other}/repo/src/ops.rs", f"ls {ROOT}/", "git show " + TASKS["396"][1]]
+    flag += [f"{tilde(link)}/ekko/Cargo.toml" for link in links_to_projects()]
+    let = [f"{run_dir}/repo/src/ops.rs", "src/ops.rs", f"{tilde(run_dir)}/ctx-state/x", "/tmp/x", f"{top}2/x",
+           f"/srv{top}/x", "git log HEAD", "/nix/store/abc-ctx/share/ctx/skills/handoff/SKILL.md"]
+    for profile in profiles():
+        flag += [f"{profile}/projects/{folder_name(repo)}/x.jsonl", f"{tilde(profile)}/history.jsonl",
+                 f"cat ${{HOME}}{tilde(profile)[1:]}/file-history/x", f"ls {profile}/projects/"]
+        let += [f"{profile}/projects/{own}/x/tool-results/hook-x-stdout.txt", f"{tilde(profile)}/skills/handoff/SKILL.md",
+                f"{profile}/plugins/x", f"{profile}/CLAUDE.md", f"{profile}x/projects/y"]
+    wrong = [f"peeks miss {text!r}" for text in flag if not peeked(peek, {"command": text})]
+    wrong += [f"peeks take {text!r}" for text in let if peeked(peek, {"command": text})]
+    named = set(rules)
+
+    def denied(path):
+        return f"Read(/{literal(path)})" in named or f"Read(/{literal(path)}/**)" in named
+
+    seen_own = False
+    for profile in profiles():
+        for entry in sorted(os.listdir(profile)):
+            path = os.path.join(profile, entry)
+            for place in [os.path.join(path, name) for name in sorted(os.listdir(path))] if entry == "projects" else [path]:
+                must = entry not in KEEP and os.path.basename(place) != own
+                seen_own |= os.path.basename(place) == own
+                if denied(place) != must:
+                    wrong.append(f"deny rules {'miss' if must else 'name'} {place}")
+    for name in runs:
+        if denied(os.path.join(ROOT, name)) != (name != own_run):
+            wrong.append(f"deny rules {'miss' if name != own_run else 'name'} {os.path.join(ROOT, name)}")
+    for rule in (f"Read(/{literal(top)}/**)", f"Edit(/{literal(top)}/**)"):
+        if rule not in named:
+            wrong.append(f"deny rules miss {rule}")
+    log(f"guard, as for run {own_run}: {len(flag)} calls to flag, {len(let)} to let pass; {len(rules)} deny rules over "
+        f"{len(profiles())} profiles and {len(runs)} entries of {ROOT}; the run's own transcript folder "
+        + ("is among them" if seen_own else "is on disk in no profile, so its case is untried"))
+    return wrong
+
+
+def tool_answers(paths):
+    """How each tool call in the transcripts was answered: its file or
+    command -> (refused, the answer's start)."""
+    calls, answers = {}, {}
+    for path in paths:
+        for raw in open(path, errors="replace"):
+            try:
+                row = json.loads(raw)
+            except ValueError:
+                continue
+            content = (row.get("message") or {}).get("content")
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    given = block.get("input") or {}
+                    calls[block.get("id")] = given.get("file_path") or given.get("command")
+                elif block.get("type") == "tool_result" and block.get("tool_use_id") in calls:
+                    text = block.get("content")
+                    if isinstance(text, list):
+                        text = " ".join(part.get("text", "") for part in text if isinstance(part, dict))
+                    answers[calls[block["tool_use_id"]]] = (bool(block.get("is_error")), str(text)[:300].replace("\n", " "))
+    return answers
+
+
+def check_live():
+    """Two tiny sessions alike but for the deny rules, each asked to read the
+    same paths: guarded ones, and ones a run reads by right. Right when the
+    session with the rules is refused just the guarded ones, each with a
+    permission refusal, and the one without them is refused none: then the
+    refusals are the rules' doing. Haiku, ctx's hooks off, a line a read.
+    Returns what is wrong, a line each."""
+    stamp = f"{now():%m%d-%H%M%S}"
+    repo = os.path.realpath(REPO)
+    sessions = sorted(glob.glob(os.path.join(PROFILE, "projects", folder_name(repo), "*.jsonl")), key=os.path.getmtime)
+    olds = [name for name in sorted(os.listdir(ROOT)) if os.path.isfile(os.path.join(ROOT, name, "repo", "Cargo.toml"))]
+    shut = [os.path.join(repo, "Cargo.toml")]
+    shut += [os.path.join(link, os.path.basename(repo), "Cargo.toml") for link in links_to_projects()[:1]]
+    shut += sessions[-1:] + [os.path.join(PROFILE, "history.jsonl")]
+    shut += [os.path.join(ROOT, name, "repo", "Cargo.toml") for name in olds[:1]]
+    command = f"head -1 {shut[0]}"
+    wrong = []
+    for arm in ("guard", "control"):
+        run_dir = os.path.join(ROOT, f"check-{arm}-{stamp}")
+        work = os.path.join(run_dir, "repo")
+        os.makedirs(work)
+        mine = os.path.join(work, "notes.txt")
+        with open(mine, "w") as handle:
+            handle.write("A file of the run's own.\n")
+        sid = str(uuid.uuid4())
+        right = [mine, os.path.join(PROFILE, "projects", folder_name(work), sid + ".jsonl"), handoff_skill(PROFILE)]
+        reads = shut + right
+        prompt = ("This is a permissions check. Call the Read tool once for each path below, in this order, with limit 1, "
+                  "and go on to the next whatever the result:\n" + "\n".join(f"{n}. {path}" for n, path in enumerate(reads, 1))
+                  + f"\nThen run this Bash command once, exactly as written: {command}\nThen reply DONE.")
+        env = child_env(run_dir, False)
+        env["CTX_DISABLE"] = "1"
+        path = settings(run_dir, False, guard=arm == "guard")
+        out = subprocess.run(["claude", "-p", prompt, "--model", "haiku", "--output-format", "stream-json", "--verbose",
+                              "--session-id", sid, "--permission-mode", "auto", "--settings", path,
+                              "--disallowedTools", *DISALLOWED],
+                             cwd=work, env=env, capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+        stream = os.path.join(run_dir, "stream.jsonl")
+        with open(stream, "w") as handle:
+            handle.write(out.stdout + out.stderr)
+        answers = tool_answers(files_of(sid)[0])
+        units, calls = spent([sid])
+        deny = len(json.load(open(path)).get("permissions", {}).get("deny", []))
+        result = result_of(stream)
+        log(f"{arm}: {deny} deny rules, session {sid}, {calls} calls, {units / 1e3:.0f}k units, exit {out.returncode}"
+            + (f", ended in error: {str(result.get('result'))[:200]}" if result.get("is_error") else ""))
+        for target in reads + [command]:
+            must = arm == "guard" and target not in right
+            if target not in answers:
+                wrong.append(f"{arm}: no call reads {target}")
+                log(f"  {'refuse' if must else 'allow '} -> no call: {target}")
+                continue
+            refused, text = answers[target]
+            log(f"  {'refuse' if must else 'allow '} -> {'refused' if refused else 'read'}: {target} | {text[:110]}")
+            if refused != must or (must and "permission" not in text.lower()):
+                wrong.append(f"{arm}: {'refused' if refused else 'read'} {target}: {text[:110]}")
+    return wrong
+
+
 def main():
     global SEVEN_DAY
     parser = argparse.ArgumentParser()
     parser.add_argument("--account", choices=sorted(POINTS), default=ACCOUNT)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("trigger")
-    check = sub.add_parser("probe")
-    check.add_argument("--parts", default="cb")
+    guard = sub.add_parser("check")
+    guard.add_argument("--live", action="store_true", help="also spend two tiny Haiku sessions on the deny rules")
+    plumbing = sub.add_parser("probe")
+    plumbing.add_argument("--parts", default="cb")
     one = sub.add_parser("run")
     one.add_argument("task", choices=sorted(TASKS))
     one.add_argument("cell", choices=sorted(CELLS))
@@ -676,8 +982,20 @@ def main():
     args = parser.parse_args()
     use_account(args.account)
     SEVEN_DAY = getattr(args, "week", None) or SEVEN_DAY
+    if args.command != "trigger" and (args.command != "check" or args.live):
+        problems = preflight()
+        for problem in problems:
+            log(f"not ready: {problem}")
+        if problems:
+            sys.exit(1)
     if args.command == "trigger":
         trigger()
+    elif args.command == "check":
+        wrong = check() + (check_live() if args.live else [])
+        for line in wrong:
+            log(f"wrong: {line}")
+        log("guard: right" if not wrong else f"guard: {len(wrong)} wrong")
+        sys.exit(1 if wrong else 0)
     elif args.command == "probe":
         probe(args.parts)
     elif args.command == "run":
