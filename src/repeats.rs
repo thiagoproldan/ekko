@@ -553,16 +553,23 @@ impl Place {
 }
 
 /// The folders Claude Code keeps sessions under: the one `CLAUDE_CONFIG_DIR`
-/// names, `~/.claude`, and each `~/.claude-<profile>` -- the profiles the
-/// holder names sessions by.
+/// names, `~/.claude`, each `~/.claude-<profile>`, and any other folder in
+/// the home folder holding its own `.claude.json`, as a folder
+/// `CLAUDE_CONFIG_DIR` names does, whatever its name (task 2230) -- the
+/// profiles the holder names sessions by. Each is read once, so a session
+/// finds the failures of every profile's sessions, and so does the user at
+/// the terminal, under none.
 fn config_dirs(home: &Path, named: Option<PathBuf>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = named.filter(|dir| !dir.as_os_str().is_empty()).into_iter().collect();
     dirs.push(home.join(".claude"));
     if let Ok(entries) = fs::read_dir(home) {
         let mut profiles: Vec<PathBuf> = entries
             .flatten()
-            .filter(|entry| entry.file_name().to_str().is_some_and(|name| name.starts_with(".claude-")))
             .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with(".claude-"))
+                    || path.join(".claude.json").is_file()
+            })
             .collect();
         profiles.sort();
         dirs.extend(profiles);
@@ -1133,5 +1140,38 @@ mod tests {
         let report = fixture.report();
         assert!(report.recurring.is_empty(), "{:?}", examples(&report));
         assert_eq!((report.transcripts, report.failures, report.left.headless), (2, 2, 1));
+    }
+
+    /// A profile's sessions are in its config folder: ~/.claude, or the one
+    /// CLAUDE_CONFIG_DIR names, which holds its own .claude.json whatever its
+    /// name (task 2230). Every profile in the home folder is read, under
+    /// whichever one the reader runs or under none, each once, and a folder
+    /// only with a projects/ to read.
+    #[test]
+    fn every_profile_in_the_home_folder_is_read_once() {
+        let home = crate::paths::test_dir("ekko-repeats-profiles");
+        let folder = |path: PathBuf, config: bool| {
+            fs::create_dir_all(path.join("projects")).unwrap();
+            if config {
+                fs::write(path.join(".claude.json"), "{}").unwrap();
+            }
+            path
+        };
+        let default = folder(home.join(".claude"), false);
+        let legacy = folder(home.join(".claude-work"), false);
+        let dotted = folder(home.join(".nox"), true);
+        let plain = folder(home.join("profile"), true);
+        // Not profiles: projects/ with no config, a config with no projects/.
+        folder(home.join(".cache"), false);
+        fs::create_dir_all(home.join(".old")).unwrap();
+        fs::write(home.join(".old").join(".claude.json"), "{}").unwrap();
+        // A link to a profile is that profile.
+        std::os::unix::fs::symlink(&dotted, home.join(".nox-link")).unwrap();
+        // A profile outside the home folder, found only when named.
+        let named = folder(home.join("deep").join("profile"), false);
+
+        assert_eq!(config_dirs(&home, None), [default.clone(), legacy.clone(), dotted.clone(), plain.clone()]);
+        assert_eq!(config_dirs(&home, Some(dotted.clone())), [dotted.clone(), default.clone(), legacy.clone(), plain.clone()]);
+        assert_eq!(config_dirs(&home, Some(named.clone())), [named, default, legacy, dotted, plain]);
     }
 }
