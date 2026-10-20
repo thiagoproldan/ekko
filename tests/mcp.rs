@@ -609,7 +609,7 @@ fn a_typed_notes_rests_on_line_is_read_and_the_reply_names_what_does_not_hold() 
     assert_eq!(created["notices"], json!([said]), "created, every anchor is said (task 1327): {created}");
     let edited: Value = serde_json::from_str(text(&replies["3"])).unwrap();
     assert!(edited.get("notices").is_none(), "every anchor holds now: {edited}");
-    let board: Value = serde_json::from_slice(&fs::read(app.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+    let board: Value = common::stored_board(&app.join(".ekko"));
     assert_eq!(board["1"]["restsOn"]["anchors"], json!([{"path": "src/lib.rs", "words": "pub fn kept", "held": true, "line": 1}]));
 
     fs::remove_dir_all(&home).ok();
@@ -679,7 +679,7 @@ fn a_task_filed_on_an_open_tasks_failure_is_told_which_one_it_may_repeat() {
     let sixth = told("8");
     assert!(sixth.starts_with("6 may be the same as open 5 (shares ") && !sixth.contains("; 2 ("), "its blocker is known to it: {sixth}");
     assert_eq!(notices("9"), Value::Null, "tasks filed together are not named for each other: {}", text(&replies["9"]));
-    let board: Value = serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+    let board: Value = common::stored_board(&home.join(".ekko"));
     assert_eq!(board.as_object().unwrap().len(), 8, "every create was written: {board}");
 
     fs::remove_dir_all(&home).ok();
@@ -794,7 +794,7 @@ fn a_note_found_still_true_records_the_claude_code_that_rechecked_it() {
     assert!(flagged.contains("      to recheck: seen with Claude Code 2.1.200, now 2.1.292\n") && flagged.contains(how), "{flagged}");
     assert!(!text(&rechecked["5"]).contains("recheck"), "{}", text(&rechecked["5"]));
     let stored = || -> Value {
-        let board: Value = serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+        let board: Value = common::stored_board(&home.join(".ekko"));
         board["1"]["restsOn"]["stillTrue"].clone()
     };
     assert_eq!(stored()["claudeCode"], json!("2.1.292"), "{}", stored());
@@ -1966,7 +1966,7 @@ fn a_server_with_a_scratch_home_writes_nothing_on_the_board_it_found() {
         let replies = serve(from, named, &[init.clone(), call(2, "create", json!({"text": words}))]);
         assert!(text(&replies["2"]).contains("\"ok\":true"), "{words}: {}", text(&replies["2"]));
     }
-    let storage = fs::read_to_string(board.join("storage").join("storage.json")).unwrap();
+    let storage = common::stored_text(&board);
     assert!(storage.contains("named with EKKO_DIR") && storage.contains("from the home it lies in"), "{storage}");
     assert!(!storage.contains("from a scratch HOME") && !storage.contains("in a batch"), "{storage}");
     fs::remove_dir_all(&home).ok();
@@ -2268,7 +2268,7 @@ fn a_session_waiting_on_a_linked_boards_task_is_told_once_it_is_done() {
     let home = temp_home();
     let folders = projects(&home, &["site", "blog", "shop"]);
     cli_in(&home, &folders[0], &["--link-project", "blog"]);
-    let board = |folder: &Path| fs::read_to_string(folder.join(".ekko").join("storage").join("storage.json")).unwrap_or_default();
+    let board = |folder: &Path| common::stored_text_or_empty(&folder.join(".ekko"));
     let mut holder = Session::in_folder(&home, &folders[1]);
     let mut waiter = Session::in_folder(&home, &folders[0]);
     holder.call("create", json!({"text": "Release the blog"}));
@@ -2420,7 +2420,7 @@ fn the_prime_says_what_moved_since_the_handoff_was_written() {
     let text = "Stopped at the parser: tasks 2, 3 and 4 are next.";
     session.call("create", json!({"kind": "handoff", "attached_to": 1, "text": text}));
 
-    let board: Value = serde_json::from_str(&fs::read_to_string(repo.join(".ekko/storage/storage.json")).unwrap()).unwrap();
+    let board: Value = common::stored_board(&repo.join(".ekko"));
     let baseline = &board["6"]["baseline"];
     assert_eq!(baseline["commit"].as_str().map(|sha| &sha[..7]), Some(first.as_str()), "{baseline}");
     assert_eq!((&baseline["branch"], &baseline["repository"]), (&json!("main"), &json!(true)), "{baseline}");
@@ -2459,7 +2459,7 @@ fn the_prime_says_what_moved_since_the_handoff_was_written() {
 
     // A later handoff on the task demotes this one, and takes its record.
     session.call("create", json!({"kind": "handoff", "attached_to": 1, "text": "Stopped again."}));
-    let board: Value = serde_json::from_str(&fs::read_to_string(repo.join(".ekko/storage/storage.json")).unwrap()).unwrap();
+    let board: Value = common::stored_board(&repo.join(".ekko"));
     assert_eq!((board["6"].get("handoff"), board["6"].get("baseline")), (None, None), "{}", board["6"]);
     assert_eq!(board["7"]["baseline"]["commit"].as_str().map(|sha| &sha[..7]), Some(first.as_str()));
     session.close();
@@ -2480,7 +2480,7 @@ fn outside_a_repository_the_line_is_the_boards_and_an_old_handoff_has_none() {
         let out = common::ekko().arg("--prime").current_dir(&folder).env("HOME", &home).output().unwrap();
         String::from_utf8(out.stdout).unwrap()
     };
-    let storage = folder.join(".ekko/storage/storage.json");
+    let storage = folder.join(".ekko");
     assert!(common::ekko().arg("init").current_dir(&folder).env("HOME", &home).status().unwrap().success());
     let mut session = Session::in_folder(&home, &folder);
     session.call("create", json!({"text": "the work"}));
@@ -2490,17 +2490,17 @@ fn outside_a_repository_the_line_is_the_boards_and_an_old_handoff_has_none() {
     session.call("set_state", json!({"items": [2], "state": "done"}));
     let shown = prime();
     assert!(shown.contains("\n    Since it was written: of the tasks it names, closed since: 2.\n    > Stopped; task 2 is next.\n"), "{shown}");
-    let board: Value = serde_json::from_str(&fs::read_to_string(&storage).unwrap()).unwrap();
+    let board: Value = common::stored_board(&storage);
     assert_eq!(board["3"]["baseline"].get("repository"), None, "no repository: {}", board["3"]);
 
     // As an older ekko left it: no record.
     let mut board = board;
     board["3"].as_object_mut().unwrap().remove("baseline");
-    fs::write(&storage, serde_json::to_string(&board).unwrap()).unwrap();
+    common::store_board(&storage, &board);
     session.call("set_state", json!({"items": [3], "state": "starred"}));
     let shown = prime();
     assert!(shown.contains("\nWhere the last session stopped: handoff 3 ") && !shown.contains("Since it was written"), "{shown}");
-    let board: Value = serde_json::from_str(&fs::read_to_string(&storage).unwrap()).unwrap();
+    let board: Value = common::stored_board(&storage);
     assert_eq!((board["3"]["isStarred"].clone(), board["3"].get("baseline")), (json!(true), None), "{}", board["3"]);
     session.close();
 
@@ -2588,8 +2588,8 @@ fn a_born_session_writes_no_task_but_its_own_unless_the_user_lets_the_call_throu
     assert!(maker.wait().unwrap().success() && out.contains(r#"\"id\":11,"#), "{out}");
     cli_in(&home, site, &["--note", "The user's note"]);
     cli_in(&home, &folders[1], &["--task", "The blog's"]);
-    let blog = || fs::read_to_string(folders[1].join(".ekko/storage/storage.json")).unwrap();
-    let board = || -> Value { serde_json::from_str(&fs::read_to_string(site.join(".ekko/storage/storage.json")).unwrap()).unwrap() };
+    let blog = || common::stored_text(&folders[1].join(".ekko"));
+    let board = || -> Value { common::stored_board(&site.join(".ekko")) };
     let own = board()["1"]["uid"].as_str().unwrap().to_string();
 
     // Each tool that reaches a task already on the board, each on a task of its own.

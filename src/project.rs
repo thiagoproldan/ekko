@@ -554,7 +554,7 @@ fn tell_sessions(dir: &Path, before: Option<&Path>) {
     if !holds_board(dir) {
         let made = Storage::new(dir).and_then(|storage| {
             let _lock = storage.acquire_lock()?;
-            if holds_board(dir) { Ok(()) } else { storage.set(&ItemMap::new()) }
+            if holds_board(dir) { Ok(()) } else { storage.make() }
         });
         if let Err(error) = made {
             eprintln!("ekko: the new board's file was not made, so sessions running here hear it only after a /clear: {error}");
@@ -719,18 +719,22 @@ fn adopt(home: &Path, legacy: &Path, dir: &Path, name: &str, now_millis: i64) ->
 }
 
 /// Everything under `from` into `to`, leaving out the lock file and the
-/// temporary-file directory: both belong to the copy being left behind.
+/// temporary-file directory: both belong to the copy being left behind. The
+/// board's database is copied through SQLite, with the writes its log holds,
+/// and its log is not copied (task 2233).
 fn copy_tree(from: &Path, to: &Path) -> Result<(), DirectoryError> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;
         let entry_name = entry.file_name();
-        if entry_name == ".lock" || entry_name == ".temp" {
+        if entry_name == ".lock" || entry_name == ".temp" || crate::database::is_log(&entry_name) {
             continue;
         }
         let target = to.join(&entry_name);
         if entry.file_type()?.is_dir() {
             copy_tree(&entry.path(), &target)?;
+        } else if entry_name == crate::database::FILE {
+            crate::database::copy(&entry.path(), &target).map_err(io)?;
         } else {
             fs::copy(entry.path(), &target)?;
         }
@@ -1185,6 +1189,35 @@ mod tests {
         fs::remove_dir_all(&home).ok();
     }
 
+    /// A board copied whole -- brought back from its copy, adopted, moved
+    /// across filesystems -- takes its database with the writes its log
+    /// alone holds, while a process keeps it open, and not the log itself; a
+    /// copy of the file would have left those writes behind (task 2233).
+    #[test]
+    fn a_board_copied_whole_takes_the_writes_its_log_holds_and_not_the_log() {
+        let home = temp("copy-tree");
+        let (from, to) = (home.join("from"), home.join("to"));
+        let storage = Storage::new(&from).unwrap();
+        let board: ItemMap = (1..=3).map(|id| (id, crate::item::Item::new_task(id, format!("task {id}"), vec!["@a".into()], 1))).collect();
+        storage.set(&board).unwrap();
+        let database = |dir: &Path| dir.join("storage").join(crate::database::FILE);
+        assert!(fs::metadata(crate::database::beside(&database(&from), "-wal")).unwrap().len() > 0, "the writes are in the log alone");
+        let as_a_file = home.join("as-a-file.sqlite");
+        fs::copy(database(&from), &as_a_file).unwrap();
+        let count = |path: &Path| -> i64 { rusqlite::Connection::open(path).unwrap().query_row("SELECT count(*) FROM items", [], |row| row.get(0)).unwrap() };
+        assert_eq!(count(&as_a_file), 0, "the file alone lacks them");
+
+        copy_tree(&from, &to).unwrap();
+        let logs: Vec<bool> = crate::database::LOGS.iter().map(|suffix| crate::database::beside(&database(&to), suffix).exists()).collect();
+        assert_eq!(logs, [false; 3], "no log copied");
+        let mode: String = rusqlite::Connection::open(database(&to)).unwrap().query_row("PRAGMA journal_mode", [], |row| row.get(0)).unwrap();
+        assert_eq!(mode, "wal");
+        assert_eq!(Storage::new(&to).unwrap().get().unwrap(), board);
+
+        drop(storage);
+        fs::remove_dir_all(&home).ok();
+    }
+
     /// A board is copied out only from the folder the registry names for its
     /// project, however that folder is reached (task 1585): a copy of the
     /// folder elsewhere, holding the same project.json, writes its own board
@@ -1194,7 +1227,7 @@ mod tests {
         let home = temp("copy-from");
         let site = folder(&home, "work/site");
         let id = init(&home, &site, None, None, NOW).unwrap().id;
-        let copied = || fs::read_to_string(copies(&home, &id).unwrap().join("storage").join("storage.json")).unwrap();
+        let copied = || crate::storage::stored(&copies(&home, &id).unwrap()).to_string();
         seed_copied(&home, &site, "from the project");
         assert!(copied().contains("from the project"));
 

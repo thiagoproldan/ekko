@@ -16,9 +16,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+import boards  # noqa: E402
 REPO = os.path.dirname(os.path.dirname(HERE))
 SCRATCH = os.environ.get("EKKO_EVAL_SCRATCH", os.path.join(REPO, "target", "evals"))
 EKKO_HOME = os.environ.get("EKKO_HOME", os.path.expanduser("~/.ekko"))
@@ -121,13 +124,15 @@ def copy_real(name, project=None):
         found = os.path.join(os.path.dirname(source), kept)
         if os.path.exists(found):
             shutil.copy(found, os.path.join(os.path.dirname(target), kept))
+    # A board kept in SQLite (task 2233): storage.json is its stamp, and the
+    # counters and journal are in the database, copied through SQLite.
+    boards.copy_database(os.path.dirname(os.path.dirname(source)), os.path.dirname(os.path.dirname(target)))
     return path, label
 
 
 def load(path):
     """A scratch board's items, by display id."""
-    with open(storage_file(path)) as f:
-        return {int(key): item for key, item in json.load(f).items()}
+    return {int(key): item for key, item in boards.read(os.path.join(path, "board", ".ekko")).items()}
 
 
 # ---- the server --------------------------------------------------------

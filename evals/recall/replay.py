@@ -45,7 +45,7 @@ only when the items the turn went on to fetch from its hits were all injected.
 
     nix develop -c python3 evals/recall/replay.py [--since 2026-09-15] [--out DIR]
 
-Only reads ~/.claude*/projects/ and each registered board's storage.json.
+Only reads ~/.claude*/projects/ and each registered board's items (evals/boards.py).
 """
 
 import argparse
@@ -65,6 +65,8 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "claude-code"))
+sys.path.insert(0, os.path.join(HERE, ".."))
+import boards  # noqa: E402
 from transcripts import LOCAL, SKIP, W_CW1H, W_CW5M, W_IN, W_OUT, profiles, read_weight, when  # noqa: E402
 
 OUT = os.path.normpath(os.path.join(HERE, "..", "..", "target", "evals", "recall"))
@@ -152,8 +154,7 @@ class Board:
 
     def __init__(self, name, path):
         self.name, self.path = name, path
-        with open(os.path.join(path, ".ekko", "storage", "storage.json")) as handle:
-            raw = json.load(handle)
+        raw = boards.read(os.path.join(path, ".ekko"))
         self.items, self.by_uid = {}, {}
         for item in raw.values():
             iid = int(item["_id"])

@@ -616,6 +616,11 @@ pub enum Outcome {
     Hook(String),
     Next(Vec<crate::agent::Entry>),
     Context(Box<crate::agent::Context>),
+    /// The board as storage.json held it (task 2233), now or at a revision.
+    Export(Box<ItemMap>),
+    /// `--import`: the board written in place of the one before, by the ids
+    /// it added, changed and removed, and the revision it was written at.
+    Imported { items: usize, added: Vec<u32>, changed: Vec<u32>, removed: Vec<u32>, revision: u64 },
 }
 
 
@@ -664,6 +669,8 @@ impl Outcome {
             Outcome::Repeats(_) => "repeats",
             Outcome::Next(_) => "next",
             Outcome::Context(_) => "context",
+            Outcome::Export(_) => "export",
+            Outcome::Imported { .. } => "import",
         }
     }
 
@@ -758,6 +765,10 @@ impl Outcome {
             Outcome::Hook(text) => out.raw(text),
             Outcome::Next(entries) => out.raw(&crate::agent::list_text(entries, "Nothing is in progress or ready.")),
             Outcome::Context(context) => out.raw(&context.text()),
+            Outcome::Export(board) => out.raw(&format!("{}\n", crate::json::to_pretty_string(&**board).unwrap_or_default())),
+            Outcome::Imported { items, added, changed, removed, revision } => {
+                out.success_imported(*items, added, changed, removed, *revision)
+            }
         }
     }
 }
@@ -1575,19 +1586,10 @@ impl Ekko {
             }
         }
 
-        // Counters last: storage, then the journal, then the revision that
-        // publishes both. A reader takes the revision first, so everything up
-        // to it is already on disk when it reads the rest.
-        self.storage.set(data)?;
-        // Each artifact's page open in a browser shows the board as it is now.
-        crate::artifact::refresh(self.storage.dir(), data, self.folder.as_deref());
-
         // What the write did that the items it left cannot show: work it set
-        // free or left waiting, and what it took out of storage. Journaled
-        // after storage, so a crash in between loses a line about a write that
-        // landed rather than recording one about a write that did not.
+        // free or left waiting, and what it took out of storage.
         let (released, blocked) = Self::readiness_changes(before, data);
-        if !released.is_empty() || !blocked.is_empty() || !gone.is_empty() {
+        let journal = (!released.is_empty() || !blocked.is_empty() || !gone.is_empty()).then(|| {
             let named = |ids: &[u32]| -> Vec<serde_json::Value> {
                 ids.iter().filter_map(|id| data.get(id)).map(|item| serde_json::json!({"id": item.id, "uid": item.uid})).collect()
             };
@@ -1595,17 +1597,20 @@ impl Ekko {
                 .iter()
                 .map(|item| serde_json::json!({"id": item.id, "uid": item.uid, "text": crate::agent::headline(&item.description, item.is_task, 80)}))
                 .collect();
-            self.storage.append_journal(&serde_json::json!({
+            serde_json::json!({
                 "rev": counters.revision,
                 "at": now,
                 "released": named(&released),
                 "blocked": named(&blocked),
                 "removed": removed,
-            }))?;
-        }
-        if counters != kept {
-            self.storage.set_counters(&counters)?;
-        }
+            })
+        });
+        // The items, the journal's line and the revision that publishes
+        // both, in one transaction (task 2233): a reader sees all of the
+        // write or none of it, and a writer killed in it leaves none of it.
+        self.storage.commit(data, journal.as_ref(), (counters != kept).then_some(&counters))?;
+        // Each artifact's page open in a browser shows the board as it is now.
+        crate::artifact::refresh(self.storage.dir(), data, self.folder.as_deref());
         Ok(Saved { released, blocked, ended, rests_read })
     }
 
@@ -2693,12 +2698,45 @@ impl Ekko {
             let mut counters = self.storage.get_counters()?;
             counters.revision = self.healed_revision(&*self.storage.get_shared()?, &counters)? + 1;
             // No item carries this revision, so the journal does: a lost
-            // counters.json heals past it instead of handing it out again.
+            // counter heals past it instead of handing it out again.
             let at = chrono::Local::now().timestamp_millis();
-            self.storage.append_journal(&serde_json::json!({"rev": counters.revision, "at": at, "phases": true}))?;
-            self.storage.set_counters(&counters)?;
+            self.storage.record(Some(&serde_json::json!({"rev": counters.revision, "at": at, "phases": true})), Some(&counters))?;
         }
         Ok(Outcome::Phases(cleaned))
+    }
+
+    /// `--import` (task 2233): the board in `file` -- JSON as `--export`
+    /// prints it, or as storage.json held it before the board's database --
+    /// written in place of this one in one write, which every session hears
+    /// and whose revision comes after every one before it. With `--export
+    /// --at`, it takes a board back to a revision, sessions running or not.
+    /// Like `--restore` and `--untrash`, it brings items back as they were,
+    /// unchecked; the write it makes is itself in the changes `--export --at`
+    /// reads, so it can be undone the same way.
+    pub fn import(&self, file: &str) -> Result<Outcome, EkkoError> {
+        let read = if file == "-" {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map(|_| text)
+        } else {
+            std::fs::read_to_string(file)
+        };
+        let text = read.map_err(|error| EkkoError::InvalidInput(format!("{file} could not be read: {error}")))?;
+        let mut data: ItemMap = serde_json::from_str(&text)
+            .map_err(|error| EkkoError::InvalidInput(format!("{file} holds no board, as ekko --export prints one: {error}")))?;
+        if let Some((key, item)) = data.iter().find(|(key, item)| item.id != **key) {
+            return Err(EkkoError::InvalidInput(format!(
+                "{file} holds no board, as ekko --export prints one: the item under \"{key}\" says its id is {}",
+                item.id
+            )));
+        }
+        let _lock = self.storage.acquire_lock()?;
+        let before = self.storage.get_shared()?;
+        let added: Vec<u32> = data.keys().filter(|id| !before.contains_key(id)).copied().collect();
+        let changed: Vec<u32> = data.iter().filter(|(id, item)| before.get(id).is_some_and(|was| was != *item)).map(|(id, _)| *id).collect();
+        let removed: Vec<u32> = before.keys().filter(|id| !data.contains_key(id)).copied().collect();
+        self.save_against(&before, &mut data)?;
+        let revision = self.storage.get_counters()?.revision;
+        Ok(Outcome::Imported { items: data.len(), added, changed, removed, revision })
     }
 
     /// `ekko docs` (task 915): the board's documentation, written as markdown
@@ -4135,10 +4173,16 @@ mod tests {
         cleanup(&dir);
     }
 
-    /// The revision a write takes, after counters.json was lost.
-    fn revision_after_losing_the_counter(ekko: &Ekko, dir: &std::path::Path) -> (u64, u64) {
+    /// The revision a write takes, after the counter was lost: set back to
+    /// zero, as counters.json once could be lost apart from the board before
+    /// the counters moved into its database (task 2233).
+    fn revision_after_losing_the_counter(ekko: &Ekko, _dir: &std::path::Path) -> (u64, u64) {
         let held = ekko.storage.get_counters().unwrap().revision;
-        fs::remove_file(dir.join("storage").join("counters.json")).unwrap();
+        {
+            let _lock = ekko.storage.acquire_lock().unwrap();
+            ekko.storage.set_counters(&crate::storage::Counters::default()).unwrap();
+        }
+        assert_eq!(ekko.storage.get_counters().unwrap().revision, 0, "the counter is lost");
         ekko.create_task(&words(&["written after the loss"])).unwrap();
         let data = ekko.storage.get().unwrap();
         (held, data.values().filter_map(|item| item.rev).max().unwrap())
@@ -4187,8 +4231,8 @@ mod tests {
         assert_eq!(data[&1].uid, None, "absent means legacy, not unknown");
 
         ekko.star_items(&words(&["1"])).unwrap();
-        let written = fs::read_to_string(dir.join("storage").join("storage.json")).unwrap();
-        assert!(!written.contains("uid"), "a write must not invent one either");
+        let written = crate::storage::stored(&dir).to_string();
+        assert!(written.contains("legacy") && !written.contains("uid"), "a write must not invent one either: {written}");
 
         cleanup(&dir);
     }
@@ -5576,7 +5620,7 @@ mod tests {
         ekko.clear().unwrap();
 
         let read = |file: &str| -> serde_json::Value { serde_json::from_str(&fs::read_to_string(dir.join(file)).unwrap()).unwrap() };
-        let stored = read("storage/storage.json");
+        let stored = crate::storage::stored(&dir);
         assert_eq!(stored["1"]["inProgress"], true, "the change itself landed");
         assert_eq!(stored["1"]["checkBack"], "2026-10-01");
         assert_eq!(stored["2"]["watchers"], serde_json::json!(["upstream"]));

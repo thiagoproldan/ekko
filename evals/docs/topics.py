@@ -4,11 +4,18 @@ task blocked by another, and an id cited in the text ('task 983'). Grouped by
 weighted label propagation, seeded so a rerun gives the same topics; a probe
 for the design, not ekko docs itself.
 
-    nix develop -c python3 evals/docs/topics.py .ekko/storage/storage.json
+    nix develop -c python3 evals/docs/topics.py .ekko
 """
-import collections, json, random, re, sys
+import collections, json, os, random, re, sys
 
-items = json.load(open(sys.argv[1]))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import boards  # noqa: E402
+# The board's .ekko folder; its storage.json, as this took before, is still
+# taken (task 2233).
+board = sys.argv[1]
+if board.endswith("storage.json"):
+    board = os.path.dirname(os.path.dirname(board))
+items = boards.read(board)
 live = {v["_id"]: v for v in items.values() if not v.get("stashed")}
 edges = collections.defaultdict(collections.Counter)
 by_uid = {v["uid"]: v["_id"] for v in live.values() if v.get("uid")}

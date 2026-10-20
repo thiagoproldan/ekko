@@ -80,3 +80,61 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 pub fn ekko() -> Command {
     command(env!("CARGO_BIN_EXE_ekko"))
 }
+
+/// The board in `ekko_dir`, a board's `.ekko/` folder, as it is stored, each
+/// item's JSON as it was written: from the board's database, or from
+/// storage.json before the board has one (task 2233). What a test reads
+/// where it read storage.json, which is now the stamp a watcher follows.
+pub fn stored_board(ekko_dir: &std::path::Path) -> serde_json::Value {
+    let database = ekko_dir.join("storage").join("board.sqlite");
+    if !database.exists() {
+        let raw = std::fs::read_to_string(ekko_dir.join("storage").join("storage.json")).expect("the board has no database and no storage.json");
+        return serde_json::from_str(&raw).expect("storage.json is a board");
+    }
+    let conn = rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut statement = conn.prepare("SELECT id, body FROM items ORDER BY id").unwrap();
+    let rows = statement.query_map([], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))).unwrap();
+    let mut board = serde_json::Map::new();
+    for row in rows {
+        let (id, body) = row.unwrap();
+        board.insert(id.to_string(), serde_json::from_str(&body).unwrap());
+    }
+    serde_json::Value::Object(board)
+}
+
+/// `stored_board` as text, for a test that looks for words in it.
+pub fn stored_text(ekko_dir: &std::path::Path) -> String {
+    stored_board(ekko_dir).to_string()
+}
+
+/// `stored_text`, or nothing where the board has neither a database nor a
+/// storage.json.
+pub fn stored_text_or_empty(ekko_dir: &std::path::Path) -> String {
+    let storage = ekko_dir.join("storage");
+    if storage.join("board.sqlite").exists() || storage.join("storage.json").exists() {
+        stored_text(ekko_dir)
+    } else {
+        String::new()
+    }
+}
+
+/// Puts `board` in place of the board stored in `ekko_dir`, as a hand would
+/// edit storage.json before the board's database: each item's JSON written
+/// as given, with the count of writes moved so that every process reads it
+/// again. For a test that sets a board up the way only the user's menu
+/// could leave it.
+pub fn store_board(ekko_dir: &std::path::Path, board: &serde_json::Value) {
+    let database = ekko_dir.join("storage").join("board.sqlite");
+    if !database.exists() {
+        std::fs::write(ekko_dir.join("storage").join("storage.json"), board.to_string()).unwrap();
+        return;
+    }
+    let mut conn = rusqlite::Connection::open(&database).unwrap();
+    let tx = conn.transaction().unwrap();
+    tx.execute("DELETE FROM items", []).unwrap();
+    for (id, item) in board.as_object().expect("a board is an object of items by id") {
+        tx.execute("INSERT INTO items (id, body) VALUES (?1, ?2)", rusqlite::params![id.parse::<u32>().unwrap(), item.to_string()]).unwrap();
+    }
+    tx.execute("UPDATE meta SET value = value + 1 WHERE key IN ('writes', 'commits')", []).unwrap();
+    tx.commit().unwrap();
+}

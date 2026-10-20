@@ -49,6 +49,8 @@ import config as C
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "claude-code"))
 sys.path.insert(0, os.path.join(HERE, "..", "recall"))
+sys.path.insert(0, os.path.join(HERE, ".."))
+import boards  # noqa: E402
 from transcripts import W_CW1H, W_CW5M, W_IN, W_OUT, profiles, read_weight  # noqa: E402
 
 HOME = os.path.expanduser("~")
@@ -170,8 +172,7 @@ def snapshot(board, start_ms, dest, shown, prime, written_ms):
     returns the ids whose text may be newer."""
     sys.path.insert(0, HERE)
     import starts as S
-    with open(os.path.join(board, "storage", "storage.json")) as handle:
-        items = json.load(handle)
+    items = boards.read(board)
     b = S.board(board)
     moment = start_ms / 1000
     in_progress = listed(prime, "In progress")
@@ -241,16 +242,9 @@ def snapshot(board, start_ms, dest, shown, prime, written_ms):
     for name in ("project.json", "memory.md"):
         if os.path.exists(os.path.join(board, name)):
             shutil.copy(os.path.join(board, name), dest)
-    counters = {}
-    try:
-        counters = json.load(open(os.path.join(board, "storage", "counters.json")))
-    except (OSError, ValueError):
-        pass
+    counters = boards.counters(board)
     counters["highestId"] = max(int(item["_id"]) for item in kept.values())
-    with open(os.path.join(dest, "storage", "storage.json"), "w") as handle:
-        json.dump(kept, handle, indent=4)
-    with open(os.path.join(dest, "storage", "counters.json"), "w") as handle:
-        json.dump(counters, handle, indent=2)
+    boards.seed(dest, kept, counters)
     return kept, newer, unsettled
 
 
@@ -336,31 +330,18 @@ def arm_text(arm, f):
 STUDY_ITEMS = {repo: tuple(ids) for repo, ids in STUDY["study_items"].items()}
 
 
-def scrub_board_file(path, drop):
-    items = json.load(open(path))
-    uids = {it["uid"] for it in items.values() if it.get("_id") in drop}
-    gone = sorted(int(k) for k, it in items.items() if it.get("_id") in drop or it.get("attachedTo") in uids)
-    if not gone:
-        return []
-    stat = os.stat(path)
-    for k in gone:
-        del items[str(k)]
-    with open(path + ".tmp", "w") as handle:
-        json.dump(items, handle)
-    os.replace(path + ".tmp", path)
-    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
-    return gone
-
-
 def scrub_study(src, repo):
+    """Takes the study's items, and the notes attached to them, out of the
+    copy's board, its database or JSON and the versions history/ kept alike
+    (boards.remove)."""
     drop = STUDY_ITEMS.get(src)
     if not drop:
         return []
-    gone = scrub_board_file(os.path.join(repo, ".ekko", "storage", "storage.json"), set(drop))
-    history = os.path.join(repo, ".ekko", "history")
-    for name in sorted(os.listdir(history)) if os.path.isdir(history) else []:
-        if name.endswith(".json"):
-            scrub_board_file(os.path.join(history, name), set(drop))
+    board = os.path.join(repo, ".ekko")
+    items = boards.read(board)
+    uids = {it["uid"] for it in items.values() if it.get("_id") in drop}
+    gone = sorted(int(k) for k, it in items.items() if it.get("_id") in drop or it.get("attachedTo") in uids)
+    boards.remove(board, set(gone) | set(drop))
     return gone
 
 
@@ -453,18 +434,17 @@ def prepare_old(name):
     repo = os.path.join(base, "repo")
     os.makedirs(repo)
     subprocess.run(["rsync", "-a", *[f"--exclude={e}" for e in EXCLUDE], src + "/", repo + "/"], check=True)
+    # rsync copied the database as a file, which can leave out what its log
+    # holds: it is copied again through SQLite (task 2233).
+    boards.copy_database(os.path.join(src, ".ekko"), os.path.join(repo, ".ekko"))
     scrub_study(src, repo)
-    path = os.path.join(repo, ".ekko", "storage", "storage.json")
-    items = json.load(open(path))
+    items = boards.read(os.path.join(repo, ".ekko"))
     since = items[str(keep)]["_timestamp"]
     dropped = sorted(int(k) for k, it in items.items()
                      if not it.get("_isTask") and it.get("handoff") is not None and (it.get("_timestamp") or 0) > since)
-    for k in dropped:
-        del items[str(k)]
-    with open(path + ".tmp", "w") as handle:
-        json.dump(items, handle)
-    # A hard link shares the real board's inode: replace the file, never write through it.
-    os.replace(path + ".tmp", path)
+    # A hard link shares the real board's inode: boards.remove replaces each
+    # file, never writing through it.
+    boards.remove(os.path.join(repo, ".ekko"), dropped)
     prime = subprocess.run(["ekko", "--prime"], cwd=repo, capture_output=True, text=True, env=child_env(base)).stdout
     with open(os.path.join(base, "prime.txt"), "w") as handle:
         handle.write(prime)

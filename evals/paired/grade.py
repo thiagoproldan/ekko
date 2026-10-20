@@ -379,7 +379,7 @@ def claude(prompt, effort, stream_path):
 def spec_of(task):
     """The request as the user typed it, and the text of each task it names as
     the board holds it."""
-    items = json.load(open(os.path.join(harness.BOARD, "storage", "storage.json")))
+    items = harness.boards.read(harness.BOARD)
     by_id = {int(item["_id"]): item for item in items.values()}
     prompt = TASKS[task][0]
     parts = [f"The request, as the user typed it: '{prompt}'."]

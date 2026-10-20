@@ -1,5 +1,12 @@
-//! File storage: reading/writing `storage.json`/`archive.json`, and the
-//! cross-process lock that protects both.
+//! The board's storage: its database, `storage/board.sqlite` (see
+//! `crate::database`), the stamp `storage.json` that every write replaces for
+//! a watcher to follow, `archive.json` and the board's other files, and the
+//! cross-process lock that protects them all.
+//!
+//! A board ekko kept as JSON before the database (task 2233) is read as JSON
+//! until a write: the first write moves it into the database, checks that it
+//! reads back the same, and keeps the JSON files under
+//! `storage/json-before-sqlite/`.
 //!
 //! Ported from the JS version's `storage.js` with two structural changes.
 //!
@@ -34,6 +41,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::database::{self, Change, Database, Write};
 use crate::item::Item;
 use crate::json;
 
@@ -72,6 +80,8 @@ pub type ItemMap = BTreeMap<u32, Item>;
 pub enum StorageError {
     Io(io::Error),
     Json(serde_json::Error),
+    /// The board's database said no (task 2233).
+    Database(rusqlite::Error),
     /// The lock, and who held it as /proc/locks told when the wait gave up.
     LockTimeout(PathBuf, Option<String>),
     /// Why this process writes nothing on this board (task 1576).
@@ -83,6 +93,7 @@ impl std::fmt::Display for StorageError {
         match self {
             StorageError::Io(e) => write!(f, "{e}"),
             StorageError::Json(e) => write!(f, "{e}"),
+            StorageError::Database(e) => write!(f, "the board's database: {e}"),
             StorageError::LockTimeout(path, holder) => {
                 write!(f, "{} {}", lock_timeout_advice(holder.as_deref()), path.display())
             }
@@ -105,10 +116,46 @@ impl From<serde_json::Error> for StorageError {
     }
 }
 
+impl From<rusqlite::Error> for StorageError {
+    fn from(error: rusqlite::Error) -> Self {
+        StorageError::Database(error)
+    }
+}
+
+/// Where the JSON files of a board moved into its database are kept, in its
+/// `storage/` folder: storage.json, counters.json and journal.jsonl as they
+/// were at the move, whole.
+pub const BEFORE_DATABASE: &str = "json-before-sqlite";
+
+/// What `storage.json` holds once the board is in its database: one entry,
+/// a string, so that an ekko from before the database fails to read it as an
+/// item and says this instead -- measured with 0.45.0, whose every command
+/// and MCP call then refused with this text and wrote nothing, while its
+/// guard let Bash calls run (target/evals/sqlite-2233/stamp-run1.txt).
+const STAMP: &str = "An ekko from before boards were kept in SQLite cannot read this board: upgrade ekko, then restart every Claude Code session. The board is in board.sqlite, beside this file, which ekko replaces at every write so that a watch on it hears each one; ekko --export prints the board as JSON.";
+
+/// Whether `raw`, storage.json's bytes, is the stamp rather than a board.
+fn is_stamp(raw: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(raw).is_ok_and(|value| value.as_object().is_some_and(|object| object.len() == 1 && object.get("0").and_then(|text| text.as_str()) == Some(STAMP)))
+}
+
+/// The board's database, open, with the file it was opened on: a database
+/// put in place of it since -- a board restored from its copy -- is opened
+/// again rather than read through the file it replaced.
+struct Opened {
+    db: Database,
+    file: (u64, u64),
+}
+
 pub struct Storage {
     /// The board's directory, `.ekko/`.
     dir: PathBuf,
+    /// The stamp a watcher follows; the board itself before its database.
     storage_file: PathBuf,
+    /// The board's database, `storage/board.sqlite`.
+    database_file: PathBuf,
+    /// The database once a read or a write opened it.
+    database: Mutex<Option<Opened>>,
     archive_file: PathBuf,
     temp_dir: PathBuf,
     lock_file: PathBuf,
@@ -161,6 +208,8 @@ impl Storage {
         let storage = Storage {
             dir: ekko_dir.to_path_buf(),
             storage_file: storage_file(ekko_dir),
+            database_file: storage_dir.join(database::FILE),
+            database: Mutex::new(None),
             archive_file: archive_dir.join("archive.json"),
             temp_dir,
             lock_file: ekko_dir.join(".lock"),
@@ -240,11 +289,28 @@ impl Storage {
     /// The board, to read, shared with every other read of the same version
     /// in this process. The MCP server answers many calls from one process,
     /// and parsing is most of what a read costs: 25 ms of a 41 ms `context`
-    /// on a board of 20,000 items. A version is the file's identity as its
-    /// open descriptor reports it, so the check costs one `fstat`, and a write
-    /// -- always a rename, so always a new inode -- is never answered from
-    /// the version it replaced.
+    /// on a board of 20,000 items. A version of the database is its file and
+    /// the count of writes that changed its items, read in one query; of a
+    /// board still kept as JSON, the file's identity as its open descriptor
+    /// reports it, one `fstat`. Either way a write by any process is never
+    /// answered from the version it replaced.
     pub fn get_shared(&self) -> Result<Arc<ItemMap>, StorageError> {
+        if let Some(board) = self.database_board()? {
+            return Ok(board);
+        }
+        match self.json_board() {
+            Ok(board) => Ok(board),
+            // A write moved the board into its database while this process
+            // read it as JSON: what it read is the stamp now.
+            Err(error) => match self.database_board()? {
+                Some(board) => Ok(board),
+                None => Err(self.missing_database().unwrap_or(error)),
+            },
+        }
+    }
+
+    /// The board as storage.json holds it, before its database.
+    fn json_board(&self) -> Result<Arc<ItemMap>, StorageError> {
         let Some((file, version)) = open_versioned(&self.storage_file)? else {
             return Ok(Arc::default());
         };
@@ -256,27 +322,257 @@ impl Storage {
         Ok(board)
     }
 
+    /// The board from its database, or `None` while it has none.
+    fn database_board(&self) -> Result<Option<Arc<ItemMap>>, StorageError> {
+        let mut opened = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        self.open_database(&mut opened)?;
+        let Some(open) = opened.as_ref() else { return Ok(None) };
+        let version = Version::of_database(open.file, open.db.writes()?);
+        if let Some(board) = kept_board(&self.database_file, version) {
+            return Ok(Some(board));
+        }
+        let (writes, board) = open.db.load()?;
+        let board = Arc::new(board);
+        keep_board(&self.database_file, Version::of_database(open.file, writes), Arc::clone(&board));
+        Ok(Some(board))
+    }
+
+    /// Opens the board's database into `opened` where it has one, or opens
+    /// it again where the file was replaced since.
+    fn open_database(&self, opened: &mut Option<Opened>) -> Result<(), StorageError> {
+        let file = fs::metadata(&self.database_file).ok().map(|meta| (meta.dev(), meta.ino()));
+        if opened.as_ref().map(|open| open.file) == file && opened.is_some() {
+            return Ok(());
+        }
+        *opened = None;
+        let Some(file) = file else { return Ok(()) };
+        if let Some(db) = Database::open(&self.database_file)? {
+            *opened = Some(Opened { db, file });
+        }
+        Ok(())
+    }
+
+    /// The error a board gives whose storage.json is the stamp, with no
+    /// database beside it: the database was removed or never copied along,
+    /// and the board must never be taken for an empty one.
+    fn missing_database(&self) -> Option<StorageError> {
+        let raw = fs::read(&self.storage_file).ok()?;
+        is_stamp(&raw).then(|| {
+            let copy = match self.copy_of(&self.database_file).filter(|copy| copy.exists()) {
+                Some(copy) => format!("its copy, {},", copy.display()),
+                None => "a copy of it".to_string(),
+            };
+            StorageError::Refused(format!(
+                "{} is missing, and storage.json beside it says the board is kept there, so nothing is written to an empty board in its place. To put back {copy} first remove {} and {} if they are there: they belong to the file that is gone, and SQLite would read the copy through them. Then copy it in under another name beside it, and rename it to {}. The JSON the board was made from is under {}/",
+                self.database_file.display(),
+                database::beside(&self.database_file, "-wal").display(),
+                database::beside(&self.database_file, "-shm").display(),
+                database::FILE,
+                self.storage_file.with_file_name(BEFORE_DATABASE).display()
+            ))
+        })
+    }
+
     pub fn get_archive(&self) -> Result<ItemMap, StorageError> {
         read_map(&self.archive_file)
     }
 
-    pub fn set(&self, data: &ItemMap) -> Result<(), StorageError> {
+    /// The board's items as stored, as one text, unparsed: what a scan for a
+    /// uid reads where parsing every board would take too long (the agents'
+    /// view). From the database, or storage.json before it.
+    pub fn text(&self) -> Result<String, StorageError> {
+        if let Some(text) = self.read_database(Database::text)? {
+            return Ok(text);
+        }
+        match fs::read_to_string(&self.storage_file) {
+            Ok(text) => Ok(text),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Makes the board's file, an empty board, where there is no board yet:
+    /// what a session watches from before the first write (task 1838). The
+    /// first write moves it into a database as it would any board kept as
+    /// JSON. Callers hold the lock.
+    pub fn make(&self) -> Result<(), StorageError> {
         self.writable()?;
-        // Nothing before the rename touches the version it replaces. Claude
-        // Code's FileChanged follows storage.json by its inode, and an event
-        // on it before the rename could leave that watch on the old inode for
-        // good (task 1248). So history takes the new version before it is put
-        // in place, and the old one only by copy, when no write kept it.
-        self.keep_unkept_version();
-        let replaced = fs::metadata(&self.storage_file).ok().as_ref().and_then(version_time);
-        let content = json::to_pretty_string(data)?;
-        let version = replace_durably_keeping(&self.storage_file, &self.temp_dir, content.as_bytes(), Some(&self.history_dir))?;
-        self.prune_history();
-        self.nudge_versions_before(replaced);
+        if self.storage_file.exists() || self.database_file.exists() {
+            return Ok(());
+        }
+        replace_durably(&self.storage_file, &self.temp_dir, b"{}\n")?;
+        Ok(())
+    }
+
+    /// Writes the board: `commit` with no journal line and the counters as
+    /// they are.
+    pub fn set(&self, data: &ItemMap) -> Result<(), StorageError> {
+        self.commit(data, None, None)
+    }
+
+    /// One write of the board, in one transaction of its database: each item
+    /// of `data` that differs from the board as stored, and each item gone
+    /// from it, with the change itself; the journal's line, when there is
+    /// one; and `counters`, when they moved. Then the stamp is replaced, which
+    /// is what every watcher hears. Callers hold the lock. The first write of
+    /// a board kept as JSON moves it into a database first.
+    pub fn commit(&self, data: &ItemMap, journal: Option<&serde_json::Value>, counters: Option<&Counters>) -> Result<(), StorageError> {
+        self.writable()?;
+        let mut opened = self.writable_database()?;
+        let open = opened.as_mut().ok_or_else(|| StorageError::Refused("the board's database could not be opened".into()))?;
+        let stored = match kept_board(&self.database_file, Version::of_database(open.file, open.db.writes()?)) {
+            Some(board) => board,
+            None => Arc::new(open.db.load()?.1),
+        };
+        let mut changes: Vec<Change> = data.iter().filter(|(id, item)| stored.get(id) != Some(*item)).map(|(id, item)| Change { id: *id, after: Some(item) }).collect();
+        changes.extend(stored.keys().filter(|id| !data.contains_key(id)).map(|id| Change { id: *id, after: None }));
+        let rev = match counters {
+            Some(counters) => counters.revision,
+            None => open.db.counters()?.revision,
+        };
+        let write = Write { changes, rev, at: now_millis(), journal, counters, journal_bytes: JOURNAL_BYTES };
+        let written = open.db.write(&write)?;
         // The version this write made is the map it wrote, so the read after
         // it -- the MCP server reads the board after every write -- parses
-        // nothing (task 859). A later write by any process is a new inode.
-        keep_board(&self.storage_file, version, Arc::new(data.clone()));
+        // nothing (task 859).
+        keep_board(&self.database_file, Version::of_database(open.file, written.writes), Arc::new(data.clone()));
+        self.mirror(&open.db, &write, written);
+        drop(opened);
+        self.stamp()?;
+        Ok(())
+    }
+
+    /// A write of the counters and the journal's line alone, in one
+    /// transaction, which no watcher hears: a change of phases. Callers hold
+    /// the lock.
+    pub fn record(&self, journal: Option<&serde_json::Value>, counters: Option<&Counters>) -> Result<(), StorageError> {
+        self.writable()?;
+        let mut opened = self.writable_database()?;
+        let open = opened.as_mut().ok_or_else(|| StorageError::Refused("the board's database could not be opened".into()))?;
+        let rev = match counters {
+            Some(counters) => counters.revision,
+            None => open.db.counters()?.revision,
+        };
+        let write = Write { changes: Vec::new(), rev, at: now_millis(), journal, counters, journal_bytes: JOURNAL_BYTES };
+        let written = open.db.write(&write)?;
+        self.mirror(&open.db, &write, written);
+        Ok(())
+    }
+
+    /// The board's database, open to write: the board moved into one first
+    /// where it has none yet, and refused where a later ekko laid it out.
+    fn writable_database(&self) -> Result<std::sync::MutexGuard<'_, Option<Opened>>, StorageError> {
+        let mut opened = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        self.open_database(&mut opened)?;
+        if opened.is_none() {
+            self.move_into_database()?;
+            self.open_database(&mut opened)?;
+        }
+        if let Some(open) = opened.as_ref() {
+            let layout = open.db.layout()?;
+            if layout > database::LAYOUT {
+                return Err(StorageError::Refused(database::newer(layout)));
+            }
+            // A database put back without its log on -- the copy outside the
+            // folder keeps a rollback journal -- has it turned on here,
+            // under the lock, rather than by a read.
+            if !open.db.logged()? {
+                open.db.seal()?;
+            }
+        }
+        Ok(opened)
+    }
+
+    /// Moves a board kept as JSON into its database (task 2233), under the
+    /// lock its caller holds: the database built in the temp folder from
+    /// storage.json, counters.json and journal.jsonl, read back and compared
+    /// with them, and put in place only when it reads back the same -- the
+    /// lesson of Taskwarrior 3.0's migration, which left users with empty
+    /// databases. The JSON files are then kept under `BEFORE_DATABASE`, and
+    /// the stamp takes storage.json's place at the end of the write that
+    /// called this. A board with no file yet gets an empty database.
+    fn move_into_database(&self) -> Result<(), StorageError> {
+        let raw = match fs::read(&self.storage_file) {
+            Ok(raw) => Some(raw),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if raw.as_deref().is_some_and(is_stamp) {
+            return Err(self.missing_database().unwrap_or_else(|| StorageError::Refused("the board's database is missing".into())));
+        }
+        let board: ItemMap = match &raw {
+            Some(raw) => serde_json::from_slice(raw)?,
+            None => ItemMap::new(),
+        };
+        let counters = self.counters_file_read()?;
+        let journal = self.journal_file_read()?;
+        let carried = board.values().filter_map(|item| item.rev).max().unwrap_or(0);
+        let journaled = journal.iter().filter_map(|entry| entry["rev"].as_u64()).max().unwrap_or(0);
+        let revision = counters.revision.max(carried).max(journaled);
+
+        let temp = temp_file_path(&self.database_file, &self.temp_dir);
+        let built = (|| -> Result<(), StorageError> {
+            let mut db = Database::create(&temp)?;
+            db.fill(&board, &counters, &journal, revision)?;
+            db.seal()?;
+            let (_, back) = db.load()?;
+            if back != board {
+                return Err(StorageError::Refused(format!(
+                    "the database built from {} does not read back as the same board, so the board stays as it is",
+                    self.storage_file.display()
+                )));
+            }
+            if db.counters()? != counters || db.journal()?.len() != journal.len() {
+                return Err(StorageError::Refused("the database built from the board's counters and journal does not read them back the same, so the board stays as it is".into()));
+            }
+            db.checkpoint()?;
+            Ok(())
+        })();
+        if let Err(error) = built {
+            for suffix in [""].into_iter().chain(database::LOGS) {
+                let _ = fs::remove_file(database::beside(&temp, suffix));
+            }
+            return Err(error);
+        }
+        database::put_in_place(&temp, &self.database_file)?;
+
+        // The JSON as it was, whole, beside the database: storage.json by a
+        // link, since its file is where an older ekko's watch still is, and
+        // the stamp replaces it by rename at the end of this write.
+        let kept = self.storage_file.with_file_name(BEFORE_DATABASE);
+        fs::create_dir_all(&kept)?;
+        if raw.is_some() {
+            let at = kept.join("storage.json");
+            if fs::hard_link(&self.storage_file, &at).is_err() {
+                fs::copy(&self.storage_file, &at)?;
+            }
+        }
+        for file in [self.counters_file(), self.journal_file()] {
+            if file.exists() {
+                fs::rename(&file, kept.join(file.file_name().unwrap_or_default()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Replaces storage.json with the stamp: what every watcher of the board
+    /// hears a write by, Claude Code's FileChanged and seek's included.
+    /// Nothing before the rename touches the version it replaces: Claude
+    /// Code's FileChanged follows storage.json by its inode, and an event on
+    /// it before the rename could leave that watch on the old inode for good
+    /// (task 1248). So history takes the new version before it is put in
+    /// place, and the old one only by copy, when no write kept it.
+    fn stamp(&self) -> Result<(), StorageError> {
+        self.keep_unkept_version();
+        let replaced = fs::metadata(&self.storage_file).ok().as_ref().and_then(version_time);
+        let content = format!("{}\n", serde_json::json!({"0": STAMP}));
+        // Not synced: the stamp's words never change and the board is in
+        // its database, so a crash can take nothing from it, and a stamp a
+        // crash left empty is read as no board, never an empty one. The
+        // rename is all a watcher hears.
+        replace_keeping(&self.storage_file, &self.temp_dir, content.as_bytes(), Some(&self.history_dir), false)?;
+        self.prune_history();
+        self.nudge_versions_before(replaced);
         self.copy_out(&self.storage_file);
         // The files a write seldom touches are copied the first time too, so
         // a copy is whole from its first write; after that, each refreshes
@@ -287,6 +583,55 @@ impl Storage {
             }
         }
         Ok(())
+    }
+
+    /// The board as storage.json held it: now, or, given a revision, as it
+    /// stood then, from the changes the database keeps (two weeks of them).
+    /// `ekko --export` prints it.
+    pub fn export(&self, at: Option<u64>) -> Result<ItemMap, StorageError> {
+        let Some(rev) = at else { return Ok(ItemMap::clone(&*self.get_shared()?)) };
+        let mut opened = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        self.open_database(&mut opened)?;
+        let Some(open) = opened.as_ref() else {
+            return Err(StorageError::Refused(format!(
+                "this board is still kept as JSON, which keeps no revisions; its earlier versions are in {}",
+                self.history_dir.display()
+            )));
+        };
+        open.db.board_at(rev)?.ok_or_else(|| {
+            StorageError::Refused(format!("revision {rev} is outside what the board's database can give back: the last two weeks of revisions, up to the board's own"))
+        })
+    }
+
+    /// Brings the copy of the board's database under `copy_dir` up to date
+    /// with the write just made (task 503): the same write, given to the
+    /// copy where it holds every transaction before this one and no other,
+    /// or the whole database copied again where it does not. Best effort, as
+    /// every copy is: a copy that cannot be made never stops the write.
+    fn mirror(&self, db: &Database, write: &Write, written: database::Written) {
+        let Some(copy) = self.copy_of(&self.database_file) else { return };
+        let done = (|| -> Result<(), StorageError> {
+            if let Some(mut there) = Database::open(&copy)? {
+                there.relax()?;
+                if there.layout()? == database::LAYOUT && there.commits()? == written.commits - 1 && there.write(write).is_ok_and(|then| then == written) {
+                    return Ok(());
+                }
+            }
+            let parent = copy.parent().ok_or_else(|| StorageError::Refused("no folder for the copy".into()))?;
+            fs::create_dir_all(parent)?;
+            let temp = temp_file_path(&copy, parent);
+            let _ = fs::remove_file(&temp);
+            // Made by VACUUM INTO, the copy keeps a rollback journal: only
+            // this board's writes open it, one at a time, under its lock.
+            db.copy_to(&temp)?;
+            database::put_in_place(&temp, &copy)?;
+            Ok(())
+        })();
+        if let Err(why) = done {
+            if !self.said.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("ekko: the copy of the board's database under {} was not brought up to date: {why}", copy.display());
+            }
+        }
     }
 
     /// Every file that makes up the board, and that a copy must hold to bring
@@ -708,7 +1053,22 @@ impl Storage {
         self.storage_file.with_file_name("counters.json")
     }
 
+    /// The counters, from the board's database, or from counters.json while
+    /// the board is still kept as JSON.
     pub fn get_counters(&self) -> Result<Counters, StorageError> {
+        if let Some(counters) = self.read_database(Database::counters)? {
+            return Ok(counters);
+        }
+        let counters = self.counters_file_read();
+        match self.read_database(Database::counters)? {
+            // Moved into the database while this read the file.
+            Some(counters) => Ok(counters),
+            None => counters,
+        }
+    }
+
+    /// counters.json, as a board kept as JSON holds it.
+    fn counters_file_read(&self) -> Result<Counters, StorageError> {
         let path = self.counters_file();
         if !path.exists() {
             return Ok(Counters::default());
@@ -716,12 +1076,18 @@ impl Storage {
         Ok(serde_json::from_str(&fs::read_to_string(&path)?)?)
     }
 
-    /// Written through the same temp-file and rename dance as everything else.
+    /// Writes the counters alone, as a test sets a board up. Callers hold the
+    /// lock.
+    #[cfg(test)]
     pub fn set_counters(&self, counters: &Counters) -> Result<(), StorageError> {
-        self.writable()?;
-        replace_durably(&self.counters_file(), &self.temp_dir, serde_json::to_string_pretty(counters)?.as_bytes())?;
-        self.copy_out(&self.counters_file());
-        Ok(())
+        self.record(None, Some(counters))
+    }
+
+    /// `read` of the board's database, or `None` while it has none.
+    fn read_database<T>(&self, read: impl FnOnce(&Database) -> Result<T, StorageError>) -> Result<Option<T>, StorageError> {
+        let mut opened = self.database.lock().unwrap_or_else(PoisonError::into_inner);
+        self.open_database(&mut opened)?;
+        opened.as_ref().map(|open| read(&open.db)).transpose()
     }
 }
 
@@ -743,6 +1109,18 @@ impl Storage {
 
     /// Every entry, oldest first; a line that does not parse is skipped.
     pub fn read_journal(&self) -> Result<Vec<serde_json::Value>, StorageError> {
+        if let Some(journal) = self.read_database(Database::journal)? {
+            return Ok(journal);
+        }
+        let journal = self.journal_file_read();
+        match self.read_database(Database::journal)? {
+            Some(journal) => Ok(journal),
+            None => journal,
+        }
+    }
+
+    /// journal.jsonl, as a board kept as JSON holds it.
+    fn journal_file_read(&self) -> Result<Vec<serde_json::Value>, StorageError> {
         let path = self.journal_file();
         if !path.exists() {
             return Ok(Vec::new());
@@ -751,9 +1129,17 @@ impl Storage {
     }
 
     /// The revision on the journal's last line, the newest it records, or 0
-    /// with no journal. Read from the end, a few kilobytes at a time, so a
-    /// write pays for one line and not for the whole journal.
+    /// with no journal.
     pub fn last_journal_rev(&self) -> Result<u64, StorageError> {
+        if let Some(rev) = self.read_database(Database::last_journal_rev)? {
+            return Ok(rev);
+        }
+        self.last_journal_file_rev()
+    }
+
+    /// `last_journal_rev` of journal.jsonl, read from the end, a few kilobytes
+    /// at a time, so a write pays for one line and not for the whole journal.
+    fn last_journal_file_rev(&self) -> Result<u64, StorageError> {
         use std::io::{Read as _, Seek as _, SeekFrom};
         let mut file = match File::open(self.journal_file()) {
             Ok(file) => file,
@@ -785,44 +1171,23 @@ impl Storage {
         }
     }
 
-    /// Appends one entry. Callers hold the lock.
+    /// Appends one entry alone, as a test sets a board up. Callers hold the
+    /// lock.
+    #[cfg(test)]
     pub fn append_journal(&self, entry: &serde_json::Value) -> Result<(), StorageError> {
-        self.writable()?;
-        self.append_journal_within(entry, JOURNAL_BYTES)?;
-        self.copy_out(&self.journal_file());
-        Ok(())
+        self.record(Some(entry), None)
     }
 
+    /// `append_journal`, keeping `bytes` of journal rather than
+    /// `JOURNAL_BYTES`.
+    #[cfg(test)]
     fn append_journal_within(&self, entry: &serde_json::Value, bytes: u64) -> Result<(), StorageError> {
-        use std::io::Write as _;
-        let path = self.journal_file();
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-        writeln!(file, "{entry}")?;
-        if file.metadata()?.len() <= bytes * 2 {
-            return Ok(());
-        }
-        drop(file);
-
-        let entries: Vec<serde_json::Value> =
-            self.read_journal()?.into_iter().filter(|entry| entry.get("from").is_none()).collect();
-        let mut kept: Vec<String> = Vec::new();
-        let mut size = 0;
-        for entry in entries.iter().rev() {
-            let line = entry.to_string();
-            size += line.len() as u64 + 1;
-            if size > bytes {
-                break;
-            }
-            kept.push(line);
-        }
-        kept.reverse();
-        let from = kept.first().and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok()?["rev"].as_i64());
-        let mut content = format!("{}\n", serde_json::json!({"from": from.unwrap_or(0)}));
-        for line in kept {
-            content.push_str(&line);
-            content.push('\n');
-        }
-        replace_durably(&path, &self.temp_dir, content.as_bytes()).map(|_| ())
+        self.writable()?;
+        let mut opened = self.writable_database()?;
+        let open = opened.as_mut().ok_or_else(|| StorageError::Refused("the board's database could not be opened".into()))?;
+        let rev = entry["rev"].as_u64().unwrap_or(0);
+        open.db.write(&Write { changes: Vec::new(), rev, at: now_millis(), journal: Some(entry), counters: None, journal_bytes: bytes })?;
+        Ok(())
     }
 }
 
@@ -869,12 +1234,25 @@ struct Version {
     mtime: i64,
     mtime_nsec: i64,
     len: u64,
+    /// Of the board's database, the count of writes that changed its items;
+    /// -1 for a file.
+    writes: i64,
 }
 
 impl Version {
     fn of(meta: &fs::Metadata) -> Version {
-        Version { dev: meta.dev(), ino: meta.ino(), mtime: meta.mtime(), mtime_nsec: meta.mtime_nsec(), len: meta.len() }
+        Version { dev: meta.dev(), ino: meta.ino(), mtime: meta.mtime(), mtime_nsec: meta.mtime_nsec(), len: meta.len(), writes: -1 }
     }
+
+    /// A version of the board's database: its file, by device and inode, and
+    /// the count of writes that changed its items.
+    fn of_database(file: (u64, u64), writes: i64) -> Version {
+        Version { dev: file.0, ino: file.1, mtime: 0, mtime_nsec: 0, len: 0, writes }
+    }
+}
+
+fn now_millis() -> i64 {
+    chrono::Local::now().timestamp_millis()
 }
 
 /// The file open, with the version the descriptor holds -- read from the same
@@ -897,9 +1275,36 @@ thread_local! {
     static PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The board as it is stored, each item's JSON as it was written, read as
+/// another program would read it: from the board's database, or from
+/// storage.json before the board has one. For the tests of what a write
+/// keeps.
+#[cfg(test)]
+pub(crate) fn stored(ekko_dir: &Path) -> serde_json::Value {
+    let database = ekko_dir.join("storage").join(database::FILE);
+    if !database.exists() {
+        return serde_json::from_str(&fs::read_to_string(storage_file(ekko_dir)).unwrap()).unwrap();
+    }
+    let conn = rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut statement = conn.prepare("SELECT id, body FROM items ORDER BY id").unwrap();
+    let rows = statement.query_map([], |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))).unwrap();
+    let mut board = serde_json::Map::new();
+    for row in rows {
+        let (id, body) = row.unwrap();
+        board.insert(id.to_string(), serde_json::from_str(&body).unwrap());
+    }
+    serde_json::Value::Object(board)
+}
+
+/// Counts a parse of a whole board, for the tests that a read reuses one.
+#[cfg(test)]
+pub(crate) fn count_parse() {
+    PARSED.with(|parsed| parsed.set(parsed.get() + 1));
+}
+
 fn parse_map(mut file: File) -> Result<ItemMap, StorageError> {
     #[cfg(test)]
-    PARSED.with(|parsed| parsed.set(parsed.get() + 1));
+    count_parse();
     let mut content = String::new();
     file.read_to_string(&mut content)?;
     Ok(serde_json::from_str(&content)?)
@@ -907,7 +1312,11 @@ fn parse_map(mut file: File) -> Result<ItemMap, StorageError> {
 
 /// Boards this process has parsed, by storage file: the latest version of
 /// each, and only a few files, since a process reads one board or a handful.
-const BOARDS_KEPT: usize = 8;
+/// The unit tests run on threads of one process, each on boards of its own,
+/// so at 8 the others' writes pushed a test's board out between its write
+/// and its read: a_write_is_read_back_without_a_parse failed 10 runs in 30
+/// (task 2233, target/evals/sqlite-2233/cache-loop-*.txt). They keep them all.
+const BOARDS_KEPT: usize = if cfg!(test) { 100_000 } else { 8 };
 static BOARDS: Mutex<Vec<(PathBuf, Version, Arc<ItemMap>)>> = Mutex::new(Vec::new());
 
 fn kept_board(path: &Path, version: Version) -> Option<Arc<ItemMap>> {
@@ -944,11 +1353,18 @@ fn replace_durably(path: &Path, temp_dir: &Path, content: &[u8]) -> Result<Versi
 /// the file a watcher follows (see `Storage::set`). A link the rename never
 /// followed is taken back.
 fn replace_durably_keeping(path: &Path, temp_dir: &Path, content: &[u8], history: Option<&Path>) -> Result<Version, StorageError> {
+    replace_keeping(path, temp_dir, content, history, true)
+}
+
+/// `replace_durably_keeping`, with the syncs only where `sync` asks for them.
+fn replace_keeping(path: &Path, temp_dir: &Path, content: &[u8], history: Option<&Path>, sync: bool) -> Result<Version, StorageError> {
     use std::io::Write as _;
     let temp_file = temp_file_path(path, temp_dir);
     let mut file = File::create(&temp_file)?;
     file.write_all(content)?;
-    file.sync_all()?;
+    if sync {
+        file.sync_all()?;
+    }
     let meta = file.metadata()?;
     let version = Version::of(&meta);
     drop(file);
@@ -961,7 +1377,7 @@ fn replace_durably_keeping(path: &Path, temp_dir: &Path, content: &[u8], history
     }
     // Best effort: some filesystems refuse to sync a directory, and the
     // rename itself has already happened.
-    if let Some(dir) = path.parent().and_then(|parent| File::open(parent).ok()) {
+    if let Some(dir) = path.parent().and_then(|parent| File::open(parent).ok()).filter(|_| sync) {
         let _ = dir.sync_all();
     }
     Ok(version)
@@ -1043,8 +1459,9 @@ mod tests {
         storage.set(&data).unwrap();
 
         assert_eq!(storage.get().unwrap(), data);
-        let file = dir.join("storage").join("storage.json");
-        assert_eq!(read_map(&file).unwrap(), data, "the file itself, which the read above no longer parses");
+        let kept: ItemMap = serde_json::from_value(stored(&dir)).unwrap();
+        assert_eq!(kept, data, "the database itself, which the read above no longer parses");
+        assert!(is_stamp(&fs::read(dir.join("storage").join("storage.json")).unwrap()), "storage.json is the stamp");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1056,7 +1473,6 @@ mod tests {
     fn a_write_is_read_back_without_a_parse() {
         let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
-        let file = dir.join("storage").join("storage.json");
         let parsed = || PARSED.with(std::cell::Cell::get);
         let mut data = BTreeMap::from([(1, sample_item(1))]);
         storage.set(&data).unwrap();
@@ -1065,10 +1481,12 @@ mod tests {
         assert_eq!(*storage.get_shared().unwrap(), data);
         assert_eq!(parsed(), before, "its own write");
 
+        // Another process's write: its own connection, which leaves this
+        // process's kept board alone.
         data.insert(2, sample_item(2));
-        let theirs = dir.join("theirs.json");
-        fs::write(&theirs, json::to_pretty_string(&data).unwrap()).unwrap();
-        fs::rename(&theirs, &file).unwrap();
+        let theirs = rusqlite::Connection::open(dir.join("storage").join(database::FILE)).unwrap();
+        theirs.execute("INSERT INTO items (id, body) VALUES (2, ?1)", [serde_json::to_string(&data[&2]).unwrap()]).unwrap();
+        theirs.execute("UPDATE meta SET value = value + 1 WHERE key = 'writes'", []).unwrap();
         assert_eq!(*storage.get_shared().unwrap(), data);
         assert_eq!(parsed(), before + 1, "another's write");
 
@@ -1124,7 +1542,7 @@ mod tests {
         for field in ["fromALaterVersion", "heldBy", "doneBy", "createdBy", "question", "answer", "wait", "stashed", "trashed", "phase"] {
             assert!(fields(&written).contains(&format!("\"{field}\"")), "the board holds {field}");
         }
-        assert_eq!(read_map(&dir.join("storage").join("storage.json")).unwrap(), written);
+        assert_eq!(serde_json::from_value::<ItemMap>(stored(&dir)).unwrap(), written);
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1155,15 +1573,17 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// An edit made in place by something else -- same inode -- still shows.
+    /// An edit made in place by something else -- same inode -- still shows,
+    /// on a board still kept as JSON.
     #[test]
     fn get_shared_sees_an_edit_made_in_place() {
         let dir = temp_ekko_dir();
         let storage = Storage::new(&dir).unwrap();
         let mut data = BTreeMap::new();
         data.insert(1, sample_item(1));
-        storage.set(&data).unwrap();
+        fs::write(dir.join("storage").join("storage.json"), json::to_pretty_string(&data).unwrap()).unwrap();
         let first = storage.get_shared().unwrap();
+        assert_eq!(*first, data);
 
         data.insert(2, sample_item(2));
         let file = dir.join("storage").join("storage.json");
@@ -1186,13 +1606,14 @@ mod tests {
         assert_eq!(storage.get_counters().unwrap(), Counters::default());
         storage.set_counters(&Counters { revision: 7, highest_id: 42, ..Counters::default() }).unwrap();
         assert_eq!(storage.get_counters().unwrap(), Counters { revision: 7, highest_id: 42, ..Counters::default() });
-        assert!(dir.join("storage").join("counters.json").exists());
+        assert!(dir.join("storage").join(database::FILE).exists(), "kept in the board's database");
+        assert!(!dir.join("storage").join("counters.json").exists(), "not in counters.json");
 
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// A counter a later version keeps survives this version's rewrite of
-    /// counters.json, which every write makes.
+    /// A counter a later version keeps survives this version's write of the
+    /// counters: from counters.json into the database, and there.
     #[test]
     fn counters_keep_what_a_later_version_added() {
         let dir = temp_ekko_dir();
@@ -1204,8 +1625,12 @@ mod tests {
         counters.revision += 1;
         storage.set_counters(&counters).unwrap();
 
-        let written: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        let db = rusqlite::Connection::open(dir.join("storage").join(database::FILE)).unwrap();
+        let kept: String = db.query_row("SELECT value FROM meta WHERE key = 'counters'", [], |row| row.get(0)).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&kept).unwrap();
         assert_eq!(written, serde_json::json!({"revision": 4, "highestId": 5, "journalFrom": 2}));
+        let before: serde_json::Value = serde_json::from_str(&fs::read_to_string(dir.join("storage").join(BEFORE_DATABASE).join("counters.json")).unwrap()).unwrap();
+        assert_eq!(before, serde_json::json!({"revision": 3, "highestId": 5, "journalFrom": 2}), "counters.json kept as it was");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1721,7 +2146,7 @@ mod tests {
     /// Every public method of `Storage` that only reads, and every one that
     /// writes the board's folder: the writes are what a refused storage
     /// refuses (task 1576).
-    const READS: [&str; 12] = [
+    const READS: [&str; 14] = [
         "get",
         "get_shared",
         "get_archive",
@@ -1734,8 +2159,10 @@ mod tests {
         "read_journal",
         "last_journal_rev",
         "get_agents",
+        "export",
+        "text",
     ];
-    const WRITES: [&str; 8] = ["set", "set_archive", "acquire_lock", "set_phases", "set_moved", "set_counters", "append_journal", "set_agents"];
+    const WRITES: [&str; 11] = ["set", "commit", "record", "make", "set_archive", "acquire_lock", "set_phases", "set_moved", "set_counters", "append_journal", "set_agents"];
 
     /// Each file and folder under `dir`, with its inode and its bytes: what a
     /// write anywhere in it changes.
@@ -1769,6 +2196,9 @@ mod tests {
         for name in WRITES {
             let result = match name {
                 "set" => refused.set(&board),
+                "commit" => refused.commit(&board, Some(&serde_json::json!({"rev": 1})), Some(&Counters::default())),
+                "record" => refused.record(Some(&serde_json::json!({"rev": 1})), Some(&Counters::default())),
+                "make" => refused.make(),
                 "set_archive" => refused.set_archive(&board),
                 "acquire_lock" => refused.acquire_lock().map(drop),
                 "set_phases" => refused.set_phases(&["setup".to_string()]),
@@ -1833,5 +2263,328 @@ mod tests {
         }
         assert!(reads.is_empty(), "a read that changes nothing takes get_shared: {reads:#?}");
         assert!(copies > 10, "the scan finds the working copies it should, not {copies}");
+    }
+
+    // ---------------------------------------------------------------- the database (task 2233)
+
+    fn database_of(dir: &Path) -> rusqlite::Connection {
+        rusqlite::Connection::open(dir.join("storage").join(database::FILE)).unwrap()
+    }
+
+    /// A board kept as JSON is read as JSON, and a read writes nothing; its
+    /// first write moves it into a database that holds the same items, the
+    /// same counters -- a field a later version added included -- and the
+    /// same journal, trimmed line and all; the JSON files are kept whole
+    /// beside it, and storage.json becomes the stamp, its last JSON version
+    /// still in history.
+    #[test]
+    fn a_json_board_moves_into_a_database_at_its_first_write_and_keeps_its_files() {
+        let dir = temp_ekko_dir();
+        let storage_dir = dir.join("storage");
+        fs::create_dir_all(&storage_dir).unwrap();
+        let mut later = sample_item(2);
+        later.unknown.insert("fromALaterVersion".into(), serde_json::json!({"kept": [1, "two"]}));
+        let board = BTreeMap::from([(1, sample_item(1)), (2, later)]);
+        let json_text = json::to_pretty_string(&board).unwrap();
+        fs::write(storage_dir.join("storage.json"), &json_text).unwrap();
+        fs::write(storage_dir.join("counters.json"), r#"{"revision": 7, "highestId": 3, "journalFrom": 2}"#).unwrap();
+        fs::write(storage_dir.join("journal.jsonl"), "{\"from\":5}\n{\"rev\":6,\"removed\":[]}\n{\"rev\":7,\"phases\":true}\n").unwrap();
+
+        let storage = Storage::new(&dir).unwrap();
+        assert_eq!(storage.get().unwrap(), board);
+        assert_eq!(storage.get_counters().unwrap().revision, 7);
+        assert_eq!(storage.read_journal().unwrap().len(), 3);
+        assert!(!storage_dir.join(database::FILE).exists(), "a read made a database");
+
+        let mut changed = board.clone();
+        changed.get_mut(&1).unwrap().description = "changed".into();
+        {
+            let _lock = storage.acquire_lock().unwrap();
+            storage.set(&changed).unwrap();
+        }
+        assert!(storage_dir.join(database::FILE).exists());
+        assert_eq!(serde_json::from_value::<ItemMap>(stored(&dir)).unwrap(), changed);
+        let fresh = Storage::new(&dir).unwrap();
+        assert_eq!(fresh.get().unwrap(), changed, "another process reads the database");
+        assert_eq!(
+            serde_json::to_value(fresh.get_counters().unwrap()).unwrap(),
+            serde_json::json!({"revision": 7, "highestId": 3, "journalFrom": 2})
+        );
+        let journal = fresh.read_journal().unwrap();
+        assert_eq!(journal, vec![serde_json::json!({"from": 5}), serde_json::json!({"rev": 6, "removed": []}), serde_json::json!({"rev": 7, "phases": true})]);
+        assert_eq!(fresh.last_journal_rev().unwrap(), 7);
+
+        let kept = storage_dir.join(BEFORE_DATABASE);
+        assert_eq!(fs::read_to_string(kept.join("storage.json")).unwrap(), json_text, "storage.json kept whole");
+        assert!(kept.join("counters.json").exists() && kept.join("journal.jsonl").exists());
+        assert!(!storage_dir.join("counters.json").exists() && !storage_dir.join("journal.jsonl").exists());
+        assert!(is_stamp(&fs::read(storage_dir.join("storage.json")).unwrap()), "storage.json is the stamp");
+        let versions: Vec<String> = fs::read_dir(dir.join("history")).unwrap().flatten().map(|entry| fs::read_to_string(entry.path()).unwrap()).collect();
+        assert!(versions.contains(&json_text), "the last JSON version is in history");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A stamp with no database beside it -- the database removed, or a copy
+    /// made without it -- is an error that names the missing file, on a read
+    /// and on a write, and the write leaves the folder alone: never an empty
+    /// board that a write would then fill.
+    #[test]
+    fn a_stamp_with_no_database_is_an_error_never_an_empty_board() {
+        let dir = temp_ekko_dir();
+        Storage::new(&dir).unwrap().set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
+        fs::remove_file(dir.join("storage").join(database::FILE)).unwrap();
+        let before = files_under(&dir);
+
+        let storage = Storage::new(&dir).unwrap();
+        let read = storage.get().unwrap_err().to_string();
+        assert!(read.contains("board.sqlite is missing"), "{read}");
+        let written = storage.set(&BTreeMap::from([(2, sample_item(2))])).unwrap_err().to_string();
+        assert!(written.contains("board.sqlite is missing"), "{written}");
+        assert_eq!(files_under(&dir), before, "the refused write changed the folder");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What an ekko from before the database does with the stamp: it parses
+    /// storage.json as items, fails, and says the stamp's text, which tells
+    /// the person what to do.
+    #[test]
+    fn an_older_ekko_reads_the_stamp_as_an_error_that_carries_its_text() {
+        let dir = temp_ekko_dir();
+        Storage::new(&dir).unwrap().set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
+        let raw = fs::read_to_string(dir.join("storage").join("storage.json")).unwrap();
+        let error = serde_json::from_str::<ItemMap>(&raw).unwrap_err().to_string();
+        assert!(error.contains("An ekko from before boards were kept in SQLite cannot read this board: upgrade ekko"), "{error}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A database a later ekko laid out is read, and never written: its writes
+    /// may keep more than this build knows to keep up to date.
+    #[test]
+    fn a_database_a_later_ekko_laid_out_is_read_and_never_written() {
+        let dir = temp_ekko_dir();
+        let board = BTreeMap::from([(1, sample_item(1))]);
+        Storage::new(&dir).unwrap().set(&board).unwrap();
+        database_of(&dir).pragma_update(None, "user_version", database::LAYOUT + 1).unwrap();
+
+        let storage = Storage::new(&dir).unwrap();
+        assert_eq!(storage.get().unwrap(), board, "read");
+        let refused = storage.set(&BTreeMap::from([(2, sample_item(2))]));
+        assert!(matches!(&refused, Err(StorageError::Refused(why)) if why.contains("from an ekko later than this one")), "{refused:?}");
+        assert_eq!(serde_json::from_value::<ItemMap>(stored(&dir)).unwrap(), board, "written");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One write is one transaction: the items, the journal's line and the
+    /// counters all land, or none does. A trigger fails the journal's insert,
+    /// the last part of the write; the items and the counters stay as they
+    /// were, and storage.json is not replaced, so no watcher hears a write.
+    #[test]
+    fn a_write_lands_whole_or_not_at_all() {
+        let dir = temp_ekko_dir();
+        let board = BTreeMap::from([(1, sample_item(1))]);
+        let storage = Storage::new(&dir).unwrap();
+        storage.commit(&board, None, Some(&Counters { revision: 1, highest_id: 1, ..Counters::default() })).unwrap();
+        let stamp = fs::metadata(dir.join("storage").join("storage.json")).unwrap().ino();
+        database_of(&dir).execute_batch("CREATE TRIGGER no_journal BEFORE INSERT ON journal BEGIN SELECT RAISE(ABORT, 'the journal fails'); END;").unwrap();
+
+        let mut changed = board.clone();
+        changed.insert(2, sample_item(2));
+        let failed = storage.commit(&changed, Some(&serde_json::json!({"rev": 2})), Some(&Counters { revision: 2, highest_id: 2, ..Counters::default() }));
+        assert!(failed.is_err());
+        let fresh = Storage::new(&dir).unwrap();
+        assert_eq!(fresh.get().unwrap(), board, "the items of a failed write");
+        assert_eq!(fresh.get_counters().unwrap().revision, 1, "the counters of a failed write");
+        assert_eq!(fs::metadata(dir.join("storage").join("storage.json")).unwrap().ino(), stamp, "the stamp was replaced");
+
+        database_of(&dir).execute_batch("DROP TRIGGER no_journal;").unwrap();
+        storage.commit(&changed, Some(&serde_json::json!({"rev": 2})), Some(&Counters { revision: 2, highest_id: 2, ..Counters::default() })).unwrap();
+        let fresh = Storage::new(&dir).unwrap();
+        assert_eq!((fresh.get().unwrap(), fresh.get_counters().unwrap().revision, fresh.last_journal_rev().unwrap()), (changed, 2, 2));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The board at each revision the changes reach back to is the board as
+    /// it was then, item for item; one before them, or after the board's own,
+    /// is refused rather than guessed.
+    #[test]
+    fn the_board_at_a_revision_is_the_board_as_it_was_then() {
+        let dir = temp_ekko_dir();
+        let ekko = crate::ekko::Ekko::new(Storage::new(&dir).unwrap());
+        let mut seen = Vec::new();
+        let at = |ekko: &crate::ekko::Ekko| (ekko.storage.get_counters().unwrap().revision, ekko.storage.get().unwrap());
+        for text in ["one", "two", "three"] {
+            ekko.create_task(&[text.to_string()]).unwrap();
+            seen.push(at(&ekko));
+        }
+        ekko.check_tasks(&["2".to_string()], false).unwrap();
+        seen.push(at(&ekko));
+        ekko.edit_description(&["@1".to_string(), "one, edited".to_string()]).unwrap();
+        seen.push(at(&ekko));
+        ekko.delete_items(&["3".to_string()]).unwrap();
+        seen.push(at(&ekko));
+        let revisions: Vec<u64> = seen.iter().map(|(rev, _)| *rev).collect();
+        assert!(revisions.windows(2).all(|pair| pair[1] > pair[0]), "{revisions:?}");
+
+        let storage = Storage::new(&dir).unwrap();
+        for (rev, board) in &seen {
+            assert_eq!(&storage.export(Some(*rev)).unwrap(), board, "at {rev}");
+        }
+        assert_eq!(storage.export(None).unwrap(), seen.last().unwrap().1);
+        let newest = seen.last().unwrap().0;
+        assert!(storage.export(Some(newest + 1)).is_err(), "a revision after the board's own");
+        database_of(&dir).execute("UPDATE meta SET value = ?1 WHERE key = 'changes_from'", [seen[2].0 as i64]).unwrap();
+        assert!(storage.export(Some(seen[1].0)).is_err(), "a revision before the changes kept");
+        assert_eq!(storage.export(Some(seen[2].0)).unwrap(), seen[2].1, "the oldest revision kept");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A board whose database and the files beside it were removed while a
+    /// process held it -- `git clean -fdx` takes them all -- and was put back
+    /// from its copy is read from the file put back, by that process too, with
+    /// the write another process has in its log alone: the process letting go
+    /// of the file it held leaves the new file's log where it is.
+    #[test]
+    fn a_database_put_back_where_its_files_were_removed_is_read_from_the_new_one() {
+        let (dir, other) = (temp_ekko_dir(), temp_ekko_dir());
+        let database = |dir: &Path| dir.join("storage").join(database::FILE);
+        let storage = Storage::new(&dir).unwrap();
+        storage.set(&BTreeMap::from([(1, sample_item(1))])).unwrap();
+        assert_eq!(storage.get().unwrap().len(), 1);
+        for suffix in [""].into_iter().chain(database::LOGS) {
+            let _ = fs::remove_file(database::beside(&database(&dir), suffix));
+        }
+        let mut replacement = BTreeMap::from([(1, sample_item(1)), (2, sample_item(2))]);
+        Storage::new(&other).unwrap().set(&replacement).unwrap();
+        database::copy(&database(&other), &database(&dir)).unwrap();
+
+        let theirs = database_of(&dir);
+        theirs.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        replacement.insert(3, sample_item(3));
+        theirs.execute("INSERT INTO items (id, body) VALUES (3, ?1)", [serde_json::to_string(&replacement[&3]).unwrap()]).unwrap();
+        theirs.execute("UPDATE meta SET value = value + 1 WHERE key = 'writes'", []).unwrap();
+        assert!(fs::metadata(database::beside(&database(&dir), "-wal")).unwrap().len() > 0, "the write is in the log alone");
+
+        assert_eq!(storage.get().unwrap(), replacement, "the process that held the file removed");
+        assert_eq!(Storage::new(&dir).unwrap().get().unwrap(), replacement, "a process started since");
+
+        drop(theirs);
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&other).ok();
+    }
+
+    /// The log of a database whose file alone was removed, which a process
+    /// holding it keeps at its path, is not read as the log of the database
+    /// put there next: `put_in_place` removes it first. Without that, SQLite
+    /// reads the new file through the old one's log.
+    #[test]
+    fn the_log_left_at_a_path_is_not_read_as_the_log_of_the_database_put_there() {
+        let (dir, other) = (temp_ekko_dir(), temp_ekko_dir());
+        let database = |dir: &Path| dir.join("storage").join(database::FILE);
+        let holding = Storage::new(&dir).unwrap();
+        holding.set(&BTreeMap::from([(9, sample_item(9))])).unwrap();
+        assert!(fs::metadata(database::beside(&database(&dir), "-wal")).unwrap().len() > 0, "the write is in the log alone");
+        fs::remove_file(database(&dir)).unwrap();
+
+        let wanted = BTreeMap::from([(1, sample_item(1))]);
+        Storage::new(&other).unwrap().set(&wanted).unwrap();
+        database::copy(&database(&other), &database(&dir)).unwrap();
+        assert_eq!(Storage::new(&dir).unwrap().get().unwrap(), wanted);
+
+        drop(holding);
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&other).ok();
+    }
+
+    /// The stamp is put in place unsynced, so a crash can leave it empty: a
+    /// board whose stamp is empty is still read from its database, and with
+    /// no database it is an error, to read or to write, never an empty board.
+    #[test]
+    fn a_stamp_a_crash_left_empty_is_never_read_as_an_empty_board() {
+        let dir = temp_ekko_dir();
+        let board = BTreeMap::from([(1, sample_item(1)), (2, sample_item(2))]);
+        Storage::new(&dir).unwrap().set(&board).unwrap();
+        fs::write(storage_file(&dir), b"").unwrap();
+        assert_eq!(Storage::new(&dir).unwrap().get().unwrap(), board);
+
+        for suffix in [""].into_iter().chain(database::LOGS) {
+            let _ = fs::remove_file(database::beside(&dir.join("storage").join(database::FILE), suffix));
+        }
+        let storage = Storage::new(&dir).unwrap();
+        assert!(storage.get().is_err(), "an empty stamp with no database was read as a board");
+        assert!(storage.set(&BTreeMap::from([(3, sample_item(3))])).is_err(), "an empty stamp with no database was written over");
+        assert_eq!(fs::read(storage_file(&dir)).unwrap(), b"", "the refused write changed the stamp");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A database put back without its log on -- as the copy outside the
+    /// folder keeps it -- is read as it is, and has the log on from its next
+    /// write.
+    #[test]
+    fn a_database_put_back_without_its_log_on_has_it_on_from_its_next_write() {
+        let dir = temp_ekko_dir();
+        let mut board = BTreeMap::from([(1, sample_item(1))]);
+        Storage::new(&dir).unwrap().set(&board).unwrap();
+        let mode = || -> String { database_of(&dir).query_row("PRAGMA journal_mode", [], |row| row.get(0)).unwrap() };
+        assert_eq!(mode(), "wal");
+        let _: String = database_of(&dir).query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0)).unwrap();
+        assert_eq!(mode(), "delete");
+
+        let storage = Storage::new(&dir).unwrap();
+        assert_eq!(storage.get().unwrap(), board);
+        assert_eq!(mode(), "delete", "a read changes nothing");
+        board.insert(2, sample_item(2));
+        storage.set(&board).unwrap();
+        assert_eq!(mode(), "wal");
+        assert_eq!(Storage::new(&dir).unwrap().get().unwrap(), board);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The copy of a board's database outside its folder holds what the board
+    /// holds after every write, and a copy that fell out of step is made
+    /// again whole at the next write.
+    #[test]
+    fn the_copy_of_the_database_follows_every_write_and_is_made_again_when_out_of_step() {
+        let dir = temp_ekko_dir();
+        let copy = temp_ekko_dir().join("copy");
+        let storage = Storage::new(&dir).unwrap().copied_to(Ok(Some(copy.clone())));
+        let mut board = BTreeMap::new();
+        for id in 1..=3 {
+            board.insert(id, sample_item(id));
+            storage.commit(&board, Some(&serde_json::json!({"rev": id})), Some(&Counters { revision: u64::from(id), highest_id: id, ..Counters::default() })).unwrap();
+            assert_eq!(stored(&copy), stored(&dir), "after write {id}");
+        }
+        assert_eq!(Storage::new(&copy).unwrap().get_counters().unwrap().revision, 3);
+        assert_eq!(Storage::new(&copy).unwrap().read_journal().unwrap().len(), 3);
+
+        database_of(&copy).execute("DELETE FROM items WHERE id = 1", []).unwrap();
+        database_of(&copy).execute("UPDATE meta SET value = value + 5 WHERE key = 'commits'", []).unwrap();
+        board.insert(4, sample_item(4));
+        storage.set(&board).unwrap();
+        assert_eq!(stored(&copy), stored(&dir), "a copy out of step, made again");
+
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(copy.parent().unwrap()).ok();
+    }
+
+    /// A board large enough to be parsed on several threads reads back as the
+    /// one parse of its JSON does, item for item and in order.
+    #[test]
+    fn a_board_parsed_on_threads_is_the_board_one_parse_gives() {
+        let dir = temp_ekko_dir();
+        let board: ItemMap = (1..=2_000).map(|id| (id, sample_item(id))).collect();
+        Storage::new(&dir).unwrap().set(&board).unwrap();
+        let read = Storage::new(&dir).unwrap().get().unwrap();
+        assert_eq!(read, board);
+        assert_eq!(read.keys().copied().collect::<Vec<u32>>(), (1..=2_000).collect::<Vec<u32>>());
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

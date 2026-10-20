@@ -14,9 +14,10 @@
 # its own folder; and any legacy $EKKO_HOME/projects/<name>/ not adopted yet,
 # which --project still reads.
 #
-# The ground truth is computed here, with jq, straight from storage.json and
-# independently of ekko's own code. An eval that asked ekko what the right
-# answer was could only ever agree with ekko.
+# The ground truth is computed here, with jq, straight from the board's items
+# -- storage.json, or the database a board is kept in since task 2233, which
+# evals/boards.py reads -- and independently of ekko's own code. An eval that
+# asked ekko what the right answer was could only ever agree with ekko.
 #
 # What an agent needs to resume, as three sets of ids:
 #   doing  open tasks in progress
@@ -35,6 +36,7 @@ set -euo pipefail
 
 EKKO="${1:-ekko}"
 EKKO_HOME="${EKKO_HOME:-$HOME/.ekko}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # Three parallel lists: what to call the board, how to point ekko at it, and
 # the storage the ground truth is read from.
@@ -60,7 +62,7 @@ for dir in "$EKKO_HOME"/projects/*/; do
 done
 
 truth() {
-  jq -r '
+  "${PYTHON:-python3}" "$HERE/../boards.py" "$(dirname "$(dirname "$1")")" | jq -r '
     [ .[] | select(.trashed == null and .stashed == null) ] as $v
     | (reduce $v[] as $i ({}; .[$i.uid // ("id" + ($i._id | tostring))] = $i)) as $by
     | def open($x): ($x._isTask and ($x.isComplete != true) and ($x.cancelled != true));
@@ -71,7 +73,7 @@ truth() {
     | [ $v[] | select((._isTask | not)
           and ((.attachedTo // .anchor) as $a | $a != null and ($focus | index($a) != null))) ] as $why
     | "\($doing | map(._id) | join(" "))", "\($ready | map(._id) | join(" "))", "\($why | map(._id) | join(" "))"
-  ' "$1"
+  '
 }
 
 # "hits/total" for the ids in $2 against the output in $1.

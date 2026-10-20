@@ -299,7 +299,7 @@ fn the_removed_ui_flag_says_it_was_removed() {
     let reply: serde_json::Value = serde_json::from_slice(&output.stdout).expect("a --json error reply");
     assert_eq!(reply["code"], "REMOVED_FLAG", "{reply}");
     assert!(reply["error"].as_str().unwrap_or("").contains("--ui was removed"), "{reply}");
-    let board = fs::read_to_string(dir.join(".ekko").join("storage").join("storage.json")).unwrap_or_default();
+    let board = common::stored_text_or_empty(&dir.join(".ekko"));
     assert!(!board.contains("never written"), "the task beside --ui was created: {board}");
 
     let output = ekko(&["--ui"]);
@@ -342,8 +342,8 @@ fn init_makes_a_folder_a_project_that_ekko_finds_from_inside_it() {
     assert!(ekko(&deep, &["--task", "inside the project"]).status.success());
     assert!(ekko(&elsewhere, &["--task", "on the default board"]).status.success());
 
-    let project_board = fs::read_to_string(app.join(".ekko").join("storage").join("storage.json")).unwrap();
-    let default_board = fs::read_to_string(home.join(".ekko").join("storage").join("storage.json")).unwrap();
+    let project_board = common::stored_text(&app.join(".ekko"));
+    let default_board = common::stored_text(&home.join(".ekko"));
     assert!(project_board.contains("inside the project"), "{project_board}");
     assert!(!project_board.contains("on the default board"), "{project_board}");
     assert!(default_board.contains("on the default board"), "{default_board}");
@@ -392,7 +392,7 @@ fn a_board_cleaned_out_of_its_folder_comes_back_with_init() {
 
     let init = reply(&ekko(&app, &["--json", "init"]));
     assert!(init["restored"]["copied"].is_string(), "{init}");
-    let board = fs::read_to_string(app.join(".ekko").join("storage").join("storage.json")).unwrap();
+    let board = common::stored_text(&app.join(".ekko"));
     assert!(board.contains("survives git clean"), "{board}");
 
     assert!(ekko(&gone, &["init"]).status.success());
@@ -439,6 +439,53 @@ fn a_blocked_task_needs_force_and_force_needs_a_task_to_complete() {
     let pointless = ekko(&["--force"]);
     assert!(!pointless.status.success(), "--force alone was accepted");
     assert_eq!(reply(&pointless)["code"], "FORCE_WITHOUT_COMPLETING");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A board taken back to a revision (task 2233): `--export --at` prints the
+/// board as it stood then, `--import` writes it in place in one write whose
+/// revision comes after every one before it, and that write is among the
+/// changes too, so `--export --at` the revision before it gives the board it
+/// replaced. A file that holds no board writes nothing.
+#[test]
+fn a_board_goes_back_to_a_revision_through_export_and_import() {
+    let dir = temp_ekko_dir();
+    let board_dir = dir.join(".ekko");
+    let ekko = |args: &[&str]| common::ekko().args(["--ekko-dir", dir.to_str().unwrap()]).args(args).output().expect("failed to run ekko");
+    let reply = |output: &process::Output| -> serde_json::Value { serde_json::from_slice(&output.stdout).expect("a --json reply") };
+    let states = |board: &serde_json::Value| -> Vec<(String, bool)> {
+        board.as_object().unwrap().values().map(|item| (item["description"].as_str().unwrap().to_string(), item["isComplete"] == true)).collect()
+    };
+
+    assert!(ekko(&["--task", "one"]).status.success());
+    let first = common::stored_board(&board_dir)["1"]["rev"].as_u64().unwrap();
+    assert!(ekko(&["--task", "two"]).status.success());
+    assert!(ekko(&["--check", "1"]).status.success());
+    let last = common::stored_board(&board_dir)["1"]["rev"].as_u64().unwrap();
+    assert_eq!(states(&common::stored_board(&board_dir)), [("one".to_string(), true), ("two".to_string(), false)]);
+
+    let then = ekko(&["--export", "--at", &first.to_string()]);
+    assert!(then.status.success(), "{}", String::from_utf8_lossy(&then.stderr));
+    let file = dir.join("then.json");
+    fs::write(&file, &then.stdout).unwrap();
+    let imported = ekko(&["--json", "--import", file.to_str().unwrap()]);
+    assert!(imported.status.success(), "{}", String::from_utf8_lossy(&imported.stdout));
+    let imported = reply(&imported);
+    assert_eq!((imported["changed"].clone(), imported["removed"].clone()), (serde_json::json!([1]), serde_json::json!([2])));
+    assert!(imported["revision"].as_u64().unwrap() > last, "{imported}");
+    assert_eq!(states(&common::stored_board(&board_dir)), [("one".to_string(), false)]);
+
+    let before = ekko(&["--export", "--at", &last.to_string()]);
+    let before: serde_json::Value = serde_json::from_slice(&before.stdout).unwrap();
+    assert_eq!(states(&before), [("one".to_string(), true), ("two".to_string(), false)]);
+
+    let written = common::stored_text(&board_dir);
+    fs::write(&file, "{\"0\": \"not an item\"}").unwrap();
+    let refused = ekko(&["--json", "--import", file.to_str().unwrap()]);
+    assert!(!refused.status.success());
+    assert_eq!(reply(&refused)["code"], "INVALID_INPUT", "{}", reply(&refused));
+    assert_eq!(common::stored_text(&board_dir), written, "a refused import wrote");
 
     fs::remove_dir_all(&dir).ok();
 }
@@ -508,7 +555,7 @@ fn a_typed_note_takes_its_kind_from_the_flags_beside_note() {
 
     let stray = ekko(&["--task", "--kind", "gotcha", "a task"]);
     assert!(!stray.status.success(), "--kind was accepted beside --task");
-    let board = fs::read_to_string(dir.join(".ekko").join("storage").join("storage.json")).unwrap();
+    let board = common::stored_text(&dir.join(".ekko"));
     assert!(!board.contains("a task"), "{board}");
 
     fs::remove_dir_all(&dir).ok();
@@ -552,7 +599,7 @@ fn the_terminal_says_what_a_notes_rests_on_line_does_not_hold() {
         "created, every anchor is said (task 1327): {out}"
     );
     let board: serde_json::Value =
-        serde_json::from_slice(&fs::read(app.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+        common::stored_board(&app.join(".ekko"));
     assert_eq!(board["1"]["restsOn"]["anchors"][0], serde_json::json!({"path": "src/lib.rs", "words": "pub fn kept", "held": true, "line": 1}));
 
     let edited = ekko(&["--edit", "@1", "Kept stays\nRests on: `src/lib.rs`"]);
@@ -560,7 +607,7 @@ fn the_terminal_says_what_a_notes_rests_on_line_does_not_hold() {
     let out = String::from_utf8_lossy(&edited.stdout);
     assert!(!out.contains("Rests on:"), "every anchor holds now: {out}");
     let board: serde_json::Value =
-        serde_json::from_slice(&fs::read(app.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+        common::stored_board(&app.join(".ekko"));
     assert_eq!(board["1"]["restsOn"]["anchors"], serde_json::json!([{"path": "src/lib.rs", "held": true}]), "read again");
 
     let bare = ekko(&["--note", "--kind", "decision", "Ship weekly"]);
@@ -884,11 +931,10 @@ fn the_guard_answers_a_pre_tool_use_event_and_stays_silent_otherwise() {
     };
     assert!(ekko(&["--note", "--kind", "gotcha", "Changing the Status field clears every item's status."], "").status.success());
     // The user's answer in ekko's menu is what sets a cue; here, the board as it leaves it.
-    let file = home.join(".ekko").join("storage").join("storage.json");
-    let mut board: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    let mut board = common::stored_board(&home.join(".ekko"));
     let gotcha = board.as_object_mut().unwrap().values_mut().find(|item| item["knowledge"] == "gotcha").unwrap();
     gotcha["cue"] = serde_json::json!({"command": "gh", "words": ["updateProjectV2Field"], "question": "q", "at": 0});
-    fs::write(&file, board.to_string()).unwrap();
+    common::store_board(&home.join(".ekko"), &board);
 
     let event = |command: &str| serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": home, "tool_use_id": "t1"}).to_string();
     let refused = ekko(&["--guard", "--hook"], &event("gh api graphql -f query='mutation { updateProjectV2Field }'"));
@@ -977,12 +1023,11 @@ fn move_to_takes_items_to_another_board_and_the_old_id_says_where() {
     // the reply says where it guards after the move. Only ekko's menu turns
     // one on, so the file is written as the user's answer would leave it.
     assert!(ekko(&home, &["--note", "--kind", "gotcha", "a trap"]).status.success());
-    let storage = home.join(".ekko").join("storage").join("storage.json");
-    let mut board: serde_json::Value = serde_json::from_slice(&fs::read(&storage).unwrap()).unwrap();
+    let mut board = common::stored_board(&home.join(".ekko"));
     let (id, gotcha) = board.as_object_mut().unwrap().iter_mut().find(|(_, item)| item["description"] == "a trap").unwrap();
     let id = id.clone();
     gotcha["cue"] = serde_json::json!({"command": "cargo", "words": ["fmt"], "question": "q", "at": 1});
-    fs::write(&storage, serde_json::to_vec(&board).unwrap()).unwrap();
+    common::store_board(&home.join(".ekko"), &board);
     let text = String::from_utf8_lossy(&ekko(&home, &["--move-to", "notes", &id]).stdout).into_owned();
     assert!(text.contains(&format!("{id}'s cue now guards {}, not the whole machine", notes.display())), "{text}");
 
@@ -1709,21 +1754,22 @@ fn a_copy_of_a_projects_folder_leaves_the_projects_copy_alone() {
     assert!(ekko(&site, &["init"]).status.success());
     assert!(ekko(&site, &["--task", "from the project"]).status.success());
     let copies = dir.join(".ekko").join("copies");
-    let copy = fs::read_dir(&copies).unwrap().next().unwrap().unwrap().path().join("storage").join("storage.json");
-    let kept = fs::read(&copy).unwrap();
+    let copy = fs::read_dir(&copies).unwrap().next().unwrap().unwrap().path();
+    let kept = common::stored_text(&copy);
+    assert!(kept.contains("from the project"), "the project's copy holds its board: {kept}");
     assert!(common::command("cp").arg("-r").arg(&site).arg(&elsewhere).status().unwrap().success());
 
     let output = ekko(&elsewhere, &["--task", "from a copy of the folder"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     let said = String::from_utf8_lossy(&output.stderr);
     assert_eq!(said.matches("registered at").count(), 1, "{said}");
-    assert_eq!(fs::read(&copy).unwrap(), kept, "a copy of the folder wrote the project's copy");
-    let own = fs::read_to_string(elsewhere.join(".ekko").join("storage").join("storage.json")).unwrap();
+    assert_eq!(common::stored_text(&copy), kept, "a copy of the folder wrote the project's copy");
+    let own = common::stored_text(&elsewhere.join(".ekko"));
     assert!(own.contains("from a copy of the folder"), "{own}");
 
     let output = ekko(&site, &["--task", "from the project again"]);
     assert!(output.status.success() && output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(fs::read_to_string(&copy).unwrap().contains("from the project again"));
+    assert!(common::stored_text(&copy).contains("from the project again"));
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -1791,7 +1837,7 @@ fn a_scratch_home_writes_nothing_on_a_board_it_found_outside_it() {
 
     assert!(ekko(&scratch, Some(&site), &["--task", "named with EKKO_DIR"]).0);
     assert!(ekko(&dir, None, &["--task", "from the home it lies in"]).0);
-    let storage = fs::read_to_string(board.join("storage").join("storage.json")).unwrap();
+    let storage = common::stored_text(&board);
     assert!(storage.contains("named with EKKO_DIR") && storage.contains("from the home it lies in"), "{storage}");
     assert!(!storage.contains("from a scratch HOME"), "{storage}");
     fs::remove_dir_all(&dir).ok();
@@ -1915,7 +1961,7 @@ impl Agents {
     }
 
     fn uid(&self, id: u32) -> String {
-        let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(self.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
+        let board: serde_json::Value = common::stored_board(&self.home.join("app/.ekko"));
         board[id.to_string()]["uid"].as_str().unwrap().to_string()
     }
 
@@ -2318,7 +2364,7 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert!(prompt.contains("Wait on a background command of yours through its own completion notice, or on its process id"), "{prompt}");
     assert!(prompt.contains("starts with the tree it ran on -- `git rev-parse HEAD^{tree}`"), "{prompt}");
     // How it was started, on the task (task 1647).
-    let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
+    let board: serde_json::Value = common::stored_board(&agents.home.join("app/.ekko"));
     let note = &board[reply["notes"][0].as_u64().unwrap().to_string()];
     assert_eq!(note["attachedTo"].as_str(), Some(agents.uid(1).as_str()), "{note}");
     assert_eq!(
@@ -2341,7 +2387,7 @@ fn agents_start_opens_a_window_for_its_tasks_in_a_worktree_of_their_own() {
     assert!(command.last().unwrap().contains("leave the tasks in progress and end your turn"), "{command:?}");
     assert!(command.last().unwrap().contains("once the last of them is done, end with no text"), "{command:?}");
     // A note on each, the effort its default.
-    let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
+    let board: serde_json::Value = common::stored_board(&agents.home.join("app/.ekko"));
     let notes: Vec<(&str, &str)> = reply["notes"]
         .as_array()
         .unwrap()
@@ -2616,7 +2662,7 @@ fn agents_start_names_the_group_whose_sessions_talk_through_notes() {
     }
     assert!(agents.calls().is_empty(), "a refused start spoke to the multiplexer: {:?}", agents.calls());
 
-    let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
+    let board = || -> serde_json::Value { common::stored_board(&agents.home.join("app/.ekko")) };
     let noted = |reply: &serde_json::Value| board()[reply["notes"][0].as_u64().unwrap().to_string()]["description"].as_str().unwrap().to_string();
     let told = "While you work, ekko tells you of each note the user or another session attaches to task 1, in a line that begins \"ekko:\", \
                 at times inside a tool's result: it comes from ekko's hook, not from the tool, so take it into account.";
@@ -3357,12 +3403,12 @@ fn a_born_session_waiting_on_the_user_says_so_on_its_task_and_window_until_it_mo
     assert_eq!(agents.window(), "1 \u{b7} haiku");
     assert!(agents.logged("waits on you no more (PostToolUse): cleared on task 1; its window named \"1 \u{b7} haiku\" again"));
 
-    let (calls, board) = (named(agents.calls()).len(), fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap());
+    let (calls, board) = (named(agents.calls()).len(), common::stored_text(&agents.home.join("app/.ekko")));
     for event in ["PostToolUse", "PostToolUseFailure", "ElicitationResult", "UserPromptSubmit", "Stop"] {
         session.hook(event, serde_json::json!({"background_tasks": [], "session_crons": []}));
     }
     assert_eq!(named(agents.calls()).len(), calls, "the multiplexer was spoken to with nothing to clear");
-    assert_eq!(fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap(), board, "the board was written with nothing to clear");
+    assert_eq!(common::stored_text(&agents.home.join("app/.ekko")), board, "the board was written with nothing to clear");
 
     // A permission granted within the six seconds leaves nothing behind: a
     // notification with no request before it -- a sandboxed command's
@@ -3578,10 +3624,10 @@ fn a_born_session_that_ends_mid_task_is_paused_with_where_it_stood_and_its_waite
     session.ekko(&["--begin", "4"], "");
     session.ekko(&["--check", "4"], "");
     session.ran();
-    let board = fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap();
+    let board = common::stored_text(&agents.home.join("app/.ekko"));
     drop(session);
     std::thread::sleep(std::time::Duration::from_millis(1_500));
-    assert_eq!(fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap(), board, "a finished session's end was written");
+    assert_eq!(common::stored_text(&agents.home.join("app/.ekko")), board, "a finished session's end was written");
     fs::remove_dir_all(&agents.home).ok();
 }
 
@@ -3733,7 +3779,7 @@ fn ekko_agents_merge_takes_a_tested_branch_in_and_hands_a_failing_one_back() {
     let main = || agents.git(&app, &["rev-parse", "main"]);
     let tip = |branch: &str| agents.git(&app, &["rev-parse", branch]);
     let on = |worktree: &std::path::Path| agents.git(worktree, &["symbolic-ref", "--short", "HEAD"]);
-    let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
+    let board = || -> serde_json::Value { common::stored_board(&agents.home.join("app/.ekko")) };
     let state = |id: u32| {
         let task = &board()[id.to_string()];
         (task["isComplete"].as_bool().unwrap(), task["inProgress"].as_bool().unwrap())
@@ -3890,7 +3936,7 @@ fn ekko_agents_merge_runs_the_checks_it_is_given_on_the_rebased_branch() {
     let said = String::from_utf8(output.stdout).unwrap();
     assert!(output.status.success() && said.contains(&format!(", then checked with `{above}` (")), "{said}");
     assert_eq!(agents.git(&app, &["show", "main:VERSION"]), "3");
-    let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
+    let board: serde_json::Value = common::stored_board(&agents.home.join("app/.ekko"));
     let checked: Vec<&str> =
         board.as_object().unwrap().values().filter_map(|item| item["description"].as_str()).filter(|note| note.contains("and passed the check")).collect();
     assert_eq!(checked.len(), 2, "{checked:?}");
@@ -3928,7 +3974,7 @@ fn ekko_agents_merge_hands_back_a_commit_that_holds_conflict_markers() {
     assert!(agents.ekko(&["agents", "test", "--none"]).status.success());
     assert!(agents.ekko(&["--check", "1", "2", "3"]).status.success());
     let main = || agents.git(&app, &["rev-parse", "main"]);
-    let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
+    let board = || -> serde_json::Value { common::stored_board(&agents.home.join("app/.ekko")) };
     let json = |output: process::Output| -> serde_json::Value {
         serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
     };
@@ -4099,7 +4145,7 @@ fn ekko_agents_merge_waits_for_the_session_to_close_and_takes_up_a_merge_cut_sho
     let main = || agents.git(&app, &["rev-parse", "main"]);
     let before = main();
     let done = |id: u32| -> bool {
-        let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap();
+        let board: serde_json::Value = common::stored_board(&agents.home.join("app/.ekko"));
         board[id.to_string()]["isComplete"].as_bool().unwrap()
     };
     let refused = |output: process::Output| -> String {
@@ -4639,7 +4685,7 @@ fn agents_view_json_gives_every_project_s_sessions_and_the_count_of_the_others()
     }
     assert!(in_lib(&["--check", "2"]).status.success());
     let lib_uid = {
-        let board: serde_json::Value = serde_json::from_str(&fs::read_to_string(lib.join(".ekko/storage/storage.json")).unwrap()).unwrap();
+        let board: serde_json::Value = common::stored_board(&lib.join(".ekko"));
         board["2"]["uid"].as_str().unwrap().to_string()
     };
     let state = agents.home.join(".local/state/ekko");
@@ -5128,7 +5174,7 @@ fn a_born_session_is_refused_a_push_a_release_a_session_and_another_s_task_and_i
     assert!(born.ekko(&["--json", "agents", "env"], "").contains("\"ok\":true"), "read");
     assert!(born.ekko(&["--json", "agents", "copy"], "").contains("\"ok\":true"), "read");
     assert!(!agents.home.join("app/.ekko/storage/agents.json").exists());
-    let board = || -> serde_json::Value { serde_json::from_str(&fs::read_to_string(agents.home.join("app/.ekko/storage/storage.json")).unwrap()).unwrap() };
+    let board = || -> serde_json::Value { common::stored_board(&agents.home.join("app/.ekko")) };
     let second = board()["2"].clone();
     assert_eq!((second["isComplete"].as_bool(), second["isStarred"].as_bool(), second["inProgress"].as_bool()), (Some(false), Some(false), Some(false)), "{second}");
     drop(born);

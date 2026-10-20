@@ -4353,7 +4353,7 @@ mod tests {
     fn a_note_without_the_line_is_stored_as_before() {
         let (ekko, dir, _) = project_board("rests-on-none");
         batch(&ekko, &[json!({"op": "create", "kind": "decision", "text": "Ship weekly"})]).unwrap();
-        let stored: Value = serde_json::from_slice(&std::fs::read(dir.join("storage/storage.json")).unwrap()).unwrap();
+        let stored: Value = crate::storage::stored(&dir);
         let keys: Vec<&str> = stored["1"].as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,

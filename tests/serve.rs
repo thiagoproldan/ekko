@@ -522,7 +522,7 @@ fn a_comment_from_the_page_is_the_persons_note_on_the_artifact() {
     };
     let comment = |version: u32, exact: &str| json!({"page": path, "text": "Which facts?", "comment": {"version": version, "quote": {"exact": exact, "prefix": "## What is known\n", "suffix": "\n## Design", "section": "What is known"}}});
     let notes = || -> Vec<Value> {
-        let board: Value = serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+        let board: Value = common::stored_board(&home.join(".ekko"));
         board.as_object().unwrap().values().filter(|item| item.get("comment").is_some()).cloned().collect()
     };
 
@@ -585,9 +585,10 @@ fn a_comment_from_a_projects_page_is_written_on_that_projects_board_and_its_copy
     assert!(code == 200 && page.contains("Ship the page"), "{code}: the page, read from the project's board");
 
     let marker: Value = serde_json::from_slice(&fs::read(site.join(".ekko").join("project.json")).unwrap()).unwrap();
-    let boards = [site.join(".ekko"), home.join(".ekko").join("copies").join(marker["id"].as_str().unwrap()), home.join(".ekko"), other.join(".ekko")]
-        .map(|dir| dir.join("storage").join("storage.json"));
-    let read = || boards.iter().map(|board| fs::read(board).unwrap()).collect::<Vec<_>>();
+    // Each board as stored (task 2233): the project's, its copy, the default
+    // board and another project's.
+    let boards = [site.join(".ekko"), home.join(".ekko").join("copies").join(marker["id"].as_str().unwrap()), home.join(".ekko"), other.join(".ekko")];
+    let read = || boards.iter().map(|board| common::stored_text_or_empty(board)).collect::<Vec<_>>();
     let before = read();
     assert!(before[1] == before[0], "the artifact's write copied the board");
 
@@ -613,7 +614,7 @@ fn a_comment_from_a_projects_page_is_written_on_that_projects_board_and_its_copy
     let made: Value = serde_json::from_str(answer.split_once("\r\n\r\n").unwrap().1).unwrap();
     let after = read();
     assert!(after[2..] == before[2..], "the default board and the other project's stay as they were");
-    let board: Value = serde_json::from_slice(&after[0]).unwrap();
+    let board: Value = serde_json::from_str(&after[0]).unwrap();
     let note = board.as_object().unwrap().values().find(|item| item["uid"] == made["uid"]).unwrap_or_else(|| panic!("no note {made} on the project's board"));
     assert_eq!((note["description"].as_str(), note["attachedTo"].as_str()), (Some("Which facts?"), Some(uid)), "{note}");
     assert!(note["createdBy"].get("pid").is_none(), "written by the person, no process: {note}");
@@ -643,7 +644,7 @@ fn the_person_edits_and_deletes_their_comment_from_the_page() {
         from_bash(&home, port, &post(to, &body), as_claude)
     };
     let comment = || -> Value {
-        let board: Value = serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap();
+        let board: Value = common::stored_board(&home.join(".ekko"));
         board.as_object().unwrap().values().find(|item| item.get("comment").is_some()).cloned().unwrap_or_default()
     };
     let quote = json!({"exact": "Facts", "prefix": "", "suffix": "", "section": "What is known"});
@@ -789,7 +790,7 @@ fn a_review_from_the_page_returns_the_ask_that_waits_on_it() {
         let _ = fs::remove_file(home.join(if as_claude { "answer-claude" } else { "answer-person" }));
         from_bash(&home, port, &post(&body), as_claude)
     };
-    let board = || -> Value { serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap() };
+    let board = || -> Value { common::stored_board(&home.join(".ekko")) };
     let reviews = || board().as_object().unwrap().values().filter(|item| item.get("review").is_some()).count();
     let menus = || fs::read_to_string(home.join("menus")).unwrap_or_default().lines().map(str::to_string).collect::<Vec<_>>();
     let up = |n: usize| until(10, || menus().len() == n);
@@ -850,7 +851,7 @@ fn an_answer_from_the_page_returns_the_ask_that_waits_on_it() {
         let _ = fs::remove_file(home.join(if as_claude { "answer-claude" } else { "answer-person" }));
         from_bash(&home, port, &request, as_claude)
     };
-    let board = || -> Value { serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap() };
+    let board = || -> Value { common::stored_board(&home.join(".ekko")) };
     let menus = || fs::read_to_string(home.join("menus")).unwrap_or_default().lines().map(str::to_string).collect::<Vec<_>>();
 
     let mut session = Session::start(&home);
@@ -966,7 +967,7 @@ fn start_on_a_ready_step_is_told_to_the_session_working_the_plan() {
         let _ = fs::remove_file(home.join(if as_claude { "answer-claude" } else { "answer-person" }));
         from_bash(&home, port, &request, as_claude)
     };
-    let board = || -> Value { serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap() };
+    let board = || -> Value { common::stored_board(&home.join(".ekko")) };
     let notes = || board().as_object().unwrap().values().filter(|item| item.get("comment").is_some()).count();
     let menus = || fs::read_to_string(home.join("menus")).unwrap_or_default().lines().map(str::to_string).collect::<Vec<_>>();
     let page = || {
@@ -1043,7 +1044,7 @@ fn a_session_answers_the_feedback_from_the_page_with_the_artifact_tool() {
         assert_eq!(status, "200", "{made}");
         made
     };
-    let board = || -> Value { serde_json::from_slice(&fs::read(home.join(".ekko").join("storage").join("storage.json")).unwrap()).unwrap() };
+    let board = || -> Value { common::stored_board(&home.join(".ekko")) };
 
     let facts = say("Facts", "Why. ", ", in code and bold. How. None.", "", Some("Numbers"), 1);
     assert_eq!(post("/api/comment/send", json!({"page": path, "uid": facts["uid"]}), false).0, "200");

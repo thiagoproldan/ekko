@@ -139,9 +139,12 @@ $ ekko --help
       --doctor            Check that every Claude Code session runs ekko's current binary and its hooks; exit 1 on a fail
       --probe             With --doctor: write the board again, then wait for each session on it to hear it
       --edit, -e          Edit item description
+      --export            Print the board as JSON, as storage.json held it
+      --at <REV>          With --export: the board as it stood at that revision
       --find, -f          Search for items
       --force             Override the blocked-by rule or a running session's hold
       --help, -h          Display help message
+      --import <FILE>     Write the board in FILE, as --export prints it, in place of this one
       --json, -j          Output machine-readable JSON instead of formatted text
       --link-project <NAME> Link this project's board and NAME's, for Claude Code sessions
       --list, -l          List items by attributes
@@ -511,7 +514,7 @@ Due dates show up next to the item, coloured by where they stand: red once past,
 
 Filter with `--list due` for everything carrying a deadline, or `--list overdue` for open tasks whose date has passed. Both compose with board names, so `ekko -l overdue coding` narrows to one board.
 
-This is an Ekko addition; taskbook has no equivalent. Items without a due date are unaffected, on screen and in `storage.json` alike -- the field is omitted entirely when unset, so files stay readable by taskbook.
+This is an Ekko addition; taskbook has no equivalent. Items without a due date are unaffected, on screen and in the board's JSON alike -- the field is omitted entirely when unset, so the board `--export` prints stays readable by taskbook.
 
 
 
@@ -796,7 +799,7 @@ It works the way an issue moves between Jira projects or GitHub repositories:
 
 #### A copy outside the folder
 
-The board lives in its folder, so whatever takes the folder's untracked files takes the board: `git clean -fdx`, whose `-x` removes what `.git/info/exclude` keeps out of git, removing the folder, or cloning it again. So every write also copies the board's files to `~/.ekko/copies/<project id>/` -- the board as its `.ekko/` holds it, without the history of its versions. On one filesystem the copy is a hard link and costs nothing: a write replaces a file by rename, never in place, so a version once linked never changes. Across filesystems, or btrfs subvolumes, it is a copy, which btrfs makes a clone. Only the folder the registry names for the project writes its copy, however that folder is reached: a copy of the folder elsewhere -- a backup, a test's fixture -- holds the same `project.json`, so its writes stay its own, and its first write says so on stderr (task 1585).
+The board lives in its folder, so whatever takes the folder's untracked files takes the board: `git clean -fdx`, whose `-x` removes what `.git/info/exclude` keeps out of git, removing the folder, or cloning it again. So every write also copies the board's files to `~/.ekko/copies/<project id>/` -- the board as its `.ekko/` holds it, without the history of its versions. On one filesystem the copy is a hard link and costs nothing: a write replaces a file by rename, never in place, so a version once linked never changes. Across filesystems, or btrfs subvolumes, it is a copy, which btrfs makes a clone. The board's database is written in place, so its copy is a database of its own (task 2233): each write the board takes is given to it too, and when the two are out of step -- a write that could not reach it, a copy removed -- it is made again whole through SQLite. A copy is best effort: one that cannot be made never stops a write. Only the folder the registry names for the project writes its copy, however that folder is reached: a copy of the folder elsewhere -- a backup, a test's fixture -- holds the same `project.json`, so its writes stay its own, and its first write says so on stderr (task 1585).
 
 A folder that has lost its board works on the default board, and the line every prime starts with says so:
 
@@ -1224,7 +1227,7 @@ $ ekko -a
 
 ### Restore Items
 
-To restore one or more items, use the `--restore`/`-r` option followed by the ids of the target items. Note that the ids of all archived items can be seen when invoking the `--archive`/`-a` option, **and are a separate id space from storage** -- a restored item gets a new id in `storage.json`, it does not get its old one back. `--delete`'s `--json` response reports both, precisely so a script/agent driving `--restore` afterward never has to guess.
+To restore one or more items, use the `--restore`/`-r` option followed by the ids of the target items. Note that the ids of all archived items can be seen when invoking the `--archive`/`-a` option, **and are a separate id space from storage** -- a restored item gets a new id on the board, it does not get its old one back. `--delete`'s `--json` response reports both, precisely so a script/agent driving `--restore` afterward never has to guess.
 
 ```
 $ ekko -r 1 2
@@ -1232,14 +1235,14 @@ $ ekko -r 1 2
 
 ### Board History
 
-Every write replaces `storage.json` whole, and a project's board is kept out of git, so Ekko keeps the versions it writes in `.ekko/history/`, the current one among them, named by the time each was written: the last 50, then the newest of each day for two weeks. Each is a hard link to a file no write changes again, so keeping them costs no copy; on a board of 330 KB they come to about 21 MB. A write links its version there before putting it in place, and touches the version it replaces only by replacing it: Claude Code's FileChanged follows `storage.json` by its inode, and a touch before the rename could leave that watch on the old file, deaf to every write after (task 1248). Two writes close together can leave it there too, so after the rename a write nudges the four versions before the one it replaced: it sets each file's mode to the mode it has, which changes nothing but is an event on that file, and a watch left on it moves to the version in place (task 1734). At an event on the file it watches, Claude Code's watch reads which file the path names and moves there, but it drops an event within 5 ms of the one it handled last. In a session traced with strace, Claude Code 2.1.296 handled a write's event 9.5 ms after it; the second write of a pair from two ekko processes at once, which the lock puts in turn, came 13 ms after the first, so it was dropped, and the watch stayed on the version the first write made. Four idle sessions on a scratch board missed all 100 probe writes made 1.5 s after such pairs, over 25 cycles, with an ekko from before the nudge, and heard all 100 with it. Two ekko writes 18 ms or more apart, one after the other, left no watch behind. A version Ekko did not write -- by hand, or by an older Ekko -- is copied in before a write replaces it.
-
-To go back to one, stop whatever writes to the board -- Claude Code sessions included -- and put a copy of it in place by rename. Copied over `.ekko/storage/storage.json` itself, it would overwrite the current version's file, which history holds too. The revision counter is left as it is, so the next write carries on past it; a session holding a cursor from before the copy should prime again.
+A board's database keeps every change of the last two weeks -- each item before and after each write, with the write's revision and time -- so the board as it stood at any revision of that window can be had back exactly (task 2233). `ekko --export --at REV` prints it as JSON, as `storage.json` held a board, and `ekko --import FILE` writes such a board in place of the current one, in one write like any other: no session needs to stop, each hears it as it hears any write, and its revision comes after every one before it, so no cursor takes it for an old one. The import is among the changes too, so it is undone the same way, with the revision before it. Each item carries the revision of the last write that changed it, as `rev` in `--json`.
 
 ```
-$ cp .ekko/history/1790110000000000000.json .ekko/storage/restore.json
-$ mv .ekko/storage/restore.json .ekko/storage/storage.json
+$ ekko --export --at 1840 > board-1840.json
+$ ekko --import board-1840.json
 ```
+
+Every write also replaces `storage.json`, the board's stamp, and Ekko keeps the versions of it in `.ekko/history/`, the current one among them, named by the time each was written: the last 50, then the newest of each day for two weeks. Each is a hard link to a file no write changes again, so keeping them costs no copy. A write links its version there before putting it in place, and touches the version it replaces only by replacing it: Claude Code's FileChanged follows `storage.json` by its inode, and a touch before the rename could leave that watch on the old file, deaf to every write after (task 1248). Two writes close together can leave it there too, so after the rename a write nudges the four versions before the one it replaced: it sets each file's mode to the mode it has, which changes nothing but is an event on that file, and a watch left on it moves to the version in place (task 1734). At an event on the file it watches, Claude Code's watch reads which file the path names and moves there, but it drops an event within 5 ms of the one it handled last. In a session traced with strace, Claude Code 2.1.296 handled a write's event 9.5 ms after it; the second write of a pair from two ekko processes at once, which the lock puts in turn, came 13 ms after the first, so it was dropped, and the watch stayed on the version the first write made. Four idle sessions on a scratch board missed all 100 probe writes made 1.5 s after such pairs, over 25 cycles, with an ekko from before the nudge, and heard all 100 with it. Two ekko writes 18 ms or more apart, one after the other, left no watch behind. A version Ekko did not write -- by hand, or by an older Ekko -- is copied in before a write replaces it. The versions from before the board moved into its database are boards as `storage.json` held them, which `--import` takes as they are, until they age out by the same rule.
 
 ### List Items
 
@@ -1300,13 +1303,19 @@ $ EKKO_DIR=~/hometasks ekko
 
 ### Locating the data files
 
-All task/note data lives in one JSON file, written atomically (temp file + rename) so it is always safe to read directly, without going through the CLI: `<ekko-dir>/storage/storage.json`. Deleted/archived items live alongside it at `<ekko-dir>/archive/archive.json`. `<ekko-dir>` defaults to `~/.ekko` and follows the same resolution order as the `--ekko-dir` flag described above.
+A board's items live in a SQLite database, `<ekko-dir>/storage/board.sqlite` (task 2233). One write is one transaction, holding the items it changed, each change itself -- the item before and after it -- the journal's line and the revision, so a write killed at any point leaves the board as it was before it or as it is after it, never half of it. Deleted/archived items live at `<ekko-dir>/archive/archive.json`, and the phases, the agents' settings and the moves to other boards in JSON files of their own. `<ekko-dir>` defaults to `~/.ekko` and follows the same resolution order as the `--ekko-dir` flag described above.
+
+`ekko --export` prints the board as JSON, as `storage.json` held it before the database: what a script reads, rather than the database, whose layout is Ekko's own and may change from one version to the next (its `user_version` says which).
 
 ```
-$ cat ~/.ekko/storage/storage.json
+$ ekko --export
 ```
 
-A field Ekko does not know is kept, not dropped. Every write rewrites the whole file, so a version that threw away what it could not read would erase whatever a newer one added -- a note's kind, a waiting state -- from every item at once. Such a field keeps its value and is written back after the fields that version knows, in `storage.json`, `archive.json` and `counters.json` alike, so an older binary still running against a board a newer one wrote loses nothing: an item's own fields from v0.11.0 on, and the fields of everything an item holds -- a question and its answer, a wait, who holds a task -- from v0.25.1 on. A word Ekko does not know where it stores one of its own -- a kind of note, what a wait waits for, how it ended -- is kept the same way by the versions after v0.25.1, which show it as written; v0.25.1 and earlier refuse the whole board over it, losing nothing, until they are upgraded. Older versions drop what they do not know: after an upgrade, restart anything still running an old `ekko` -- an MCP server above all -- before it writes.
+`storage.json` stays, as the board's stamp: a small file put in place by rename at every write, which is how Claude Code's FileChanged hook, `seek` and every other watcher of the board hear a write. Its one entry is a sentence an Ekko from before the database cannot read as an item, so one still running against the board -- an MCP server started before the upgrade -- refuses every command with that sentence, and writes nothing. A board such an Ekko wrote is read as it is, and moves into a database at the first write of an Ekko that keeps one: the database is built beside it, read back and compared with it item by item, and put in place only when it reads back the same -- Taskwarrior 3.0's move to SQLite left some users with empty databases -- and the JSON files it was made from are kept whole in `<ekko-dir>/storage/json-before-sqlite/`. A board whose database is missing refuses every command rather than reading as empty, and says how to put its copy back.
+
+Never put a file in place of `board.sqlite` while an Ekko process may have the board open -- a Claude Code session's MCP server holds it for as long as the session runs -- and never copy it as a file while one may: SQLite keeps writes in `board.sqlite-wal` beside it until it moves them into the file, and applies that log to whatever file then has the name ([How To Corrupt An SQLite Database File](https://www.sqlite.org/howtocorrupt.html), 1.4 and 2.5). `--import` puts a board back with sessions running, and `sqlite3 board.sqlite ".backup copy.sqlite"` copies it, log and all.
+
+A field Ekko does not know is kept, not dropped. A write puts each item it changes back whole -- and a write of `archive.json` the whole file -- so a version that threw away what it could not read would erase whatever a newer one added -- a note's kind, a waiting state -- from the item. Such a field keeps its value and is written back after the fields that version knows, in the board's items, its counters and `archive.json` alike, so an older binary still running against a board a newer one wrote loses nothing: an item's own fields from v0.11.0 on, and the fields of everything an item holds -- a question and its answer, a wait, who holds a task -- from v0.25.1 on. A word Ekko does not know where it stores one of its own -- a kind of note, what a wait waits for, how it ended -- is kept the same way by the versions after v0.25.1, which show it as written; v0.25.1 and earlier refuse the whole board over it, losing nothing, until they are upgraded. Older versions drop what they do not know: after an upgrade, restart anything still running an old `ekko` -- an MCP server above all -- before it writes. A database a later Ekko laid out, whose `user_version` is past the layout this one knows, is read and never written: every write is refused with a word to upgrade.
 
 Every command that writes (`--task`, `--check`, `--delete`, ...) takes a lock at `<ekko-dir>/.lock` for its duration, so two `ekko` processes -- two terminals, two scripts, two agents -- touching the same directory at once queue up instead of silently clobbering each other's write. A second process waits up to 5 seconds before reporting `LOCK_TIMEOUT`.
 
@@ -1329,7 +1338,7 @@ A couple of things worth knowing:
 
 Every item created by Ekko also carries a `uid`: a stable identifier that, unlike `_id`, is never recycled and survives `--restore`. Ids are assigned as `max + 1`, so deleting the highest-numbered item and creating another hands the new one the same number -- which makes `_id` a poor thing to hold on to across time. Scripts and agents that keep a reference between invocations should key on `uid`.
 
-Items written before uids existed, and any written by taskbook, have no `uid` field. Ekko does not backfill one, because that would rewrite files it otherwise leaves untouched; an absent `uid` means "legacy", not "unknown".
+Items written before uids existed, and any written by taskbook, have no `uid` field. Ekko does not backfill one, because that would rewrite items it otherwise leaves untouched; an absent `uid` means "legacy", not "unknown".
 
 - **Output is [newline-delimited JSON](https://github.com/ndjson/ndjson-spec), not always a single object.** A few commands (the default board view, `--timeline`, `--list`) print a data line followed by a separate `{"command":"stats",...}` line. Parse stdout line by line, not as one JSON document.
 - If you drive `ekko` through `nix develop --command`, the devShell's own banner goes to stderr, not stdout, specifically so it never lands in a `--json` response -- safe to invoke that way from a script.

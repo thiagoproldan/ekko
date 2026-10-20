@@ -44,6 +44,8 @@ import uuid
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(HERE, "..", "claude-code"))
+sys.path.insert(0, os.path.join(HERE, ".."))
+import boards  # noqa: E402
 from transcripts import W_CW1H, W_CW5M, W_IN, W_OUT, profiles, read_weight  # noqa: E402
 
 HOME = os.path.expanduser("~")
@@ -297,8 +299,7 @@ def snapshot(start_ms, targets, dest):
     reopened, no session holding anything, the targets pending. Text edited
     later cannot be recovered (the board keeps its last 51 versions only):
     returns the ids whose text may be newer than start_ms, for review."""
-    with open(os.path.join(BOARD, "storage", "storage.json")) as handle:
-        items = json.load(handle)
+    items = boards.read(BOARD)
     kept, newer = {}, []
     for key, item in items.items():
         if int(item.get("_timestamp") or 0) >= start_ms:
@@ -319,16 +320,13 @@ def snapshot(start_ms, targets, dest):
         if int(item.get("updatedAt") or 0) >= start_ms and not item.get("_isTask"):
             newer.append(item["_id"])
         kept[key] = item
-    counters = json.load(open(os.path.join(BOARD, "storage", "counters.json")))
+    counters = boards.counters(BOARD)
     counters["highestId"] = max(int(item["_id"]) for item in kept.values())
     os.makedirs(os.path.join(dest, "storage"))
     for folder in ("history", "archive"):
         os.makedirs(os.path.join(dest, folder))
     shutil.copy(os.path.join(BOARD, "project.json"), dest)
-    with open(os.path.join(dest, "storage", "storage.json"), "w") as handle:
-        json.dump(kept, handle, indent=4)
-    with open(os.path.join(dest, "storage", "counters.json"), "w") as handle:
-        json.dump(counters, handle, indent=2)
+    boards.seed(dest, kept, counters)
     return len(kept), newer
 
 
@@ -547,8 +545,8 @@ def trigger():
 
 def handoffs_since(repo, since):
     try:
-        items = json.load(open(os.path.join(repo, ".ekko", "storage", "storage.json")))
-    except (OSError, ValueError):
+        items = boards.read(os.path.join(repo, ".ekko"))
+    except (OSError, ValueError, SystemExit):
         return []
     return [item["_id"] for item in items.values() if item.get("handoff") and int(item.get("_timestamp") or 0) >= since * 1000]
 
@@ -724,7 +722,8 @@ def run(name, cell, rep, window=None, prompt=None, cap=None, effort=None, extra_
                 if isinstance(block, dict) and block.get("type") == "tool_use" and peeked(peek, block.get("input")):
                     peeks.append(json.dumps(block.get("input"))[:200])
     record["peeks"] = peeks
-    shutil.copy(os.path.join(repo, ".ekko", "storage", "storage.json"), os.path.join(out_dir, "board.json"))
+    with open(os.path.join(out_dir, "board.json"), "w") as handle:
+        json.dump(boards.read(os.path.join(repo, ".ekko")), handle, indent=4)
     with open(os.path.join(out_dir, "run.json"), "w") as handle:
         json.dump(record, handle, indent=2)
     log(f"{run_id}: {status}, {calls} calls, {total / 1e6:.2f}M units ({total / POINT:.0f} points), {len(peeks)} peeks")

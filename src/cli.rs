@@ -451,6 +451,19 @@ pub struct Cli {
     /// the task it explains or the notes explaining it.
     #[arg(long, value_name = "ID")]
     pub context: Option<String>,
+    /// The board as JSON, as storage.json held it before the board's
+    /// database (task 2233): what a script or a restore reads.
+    #[arg(long)]
+    pub export: bool,
+    /// With --export: the board as it stood at this revision, within the
+    /// two weeks of changes its database keeps.
+    #[arg(long, value_name = "REV", requires = "export")]
+    pub at: Option<u64>,
+    /// Writes the board in FILE, JSON as --export prints it, in place of this
+    /// one, in one write: with --export --at, how a board goes back to a
+    /// revision (task 2233). `-` reads it from stdin.
+    #[arg(long, value_name = "FILE", conflicts_with = "export")]
+    pub import: Option<String>,
     /// Work against a named project instead of the default board. Sugar over
     /// `--ekko-dir`: the project lives at `~/.ekko/projects/<name>`, so the
     /// filesystem is the registry and there is no list to keep in sync.

@@ -101,10 +101,7 @@ fn concurrent_writers_neither_collide_on_an_id_nor_lose_an_update() {
         finish(exe, run);
     }
 
-    let storage_path = dir.join(".ekko").join("storage").join("storage.json");
-    let content = fs::read_to_string(&storage_path).expect("storage.json should exist");
-    let data: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&content).expect("storage.json should be valid JSON");
+    let data = read_storage(&dir);
 
     assert_eq!(data.len(), total, "expected {total} items, found {} (lost update)", data.len());
 
@@ -130,19 +127,16 @@ fn fifty_concurrent_writers_still_neither_collide_nor_lose_updates() {
         finish(exe, run);
     }
 
-    let storage_path = dir.join(".ekko").join("storage").join("storage.json");
-    let content = fs::read_to_string(&storage_path).unwrap();
-    let data: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&content).unwrap();
+    let data = read_storage(&dir);
 
     assert_eq!(data.len(), total, "expected {total} items, found {} (lost update)", data.len());
 
     fs::remove_dir_all(&dir).ok();
 }
 
+/// The board as stored, from its database (task 2233).
 fn read_storage(dir: &std::path::Path) -> serde_json::Map<String, serde_json::Value> {
-    let path = dir.join(".ekko").join("storage").join("storage.json");
-    let content = fs::read_to_string(&path).expect("storage.json should exist");
-    serde_json::from_str(&content).expect("storage.json should be valid JSON")
+    common::stored_board(&dir.join(".ekko")).as_object().expect("a board is an object of items").clone()
 }
 
 fn seed_tasks(exe: &str, dir: &std::path::Path, count: u32) {

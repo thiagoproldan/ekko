@@ -36,6 +36,8 @@ import config as C
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "claude-code"))
 sys.path.insert(0, os.path.join(HERE, "..", "recall"))
+sys.path.insert(0, os.path.join(HERE, ".."))
+import boards  # noqa: E402
 import transcripts as T  # noqa: E402
 from replay import cited_ids  # noqa: E402
 
@@ -265,15 +267,11 @@ def board(path):
     """The board today, its snapshots' times, and a loader for one snapshot."""
     if path in _board_cache:
         return _board_cache[path]
-    with open(os.path.join(path, "storage", "storage.json")) as handle:
-        items = {int(item["_id"]): item for item in json.load(handle).values()}
-    snaps = []
-    for file in glob.glob(os.path.join(path, "history", "*.json")):
-        stem = os.path.basename(file)[:-5]
-        if stem.isdigit():
-            snaps.append((int(stem) / 1e9, file))
-    snaps.sort()
-    _board_cache[path] = {"items": items, "snaps": snaps, "loaded": {}}
+    items = {int(item["_id"]): item for item in boards.read(path).values()}
+    # The versions history/ kept as JSON, then the changes the board's
+    # database keeps (task 2233): history/ holds only stamps from then on.
+    snaps = boards.snapshots(path)
+    _board_cache[path] = {"path": path, "items": items, "snaps": snaps, "loaded": {}}
     return _board_cache[path]
 
 
@@ -295,11 +293,10 @@ def state_of(item):
     return "pending"
 
 
-def snapshot_items(b, file):
-    if file not in b["loaded"]:
-        with open(file) as handle:
-            b["loaded"][file] = {int(item["_id"]): item for item in json.load(handle).values()}
-    return b["loaded"][file]
+def snapshot_items(b, key):
+    if key not in b["loaded"]:
+        b["loaded"][key] = boards.at(b["path"], key)
+    return b["loaded"][key]
 
 
 def closed_at(b, item_id, moment):

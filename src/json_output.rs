@@ -147,6 +147,16 @@ fn success_value(outcome: &Outcome) -> Value {
         Outcome::Hook(text) => json!({"ok": true, "command": command, "text": text}),
         Outcome::Next(entries) => json!({"ok": true, "command": command, "items": entries}),
         Outcome::Context(context) => json!({"ok": true, "command": command, "context": context}),
+        Outcome::Export(board) => json!({"ok": true, "command": command, "board": board}),
+        Outcome::Imported { items, added, changed, removed, revision } => json!({
+            "ok": true,
+            "command": command,
+            "items": items,
+            "added": added,
+            "changed": changed,
+            "removed": removed,
+            "revision": revision,
+        }),
     }
 }
 

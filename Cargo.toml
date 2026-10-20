@@ -30,3 +30,9 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 # The head of each request `ekko serve` answers (task 1102): hyper's parser,
 # with no dependencies, for 25 kB of a stripped build (decision 1128).
 httparse = "1"
+# The board's database (task 2233, study 2207): one SQLite file, so that a
+# write is one transaction of the items it changed, the change itself, the
+# journal and the counters. Bundled, so the build needs a C compiler and no
+# SQLite on the machine; 2.6 MB of binary and 41 s of clean build in the
+# study, one run each.
+rusqlite = { version = "0.40", features = ["bundled"] }

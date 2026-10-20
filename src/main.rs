@@ -11,6 +11,7 @@ mod claims;
 mod cli;
 mod commits;
 mod config;
+mod database;
 mod dialog;
 mod directory;
 mod docs;
@@ -81,9 +82,12 @@ const HELP: &str = r#"
       --doctor            Check that every Claude Code session runs ekko's current binary and its hooks; exit 1 on a fail
       --probe             With --doctor: write the board again, then wait for each session on it to hear it
       --edit, -e          Edit item description
+      --export            Print the board as JSON, as storage.json held it
+      --at <REV>          With --export: the board as it stood at that revision
       --find, -f          Search for items
       --force             Override the blocked-by rule or a running session's hold
       --help, -h          Display help message
+      --import <FILE>     Write the board in FILE, as --export prints it, in place of this one
       --json, -j          Output machine-readable JSON instead of formatted text
       --link-project <NAME> Link this project's board and NAME's, for Claude Code sessions
       --list, -l          List items by attributes
@@ -395,8 +399,9 @@ fn main() -> ExitCode {
                     // which Claude Code reads as JSON only when it is nothing
                     // else: --tasklist's watchPaths would become context. And
                     // for --sessions and --repeats, whose first line names the board.
+                    // And for --export, whose output is the board's JSON alone.
                     if let Some(project) = &location.project {
-                        if !cli.projects && !cli.destroy && !cli.prime && !cli.tasklist && !cli.sessions && !cli.repeats {
+                        if !cli.projects && !cli.destroy && !cli.prime && !cli.tasklist && !cli.sessions && !cli.repeats && !cli.export {
                             r.display_project(&project.name);
                         }
                     }
@@ -1233,6 +1238,12 @@ fn dispatch(
     }
     if let Some(target) = cli.context.as_deref() {
         return Ok(vec![Outcome::Context(Box::new(agent::context(ekko, target)?))]);
+    }
+    if cli.export {
+        return Ok(vec![Outcome::Export(Box::new(ekko.storage.export(cli.at)?))]);
+    }
+    if let Some(file) = cli.import.as_deref() {
+        return Ok(vec![ekko.import(file)?]);
     }
     if let Some(args) = cli.stash.as_deref() {
         return Ok(vec![if args.is_empty() {

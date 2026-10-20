@@ -343,7 +343,7 @@ impl<'a> Opened<'a> {
         let current = std::iter::once((self.current.clone(), self.ekko));
         current
             .chain(self.others.iter().map(|(name, ekko)| (Some(name.clone()), ekko)))
-            .filter(|(project, ekko)| reads(project, &self.current, &wanted, &names, || std::fs::read_to_string(ekko.storage.storage_path()).ok()))
+            .filter(|(project, ekko)| reads(project, &self.current, &wanted, &names, || ekko.storage.text().ok()))
             .filter_map(|(project, ekko)| Some((project, ekko.storage.get_shared().ok()?)))
             .collect()
     }

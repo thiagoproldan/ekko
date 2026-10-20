@@ -1232,6 +1232,21 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// What `--import` did: the board it wrote, and how it differs from the
+    /// one it replaced.
+    pub fn success_imported(&mut self, items: usize, added: &[u32], changed: &[u32], removed: &[u32], revision: u64) {
+        let ids = |ids: &[u32]| ids.iter().map(u32::to_string).collect::<Vec<String>>().join(", ");
+        let mut parts: Vec<String> = Vec::new();
+        for (word, list) in [("added", added), ("changed", changed), ("removed", removed)] {
+            if !list.is_empty() {
+                parts.push(format!("{word} {}", ids(list)));
+            }
+        }
+        let what = if parts.is_empty() { "nothing changed".to_string() } else { parts.join("; ") };
+        let noun = if items == 1 { "item" } else { "items" };
+        self.success("\n", "Imported the board:", &self.painter.grey(&format!("{items} {noun}, {what}, at revision {revision}")));
+    }
+
     /// What `--move-to` did: where the items went, and the id each has
     /// there. A note that went with its task, not by name, says so.
     pub fn success_moved_to(&mut self, project: Option<&str>, items: &[crate::move_to::Carried]) {

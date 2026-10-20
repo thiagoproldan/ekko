@@ -1086,7 +1086,7 @@ mod tests {
         let ekko = crate::ekko::Ekko::new(Storage::new(&dir.join(".ekko")).unwrap());
         ekko.create_task(&["probe me".to_string()]).unwrap();
         let storage = &ekko.storage;
-        let (items, before, revision) = (fs::read(storage.storage_path()).unwrap(), id(storage.storage_path()), storage.get_counters().unwrap().revision);
+        let (items, before, revision) = (crate::storage::stored(&dir.join(".ekko")), id(storage.storage_path()), storage.get_counters().unwrap().revision);
         let started = std::time::Instant::now();
         let probe = probe(storage, &dir.join("home")).unwrap();
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "it waited with no session to wait for");
@@ -1094,7 +1094,7 @@ mod tests {
         let after = id(storage.storage_path());
         assert_ne!(after, before, "no new version: a write in place, which a watch on the file may not follow");
         assert_eq!(probe.written, version(storage.storage_path()).unwrap().1.div_euclid(1_000_000));
-        assert_eq!(fs::read(storage.storage_path()).unwrap(), items, "the probe changed the items");
+        assert_eq!(crate::storage::stored(&dir.join(".ekko")), items, "the probe changed the items");
         assert_eq!(storage.get_counters().unwrap().revision, revision, "the probe moved the board's revision");
         let kept = fs::read_dir(dir.join(".ekko").join("history")).unwrap().flatten().any(|entry| id(&entry.path()) == after);
         assert!(kept, "the probe's version is not in history");
